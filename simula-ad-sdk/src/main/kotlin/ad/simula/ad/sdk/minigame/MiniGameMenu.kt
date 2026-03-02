@@ -11,11 +11,14 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -53,8 +56,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -79,6 +86,7 @@ import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -612,6 +620,15 @@ private fun AdIframeOverlay(
     val view = LocalView.current
     val config = LocalConfiguration.current
 
+    // ── Countdown timer state ────────────────────────────────────────────
+    var adCountdown by remember { mutableStateOf(5) }
+    val ringProgress = remember { Animatable(1f) }
+
+    LaunchedEffect(Unit) {
+        launch { ringProgress.animateTo(0f, tween(5000, easing = LinearEasing)) }
+        repeat(5) { delay(1000); adCountdown-- }
+    }
+
     val isBottomSheet = playableHeightDp != null
     val shouldHideStatusBar = if (isBottomSheet) {
         playableHeightDp!! >= config.screenHeightDp * 0.95f
@@ -640,11 +657,11 @@ private fun AdIframeOverlay(
     }
 
     BackHandler(enabled = true) {
-        onClose()
+        if (adCountdown <= 0) onClose()
     }
 
     Dialog(
-        onDismissRequest = onClose,
+        onDismissRequest = { if (adCountdown <= 0) onClose() },
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             decorFitsSystemWindows = false,
@@ -728,14 +745,55 @@ private fun AdIframeOverlay(
                         onRelease = { webView -> webView.destroy() },
                     )
 
-                    // Close button
-                    CloseButton(
-                        onClick = onClose,
-                        size = 44,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(16.dp),
-                    )
+                    // Close button or countdown ring
+                    if (adCountdown <= 0) {
+                        CloseButton(
+                            onClick = onClose,
+                            size = 44,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(16.dp),
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(16.dp)
+                                .size(44.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Canvas(modifier = Modifier.fillMaxSize()) {
+                                val strokeWidth = 3.dp.toPx()
+                                val radius = size.minDimension / 2f
+
+                                // Semi-transparent black circle background
+                                drawCircle(
+                                    color = Color(0x66000000),
+                                    radius = radius,
+                                    center = center,
+                                )
+
+                                // White arc that drains from full to empty
+                                val arcSize = size.minDimension - strokeWidth
+                                drawArc(
+                                    color = Color.White,
+                                    startAngle = -90f + 360f * (1f - ringProgress.value),
+                                    sweepAngle = 360f * ringProgress.value,
+                                    useCenter = false,
+                                    topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f),
+                                    size = Size(arcSize, arcSize),
+                                    style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+                                )
+                            }
+                            Text(
+                                text = "$adCountdown",
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
                 }
             }
         }
