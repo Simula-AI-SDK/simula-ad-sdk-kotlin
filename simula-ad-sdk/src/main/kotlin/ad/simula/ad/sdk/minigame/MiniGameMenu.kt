@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.minigame
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.view.ViewGroup
@@ -39,6 +40,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -54,7 +56,9 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -63,6 +67,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import ad.simula.ad.sdk.model.Defaults
@@ -109,6 +116,8 @@ fun MiniGameMenu(
     var adFetched by remember { mutableStateOf(false) }
     var adIframeUrl by remember { mutableStateOf<String?>(null) }
     var currentAdId by remember { mutableStateOf<String?>(null) }
+    var lastGameHeightDp by remember { mutableStateOf<Float?>(null) }
+    var lastGameWasBottomSheet by remember { mutableStateOf(false) }
 
     // ── Derived state ───────────────────────────────────────────────────────
     val filteredGames by remember(games, searchQuery) {
@@ -254,6 +263,10 @@ fun MiniGameMenu(
             menuId = menuId,
             playableHeight = theme.playableHeight,
             playableBorderColor = theme.playableBorderColor ?: "#262626",
+            onDimensionsOnClose = { heightDp, isBottomSheet ->
+                lastGameHeightDp = heightDp
+                lastGameWasBottomSheet = isBottomSheet
+            },
         )
     }
 
@@ -262,6 +275,8 @@ fun MiniGameMenu(
         AdIframeOverlay(
             url = adIframeUrl!!,
             onClose = { handleAdIframeClose() },
+            playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
+            playableBorderColor = theme.playableBorderColor ?: "#262626",
         )
     }
 
@@ -590,8 +605,39 @@ private fun SearchBar(
 private fun AdIframeOverlay(
     url: String,
     onClose: () -> Unit,
+    playableHeightDp: Float? = null,
+    playableBorderColor: String = "#262626",
 ) {
     val context = LocalContext.current
+    val view = LocalView.current
+    val config = LocalConfiguration.current
+
+    val isBottomSheet = playableHeightDp != null
+    val shouldHideStatusBar = if (isBottomSheet) {
+        playableHeightDp!! >= config.screenHeightDp * 0.95f
+    } else {
+        true
+    }
+
+    // Hide status bar when full-screen or near-full
+    if (shouldHideStatusBar) {
+        DisposableEffect(Unit) {
+            val activity = view.context as? Activity
+            val window = activity?.window
+            if (window != null) {
+                val insetsController = WindowCompat.getInsetsController(window, view)
+                insetsController.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                insetsController.hide(WindowInsetsCompat.Type.statusBars())
+            }
+            onDispose {
+                if (window != null) {
+                    val insetsController = WindowCompat.getInsetsController(window, view)
+                    insetsController.show(WindowInsetsCompat.Type.statusBars())
+                }
+            }
+        }
+    }
 
     BackHandler(enabled = true) {
         onClose()
@@ -607,50 +653,91 @@ private fun AdIframeOverlay(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xCC000000)), // rgba(0,0,0,0.8)
+                .background(Color(0xCC000000)),
+            contentAlignment = if (isBottomSheet) Alignment.BottomCenter else Alignment.TopStart,
         ) {
-            // WebView
-            AndroidView(
-                factory = { ctx ->
-                    WebView(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                        )
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-
-                        webViewClient = object : WebViewClient() {
-                            override fun shouldOverrideUrlLoading(
-                                view: WebView?,
-                                request: WebResourceRequest?,
-                            ): Boolean {
-                                val requestUrl = request?.url?.toString() ?: return false
-                                if (requestUrl == url) return false
-                                val originalHost = Uri.parse(url).host
-                                val requestHost = Uri.parse(requestUrl).host
-                                if (originalHost == requestHost) return false
-                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl))
-                                ctx.startActivity(intent)
-                                return true
-                            }
-                        }
-                        loadUrl(url)
-                    }
-                },
-                modifier = Modifier.fillMaxSize(),
-                onRelease = { webView -> webView.destroy() },
-            )
-
-            // Close button
-            CloseButton(
-                onClick = onClose,
-                size = 44,
+            Column(
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(16.dp),
-            )
+                    .fillMaxWidth()
+                    .then(
+                        if (isBottomSheet) {
+                            Modifier.height(playableHeightDp!!.dp)
+                        } else {
+                            Modifier.fillMaxSize()
+                        }
+                    ),
+            ) {
+                // Visual-only drag handle for bottom sheet mode (no gesture)
+                if (isBottomSheet) {
+                    val borderColor = ColorUtil.parseColor(playableBorderColor)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                borderColor,
+                                RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                            )
+                            .padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(40.dp)
+                                .height(4.dp)
+                                .background(
+                                    Color.White.copy(alpha = 0.3f),
+                                    RoundedCornerShape(2.dp),
+                                ),
+                        )
+                    }
+                }
+
+                // Main content
+                Box(modifier = Modifier.fillMaxSize().weight(1f)) {
+                    // WebView
+                    AndroidView(
+                        factory = { ctx ->
+                            WebView(ctx).apply {
+                                layoutParams = ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                )
+                                settings.javaScriptEnabled = true
+                                settings.domStorageEnabled = true
+                                settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+
+                                webViewClient = object : WebViewClient() {
+                                    override fun shouldOverrideUrlLoading(
+                                        view: WebView?,
+                                        request: WebResourceRequest?,
+                                    ): Boolean {
+                                        val requestUrl = request?.url?.toString() ?: return false
+                                        if (requestUrl == url) return false
+                                        val originalHost = Uri.parse(url).host
+                                        val requestHost = Uri.parse(requestUrl).host
+                                        if (originalHost == requestHost) return false
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl))
+                                        ctx.startActivity(intent)
+                                        return true
+                                    }
+                                }
+                                loadUrl(url)
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        onRelease = { webView -> webView.destroy() },
+                    )
+
+                    // Close button
+                    CloseButton(
+                        onClick = onClose,
+                        size = 44,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(16.dp),
+                    )
+                }
+            }
         }
     }
 }

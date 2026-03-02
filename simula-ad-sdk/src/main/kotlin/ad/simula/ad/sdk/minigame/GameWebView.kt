@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.minigame
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.view.ViewGroup
@@ -10,12 +11,15 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,13 +41,17 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -51,10 +59,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
+import android.util.Log
+import kotlinx.coroutines.launch
 
 /**
  * Full-screen WebView composable for game iframes.
@@ -77,6 +90,7 @@ fun GameWebView(
     menuId: String? = null,
     playableHeight: Any? = null,
     playableBorderColor: String = "#262626",
+    onDimensionsOnClose: ((heightDp: Float, isBottomSheet: Boolean) -> Unit)? = null,
 ) {
     val simulaContext = useSimula()
     val context = LocalContext.current
@@ -122,16 +136,66 @@ fun GameWebView(
         }
     }
 
-    // Back button closes the game
-    BackHandler(enabled = true) {
-        onClose()
-    }
+    val density = LocalDensity.current.density
+    val scope = rememberCoroutineScope()
+    val screenHeightDp = config.screenHeightDp.toFloat()
 
     val isBottomSheet = playableHeight != null
     val borderColor = ColorUtil.parseColor(playableBorderColor)
+    val initialHeightDp = calculatePlayableHeight(playableHeight, config.screenHeightDp).toFloat()
+    val animatedHeightDp = remember { Animatable(initialHeightDp) }
+
+    Log.d("GameWebView", "isBottomSheet=$isBottomSheet, initialHeight=$initialHeightDp, animatedHeight=${animatedHeightDp.value}, screenHeight=$screenHeightDp, playableHeight=$playableHeight")
+
+    // Re-clamp height on screen rotation
+    LaunchedEffect(screenHeightDp) {
+        val clamped = animatedHeightDp.value.coerceIn(500f, screenHeightDp)
+        animatedHeightDp.snapTo(clamped)
+    }
+
+    val shouldHideStatusBar = if (isBottomSheet) {
+        animatedHeightDp.value >= screenHeightDp * 0.95f
+    } else {
+        true
+    }
+
+    // Wrap onClose to report dimensions
+    val handleClose: () -> Unit = {
+        onDimensionsOnClose?.invoke(
+            animatedHeightDp.value,
+            isBottomSheet && animatedHeightDp.value < screenHeightDp * 0.95f,
+        )
+        onClose()
+    }
+
+    // Back button closes the game
+    BackHandler(enabled = true) {
+        handleClose()
+    }
+
+    // Hide the status bar when the game covers >= 95% of the screen
+    val view = LocalView.current
+    if (shouldHideStatusBar) {
+        DisposableEffect(Unit) {
+            val activity = view.context as? Activity
+            val window = activity?.window
+            if (window != null) {
+                val insetsController = WindowCompat.getInsetsController(window, view)
+                insetsController.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                insetsController.hide(WindowInsetsCompat.Type.statusBars())
+            }
+            onDispose {
+                if (window != null) {
+                    val insetsController = WindowCompat.getInsetsController(window, view)
+                    insetsController.show(WindowInsetsCompat.Type.statusBars())
+                }
+            }
+        }
+    }
 
     Dialog(
-        onDismissRequest = onClose,
+        onDismissRequest = handleClose,
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             decorFitsSystemWindows = false,
@@ -148,8 +212,7 @@ fun GameWebView(
                     .fillMaxWidth()
                     .then(
                         if (isBottomSheet) {
-                            val heightDp = calculatePlayableHeight(playableHeight, config.screenHeightDp)
-                            Modifier.height(heightDp.dp)
+                            Modifier.height(animatedHeightDp.value.dp)
                         } else {
                             Modifier.fillMaxSize()
                         }
@@ -164,6 +227,39 @@ fun GameWebView(
                                 borderColor,
                                 RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
                             )
+                            .pointerInput(Unit) {
+                                var startHeight = 0f
+                                var accumulatedDragPx = 0f
+                                detectVerticalDragGestures(
+                                    onDragStart = {
+                                        startHeight = animatedHeightDp.value
+                                        accumulatedDragPx = 0f
+                                    },
+                                    onDragEnd = {
+                                        if (animatedHeightDp.value >= screenHeightDp * 0.95f) {
+                                            scope.launch {
+                                                animatedHeightDp.animateTo(
+                                                    screenHeightDp,
+                                                    spring(
+                                                        dampingRatio = 0.5f,
+                                                        stiffness = 300f,
+                                                    ),
+                                                )
+                                            }
+                                        }
+                                    },
+                                    onDragCancel = {},
+                                    onVerticalDrag = { _, dragAmount ->
+                                        accumulatedDragPx += dragAmount
+                                        val dragDp = accumulatedDragPx / density
+                                        val newHeight = (startHeight - dragDp)
+                                            .coerceIn(500f, screenHeightDp)
+                                        scope.launch {
+                                            animatedHeightDp.snapTo(newHeight)
+                                        }
+                                    },
+                                )
+                            }
                             .padding(vertical = 12.dp),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -224,7 +320,7 @@ fun GameWebView(
 
                     // Close button — top right
                     CloseButton(
-                        onClick = onClose,
+                        onClick = handleClose,
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(16.dp),
@@ -314,6 +410,15 @@ internal fun CloseButton(
             fontWeight = FontWeight.Bold,
         )
     }
+}
+
+/**
+ * Returns true if the playable height covers >= 95% of the screen.
+ */
+private fun isNearFullScreen(playableHeight: Any?, screenHeightDp: Int): Boolean {
+    if (playableHeight == null) return true
+    val effectiveHeight = calculatePlayableHeight(playableHeight, screenHeightDp)
+    return effectiveHeight >= (screenHeightDp * 0.95f)
 }
 
 /**
