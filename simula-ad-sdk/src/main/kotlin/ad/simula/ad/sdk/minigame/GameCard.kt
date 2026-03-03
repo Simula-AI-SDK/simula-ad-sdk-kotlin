@@ -40,6 +40,7 @@ import ad.simula.ad.sdk.model.Defaults
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.util.ColorUtil
+import ad.simula.ad.sdk.util.FontUtil
 
 /**
  * Individual game card composable — equivalent to React's GameCard.tsx.
@@ -62,6 +63,7 @@ fun GameCard(
     val fallbackIcons = remember { listOf("🎲", "🎮", "🎰", "🧩", "🎯") }
     val randomFallback = remember { fallbackIcons.random() }
 
+    val titleFont = FontUtil.parseFont(theme.titleFont ?: Defaults.MiniGameMenuTheme.TITLE_FONT)
     val iconCornerRadius = theme.iconCornerRadius ?: Defaults.MiniGameMenuTheme.ICON_CORNER_RADIUS
     val titleFontColor = ColorUtil.parseColor(
         theme.titleFontColor ?: Defaults.MiniGameMenuTheme.TITLE_FONT_COLOR
@@ -159,6 +161,7 @@ fun GameCard(
         Text(
             text = game.name,
             fontSize = nameFontSize,
+            fontFamily = titleFont,
             fontWeight = FontWeight.Medium,
             color = titleFontColor,
             textAlign = TextAlign.Center,

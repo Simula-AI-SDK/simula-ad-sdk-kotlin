@@ -19,6 +19,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -67,6 +68,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -79,6 +82,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
+import ad.simula.ad.sdk.R
 import ad.simula.ad.sdk.model.Defaults
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.Message
@@ -86,6 +90,7 @@ import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
+import ad.simula.ad.sdk.util.FontUtil
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -139,8 +144,8 @@ fun MiniGameMenu(
     }
 
     // ── Theme ───────────────────────────────────────────────────────────────
-    val appliedTitleFont = theme.titleFont ?: Defaults.MiniGameMenuTheme.TITLE_FONT
-    val appliedSecondaryFont = theme.secondaryFont ?: Defaults.MiniGameMenuTheme.SECONDARY_FONT
+    val appliedTitleFont = FontUtil.parseFont(theme.titleFont ?: Defaults.MiniGameMenuTheme.TITLE_FONT)
+    val appliedSecondaryFont = FontUtil.parseFont(theme.secondaryFont ?: Defaults.MiniGameMenuTheme.SECONDARY_FONT)
     val appliedTitleFontColor = ColorUtil.parseColor(
         theme.titleFontColor ?: Defaults.MiniGameMenuTheme.TITLE_FONT_COLOR
     )
@@ -362,6 +367,7 @@ fun MiniGameMenu(
                                 Text(
                                     text = getInitials(charName),
                                     fontSize = 16.sp,
+                                    fontFamily = appliedTitleFont,
                                     fontWeight = FontWeight.SemiBold,
                                     color = appliedTitleFontColor,
                                 )
@@ -374,6 +380,7 @@ fun MiniGameMenu(
                         Text(
                             text = "Play a Game with $charName",
                             fontSize = 18.sp,
+                            fontFamily = appliedTitleFont,
                             fontWeight = FontWeight.SemiBold,
                             color = appliedTitleFontColor,
                             modifier = Modifier.weight(1f),
@@ -428,6 +435,7 @@ fun MiniGameMenu(
                                     Text(
                                         text = "Loading games...",
                                         fontSize = 14.sp,
+                                        fontFamily = appliedSecondaryFont,
                                         color = appliedSecondaryFontColor,
                                     )
                                 }
@@ -440,26 +448,19 @@ fun MiniGameMenu(
                                     verticalArrangement = Arrangement.spacedBy(16.dp),
                                     modifier = Modifier.padding(20.dp),
                                 ) {
-                                    // Unavailable image placeholder (circle)
-                                    Box(
+                                    // Unavailable image
+                                    Image(
+                                        painter = painterResource(R.drawable.games_unavailable),
+                                        contentDescription = "Games unavailable",
+                                        contentScale = ContentScale.Crop,
                                         modifier = Modifier
                                             .size(150.dp)
-                                            .clip(CircleShape)
-                                            .background(
-                                                if (theme.backgroundColor != null)
-                                                    appliedBackgroundColor
-                                                else Color(0xFFF3F4F6)
-                                            ),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Text(
-                                            text = "🎮",
-                                            fontSize = 48.sp,
-                                        )
-                                    }
+                                            .clip(CircleShape),
+                                    )
                                     Text(
                                         text = "No games are available to play right now. Please check back later!",
                                         fontSize = 14.sp,
+                                        fontFamily = appliedSecondaryFont,
                                         color = appliedSecondaryFontColor,
                                         textAlign = TextAlign.Center,
                                     )
@@ -481,6 +482,7 @@ fun MiniGameMenu(
                                             textColor = appliedTitleFontColor,
                                             secondaryColor = appliedSecondaryFontColor,
                                             backgroundColor = appliedBackgroundColor,
+                                            fontFamily = appliedSecondaryFont,
                                         )
                                         Spacer(modifier = Modifier.height(16.dp))
                                     }
@@ -496,6 +498,7 @@ fun MiniGameMenu(
                                             Text(
                                                 text = "No games found for \"$searchQuery\"",
                                                 fontSize = 14.sp,
+                                                fontFamily = appliedSecondaryFont,
                                                 color = appliedSecondaryFontColor,
                                             )
                                         }
@@ -535,6 +538,7 @@ private fun SearchBar(
     textColor: Color,
     secondaryColor: Color,
     backgroundColor: Color,
+    fontFamily: FontFamily = FontFamily.SansSerif,
 ) {
     val currentBorderColor = if (isFocused) accentColor else borderColor
 
@@ -566,6 +570,7 @@ private fun SearchBar(
                 textStyle = TextStyle(
                     fontSize = 14.sp,
                     color = textColor,
+                    fontFamily = fontFamily,
                 ),
                 singleLine = true,
                 cursorBrush = SolidColor(accentColor),
@@ -575,6 +580,7 @@ private fun SearchBar(
                             Text(
                                 text = "Search games...",
                                 fontSize = 14.sp,
+                                fontFamily = fontFamily,
                                 color = secondaryColor,
                             )
                         }

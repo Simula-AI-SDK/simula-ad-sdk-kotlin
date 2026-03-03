@@ -83,11 +83,15 @@ data class MiniGameInvitationTheme(
     val cornerRadius: Int? = null,
     val backgroundColor: String? = null,
     val textColor: String? = null,
+    val titleTextColor: String? = null,
+    val subTextColor: String? = null,
+    val ctaTextColor: String? = null,
     val ctaColor: String? = null,
     val charImageCornerRadius: Int? = null,
     val charImageAnchor: String? = null, // "left" or "right"
     val borderWidth: Int? = null,
     val borderColor: String? = null,
+    val fontFamily: String? = null,
     val fontSize: Int? = null,
 )
 
@@ -98,6 +102,7 @@ data class MiniGameButtonTheme(
     val backgroundColor: String? = null,
     val textColor: String? = null,
     val fontSize: Int? = null,
+    val fontFamily: String? = null,
     val padding: Any? = null, // String (e.g. "10px 20px") or Number (px)
     val borderWidth: Int? = null,
     val borderColor: String? = null,
@@ -108,9 +113,12 @@ data class MiniGameButtonTheme(
 // ── MiniGameInterstitial Types ──────────────────────────────────────────────
 
 data class MiniGameInterstitialTheme(
-    val cornerRadius: Int? = null,
+    val ctaCornerRadius: Int? = null,
     val characterSize: Int? = null,
-    val textColor: String? = null,
-    val fontSize: Int? = null,
+    val titleTextColor: String? = null,
+    val titleFontSize: Int? = null,
+    val ctaTextColor: String? = null,
+    val ctaFontSize: Int? = null,
     val ctaColor: String? = null,
+    val fontFamily: String? = null,
 )

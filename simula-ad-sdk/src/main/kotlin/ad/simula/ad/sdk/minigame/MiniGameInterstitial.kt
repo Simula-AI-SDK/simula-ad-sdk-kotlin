@@ -5,7 +5,10 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.ui.res.painterResource
+import ad.simula.ad.sdk.R
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -44,6 +47,7 @@ import coil.compose.AsyncImagePainter
 import ad.simula.ad.sdk.model.Defaults.MiniGameInterstitialDefaults
 import ad.simula.ad.sdk.model.MiniGameInterstitialTheme
 import ad.simula.ad.sdk.util.ColorUtil
+import ad.simula.ad.sdk.util.FontUtil
 
 /**
  * Full-screen interstitial invitation composable.
@@ -67,12 +71,17 @@ fun MiniGameInterstitial(
     var closedInternally by remember { mutableStateOf(false) }
 
     // Applied theme
-    val cornerRadius = theme.cornerRadius ?: MiniGameInterstitialDefaults.CORNER_RADIUS
+    val ctaCornerRadius = theme.ctaCornerRadius ?: MiniGameInterstitialDefaults.CTA_CORNER_RADIUS
     val characterSize = theme.characterSize ?: MiniGameInterstitialDefaults.CHARACTER_SIZE
-    val textColor = ColorUtil.parseColor(
-        theme.textColor ?: MiniGameInterstitialDefaults.TEXT_COLOR
+    val titleTextColor = ColorUtil.parseColor(
+        theme.titleTextColor ?: MiniGameInterstitialDefaults.TITLE_TEXT_COLOR
     )
-    val fontSize = theme.fontSize ?: MiniGameInterstitialDefaults.FONT_SIZE
+    val titleFontSize = theme.titleFontSize ?: MiniGameInterstitialDefaults.TITLE_FONT_SIZE
+    val ctaTextColor = ColorUtil.parseColor(
+        theme.ctaTextColor ?: MiniGameInterstitialDefaults.CTA_TEXT_COLOR
+    )
+    val ctaFontSize = theme.ctaFontSize ?: MiniGameInterstitialDefaults.CTA_FONT_SIZE
+    val fontFamily = FontUtil.parseFont(theme.fontFamily)
     val ctaColor = ColorUtil.parseColor(
         theme.ctaColor ?: MiniGameInterstitialDefaults.CTA_COLOR
     )
@@ -134,7 +143,7 @@ fun MiniGameInterstitial(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            // Background image (if provided)
+            // Background image (user-provided URL or bundled default)
             if (backgroundImage != null) {
                 AsyncImage(
                     model = backgroundImage,
@@ -142,13 +151,20 @@ fun MiniGameInterstitial(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
                 )
-                // Dark overlay on top of background image
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color(0x99000000)),
+            } else {
+                Image(
+                    painter = painterResource(R.drawable.minigame_interstitial_background),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
                 )
             }
+            // Dark overlay on top of background image
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x99000000)),
+            )
 
             // Content
             Column(
@@ -189,11 +205,12 @@ fun MiniGameInterstitial(
                 // Invitation text
                 Text(
                     text = invitationText,
-                    color = textColor,
-                    fontSize = fontSize.sp,
+                    color = titleTextColor,
+                    fontSize = titleFontSize.sp,
+                    fontFamily = fontFamily,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
-                    lineHeight = (fontSize * 1.3f).sp,
+                    lineHeight = (titleFontSize * 1.3f).sp,
                     modifier = Modifier.widthIn(max = 320.dp),
                 )
 
@@ -201,7 +218,7 @@ fun MiniGameInterstitial(
                 Box(
                     modifier = Modifier
                         .graphicsLayer(scaleX = ctaScale, scaleY = ctaScale)
-                        .clip(RoundedCornerShape(cornerRadius.dp))
+                        .clip(RoundedCornerShape(ctaCornerRadius.dp))
                         .background(ctaColor)
                         .clickable(
                             interactionSource = ctaInteractionSource,
@@ -220,13 +237,14 @@ fun MiniGameInterstitial(
                     ) {
                         Text(
                             text = "▶",
-                            color = Color.White,
-                            fontSize = 14.sp,
+                            color = ctaTextColor,
+                            fontSize = (ctaFontSize - 2).sp,
                         )
                         Text(
                             text = ctaText,
-                            color = Color.White,
-                            fontSize = 16.sp,
+                            color = ctaTextColor,
+                            fontSize = ctaFontSize.sp,
+                            fontFamily = fontFamily,
                             fontWeight = FontWeight.SemiBold,
                         )
                     }
@@ -252,7 +270,7 @@ fun MiniGameInterstitial(
             ) {
                 Text(
                     text = "✕",
-                    color = textColor,
+                    color = titleTextColor,
                     fontSize = 16.sp,
                 )
             }

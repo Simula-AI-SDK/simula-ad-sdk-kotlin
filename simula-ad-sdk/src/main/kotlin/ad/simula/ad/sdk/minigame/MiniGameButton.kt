@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import ad.simula.ad.sdk.model.Defaults.MiniGameButtonDefaults
 import ad.simula.ad.sdk.model.MiniGameButtonTheme
 import ad.simula.ad.sdk.util.ColorUtil
+import ad.simula.ad.sdk.util.FontUtil
 import ad.simula.ad.sdk.util.applyWidth
 import ad.simula.ad.sdk.util.parseDimension
 
@@ -67,6 +68,7 @@ fun MiniGameButton(
         theme.textColor ?: MiniGameButtonDefaults.TEXT_COLOR
     )
     val fontSize = theme.fontSize ?: MiniGameButtonDefaults.FONT_SIZE
+    val fontFamily = FontUtil.parseFont(theme.fontFamily)
     val borderWidthVal = theme.borderWidth ?: MiniGameButtonDefaults.BORDER_WIDTH
     val borderColorVal = ColorUtil.parseColor(
         theme.borderColor ?: MiniGameButtonDefaults.BORDER_COLOR
@@ -187,6 +189,7 @@ fun MiniGameButton(
                     text = displayText,
                     color = textColorValue,
                     fontSize = fontSize.sp,
+                    fontFamily = fontFamily,
                     fontWeight = FontWeight.SemiBold,
                     textAlign = TextAlign.Center,
                 )

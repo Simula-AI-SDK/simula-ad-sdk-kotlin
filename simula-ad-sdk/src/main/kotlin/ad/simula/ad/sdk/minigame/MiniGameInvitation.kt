@@ -36,6 +36,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -48,6 +49,7 @@ import ad.simula.ad.sdk.model.Defaults.MiniGameInvitationDefaults
 import ad.simula.ad.sdk.model.MiniGameInvitationAnimation
 import ad.simula.ad.sdk.model.MiniGameInvitationTheme
 import ad.simula.ad.sdk.util.ColorUtil
+import ad.simula.ad.sdk.util.FontUtil
 import ad.simula.ad.sdk.util.ParsedOffset
 import ad.simula.ad.sdk.util.applyWidth
 import ad.simula.ad.sdk.util.parseDimension
@@ -84,9 +86,17 @@ fun MiniGameInvitation(
     val bgColor = ColorUtil.parseColor(
         theme.backgroundColor ?: MiniGameInvitationDefaults.BACKGROUND_COLOR
     )
-    val textColor = ColorUtil.parseColor(
-        theme.textColor ?: MiniGameInvitationDefaults.TEXT_COLOR
+    val fallbackTextColor = theme.textColor ?: MiniGameInvitationDefaults.TEXT_COLOR
+    val titleTextColor = ColorUtil.parseColor(
+        theme.titleTextColor ?: fallbackTextColor
     )
+    val subTextColor = ColorUtil.parseColor(
+        theme.subTextColor ?: fallbackTextColor
+    )
+    val ctaTextColor = ColorUtil.parseColor(
+        theme.ctaTextColor ?: fallbackTextColor
+    )
+    val closeButtonColor = ColorUtil.parseColor(fallbackTextColor)
     val ctaColor = ColorUtil.parseColor(
         theme.ctaColor ?: MiniGameInvitationDefaults.CTA_COLOR
     )
@@ -98,6 +108,7 @@ fun MiniGameInvitation(
     val borderColor = ColorUtil.parseColor(
         theme.borderColor ?: MiniGameInvitationDefaults.BORDER_COLOR
     )
+    val fontFamily = FontUtil.parseFont(theme.fontFamily)
     val fontSize = theme.fontSize ?: MiniGameInvitationDefaults.FONT_SIZE
 
     val animDuration = MiniGameInvitationDefaults.ANIMATION_DURATION_MS
@@ -214,8 +225,11 @@ fun MiniGameInvitation(
                             titleText = titleText,
                             subText = subText,
                             ctaText = ctaText,
-                            textColor = textColor,
+                            titleTextColor = titleTextColor,
+                            subTextColor = subTextColor,
+                            ctaTextColor = ctaTextColor,
                             ctaColor = ctaColor,
+                            fontFamily = fontFamily,
                             fontSize = fontSize,
                             onClick = {
                                 onClose?.invoke()
@@ -243,8 +257,11 @@ fun MiniGameInvitation(
                             titleText = titleText,
                             subText = subText,
                             ctaText = ctaText,
-                            textColor = textColor,
+                            titleTextColor = titleTextColor,
+                            subTextColor = subTextColor,
+                            ctaTextColor = ctaTextColor,
                             ctaColor = ctaColor,
+                            fontFamily = fontFamily,
                             fontSize = fontSize,
                             onClick = {
                                 onClose?.invoke()
@@ -272,7 +289,7 @@ fun MiniGameInvitation(
                     Text(
                         text = "✕",
                         fontSize = 16.sp,
-                        color = textColor.copy(alpha = 0.4f),
+                        color = closeButtonColor.copy(alpha = 0.4f),
                     )
                 }
             }
@@ -285,8 +302,11 @@ private fun InvitationTextContent(
     titleText: String,
     subText: String,
     ctaText: String,
-    textColor: Color,
+    titleTextColor: Color,
+    subTextColor: Color,
+    ctaTextColor: Color,
     ctaColor: Color,
+    fontFamily: FontFamily,
     fontSize: Int,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -299,13 +319,15 @@ private fun InvitationTextContent(
             text = titleText,
             fontSize = fontSize.sp,
             fontWeight = FontWeight.Bold,
-            color = textColor,
+            fontFamily = fontFamily,
+            color = titleTextColor,
             lineHeight = (fontSize * 1.3f).sp,
         )
         Text(
             text = subText,
             fontSize = 13.sp,
-            color = textColor.copy(alpha = 0.65f),
+            fontFamily = fontFamily,
+            color = subTextColor.copy(alpha = 0.65f),
             lineHeight = 18.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -317,7 +339,7 @@ private fun InvitationTextContent(
             shape = RoundedCornerShape(8.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = ctaColor,
-                contentColor = Color.White,
+                contentColor = ctaTextColor,
             ),
             contentPadding = ButtonDefaults.ContentPadding.let {
                 // 6px vertical, 16px horizontal
@@ -335,6 +357,7 @@ private fun InvitationTextContent(
             Text(
                 text = ctaText,
                 fontSize = 13.sp,
+                fontFamily = fontFamily,
                 fontWeight = FontWeight.SemiBold,
             )
         }
