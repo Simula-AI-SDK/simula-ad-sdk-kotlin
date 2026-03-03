@@ -204,7 +204,7 @@ fun GameWebView(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xCC000000)), // rgba(0,0,0,0.8)
+                .background(Color(0x80000000)), // rgba(0,0,0,0.5)
             contentAlignment = if (isBottomSheet) Alignment.BottomCenter else Alignment.Center,
         ) {
             Column(
