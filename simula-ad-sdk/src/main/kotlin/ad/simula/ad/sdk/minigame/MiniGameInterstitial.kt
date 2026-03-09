@@ -138,7 +138,6 @@ fun MiniGameInterstitial(
                     indication = null,
                 ) {
                     closedInternally = true
-                    onClose?.invoke()
                     onClick()
                 },
             contentAlignment = Alignment.Center,
@@ -225,7 +224,6 @@ fun MiniGameInterstitial(
                             indication = null,
                         ) {
                             closedInternally = true
-                            onClose?.invoke()
                             onClick()
                         }
                         .padding(horizontal = 32.dp, vertical = 14.dp),

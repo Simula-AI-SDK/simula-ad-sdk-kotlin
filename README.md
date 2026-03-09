@@ -13,7 +13,7 @@ A Kotlin SDK for integrating sponsored mini-games into AI chat Android applicati
 
 - Android minSdk 24 (Android 7.0+)
 - Jetpack Compose
-- Kotlin 1.9+
+- Kotlin 2.1+
 
 ## Installation
 

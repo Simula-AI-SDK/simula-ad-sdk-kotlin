@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("maven-publish")
+    id("signing")
 }
 
 android {
@@ -36,6 +38,76 @@ android {
 
     buildFeatures {
         compose = true
+    }
+}
+
+// ── Maven Central Publishing ────────────────────────────────────────────────
+
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+
+                groupId = "ad.simula"
+                artifactId = "ad-sdk"
+                version = findProperty("VERSION_NAME")?.toString() ?: "1.0.0"
+
+                pom {
+                    name.set("Simula Ad SDK")
+                    description.set("Simula interactive ad SDK for Android")
+                    url.set("https://github.com/AugustBemworworthy/simula-ad-sdk-kotlin") // TODO: replace with your repo URL
+
+                    licenses {
+                        license {
+                            name.set("The Apache License, Version 2.0")
+                            url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                        }
+                    }
+
+                    developers {
+                        developer {
+                            id.set("simula")          // TODO: your ID
+                            name.set("Simula")        // TODO: your name
+                            email.set("dev@simula.ad") // TODO: your email
+                        }
+                    }
+
+                    scm {
+                        connection.set("scm:git:git://github.com/YOUR_USERNAME/simula-ad-sdk-kotlin.git")       // TODO
+                        developerConnection.set("scm:git:ssh://github.com/YOUR_USERNAME/simula-ad-sdk-kotlin.git") // TODO
+                        url.set("https://github.com/YOUR_USERNAME/simula-ad-sdk-kotlin")                           // TODO
+                    }
+                }
+            }
+        }
+
+        repositories {
+            maven {
+                name = "sonatype"
+                val releasesUrl = uri("https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/")
+                val snapshotsUrl = uri("https://s01.oss.sonatype.org/content/repositories/snapshots/")
+                url = if ((findProperty("VERSION_NAME")?.toString() ?: "").endsWith("SNAPSHOT")) snapshotsUrl else releasesUrl
+
+                credentials {
+                    username = findProperty("ossrhUsername")?.toString() ?: System.getenv("OSSRH_USERNAME") ?: ""
+                    password = findProperty("ossrhPassword")?.toString() ?: System.getenv("OSSRH_PASSWORD") ?: ""
+                }
+            }
+        }
+    }
+
+    signing {
+        // Uses GPG key from gradle.properties or env vars
+        val signingKeyId = findProperty("signing.keyId")?.toString() ?: System.getenv("SIGNING_KEY_ID")
+        val signingKey = findProperty("signing.key")?.toString() ?: System.getenv("SIGNING_KEY")
+        val signingPassword = findProperty("signing.password")?.toString() ?: System.getenv("SIGNING_PASSWORD")
+
+        if (signingKey != null) {
+            useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+        }
+
+        sign(publishing.publications["release"])
     }
 }
 

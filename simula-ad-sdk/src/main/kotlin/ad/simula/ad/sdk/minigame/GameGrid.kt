@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -154,11 +156,11 @@ fun GameGrid(
                 val rows = currentGames.chunked(3)
                 for (row in rows) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Max),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         for (game in row) {
-                            Box(modifier = Modifier.weight(1f)) {
+                            Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                                 GameCard(
                                     game = game,
                                     charID = charID,
@@ -172,7 +174,7 @@ fun GameGrid(
                         }
                         // Fill remaining columns with empty boxes for alignment
                         repeat(3 - row.size) {
-                            Box(modifier = Modifier.weight(1f))
+                            Box(modifier = Modifier.weight(1f).fillMaxHeight())
                         }
                     }
                 }
