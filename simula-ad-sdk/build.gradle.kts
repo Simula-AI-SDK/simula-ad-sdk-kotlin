@@ -3,8 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("maven-publish")
-    id("signing")
+    id("com.vanniktech.maven.publish")
 }
 
 android {
@@ -43,71 +42,37 @@ android {
 
 // ── Maven Central Publishing ────────────────────────────────────────────────
 
-afterEvaluate {
-    publishing {
-        publications {
-            create<MavenPublication>("release") {
-                from(components["release"])
+mavenPublishing {
+    publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
+    signAllPublications()
 
-                groupId = "ad.simula"
-                artifactId = "ad-sdk"
-                version = findProperty("VERSION_NAME")?.toString() ?: "1.0.0"
+    coordinates("ad.simula", "ad-sdk", findProperty("VERSION_NAME")?.toString() ?: "1.0.0")
 
-                pom {
-                    name.set("Simula Ad SDK")
-                    description.set("Simula interactive ad SDK for Android")
-                    url.set("https://github.com/AugustBemworworthy/simula-ad-sdk-kotlin") // TODO: replace with your repo URL
+    pom {
+        name.set("Simula Ad SDK")
+        description.set("Simula interactive ad SDK for Android")
+        url.set("https://github.com/Simula-AI-SDK/simula-ad-sdk-kotlin")
 
-                    licenses {
-                        license {
-                            name.set("The Apache License, Version 2.0")
-                            url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
-                        }
-                    }
-
-                    developers {
-                        developer {
-                            id.set("simula")          // TODO: your ID
-                            name.set("Simula")        // TODO: your name
-                            email.set("dev@simula.ad") // TODO: your email
-                        }
-                    }
-
-                    scm {
-                        connection.set("scm:git:git://github.com/YOUR_USERNAME/simula-ad-sdk-kotlin.git")       // TODO
-                        developerConnection.set("scm:git:ssh://github.com/YOUR_USERNAME/simula-ad-sdk-kotlin.git") // TODO
-                        url.set("https://github.com/YOUR_USERNAME/simula-ad-sdk-kotlin")                           // TODO
-                    }
-                }
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/licenses/MIT")
             }
         }
 
-        repositories {
-            maven {
-                name = "sonatype"
-                val releasesUrl = uri("https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/")
-                val snapshotsUrl = uri("https://s01.oss.sonatype.org/content/repositories/snapshots/")
-                url = if ((findProperty("VERSION_NAME")?.toString() ?: "").endsWith("SNAPSHOT")) snapshotsUrl else releasesUrl
-
-                credentials {
-                    username = findProperty("ossrhUsername")?.toString() ?: System.getenv("OSSRH_USERNAME") ?: ""
-                    password = findProperty("ossrhPassword")?.toString() ?: System.getenv("OSSRH_PASSWORD") ?: ""
-                }
+        developers {
+            developer {
+                id.set("Simula-Ad")
+                name.set("Simula Admin")
+                email.set("admin@simula.ad")
             }
         }
-    }
 
-    signing {
-        // Uses GPG key from gradle.properties or env vars
-        val signingKeyId = findProperty("signing.keyId")?.toString() ?: System.getenv("SIGNING_KEY_ID")
-        val signingKey = findProperty("signing.key")?.toString() ?: System.getenv("SIGNING_KEY")
-        val signingPassword = findProperty("signing.password")?.toString() ?: System.getenv("SIGNING_PASSWORD")
-
-        if (signingKey != null) {
-            useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+        scm {
+            connection.set("scm:git:git://github.com/Simula-AI-SDK/simula-ad-sdk-kotlin.git")
+            developerConnection.set("scm:git:ssh://github.com/Simula-AI-SDK/simula-ad-sdk-kotlin.git")
+            url.set("https://github.com/Simula-AI-SDK/simula-ad-sdk-kotlin")
         }
-
-        sign(publishing.publications["release"])
     }
 }
 

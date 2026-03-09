@@ -21,7 +21,7 @@ A Kotlin SDK for integrating sponsored mini-games into AI chat Android applicati
 
 ```kotlin
 dependencies {
-    implementation("com.simula.ad:simula-ad-sdk:1.0.0")
+    implementation("ad.simula:ad-sdk:1.0.0")
 }
 ```
 
@@ -29,7 +29,7 @@ dependencies {
 
 ```groovy
 dependencies {
-    implementation 'com.simula.ad:simula-ad-sdk:1.0.0'
+    implementation 'ad.simula:ad-sdk:1.0.0'
 }
 ```
 
