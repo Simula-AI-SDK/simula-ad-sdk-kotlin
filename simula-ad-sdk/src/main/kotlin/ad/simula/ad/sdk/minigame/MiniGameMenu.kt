@@ -703,7 +703,15 @@ private fun AdIframeOverlay(
                         } else {
                             Modifier.fillMaxSize()
                         }
-                    ),
+                    )
+                    .then(
+                        if (isBottomSheet) {
+                            Modifier.clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .background(Color.White),
             ) {
                 // Visual-only drag handle for bottom sheet mode (no gesture)
                 if (isBottomSheet) {
@@ -711,10 +719,7 @@ private fun AdIframeOverlay(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(
-                                borderColor,
-                                RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-                            )
+                            .background(borderColor)
                             .padding(vertical = 12.dp),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -773,7 +778,7 @@ private fun AdIframeOverlay(
                     // Loading overlay until ad page finishes painting
                     if (!adPageLoaded) {
                         Box(
-                            modifier = Modifier.fillMaxSize().background(Color.White),
+                            modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center,
                         ) {
                             CircularProgressIndicator(color = Color(0xFF6B7280))

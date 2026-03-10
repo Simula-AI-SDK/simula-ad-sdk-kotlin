@@ -209,17 +209,22 @@ fun GameWebView(
                     } else {
                         Modifier.fillMaxSize()
                     }
-                ),
+                )
+                .then(
+                    if (isBottomSheet) {
+                        Modifier.clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    } else {
+                        Modifier
+                    }
+                )
+                .background(Color.White),
         ) {
             // Bottom sheet drag handle
             if (isBottomSheet) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(
-                            borderColor,
-                            RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-                        )
+                        .background(borderColor)
                         .pointerInput(Unit) {
                             var startHeight = 0f
                             var accumulatedDragPx = 0f
@@ -294,7 +299,7 @@ fun GameWebView(
                         // Loading overlay stays visible until page finishes painting
                         if (!pageLoaded) {
                             Box(
-                                modifier = Modifier.fillMaxSize().background(Color.White),
+                                modifier = Modifier.fillMaxSize(),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Column(
