@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.minigame
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.util.Log
 import android.content.Intent
 import android.net.Uri
 import android.view.ViewGroup
@@ -77,6 +78,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -196,6 +198,7 @@ fun MiniGameMenu(
     }
 
     fun handleGameSelect(gameId: String, gameName: String) {
+        Log.d("MiniGameMenu", "handleGameSelect: gameId=$gameId, gameName=$gameName")
         // Track click (best effort)
         val currentMenuId = menuId
         if (currentMenuId != null && gameName.isNotBlank()) {
@@ -203,7 +206,7 @@ fun MiniGameMenu(
                 SimulaApiClient.trackMenuGameClick(currentMenuId, gameName, simulaContext.apiKey)
             }
         }
-        handleClose()
+        // Menu stays open behind game Dialog to prevent black flash
         selectedGameId = gameId
         adFetched = false
         currentAdId = null
@@ -214,6 +217,7 @@ fun MiniGameMenu(
     }
 
     fun handleIframeClose() {
+        Log.d("MiniGameMenu", "handleIframeClose: adFetched=$adFetched, currentAdId=$currentAdId")
         if (!adFetched) {
             val aid = currentAdId
             if (aid != null) {
@@ -225,18 +229,27 @@ fun MiniGameMenu(
                             adFetched = true
                         }
                     } catch (_: Exception) {
-                        // If ad fetch fails, just close
+                        // Ad fetch failed -- no ad to show
+                    }
+                    // Close game AFTER fetch so there's no gap
+                    selectedGameId = null
+                    if (adIframeUrl == null) {
+                        handleClose()
                     }
                 }
+            } else {
+                selectedGameId = null
+                handleClose()
             }
-            selectedGameId = null
         } else {
             selectedGameId = null
+            handleClose()
         }
     }
 
     fun handleAdIframeClose() {
         adIframeUrl = null
+        handleClose()
     }
 
     // ── Character initials fallback ─────────────────────────────────────────
@@ -261,40 +274,10 @@ fun MiniGameMenu(
         handleClose()
     }
 
-    // ── Game Iframe ─────────────────────────────────────────────────────────
-    if (selectedGameId != null) {
-        GameWebView(
-            gameId = selectedGameId!!,
-            charID = charID,
-            charName = charName,
-            charImage = charImage,
-            charDesc = charDesc,
-            messages = messages,
-            delegateChar = delegateChar,
-            onClose = { handleIframeClose() },
-            onAdIdReceived = { handleAdIdReceived(it) },
-            menuId = menuId,
-            playableHeight = theme.playableHeight,
-            playableBorderColor = theme.playableBorderColor ?: "#262626",
-            onDimensionsOnClose = { heightDp, isBottomSheet ->
-                lastGameHeightDp = heightDp
-                lastGameWasBottomSheet = isBottomSheet
-            },
-        )
-    }
+    Log.d("MiniGameMenu", "Composing: isOpen=$isOpen, selectedGameId=$selectedGameId, adIframeUrl=${adIframeUrl != null}")
 
-    // ── Ad Iframe ───────────────────────────────────────────────────────────
-    if (adIframeUrl != null) {
-        AdIframeOverlay(
-            url = adIframeUrl!!,
-            onClose = { handleAdIframeClose() },
-            playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
-            playableBorderColor = theme.playableBorderColor ?: "#262626",
-        )
-    }
-
-    // ── Menu Modal ──────────────────────────────────────────────────────────
-    if (isOpen) {
+    // ── Single Dialog for all screens (one window = no black flash on transitions)
+    if (isOpen || selectedGameId != null || adIframeUrl != null) {
         Dialog(
             onDismissRequest = { handleClose() },
             properties = DialogProperties(
@@ -302,6 +285,12 @@ fun MiniGameMenu(
                 decorFitsSystemWindows = false,
             ),
         ) {
+            val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+            LaunchedEffect(dialogWindow) {
+                dialogWindow?.setDimAmount(0f)
+                dialogWindow?.setBackgroundDrawableResource(android.R.color.transparent)
+            }
+            Log.d("MiniGameMenu", "Dialog composing: isOpen=$isOpen, selectedGameId=$selectedGameId, adIframeUrl=${adIframeUrl != null}")
             // Backdrop
             Box(
                 modifier = Modifier
@@ -520,6 +509,38 @@ fun MiniGameMenu(
                     }
                 }
             }
+
+            // ── Game Iframe (on top of menu) ────────────────────────────────
+            if (selectedGameId != null) {
+                GameWebView(
+                    gameId = selectedGameId!!,
+                    charID = charID,
+                    charName = charName,
+                    charImage = charImage,
+                    charDesc = charDesc,
+                    messages = messages,
+                    delegateChar = delegateChar,
+                    onClose = { handleIframeClose() },
+                    onAdIdReceived = { handleAdIdReceived(it) },
+                    menuId = menuId,
+                    playableHeight = theme.playableHeight,
+                    playableBorderColor = theme.playableBorderColor ?: "#262626",
+                    onDimensionsOnClose = { heightDp, isBottomSheet ->
+                        lastGameHeightDp = heightDp
+                        lastGameWasBottomSheet = isBottomSheet
+                    },
+                )
+            }
+
+            // ── Ad Iframe (on top of everything) ────────────────────────────
+            if (adIframeUrl != null) {
+                AdIframeOverlay(
+                    url = adIframeUrl!!,
+                    onClose = { handleAdIframeClose() },
+                    playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
+                    playableBorderColor = theme.playableBorderColor ?: "#262626",
+                )
+            }
         }
     }
 }
@@ -629,6 +650,7 @@ private fun AdIframeOverlay(
     // ── Countdown timer state ────────────────────────────────────────────
     var adCountdown by remember { mutableStateOf(5) }
     val ringProgress = remember { Animatable(1f) }
+    var adPageLoaded by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         launch { ringProgress.animateTo(0f, tween(5000, easing = LinearEasing)) }
@@ -666,17 +688,10 @@ private fun AdIframeOverlay(
         if (adCountdown <= 0) onClose()
     }
 
-    Dialog(
-        onDismissRequest = { if (adCountdown <= 0) onClose() },
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            decorFitsSystemWindows = false,
-        ),
-    ) {
-        Box(
+    Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xCC000000)),
+                .background(Color(0x80000000)),
             contentAlignment = if (isBottomSheet) Alignment.BottomCenter else Alignment.TopStart,
         ) {
             Column(
@@ -721,6 +736,7 @@ private fun AdIframeOverlay(
                     AndroidView(
                         factory = { ctx ->
                             WebView(ctx).apply {
+                                setBackgroundColor(android.graphics.Color.TRANSPARENT)
                                 layoutParams = ViewGroup.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
                                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -730,6 +746,9 @@ private fun AdIframeOverlay(
                                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
 
                                 webViewClient = object : WebViewClient() {
+                                    override fun onPageFinished(view: WebView?, finishedUrl: String?) {
+                                        adPageLoaded = true
+                                    }
                                     override fun shouldOverrideUrlLoading(
                                         view: WebView?,
                                         request: WebResourceRequest?,
@@ -750,6 +769,16 @@ private fun AdIframeOverlay(
                         modifier = Modifier.fillMaxSize(),
                         onRelease = { webView -> webView.destroy() },
                     )
+
+                    // Loading overlay until ad page finishes painting
+                    if (!adPageLoaded) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator(color = Color.White)
+                        }
+                    }
 
                     // Close button or countdown ring
                     if (adCountdown <= 0) {
@@ -803,5 +832,4 @@ private fun AdIframeOverlay(
                 }
             }
         }
-    }
 }

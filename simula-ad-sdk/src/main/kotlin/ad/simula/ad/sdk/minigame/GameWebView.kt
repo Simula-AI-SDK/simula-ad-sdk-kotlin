@@ -57,8 +57,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -99,6 +97,7 @@ fun GameWebView(
     var iframeUrl by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    var pageLoaded by remember { mutableStateOf(false) }
 
     // Fetch the minigame iframe URL
     LaunchedEffect(gameId, charID, simulaContext.sessionId) {
@@ -194,92 +193,106 @@ fun GameWebView(
         }
     }
 
-    Dialog(
-        onDismissRequest = handleClose,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            decorFitsSystemWindows = false,
-        ),
+    Log.d("GameWebView", "Composing: loading=$loading, iframeUrl=${iframeUrl != null}, pageLoaded=$pageLoaded, error=$error")
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0x80000000)), // rgba(0,0,0,0.5)
+        contentAlignment = if (isBottomSheet) Alignment.BottomCenter else Alignment.Center,
     ) {
-        Box(
+        Column(
             modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0x80000000)), // rgba(0,0,0,0.5)
-            contentAlignment = if (isBottomSheet) Alignment.BottomCenter else Alignment.Center,
+                .fillMaxWidth()
+                .then(
+                    if (isBottomSheet) {
+                        Modifier.height(animatedHeightDp.value.dp)
+                    } else {
+                        Modifier.fillMaxSize()
+                    }
+                ),
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .then(
-                        if (isBottomSheet) {
-                            Modifier.height(animatedHeightDp.value.dp)
-                        } else {
-                            Modifier.fillMaxSize()
+            // Bottom sheet drag handle
+            if (isBottomSheet) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            borderColor,
+                            RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                        )
+                        .pointerInput(Unit) {
+                            var startHeight = 0f
+                            var accumulatedDragPx = 0f
+                            detectVerticalDragGestures(
+                                onDragStart = {
+                                    startHeight = animatedHeightDp.value
+                                    accumulatedDragPx = 0f
+                                },
+                                onDragEnd = {
+                                    if (animatedHeightDp.value >= screenHeightDp * 0.95f) {
+                                        scope.launch {
+                                            animatedHeightDp.animateTo(
+                                                screenHeightDp,
+                                                spring(
+                                                    dampingRatio = 0.5f,
+                                                    stiffness = 300f,
+                                                ),
+                                            )
+                                        }
+                                    }
+                                },
+                                onDragCancel = {},
+                                onVerticalDrag = { _, dragAmount ->
+                                    accumulatedDragPx += dragAmount
+                                    val dragDp = accumulatedDragPx / density
+                                    val newHeight = (startHeight - dragDp)
+                                        .coerceIn(500f, screenHeightDp)
+                                    scope.launch {
+                                        animatedHeightDp.snapTo(newHeight)
+                                    }
+                                },
+                            )
                         }
-                    ),
-            ) {
-                // Bottom sheet drag handle
-                if (isBottomSheet) {
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth()
+                            .width(40.dp)
+                            .height(4.dp)
                             .background(
-                                borderColor,
-                                RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-                            )
-                            .pointerInput(Unit) {
-                                var startHeight = 0f
-                                var accumulatedDragPx = 0f
-                                detectVerticalDragGestures(
-                                    onDragStart = {
-                                        startHeight = animatedHeightDp.value
-                                        accumulatedDragPx = 0f
-                                    },
-                                    onDragEnd = {
-                                        if (animatedHeightDp.value >= screenHeightDp * 0.95f) {
-                                            scope.launch {
-                                                animatedHeightDp.animateTo(
-                                                    screenHeightDp,
-                                                    spring(
-                                                        dampingRatio = 0.5f,
-                                                        stiffness = 300f,
-                                                    ),
-                                                )
-                                            }
-                                        }
-                                    },
-                                    onDragCancel = {},
-                                    onVerticalDrag = { _, dragAmount ->
-                                        accumulatedDragPx += dragAmount
-                                        val dragDp = accumulatedDragPx / density
-                                        val newHeight = (startHeight - dragDp)
-                                            .coerceIn(500f, screenHeightDp)
-                                        scope.launch {
-                                            animatedHeightDp.snapTo(newHeight)
-                                        }
-                                    },
-                                )
-                            }
-                            .padding(vertical = 12.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .width(40.dp)
-                                .height(4.dp)
-                                .background(
-                                    Color.White.copy(alpha = 0.3f),
-                                    RoundedCornerShape(2.dp),
-                                ),
-                        )
-                    }
+                                Color.White.copy(alpha = 0.3f),
+                                RoundedCornerShape(2.dp),
+                            ),
+                    )
                 }
+            }
 
-                // Main content
-                Box(modifier = Modifier.fillMaxSize().weight(1f)) {
-                    when {
-                        loading -> {
-                            // Loading state
+            // Main content
+            Box(modifier = Modifier.fillMaxSize().weight(1f)) {
+                when {
+                    error != null -> {
+                        // Error state
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = error!!,
+                                color = Color.White,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
+                    iframeUrl != null -> {
+                        // WebView loads in background
+                        GameWebViewContent(
+                            url = iframeUrl!!,
+                            onPageFinished = { pageLoaded = true },
+                        )
+                        // Loading overlay stays visible until page finishes painting
+                        if (!pageLoaded) {
                             Box(
                                 modifier = Modifier.fillMaxSize(),
                                 contentAlignment = Alignment.Center,
@@ -298,34 +311,36 @@ fun GameWebView(
                                 }
                             }
                         }
-                        error != null -> {
-                            // Error state
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center,
+                    }
+                    loading -> {
+                        // Initial API fetch (before iframeUrl is set)
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
+                                CircularProgressIndicator(color = Color.White)
                                 Text(
-                                    text = error!!,
+                                    text = "Loading game...",
                                     color = Color.White,
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.Medium,
                                 )
                             }
                         }
-                        iframeUrl != null -> {
-                            // WebView
-                            GameWebViewContent(url = iframeUrl!!)
-                        }
                     }
-
-                    // Close button — top right
-                    CloseButton(
-                        onClick = handleClose,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(16.dp),
-                    )
                 }
+
+                // Close button — top right
+                CloseButton(
+                    onClick = handleClose,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(16.dp),
+                )
             }
         }
     }
@@ -336,12 +351,13 @@ fun GameWebView(
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun GameWebViewContent(url: String) {
+private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
     val context = LocalContext.current
 
     AndroidView(
         factory = { ctx ->
             WebView(ctx).apply {
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -352,6 +368,9 @@ private fun GameWebViewContent(url: String) {
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
 
                 webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        onPageFinished()
+                    }
                     override fun shouldOverrideUrlLoading(
                         view: WebView?,
                         request: WebResourceRequest?,

@@ -40,8 +40,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import ad.simula.ad.sdk.model.Defaults.MiniGameInterstitialDefaults
@@ -128,6 +130,9 @@ fun MiniGameInterstitial(
             decorFitsSystemWindows = false,
         ),
     ) {
+        val interstitialWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+        interstitialWindow?.setDimAmount(0f)
+        interstitialWindow?.setBackgroundDrawableResource(android.R.color.transparent)
         // Full-screen background — clicking anywhere triggers CTA
         Box(
             modifier = Modifier
