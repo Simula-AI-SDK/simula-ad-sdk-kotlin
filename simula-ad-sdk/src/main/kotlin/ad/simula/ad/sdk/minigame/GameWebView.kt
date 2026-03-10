@@ -294,17 +294,17 @@ fun GameWebView(
                         // Loading overlay stays visible until page finishes painting
                         if (!pageLoaded) {
                             Box(
-                                modifier = Modifier.fillMaxSize(),
+                                modifier = Modifier.fillMaxSize().background(Color.White),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Column(
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                     verticalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
-                                    CircularProgressIndicator(color = Color.White)
+                                    CircularProgressIndicator(color = Color(0xFF6B7280))
                                     Text(
                                         text = "Loading game...",
-                                        color = Color.White,
+                                        color = Color(0xFF6B7280),
                                         fontSize = 18.sp,
                                         fontWeight = FontWeight.Medium,
                                     )
@@ -368,7 +368,7 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
 
                 webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
+                    override fun onPageCommitVisible(view: WebView?, url: String?) {
                         onPageFinished()
                     }
                     override fun shouldOverrideUrlLoading(

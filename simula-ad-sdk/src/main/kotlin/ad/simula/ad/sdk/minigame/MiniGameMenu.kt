@@ -773,10 +773,10 @@ private fun AdIframeOverlay(
                     // Loading overlay until ad page finishes painting
                     if (!adPageLoaded) {
                         Box(
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxSize().background(Color.White),
                             contentAlignment = Alignment.Center,
                         ) {
-                            CircularProgressIndicator(color = Color.White)
+                            CircularProgressIndicator(color = Color(0xFF6B7280))
                         }
                     }
 
