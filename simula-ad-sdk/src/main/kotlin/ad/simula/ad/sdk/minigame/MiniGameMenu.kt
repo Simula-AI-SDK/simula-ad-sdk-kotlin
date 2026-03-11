@@ -275,8 +275,8 @@ fun MiniGameMenu(
         handleClose()
     }
 
-    // ── Single Dialog for all screens (one window = no black flash on transitions)
-    if (isOpen || selectedGameId != null || adIframeUrl != null) {
+    // ── Dialog 1: Menu Card ─────────────────────────────────────────────────
+    if (isOpen && selectedGameId == null && adIframeUrl == null) {
         Dialog(
             onDismissRequest = { handleClose() },
             properties = DialogProperties(
@@ -284,26 +284,7 @@ fun MiniGameMenu(
                 decorFitsSystemWindows = false,
             ),
         ) {
-            val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
-            LaunchedEffect(dialogWindow) {
-                dialogWindow?.let { window ->
-                    window.setDimAmount(0f)
-                    window.setBackgroundDrawableResource(android.R.color.transparent)
-                    window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
-                    // Make the Dialog window truly fullscreen, including cutout/notch areas
-                    window.setLayout(
-                        WindowManager.LayoutParams.MATCH_PARENT,
-                        WindowManager.LayoutParams.MATCH_PARENT,
-                    )
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        window.attributes = window.attributes.apply {
-                            layoutInDisplayCutoutMode =
-                                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                        }
-                    }
-                }
-            }
-            // Backdrop
+            FullscreenDialogWindowConfig()
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -523,38 +504,56 @@ fun MiniGameMenu(
                     }
                 }
             }
+        }
+    }
 
-            // ── Game Iframe (on top of menu) ────────────────────────────────
-            if (selectedGameId != null) {
-                GameWebView(
-                    gameId = selectedGameId!!,
-                    charID = charID,
-                    charName = charName,
-                    charImage = charImage,
-                    charDesc = charDesc,
-                    messages = messages,
-                    delegateChar = delegateChar,
-                    onClose = { handleIframeClose() },
-                    onAdIdReceived = { handleAdIdReceived(it) },
-                    menuId = menuId,
-                    playableHeight = theme.playableHeight,
-                    playableBorderColor = theme.playableBorderColor ?: "#262626",
-                    onDimensionsOnClose = { heightDp, isBottomSheet ->
-                        lastGameHeightDp = heightDp
-                        lastGameWasBottomSheet = isBottomSheet
-                    },
-                )
-            }
+    // ── Dialog 2: Ad Overlay (before game Dialog for z-order during transition) ──
+    if (adIframeUrl != null) {
+        Dialog(
+            onDismissRequest = { handleAdIframeClose() },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false,
+            ),
+        ) {
+            FullscreenDialogWindowConfig()
+            AdIframeOverlay(
+                url = adIframeUrl!!,
+                onClose = { handleAdIframeClose() },
+                playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
+                playableBorderColor = theme.playableBorderColor ?: "#262626",
+            )
+        }
+    }
 
-            // ── Ad Iframe (on top of everything) ────────────────────────────
-            if (adIframeUrl != null) {
-                AdIframeOverlay(
-                    url = adIframeUrl!!,
-                    onClose = { handleAdIframeClose() },
-                    playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
-                    playableBorderColor = theme.playableBorderColor ?: "#262626",
-                )
-            }
+    // ── Dialog 3: Game WebView ───────────────────────────────────────────────
+    if (selectedGameId != null) {
+        Dialog(
+            onDismissRequest = { handleIframeClose() },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false,
+            ),
+        ) {
+            FullscreenDialogWindowConfig()
+            GameWebView(
+                gameId = selectedGameId!!,
+                charID = charID,
+                charName = charName,
+                charImage = charImage,
+                charDesc = charDesc,
+                messages = messages,
+                delegateChar = delegateChar,
+                onClose = { handleIframeClose() },
+                onAdIdReceived = { handleAdIdReceived(it) },
+                menuId = menuId,
+                playableHeight = theme.playableHeight,
+                playableBorderColor = theme.playableBorderColor ?: "#262626",
+                onDimensionsOnClose = { heightDp, isBottomSheet ->
+                    lastGameHeightDp = heightDp
+                    lastGameWasBottomSheet = isBottomSheet
+                },
+            )
         }
     }
 }
@@ -647,6 +646,30 @@ private fun SearchBar(
     }
 }
 
+// ── Fullscreen Dialog Window Config ─────────────────────────────────────────
+
+@Composable
+private fun FullscreenDialogWindowConfig() {
+    val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+    LaunchedEffect(dialogWindow) {
+        dialogWindow?.let { window ->
+            window.setDimAmount(0f)
+            window.setBackgroundDrawableResource(android.R.color.transparent)
+            window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+            window.setLayout(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                window.attributes = window.attributes.apply {
+                    layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
+            }
+        }
+    }
+}
+
 // ── Ad Iframe Overlay ───────────────────────────────────────────────────────
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -672,31 +695,23 @@ private fun AdIframeOverlay(
     }
 
     val isBottomSheet = playableHeightDp != null
-    val shouldHideStatusBar = if (isBottomSheet) {
-        playableHeightDp!! >= config.screenHeightDp * 0.95f
-    } else {
-        true
-    }
 
-    // Hide system bars when full-screen or near-full
-    if (shouldHideStatusBar) {
-        DisposableEffect(Unit) {
-            // Use the Dialog's window (not the Activity's) since we're inside a Dialog
-            val dialogWindow = (view.parent as? DialogWindowProvider)?.window
-            val activityWindow = (view.context as? Activity)?.window
-            val window = dialogWindow ?: activityWindow
+    // Hide system bars (status bar + navigation bar) during ad
+    DisposableEffect(Unit) {
+        val dialogWindow = (view.parent as? DialogWindowProvider)?.window
+        val activityWindow = (view.context as? Activity)?.window
+        val window = dialogWindow ?: activityWindow
+        if (window != null) {
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            val insetsController = WindowCompat.getInsetsController(window, view)
+            insetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
             if (window != null) {
-                WindowCompat.setDecorFitsSystemWindows(window, false)
                 val insetsController = WindowCompat.getInsetsController(window, view)
-                insetsController.systemBarsBehavior =
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                insetsController.hide(WindowInsetsCompat.Type.systemBars())
-            }
-            onDispose {
-                if (window != null) {
-                    val insetsController = WindowCompat.getInsetsController(window, view)
-                    insetsController.show(WindowInsetsCompat.Type.systemBars())
-                }
+                insetsController.show(WindowInsetsCompat.Type.systemBars())
             }
         }
     }
@@ -708,8 +723,7 @@ private fun AdIframeOverlay(
     Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0x80000000))
-                .navigationBarsPadding(),
+                .background(Color(0x80000000)),
             contentAlignment = if (isBottomSheet) Alignment.BottomCenter else Alignment.TopStart,
         ) {
             Column(

@@ -143,12 +143,6 @@ fun GameWebView(
         animatedHeightDp.snapTo(clamped)
     }
 
-    val shouldHideStatusBar = if (isBottomSheet) {
-        animatedHeightDp.value >= screenHeightDp * 0.95f
-    } else {
-        true
-    }
-
     // Wrap onClose to report dimensions
     val handleClose: () -> Unit = {
         onDimensionsOnClose?.invoke(
@@ -163,26 +157,23 @@ fun GameWebView(
         handleClose()
     }
 
-    // Hide system bars when the game covers >= 95% of the screen
+    // Hide system bars (status bar + navigation bar) during game
     val view = LocalView.current
-    if (shouldHideStatusBar) {
-        DisposableEffect(Unit) {
-            // Use the Dialog's window (not the Activity's) since we're inside a Dialog
-            val dialogWindow = (view.parent as? DialogWindowProvider)?.window
-            val activityWindow = (view.context as? Activity)?.window
-            val window = dialogWindow ?: activityWindow
+    DisposableEffect(Unit) {
+        val dialogWindow = (view.parent as? DialogWindowProvider)?.window
+        val activityWindow = (view.context as? Activity)?.window
+        val window = dialogWindow ?: activityWindow
+        if (window != null) {
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            val insetsController = WindowCompat.getInsetsController(window, view)
+            insetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
             if (window != null) {
-                WindowCompat.setDecorFitsSystemWindows(window, false)
                 val insetsController = WindowCompat.getInsetsController(window, view)
-                insetsController.systemBarsBehavior =
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                insetsController.hide(WindowInsetsCompat.Type.systemBars())
-            }
-            onDispose {
-                if (window != null) {
-                    val insetsController = WindowCompat.getInsetsController(window, view)
-                    insetsController.show(WindowInsetsCompat.Type.systemBars())
-                }
+                insetsController.show(WindowInsetsCompat.Type.systemBars())
             }
         }
     }
@@ -190,8 +181,7 @@ fun GameWebView(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0x80000000)) // rgba(0,0,0,0.5)
-            .navigationBarsPadding(),
+            .background(Color(0x80000000)), // rgba(0,0,0,0.5)
         contentAlignment = if (isBottomSheet) Alignment.BottomCenter else Alignment.Center,
     ) {
         Column(
