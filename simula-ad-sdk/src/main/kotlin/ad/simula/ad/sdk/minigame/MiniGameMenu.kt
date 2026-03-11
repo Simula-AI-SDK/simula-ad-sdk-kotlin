@@ -3,7 +3,6 @@ package ad.simula.ad.sdk.minigame
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.os.Build
-import android.util.Log
 import android.content.Intent
 import android.net.Uri
 import android.view.ViewGroup
@@ -202,7 +201,6 @@ fun MiniGameMenu(
     }
 
     fun handleGameSelect(gameId: String, gameName: String) {
-        Log.d("MiniGameMenu", "handleGameSelect: gameId=$gameId, gameName=$gameName")
         // Track click (best effort)
         val currentMenuId = menuId
         if (currentMenuId != null && gameName.isNotBlank()) {
@@ -221,7 +219,6 @@ fun MiniGameMenu(
     }
 
     fun handleIframeClose() {
-        Log.d("MiniGameMenu", "handleIframeClose: adFetched=$adFetched, currentAdId=$currentAdId")
         if (!adFetched) {
             val aid = currentAdId
             if (aid != null) {
@@ -278,8 +275,6 @@ fun MiniGameMenu(
         handleClose()
     }
 
-    Log.d("MiniGameMenu", "Composing: isOpen=$isOpen, selectedGameId=$selectedGameId, adIframeUrl=${adIframeUrl != null}")
-
     // ── Single Dialog for all screens (one window = no black flash on transitions)
     if (isOpen || selectedGameId != null || adIframeUrl != null) {
         Dialog(
@@ -294,6 +289,7 @@ fun MiniGameMenu(
                 dialogWindow?.let { window ->
                     window.setDimAmount(0f)
                     window.setBackgroundDrawableResource(android.R.color.transparent)
+                    window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
                     // Make the Dialog window truly fullscreen, including cutout/notch areas
                     window.setLayout(
                         WindowManager.LayoutParams.MATCH_PARENT,
@@ -307,7 +303,6 @@ fun MiniGameMenu(
                     }
                 }
             }
-            Log.d("MiniGameMenu", "Dialog composing: isOpen=$isOpen, selectedGameId=$selectedGameId, adIframeUrl=${adIframeUrl != null}")
             // Backdrop
             Box(
                 modifier = Modifier

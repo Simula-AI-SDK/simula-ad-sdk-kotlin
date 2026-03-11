@@ -10,13 +10,8 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -34,7 +29,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -53,7 +47,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,7 +59,6 @@ import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
-import android.util.Log
 import kotlinx.coroutines.launch
 
 /**
@@ -96,6 +88,10 @@ fun GameWebView(
     val context = LocalContext.current
     val config = LocalConfiguration.current
 
+    val density = LocalDensity.current.density
+    val screenHeightDp = config.screenHeightDp.toFloat()
+    val isBottomSheet = playableHeight != null
+
     var iframeUrl by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -117,7 +113,7 @@ fun GameWebView(
                 sessionId = sessionId,
                 currencyMode = false,
                 screenWidth = config.screenWidthDp,
-                screenHeight = config.screenHeightDp,
+                screenHeight = screenHeightDp.toInt(),
                 charId = charID,
                 charName = charName,
                 charImage = charImage,
@@ -137,17 +133,10 @@ fun GameWebView(
         }
     }
 
-    val density = LocalDensity.current.density
     val scope = rememberCoroutineScope()
-    val screenHeightDp = config.screenHeightDp.toFloat()
-
-    val isBottomSheet = playableHeight != null
     val borderColor = ColorUtil.parseColor(playableBorderColor)
-    val initialHeightDp = calculatePlayableHeight(playableHeight, config.screenHeightDp).toFloat()
+    val initialHeightDp = calculatePlayableHeight(playableHeight, screenHeightDp.toInt()).toFloat()
     val animatedHeightDp = remember { Animatable(initialHeightDp) }
-
-    Log.d("GameWebView", "isBottomSheet=$isBottomSheet, initialHeight=$initialHeightDp, animatedHeight=${animatedHeightDp.value}, screenHeight=$screenHeightDp, playableHeight=$playableHeight")
-
     // Re-clamp height on screen rotation
     LaunchedEffect(screenHeightDp) {
         val clamped = animatedHeightDp.value.coerceIn(500f, screenHeightDp)
@@ -198,7 +187,6 @@ fun GameWebView(
         }
     }
 
-    Log.d("GameWebView", "Composing: loading=$loading, iframeUrl=${iframeUrl != null}, pageLoaded=$pageLoaded, error=$error")
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -440,15 +428,6 @@ internal fun CloseButton(
             fontWeight = FontWeight.Normal,
         )
     }
-}
-
-/**
- * Returns true if the playable height covers >= 95% of the screen.
- */
-private fun isNearFullScreen(playableHeight: Any?, screenHeightDp: Int): Boolean {
-    if (playableHeight == null) return true
-    val effectiveHeight = calculatePlayableHeight(playableHeight, screenHeightDp)
-    return effectiveHeight >= (screenHeightDp * 0.95f)
 }
 
 /**
