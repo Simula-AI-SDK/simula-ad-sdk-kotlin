@@ -44,6 +44,14 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
+import android.app.Activity
+import android.os.Build
+import android.view.WindowManager
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import ad.simula.ad.sdk.model.Defaults.MiniGameInterstitialDefaults
@@ -120,6 +128,25 @@ fun MiniGameInterstitial(
         label = "ctaScale",
     )
 
+    // Hide system bars on the Activity window BEFORE the Dialog opens
+    val activityView = LocalView.current
+    val activityWindow = (LocalContext.current as? Activity)?.window
+    DisposableEffect(Unit) {
+        if (activityWindow != null) {
+            WindowCompat.setDecorFitsSystemWindows(activityWindow, false)
+            val insetsController = WindowCompat.getInsetsController(activityWindow, activityView)
+            insetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
+            if (activityWindow != null) {
+                val insetsController = WindowCompat.getInsetsController(activityWindow, activityView)
+                insetsController.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
     Dialog(
         onDismissRequest = {
             closedInternally = true
@@ -130,9 +157,25 @@ fun MiniGameInterstitial(
             decorFitsSystemWindows = false,
         ),
     ) {
-        val interstitialWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
-        interstitialWindow?.setDimAmount(0f)
-        interstitialWindow?.setBackgroundDrawableResource(android.R.color.transparent)
+        val view = LocalView.current
+        val interstitialWindow = (view.parent as? DialogWindowProvider)?.window
+        LaunchedEffect(interstitialWindow) {
+            interstitialWindow?.let { window ->
+                window.setDimAmount(0f)
+                window.setBackgroundDrawableResource(android.R.color.transparent)
+                window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+                window.setLayout(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                )
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    window.attributes = window.attributes.apply {
+                        layoutInDisplayCutoutMode =
+                            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    }
+                }
+            }
+        }
         // Full-screen background — clicking anywhere triggers CTA
         Box(
             modifier = Modifier

@@ -87,7 +87,11 @@ fun ChatScreen() {
 }
 ```
 
-### 3. Game Button
+## Optional Components
+
+The following components are optional UI helpers for triggering the MiniGame Menu. Use any combination that fits your app, or use your own buttons/triggers instead.
+
+### Game Button
 
 ```kotlin
 import ad.simula.ad.sdk.minigame.MiniGameButton
@@ -106,7 +110,7 @@ MiniGameButton(
 )
 ```
 
-### 4. Invitation Banner
+### Invitation Banner
 
 ```kotlin
 import ad.simula.ad.sdk.minigame.MiniGameInvitation
@@ -134,7 +138,7 @@ MiniGameInvitation(
 )
 ```
 
-### 5. Full-Screen Interstitial
+### Full-Screen Interstitial
 
 ```kotlin
 import ad.simula.ad.sdk.minigame.MiniGameInterstitial
@@ -159,7 +163,7 @@ MiniGameInterstitial(
 )
 ```
 
-### 6. Grouped Kit (Alternative)
+### Grouped Kit (Alternative)
 
 ```kotlin
 import ad.simula.ad.sdk.minigame.MiniGameInviteKit
@@ -248,7 +252,7 @@ The SDK accepts CSS font-family strings and maps them to Android `FontFamily` eq
 
 All color properties accept these formats:
 
-- Hex: `#RGB`, `#RRGGBB`, `#AARRGGBB`
+- Hex: `#RGB`, `#RRGGBB`, `#RRGGBBAA`
 - CSS: `rgb(255, 0, 0)`, `rgba(255, 0, 0, 0.5)`
 - Named: `transparent`
 

@@ -4,7 +4,7 @@ import androidx.compose.ui.graphics.Color
 
 /**
  * Utility for parsing CSS color strings to Compose [Color].
- * Supports hex (#RRGGBB, #AARRGGBB, #RGB), rgba(), rgb(), and named colors.
+ * Supports hex (#RRGGBB, #RRGGBBAA, #RGB), rgba(), rgb(), and named colors.
  */
 object ColorUtil {
 
@@ -59,10 +59,10 @@ object ColorUtil {
                 8 -> {
                     val colorLong = cleaned.toLong(16)
                     Color(
-                        alpha = ((colorLong shr 24) and 0xFF).toInt(),
-                        red = ((colorLong shr 16) and 0xFF).toInt(),
-                        green = ((colorLong shr 8) and 0xFF).toInt(),
-                        blue = (colorLong and 0xFF).toInt(),
+                        red = ((colorLong shr 24) and 0xFF).toInt(),
+                        green = ((colorLong shr 16) and 0xFF).toInt(),
+                        blue = ((colorLong shr 8) and 0xFF).toInt(),
+                        alpha = (colorLong and 0xFF).toInt(),
                     )
                 }
                 else -> Color.Transparent

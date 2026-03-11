@@ -323,12 +323,12 @@ fun MiniGameMenu(
                     modifier = Modifier
                         .widthIn(min = 320.dp, max = 600.dp)
                         .fillMaxWidth(0.95f)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(appliedBackgroundColor)
                         .shadow(
                             elevation = 25.dp,
                             shape = RoundedCornerShape(16.dp),
                         )
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(appliedBackgroundColor)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
