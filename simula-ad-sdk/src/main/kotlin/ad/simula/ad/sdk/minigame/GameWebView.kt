@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -57,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -172,22 +174,25 @@ fun GameWebView(
         handleClose()
     }
 
-    // Hide the status bar when the game covers >= 95% of the screen
+    // Hide system bars when the game covers >= 95% of the screen
     val view = LocalView.current
     if (shouldHideStatusBar) {
         DisposableEffect(Unit) {
-            val activity = view.context as? Activity
-            val window = activity?.window
+            // Use the Dialog's window (not the Activity's) since we're inside a Dialog
+            val dialogWindow = (view.parent as? DialogWindowProvider)?.window
+            val activityWindow = (view.context as? Activity)?.window
+            val window = dialogWindow ?: activityWindow
             if (window != null) {
+                WindowCompat.setDecorFitsSystemWindows(window, false)
                 val insetsController = WindowCompat.getInsetsController(window, view)
                 insetsController.systemBarsBehavior =
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                insetsController.hide(WindowInsetsCompat.Type.statusBars())
+                insetsController.hide(WindowInsetsCompat.Type.systemBars())
             }
             onDispose {
                 if (window != null) {
                     val insetsController = WindowCompat.getInsetsController(window, view)
-                    insetsController.show(WindowInsetsCompat.Type.statusBars())
+                    insetsController.show(WindowInsetsCompat.Type.systemBars())
                 }
             }
         }
@@ -197,7 +202,8 @@ fun GameWebView(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0x80000000)), // rgba(0,0,0,0.5)
+            .background(Color(0x80000000)) // rgba(0,0,0,0.5)
+            .navigationBarsPadding(),
         contentAlignment = if (isBottomSheet) Alignment.BottomCenter else Alignment.Center,
     ) {
         Column(
@@ -411,9 +417,9 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
 internal fun CloseButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    size: Int = 48,
-    backgroundColor: Color = Color.White.copy(alpha = 0.9f),
-    contentColor: Color = Color(0xFF1F2937),
+    size: Int = 32,
+    backgroundColor: Color = Color(0x99000000),
+    contentColor: Color = Color.White,
 ) {
     Box(
         modifier = modifier
@@ -430,8 +436,8 @@ internal fun CloseButton(
         Text(
             text = "✕",
             color = contentColor,
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Normal,
         )
     }
 }

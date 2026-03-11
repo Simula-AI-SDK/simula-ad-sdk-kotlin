@@ -2,10 +2,12 @@ package ad.simula.ad.sdk.minigame
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.os.Build
 import android.util.Log
 import android.content.Intent
 import android.net.Uri
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -33,8 +35,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -287,8 +291,21 @@ fun MiniGameMenu(
         ) {
             val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
             LaunchedEffect(dialogWindow) {
-                dialogWindow?.setDimAmount(0f)
-                dialogWindow?.setBackgroundDrawableResource(android.R.color.transparent)
+                dialogWindow?.let { window ->
+                    window.setDimAmount(0f)
+                    window.setBackgroundDrawableResource(android.R.color.transparent)
+                    // Make the Dialog window truly fullscreen, including cutout/notch areas
+                    window.setLayout(
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                    )
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        window.attributes = window.attributes.apply {
+                            layoutInDisplayCutoutMode =
+                                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                        }
+                    }
+                }
             }
             Log.d("MiniGameMenu", "Dialog composing: isOpen=$isOpen, selectedGameId=$selectedGameId, adIframeUrl=${adIframeUrl != null}")
             // Backdrop
@@ -296,6 +313,8 @@ fun MiniGameMenu(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color(0x80000000)) // rgba(0,0,0,0.5)
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -664,21 +683,24 @@ private fun AdIframeOverlay(
         true
     }
 
-    // Hide status bar when full-screen or near-full
+    // Hide system bars when full-screen or near-full
     if (shouldHideStatusBar) {
         DisposableEffect(Unit) {
-            val activity = view.context as? Activity
-            val window = activity?.window
+            // Use the Dialog's window (not the Activity's) since we're inside a Dialog
+            val dialogWindow = (view.parent as? DialogWindowProvider)?.window
+            val activityWindow = (view.context as? Activity)?.window
+            val window = dialogWindow ?: activityWindow
             if (window != null) {
+                WindowCompat.setDecorFitsSystemWindows(window, false)
                 val insetsController = WindowCompat.getInsetsController(window, view)
                 insetsController.systemBarsBehavior =
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                insetsController.hide(WindowInsetsCompat.Type.statusBars())
+                insetsController.hide(WindowInsetsCompat.Type.systemBars())
             }
             onDispose {
                 if (window != null) {
                     val insetsController = WindowCompat.getInsetsController(window, view)
-                    insetsController.show(WindowInsetsCompat.Type.statusBars())
+                    insetsController.show(WindowInsetsCompat.Type.systemBars())
                 }
             }
         }
@@ -691,7 +713,8 @@ private fun AdIframeOverlay(
     Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0x80000000)),
+                .background(Color(0x80000000))
+                .navigationBarsPadding(),
             contentAlignment = if (isBottomSheet) Alignment.BottomCenter else Alignment.TopStart,
         ) {
             Column(
@@ -789,7 +812,6 @@ private fun AdIframeOverlay(
                     if (adCountdown <= 0) {
                         CloseButton(
                             onClick = onClose,
-                            size = 44,
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
                                 .padding(16.dp),
@@ -799,7 +821,7 @@ private fun AdIframeOverlay(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
                                 .padding(16.dp)
-                                .size(44.dp),
+                                .size(32.dp),
                             contentAlignment = Alignment.Center,
                         ) {
                             Canvas(modifier = Modifier.fillMaxSize()) {
@@ -828,8 +850,8 @@ private fun AdIframeOverlay(
                             Text(
                                 text = "$adCountdown",
                                 color = Color.White,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
                                 textAlign = TextAlign.Center,
                             )
                         }
