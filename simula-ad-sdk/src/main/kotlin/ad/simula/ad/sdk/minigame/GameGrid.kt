@@ -50,7 +50,7 @@ private const val SWIPE_THRESHOLD = 50f
  * Equivalent to React's GameGrid.tsx.
  */
 @Composable
-fun GameGrid(
+internal fun GameGrid(
     games: List<GameData>,
     maxGamesToShow: Int = 6,
     charID: String,

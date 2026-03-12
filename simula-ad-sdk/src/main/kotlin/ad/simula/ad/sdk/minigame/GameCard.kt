@@ -10,7 +10,6 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -50,7 +49,7 @@ import ad.simula.ad.sdk.util.FontUtil
  * error fallback to random emoji, and press feedback (scale).
  */
 @Composable
-fun GameCard(
+internal fun GameCard(
     game: GameData,
     charID: String,
     theme: MiniGameTheme,

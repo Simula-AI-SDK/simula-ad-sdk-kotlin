@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit
  * All functions are suspend and safe to call from coroutine scopes.
  * Mirrors the React SDK's utils/api.ts exactly.
  */
-object SimulaApiClient {
+internal object SimulaApiClient {
 
     private const val API_BASE_URL = "https://simula-api-701226639755.us-central1.run.app"
 
