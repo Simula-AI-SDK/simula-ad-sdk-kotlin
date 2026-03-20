@@ -46,7 +46,7 @@ mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
     signAllPublications()
 
-    coordinates("ad.simula", "ad-sdk", findProperty("VERSION_NAME")?.toString() ?: "1.0.0")
+    coordinates("ad.simula", "ad-sdk", findProperty("VERSION_NAME")?.toString() ?: "1.0.3")
 
     pom {
         name.set("Simula Ad SDK")
@@ -104,6 +104,7 @@ dependencies {
 
     // Image loading
     implementation("io.coil-kt:coil-compose:2.6.0")
+    implementation("io.coil-kt:coil-gif:2.6.0")
 
     // WebView
     implementation("androidx.webkit:webkit:1.10.0")

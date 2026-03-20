@@ -16,7 +16,7 @@ import ad.simula.ad.sdk.network.SimulaApiClient
  * CompositionLocal providing the Simula context to child composables.
  * Must be accessed within a [SimulaProvider] composable scope.
  */
-val LocalSimulaContext = staticCompositionLocalOf<SimulaContextValue> {
+internal val LocalSimulaContext = staticCompositionLocalOf<SimulaContextValue> {
     error("useSimula() / LocalSimulaContext must be used within a SimulaProvider")
 }
 
@@ -25,7 +25,7 @@ val LocalSimulaContext = staticCompositionLocalOf<SimulaContextValue> {
  * Equivalent to React's useSimula() hook.
  */
 @Composable
-fun useSimula(): SimulaContextValue = LocalSimulaContext.current
+internal fun useSimula(): SimulaContextValue = LocalSimulaContext.current
 
 /**
  * Cache key helper — matches React's getCacheKey(slot, position).

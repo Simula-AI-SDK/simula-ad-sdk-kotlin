@@ -10,24 +10,25 @@ data class Message(
     val content: String,
 )
 
-data class AdData(
+internal data class AdData(
     val id: String,
     val format: String,
     val iframeUrl: String? = null,
     val html: String? = null,
 )
 
-data class GameData(
+internal data class GameData(
     val id: String,
     val name: String,
     val iconUrl: String,
     val description: String,
     val iconFallback: String? = null,
+    val gifCover: String? = null,
 )
 
 // ── SimulaProvider Types ────────────────────────────────────────────────────
 
-data class SimulaContextValue(
+internal data class SimulaContextValue(
     val apiKey: String,
     val devMode: Boolean,
     val sessionId: String?,
