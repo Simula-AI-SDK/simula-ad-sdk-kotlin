@@ -59,10 +59,13 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -394,37 +397,72 @@ fun MiniGameMenu(
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     // Character Avatar — draws ON TOP of game icon (zIndex 2)
+                                    // Painted shadow matches CSS: boxShadow 0 16px 34px rgba(0,0,0,0.45)
+                                    // Compose elevation shadow is invisible on dark backgrounds,
+                                    // so we paint it manually as an overflow child (Compose doesn't
+                                    // clip children by default, so it extends beyond the avatar bounds).
+                                    val avatarSize = if (isMobile) 72.dp else 80.dp
                                     val avatarShape = RoundedCornerShape(if (isMobile) 16.dp else 24.dp)
+                                    val avatarDensity = LocalDensity.current
+                                    val blurRadiusPx = with(avatarDensity) { 34.dp.toPx() }
                                     Box(
                                         modifier = Modifier
                                             .zIndex(2f)
-                                            .size(if (isMobile) 72.dp else 80.dp)
-                                            .shadow(34.dp, avatarShape) // CSS: boxShadow 0 16px 34px
-                                            .clip(avatarShape)
-                                            .border(2.dp, Color(0x1A78C8FF), avatarShape)
-                                            .background(Color(0x14FFFFFF)),
+                                            .size(avatarSize),
                                         contentAlignment = Alignment.Center,
                                     ) {
-                                        if (!imageError && charImage.isNotBlank()) {
-                                            AsyncImage(
-                                                model = charImage,
-                                                contentDescription = charName,
-                                                contentScale = ContentScale.Crop,
-                                                onState = { state ->
-                                                    if (state is AsyncImagePainter.State.Error) {
-                                                        imageError = true
+                                        // Shadow: same size as avatar, offset 16dp down, blurred 34dp
+                                        // The blur extends the shadow beyond the shape edges naturally
+                                        Box(
+                                            modifier = Modifier
+                                                .matchParentSize()
+                                                .offset(y = 16.dp)
+                                                .graphicsLayer {
+                                                    if (android.os.Build.VERSION.SDK_INT >= 31) {
+                                                        @Suppress("NewApi")
+                                                        renderEffect = android.graphics.RenderEffect
+                                                            .createBlurEffect(
+                                                                blurRadiusPx, blurRadiusPx,
+                                                                android.graphics.Shader.TileMode.DECAL,
+                                                            )
+                                                            .asComposeRenderEffect()
                                                     }
-                                                },
-                                                modifier = Modifier.fillMaxSize(),
-                                            )
-                                        } else {
-                                            Text(
-                                                text = getInitials(charName),
-                                                fontSize = 28.sp,
-                                                fontFamily = appliedTitleFont,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = appliedTitleFontColor,
-                                            )
+                                                }
+                                                .background(
+                                                    Color(0x73000000), // rgba(0,0,0,0.45)
+                                                    avatarShape,
+                                                ),
+                                        )
+                                        // Actual avatar card
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .clip(avatarShape)
+                                                .border(2.dp, Color(0x1A78C8FF), avatarShape)
+                                                .background(Color(0x14FFFFFF)),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            if (!imageError && charImage.isNotBlank()) {
+                                                AsyncImage(
+                                                    model = charImage,
+                                                    contentDescription = charName,
+                                                    contentScale = ContentScale.Crop,
+                                                    onState = { state ->
+                                                        if (state is AsyncImagePainter.State.Error) {
+                                                            imageError = true
+                                                        }
+                                                    },
+                                                    modifier = Modifier.fillMaxSize(),
+                                                )
+                                            } else {
+                                                Text(
+                                                    text = getInitials(charName),
+                                                    fontSize = 28.sp,
+                                                    fontFamily = appliedTitleFont,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = appliedTitleFontColor,
+                                                )
+                                            }
                                         }
                                     }
 
@@ -481,7 +519,7 @@ fun MiniGameMenu(
                                             fontSize = if (isMobile) 18.sp else 19.sp,
                                             fontFamily = appliedTitleFont,
                                             fontWeight = FontWeight.ExtraBold,
-                                            color = Color.White.copy(alpha = 0.78f),
+                                            color = appliedTitleFontColor.copy(alpha = 0.78f),
                                             letterSpacing = (-0.3).sp,
                                             lineHeight = 22.sp,
                                         )

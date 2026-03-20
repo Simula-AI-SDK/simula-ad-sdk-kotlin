@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.minigame
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -31,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -85,14 +88,14 @@ internal fun GameGrid(
 }
 
 // ── Mobile Carousel ──────────────────────────────────────────────────────────
-// Manual gesture-based carousel using only stable APIs (Animatable + graphicsLayer).
+// Continuous scroll carousel with snap-to-nearest using only stable APIs.
 // Avoids HorizontalPager which is experimental and has breaking API changes between
 // Compose Foundation versions, causing NoSuchMethodError in host apps.
 //
-// Uses a SINGLE Animatable<Float> as scroll position to avoid flash caused by
-// two-state sync (currentIndex + offsetFraction). The integer part of the scroll
-// position determines which card is centered; the fractional part drives smooth
-// inter-card animation. No snapping or state-swap needed.
+// Uses a SINGLE Animatable<Float> as scroll position. The integer part determines
+// which card is centered; the fractional part drives smooth inter-card animation.
+// During drag, cards follow the finger in real-time. On release, velocity-based
+// fling with spring snap to the nearest card center.
 
 @Composable
 private fun MobileCarousel(
@@ -113,22 +116,9 @@ private fun MobileCarousel(
     val cardStepPx = with(density) { (cardWidthDp + CAROUSEL_GAP_DP).dp.toPx() }
 
     // Single source of truth: scroll position as a continuous float.
-    // Integer part = which card is centered, fractional part = inter-card offset.
     val scrollPosition = remember { Animatable(0f) }
-    var isAnimating by remember { mutableStateOf(false) }
-    var totalDragX by remember { mutableFloatStateOf(0f) }
+    val velocityTracker = remember { VelocityTracker() }
     val scope = rememberCoroutineScope()
-
-    fun animateToNext(forward: Boolean) {
-        if (isAnimating) return
-        isAnimating = true
-        val target = scrollPosition.value + if (forward) 1f else -1f
-
-        scope.launch {
-            scrollPosition.animateTo(target, tween(200))
-            isAnimating = false
-        }
-    }
 
     Box(
         modifier = Modifier
@@ -136,14 +126,37 @@ private fun MobileCarousel(
             .height(carouselHeightDp.dp)
             .pointerInput(Unit) {
                 detectHorizontalDragGestures(
-                    onDragStart = { totalDragX = 0f },
+                    onDragStart = {
+                        // Stop any ongoing fling animation so user takes control
+                        scope.launch { scrollPosition.stop() }
+                        velocityTracker.resetTracking()
+                    },
                     onDragEnd = {
-                        if (abs(totalDragX) >= SWIPE_THRESHOLD && !isAnimating) {
-                            animateToNext(forward = totalDragX < 0)
+                        val velocityPx = velocityTracker.calculateVelocity().x
+                        val velocityCards = velocityPx / cardStepPx
+
+                        // Project where scroll would land with momentum, snap to nearest
+                        val decayFactor = 0.4f
+                        val projected = scrollPosition.value - velocityCards * decayFactor
+                        val snapTarget = kotlin.math.round(projected).toFloat()
+
+                        scope.launch {
+                            scrollPosition.animateTo(
+                                snapTarget,
+                                spring(dampingRatio = 0.8f, stiffness = 200f),
+                            )
                         }
                     },
-                    onHorizontalDrag = { _, dragAmount ->
-                        totalDragX += dragAmount
+                    onHorizontalDrag = { change, dragAmount ->
+                        velocityTracker.addPosition(
+                            change.uptimeMillis,
+                            change.position,
+                        )
+                        // Convert pixel drag to scroll position delta (live finger-following)
+                        val scrollDelta = dragAmount / cardStepPx
+                        scope.launch {
+                            scrollPosition.snapTo(scrollPosition.value - scrollDelta)
+                        }
                     },
                 )
             },
@@ -153,29 +166,33 @@ private fun MobileCarousel(
         val centerIndex = kotlin.math.round(currentPos).toInt()
 
         // Render visible cards: center ±2
+        // key(rawIndex) preserves each card's composable state (loaded images etc.)
+        // when centerIndex shifts, so only the new edge card recomposes — no flash.
         for (cardOffset in -2..2) {
             val rawIndex = centerIndex + cardOffset
-            val gameIndex = ((rawIndex % n) + n) % n
-            val game = games[gameIndex]
+            key(rawIndex) {
+                val gameIndex = ((rawIndex % n) + n) % n
+                val game = games[gameIndex]
 
-            // Continuous offset from center — drives position + depth
-            val effectiveOffset = rawIndex.toFloat() - currentPos
-            val xTranslationPx = effectiveOffset * cardStepPx
-            val dist = abs(effectiveOffset).coerceAtMost(2f)
-            val scale = 1f - dist * 0.08f // center=1.0, ±1=0.92, ±2=0.84
+                // Continuous offset from center — drives position + depth
+                val effectiveOffset = rawIndex.toFloat() - currentPos
+                val xTranslationPx = effectiveOffset * cardStepPx
+                val dist = abs(effectiveOffset).coerceAtMost(2f)
+                val scale = 1f - dist * 0.08f // center=1.0, ±1=0.92, ±2=0.84
 
-            CoverCard(
-                game = game,
-                onGameSelect = { id -> onGameSelect(id, game.name) },
-                modifier = Modifier
-                    .graphicsLayer {
-                        translationX = xTranslationPx
-                        scaleX = scale
-                        scaleY = scale
-                    }
-                    .width(cardWidthDp.dp)
-                    .height(cardHeightDp.dp),
-            )
+                CoverCard(
+                    game = game,
+                    onGameSelect = { id -> onGameSelect(id, game.name) },
+                    modifier = Modifier
+                        .graphicsLayer {
+                            translationX = xTranslationPx
+                            scaleX = scale
+                            scaleY = scale
+                        }
+                        .width(cardWidthDp.dp)
+                        .height(cardHeightDp.dp),
+                )
+            }
         }
     }
 }
