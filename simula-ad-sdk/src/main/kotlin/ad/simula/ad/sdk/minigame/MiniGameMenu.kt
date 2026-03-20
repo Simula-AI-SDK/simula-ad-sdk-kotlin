@@ -532,15 +532,15 @@ fun MiniGameMenu(
                                         .align(Alignment.TopEnd)
                                         .size(28.dp)
                                         .clip(CircleShape)
-                                        .background(Color.White.copy(alpha = 0.08f))
-                                        .border(1.dp, Color.White.copy(alpha = 0.12f), CircleShape)
+                                        .background(appliedSecondaryFontColor.copy(alpha = 0.08f))
+                                        .border(1.dp, appliedSecondaryFontColor.copy(alpha = 0.12f), CircleShape)
                                         .clickable { handleClose() },
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text(
                                         text = "✕",
                                         fontSize = 14.sp,
-                                        color = Color.White.copy(alpha = 0.92f),
+                                        color = appliedSecondaryFontColor.copy(alpha = 0.92f),
                                     )
                                 }
                             }
