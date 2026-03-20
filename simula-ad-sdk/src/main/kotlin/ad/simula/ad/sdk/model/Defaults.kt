@@ -10,10 +10,10 @@ object Defaults {
     object MiniGameMenuTheme {
         const val TITLE_FONT = "Inter, system-ui, sans-serif"
         const val SECONDARY_FONT = "Inter, system-ui, sans-serif"
-        const val TITLE_FONT_COLOR = "#1F2937"
-        const val SECONDARY_FONT_COLOR = "#6B7280"
-        const val ICON_CORNER_RADIUS = 8
-        const val BORDER_COLOR = "rgba(0, 0, 0, 0.08)"
+        const val TITLE_FONT_COLOR = "#ffffff"
+        const val SECONDARY_FONT_COLOR = "rgba(255, 255, 255, 0.75)"
+        const val ICON_CORNER_RADIUS = 18
+        const val BORDER_COLOR = "rgba(255, 255, 255, 0.06)"
         const val ACCENT_COLOR = "#3B82F6"
     }
 

@@ -23,6 +23,7 @@ internal data class GameData(
     val iconUrl: String,
     val description: String,
     val iconFallback: String? = null,
+    val gifCover: String? = null,
 )
 
 // ── SimulaProvider Types ────────────────────────────────────────────────────

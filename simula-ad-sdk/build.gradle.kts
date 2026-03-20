@@ -104,6 +104,7 @@ dependencies {
 
     // Image loading
     implementation("io.coil-kt:coil-compose:2.6.0")
+    implementation("io.coil-kt:coil-gif:2.6.0")
 
     // WebView
     implementation("androidx.webkit:webkit:1.10.0")

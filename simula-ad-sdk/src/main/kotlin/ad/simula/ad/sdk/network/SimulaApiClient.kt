@@ -142,6 +142,7 @@ internal object SimulaApiClient {
                 iconUrl = obj["icon"]?.jsonPrimitive?.content ?: "",
                 description = obj["description"]?.jsonPrimitive?.content ?: "",
                 iconFallback = obj["iconFallback"]?.jsonPrimitive?.content,
+                gifCover = (obj["gif_cover"] ?: obj["gifCover"])?.jsonPrimitive?.content,
             )
         }
 

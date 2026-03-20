@@ -7,167 +7,158 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
-import ad.simula.ad.sdk.model.Defaults
 import ad.simula.ad.sdk.model.GameData
-import ad.simula.ad.sdk.model.MiniGameTheme
-import ad.simula.ad.sdk.util.ColorUtil
-import ad.simula.ad.sdk.util.FontUtil
+
+private val fallbackEmojis = listOf("🎲", "🎮", "🎰", "🧩", "🎯")
 
 /**
- * Individual game card composable — equivalent to React's GameCard.tsx.
- *
- * Displays a game icon and name. Supports image loading state with spinner,
- * error fallback to random emoji, and press feedback (scale).
+ * Cover-style game card — 9:16 aspect ratio with full-bleed image,
+ * dark gradient overlay, and game name at the bottom.
+ * Equivalent to React's CoverCard.tsx.
  */
 @Composable
-internal fun GameCard(
+internal fun CoverCard(
     game: GameData,
-    charID: String,
-    theme: MiniGameTheme,
     onGameSelect: (gameId: String) -> Unit,
-    menuId: String? = null,
+    modifier: Modifier = Modifier,
 ) {
-    var imageError by remember { mutableStateOf(false) }
-    var imageLoading by remember { mutableStateOf(true) }
+    // Image fallback stage: 0 = gifCover, 1 = iconUrl, 2 = emoji
+    var imageStage by remember { mutableIntStateOf(0) }
+    val randomEmoji = remember { fallbackEmojis.random() }
 
-    // Random fallback icon — picked once per composition, matching React behavior
-    val fallbackIcons = remember { listOf("🎲", "🎮", "🎰", "🧩", "🎯") }
-    val randomFallback = remember { fallbackIcons.random() }
+    val currentImageUrl: String? = when (imageStage) {
+        0 -> (game.gifCover ?: game.iconUrl).takeIf { it.isNotBlank() }
+        1 -> game.iconUrl.takeIf { it.isNotBlank() }
+        else -> null
+    }
 
-    val titleFont = FontUtil.parseFont(theme.titleFont ?: Defaults.MiniGameMenuTheme.TITLE_FONT)
-    val iconCornerRadius = theme.iconCornerRadius ?: Defaults.MiniGameMenuTheme.ICON_CORNER_RADIUS
-    val titleFontColor = ColorUtil.parseColor(
-        theme.titleFontColor ?: Defaults.MiniGameMenuTheme.TITLE_FONT_COLOR
-    )
-    val borderColor = ColorUtil.parseColor(
-        theme.borderColor ?: Defaults.MiniGameMenuTheme.BORDER_COLOR
-    )
-    val backgroundColor = if (theme.backgroundColor != null)
-        ColorUtil.parseColor(theme.backgroundColor) else Color.White
-
-    // Press interaction for scale effect (replaces mouse hover)
+    // Press scale animation
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(
+    val pressScale by animateFloatAsState(
         targetValue = if (isPressed) 0.95f else 1f,
         animationSpec = tween(durationMillis = 200),
-        label = "gameCardScale",
+        label = "coverCardScale",
     )
 
-    // Responsive icon size: smaller on compact screens
-    val screenWidthDp = LocalConfiguration.current.screenWidthDp
-    val isCompact = screenWidthDp < 640
-    val iconSize = if (isCompact) 50.dp else 80.dp
-    val nameFontSize = if (isCompact) 11.sp else 14.sp
-    val cardPadding = if (isCompact) 10.dp else 16.dp
+    val cardShape = RoundedCornerShape(18.dp)
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Top,
-        modifier = Modifier
-            .fillMaxHeight()
-            .graphicsLayer(scaleX = scale, scaleY = scale)
-            .clip(RoundedCornerShape(12.dp))
-            .background(backgroundColor)
-            .border(1.dp, borderColor, RoundedCornerShape(12.dp))
+    Box(
+        modifier = modifier
+            .aspectRatio(9f / 16f)
+            .graphicsLayer(scaleX = pressScale, scaleY = pressScale)
+            .shadow(14.dp, cardShape)
+            .clip(cardShape)
+            .background(Color(0x0FFFFFFF)) // rgba(255,255,255,0.06)
+            .border(2.dp, Color(0x1A78C8FF), cardShape) // rgba(120,200,255,0.1)
             .clickable(
                 interactionSource = interactionSource,
-                indication = null, // We use scale instead of ripple
+                indication = null,
             ) {
                 onGameSelect(game.id)
-            }
-            .padding(cardPadding)
+            },
     ) {
-        // Game Icon
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .size(iconSize)
-                .clip(RoundedCornerShape(iconCornerRadius.dp))
-        ) {
-            if (imageError) {
-                // Fallback emoji
-                Text(
-                    text = game.iconFallback ?: randomFallback,
-                    fontSize = if (isCompact) 36.sp else 56.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                // Loading spinner (shown while image loads)
-                if (imageLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        color = titleFontColor,
-                        strokeWidth = 2.dp,
-                    )
-                }
-
-                AsyncImage(
-                    model = game.iconUrl,
-                    contentDescription = game.name,
-                    contentScale = ContentScale.Crop,
-                    onState = { state ->
-                        when (state) {
-                            is AsyncImagePainter.State.Success -> imageLoading = false
-                            is AsyncImagePainter.State.Error -> {
-                                imageError = true
-                                imageLoading = false
-                            }
-                            is AsyncImagePainter.State.Loading -> imageLoading = true
-                            else -> {}
+        // Cover Image
+        if (currentImageUrl != null) {
+            AsyncImage(
+                model = currentImageUrl,
+                contentDescription = game.name,
+                contentScale = ContentScale.Crop,
+                onState = { state ->
+                    if (state is AsyncImagePainter.State.Error) {
+                        if (imageStage == 0 && game.iconUrl.isNotBlank() && game.gifCover != null) {
+                            imageStage = 1 // gifCover failed, try iconUrl
+                        } else {
+                            imageStage = 2 // show emoji fallback
                         }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = 1.04f
+                        scaleY = 1.04f
                     },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(RoundedCornerShape(iconCornerRadius.dp))
-                        .then(if (imageLoading) Modifier.size(0.dp) else Modifier),
+            )
+        } else {
+            // Emoji fallback
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x0AFFFFFF)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = game.iconFallback ?: randomEmoji,
+                    fontSize = 48.sp,
                 )
             }
         }
 
-        // Spacer
-        Box(modifier = Modifier.padding(top = if (isCompact) 8.dp else 12.dp))
+        // Dark gradient overlay
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colorStops = arrayOf(
+                            0.0f to Color.Transparent,
+                            0.52f to Color.Transparent,
+                            0.75f to Color(0x73000000),
+                            1.0f to Color(0xF2000000),
+                        ),
+                    ),
+                ),
+        )
 
-        // Game Name
+        // Game title at bottom
         Text(
             text = game.name,
-            fontSize = nameFontSize,
-            fontFamily = titleFont,
-            fontWeight = FontWeight.Medium,
-            color = titleFontColor,
-            textAlign = TextAlign.Center,
+            color = Color.White,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.ExtraBold,
+            lineHeight = 20.sp,
             maxLines = 2,
-            modifier = Modifier.fillMaxWidth(),
+            overflow = TextOverflow.Ellipsis,
+            style = TextStyle(
+                shadow = Shadow(
+                    color = Color(0xA6000000), // rgba(0,0,0,0.65)
+                    offset = Offset(0f, 10f),
+                    blurRadius = 24f,
+                ),
+            ),
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(10.dp),
         )
     }
 }
