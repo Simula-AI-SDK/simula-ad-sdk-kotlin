@@ -52,8 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import coil.compose.AsyncImage
-import coil.compose.AsyncImagePainter
+import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.model.Defaults.MiniGameInterstitialDefaults
 import ad.simula.ad.sdk.model.MiniGameInterstitialTheme
 import ad.simula.ad.sdk.util.ColorUtil
@@ -192,7 +191,7 @@ fun MiniGameInterstitial(
         ) {
             // Background image (user-provided URL or bundled default)
             if (backgroundImage != null) {
-                AsyncImage(
+                CachedAsyncImage(
                     model = backgroundImage,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
@@ -220,15 +219,11 @@ fun MiniGameInterstitial(
             ) {
                 // Character image in circle
                 if (!imageError) {
-                    AsyncImage(
+                    CachedAsyncImage(
                         model = charImage,
                         contentDescription = "AI companion",
                         contentScale = ContentScale.Crop,
-                        onState = { state ->
-                            if (state is AsyncImagePainter.State.Error) {
-                                imageError = true
-                            }
-                        },
+                        onError = { imageError = true },
                         modifier = Modifier
                             .size(characterSize.dp)
                             .clip(CircleShape)

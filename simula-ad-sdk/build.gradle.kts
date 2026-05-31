@@ -101,9 +101,7 @@ dependencies {
     // Networking (native HttpURLConnection via SimulaHttp — no third-party HTTP lib)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
-    // Image loading
-    implementation("io.coil-kt:coil-compose:2.6.0")
-    implementation("io.coil-kt:coil-gif:2.6.0")
+    // Image loading: native ImageDecoder/BitmapFactory pipeline (see ad.simula.ad.sdk.image) — no third-party lib
 
     // WebView
     implementation("androidx.webkit:webkit:1.10.0")

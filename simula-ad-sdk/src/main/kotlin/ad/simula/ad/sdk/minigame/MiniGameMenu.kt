@@ -41,7 +41,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -79,13 +78,7 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import coil.ImageLoader
-import coil.compose.AsyncImage
-import coil.compose.AsyncImagePainter
-import coil.compose.LocalImageLoader
-import coil.decode.GifDecoder
-import coil.decode.ImageDecoderDecoder
-import coil.request.ImageRequest
+import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.R
 import ad.simula.ad.sdk.model.Defaults
 import ad.simula.ad.sdk.model.GameData
@@ -95,8 +88,6 @@ import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
 import ad.simula.ad.sdk.util.FontUtil
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -122,20 +113,6 @@ fun MiniGameMenu(
 ) {
     val simulaContext = useSimula()
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-
-    // ── GIF-capable ImageLoader ──────────────────────────────────────────────
-    val gifImageLoader = remember(context) {
-        ImageLoader.Builder(context)
-            .components {
-                if (Build.VERSION.SDK_INT >= 28) {
-                    add(ImageDecoderDecoder.Factory())
-                } else {
-                    add(GifDecoder.Factory())
-                }
-            }
-            .build()
-    }
 
     // ── State ────────────────────────────────────────────────────────────────
     var selectedGameId by remember { mutableStateOf<String?>(null) }
@@ -175,23 +152,7 @@ fun MiniGameMenu(
             val result = SimulaApiClient.fetchCatalog()
             games = result.games
             menuId = result.menuId.takeIf { it.isNotBlank() }
-
-            // Preload all cover images before showing grid (matching React behavior)
-            val imageUrls = result.games.mapNotNull { game ->
-                (game.gifCover ?: game.iconUrl).takeIf { it.isNotBlank() }
-            }
-            imageUrls.map { url ->
-                async {
-                    try {
-                        val request = ImageRequest.Builder(context)
-                            .data(url)
-                            .build()
-                        gifImageLoader.execute(request)
-                    } catch (_: Exception) {
-                        // Errors count as "loaded" — same as React
-                    }
-                }
-            }.awaitAll()
+            // Covers load lazily per card through ImageCache — grid shows immediately.
         } catch (e: Exception) {
             catalogError = true
             games = emptyList()
@@ -277,11 +238,7 @@ fun MiniGameMenu(
         handleClose()
     }
 
-    // Provide GIF-capable image loader to all children
-    @Suppress("DEPRECATION")
-    CompositionLocalProvider(LocalImageLoader provides gifImageLoader) {
-
-        // ── Dialog 1: Menu Card ──────────────────────────────────────────────
+    // ── Dialog 1: Menu Card ──────────────────────────────────────────────
         if (isOpen && selectedGameId == null && adIframeUrl == null) {
             val configuration = LocalConfiguration.current
             val screenWidthDp = configuration.screenWidthDp
@@ -442,15 +399,11 @@ fun MiniGameMenu(
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             if (!imageError && charImage.isNotBlank()) {
-                                                AsyncImage(
+                                                CachedAsyncImage(
                                                     model = charImage,
                                                     contentDescription = charName,
                                                     contentScale = ContentScale.Crop,
-                                                    onState = { state ->
-                                                        if (state is AsyncImagePainter.State.Error) {
-                                                            imageError = true
-                                                        }
-                                                    },
+                                                    onError = { imageError = true },
                                                     modifier = Modifier.fillMaxSize(),
                                                 )
                                             } else {
@@ -664,7 +617,6 @@ fun MiniGameMenu(
                 )
             }
         }
-    }
 }
 
 // ── Fullscreen Dialog Window Config ──────────────────────────────────────────

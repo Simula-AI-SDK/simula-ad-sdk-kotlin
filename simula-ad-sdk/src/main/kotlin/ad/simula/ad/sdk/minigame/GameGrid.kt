@@ -191,6 +191,7 @@ private fun MobileCarousel(
                         }
                         .width(cardWidthDp.dp)
                         .height(cardHeightDp.dp),
+                    isAnimating = cardOffset == 0,
                 )
             }
         }

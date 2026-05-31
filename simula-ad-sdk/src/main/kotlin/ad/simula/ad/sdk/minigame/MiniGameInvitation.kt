@@ -43,8 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
-import coil.compose.AsyncImage
-import coil.compose.AsyncImagePainter
+import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.model.Defaults.MiniGameInvitationDefaults
 import ad.simula.ad.sdk.model.MiniGameInvitationAnimation
 import ad.simula.ad.sdk.model.MiniGameInvitationTheme
@@ -377,15 +376,11 @@ private fun CharacterImage(
         contentAlignment = Alignment.Center,
     ) {
         if (!imageError) {
-            AsyncImage(
+            CachedAsyncImage(
                 model = charImage,
                 contentDescription = "AI companion",
                 contentScale = ContentScale.Crop,
-                onState = { state ->
-                    if (state is AsyncImagePainter.State.Error) {
-                        onImageError()
-                    }
-                },
+                onError = onImageError,
                 modifier = Modifier
                     .size(88.dp)
                     .clip(RoundedCornerShape(cornerRadius.dp)),
