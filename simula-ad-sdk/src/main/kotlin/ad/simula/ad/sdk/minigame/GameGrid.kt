@@ -234,9 +234,9 @@ private fun TabletGrid(
     }
 
     val showPagination = totalPages > 1
-    val accentColor = ColorUtil.parseColor(
-        theme.accentColor ?: Defaults.MiniGameMenuTheme.ACCENT_COLOR
-    )
+    val accentColor = remember(theme.accentColor) {
+        ColorUtil.parseColor(theme.accentColor ?: Defaults.MiniGameMenuTheme.ACCENT_COLOR)
+    }
 
     fun animateToPage(newPage: Int) {
         if (isAnimating) return

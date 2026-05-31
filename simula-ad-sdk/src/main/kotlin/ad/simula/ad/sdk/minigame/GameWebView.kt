@@ -4,9 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
-import android.view.ViewGroup
 import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -98,17 +96,21 @@ fun GameWebView(
     var error by remember { mutableStateOf<String?>(null) }
     var pageLoaded by remember { mutableStateOf(false) }
 
-    // Fetch the minigame iframe URL
-    LaunchedEffect(gameId, charID, simulaContext.sessionId) {
-        val sessionId = simulaContext.sessionId
-        if (sessionId.isNullOrBlank()) {
-            error = "Session invalid, cannot initialize minigame"
-            loading = false
-            return@LaunchedEffect
-        }
+    // Warm a spare WebView for the post-game ad iframe while the game loads.
+    LaunchedEffect(Unit) {
+        WebViewPool.prewarm(context)
+    }
 
+    // Fetch the minigame iframe URL
+    LaunchedEffect(gameId, charID) {
         loading = true
         try {
+            // Await the (coalesced) session instead of hard-failing on a launch race.
+            val sessionId = simulaContext.ensureSession()
+            if (sessionId.isNullOrBlank()) {
+                error = "Session invalid, cannot initialize minigame"
+                return@LaunchedEffect
+            }
             val result = SimulaApiClient.getMinigame(
                 gameType = gameId,
                 sessionId = sessionId,
@@ -135,7 +137,7 @@ fun GameWebView(
     }
 
     val scope = rememberCoroutineScope()
-    val borderColor = ColorUtil.parseColor(playableBorderColor)
+    val borderColor = remember(playableBorderColor) { ColorUtil.parseColor(playableBorderColor) }
     val initialHeightDp = calculatePlayableHeight(playableHeight, screenHeightDp.toInt()).toFloat()
     val animatedHeightDp = remember { Animatable(initialHeightDp) }
     // Re-clamp height on screen rotation
@@ -346,19 +348,11 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
 
     AndroidView(
         factory = { ctx ->
-            WebView(ctx).apply {
-                setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                )
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.mediaPlaybackRequiresUserGesture = false
-                settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-
-                webViewClient = object : WebViewClient() {
-                    override fun onPageCommitVisible(view: WebView?, url: String?) {
+            WebViewPool.acquire(
+                context = ctx,
+                client = object : WebViewClient() {
+                    override fun onPageCommitVisible(view: WebView?, committedUrl: String?) {
+                        if (committedUrl == "about:blank") return
                         onPageFinished()
                     }
                     override fun shouldOverrideUrlLoading(
@@ -377,15 +371,11 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
                         ctx.startActivity(intent)
                         return true
                     }
-                }
-
-                loadUrl(url)
-            }
+                },
+            ).apply { loadUrl(url) }
         },
         modifier = Modifier.fillMaxSize(),
-        onRelease = { webView ->
-            webView.destroy()
-        },
+        onRelease = { webView -> WebViewPool.release(webView) },
     )
 }
 

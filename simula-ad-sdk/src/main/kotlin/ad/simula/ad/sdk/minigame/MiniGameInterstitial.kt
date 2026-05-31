@@ -53,10 +53,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.image.CachedAsyncImage
-import ad.simula.ad.sdk.model.Defaults.MiniGameInterstitialDefaults
 import ad.simula.ad.sdk.model.MiniGameInterstitialTheme
-import ad.simula.ad.sdk.util.ColorUtil
-import ad.simula.ad.sdk.util.FontUtil
+import ad.simula.ad.sdk.model.resolve
 
 /**
  * Full-screen interstitial invitation composable.
@@ -79,21 +77,16 @@ fun MiniGameInterstitial(
     var imageError by remember { mutableStateOf(false) }
     var closedInternally by remember { mutableStateOf(false) }
 
-    // Applied theme
-    val ctaCornerRadius = theme.ctaCornerRadius ?: MiniGameInterstitialDefaults.CTA_CORNER_RADIUS
-    val characterSize = theme.characterSize ?: MiniGameInterstitialDefaults.CHARACTER_SIZE
-    val titleTextColor = ColorUtil.parseColor(
-        theme.titleTextColor ?: MiniGameInterstitialDefaults.TITLE_TEXT_COLOR
-    )
-    val titleFontSize = theme.titleFontSize ?: MiniGameInterstitialDefaults.TITLE_FONT_SIZE
-    val ctaTextColor = ColorUtil.parseColor(
-        theme.ctaTextColor ?: MiniGameInterstitialDefaults.CTA_TEXT_COLOR
-    )
-    val ctaFontSize = theme.ctaFontSize ?: MiniGameInterstitialDefaults.CTA_FONT_SIZE
-    val fontFamily = FontUtil.parseFont(theme.fontFamily)
-    val ctaColor = ColorUtil.parseColor(
-        theme.ctaColor ?: MiniGameInterstitialDefaults.CTA_COLOR
-    )
+    // Applied theme (parsed once per theme identity)
+    val resolved = remember(theme) { theme.resolve() }
+    val ctaCornerRadius = resolved.ctaCornerRadius
+    val characterSize = resolved.characterSize
+    val titleTextColor = resolved.titleTextColor
+    val titleFontSize = resolved.titleFontSize
+    val ctaTextColor = resolved.ctaTextColor
+    val ctaFontSize = resolved.ctaFontSize
+    val fontFamily = resolved.fontFamily
+    val ctaColor = resolved.ctaColor
 
     val isVisible = isOpen && !closedInternally
 

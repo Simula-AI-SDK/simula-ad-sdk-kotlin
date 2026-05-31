@@ -5,10 +5,8 @@ import android.app.Activity
 import android.os.Build
 import android.content.Intent
 import android.net.Uri
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -80,14 +78,13 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.R
-import ad.simula.ad.sdk.model.Defaults
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.model.MiniGameTheme
+import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
-import ad.simula.ad.sdk.util.FontUtil
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -113,6 +110,7 @@ fun MiniGameMenu(
 ) {
     val simulaContext = useSimula()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     // ── State ────────────────────────────────────────────────────────────────
     var selectedGameId by remember { mutableStateOf<String?>(null) }
@@ -127,25 +125,21 @@ fun MiniGameMenu(
     var lastGameHeightDp by remember { mutableStateOf<Float?>(null) }
     var lastGameWasBottomSheet by remember { mutableStateOf(false) }
 
-    // ── Theme ────────────────────────────────────────────────────────────────
-    val appliedTitleFont = FontUtil.parseFont(theme.titleFont ?: Defaults.MiniGameMenuTheme.TITLE_FONT)
-    val appliedSecondaryFont = FontUtil.parseFont(theme.secondaryFont ?: Defaults.MiniGameMenuTheme.SECONDARY_FONT)
-    val appliedTitleFontColor = ColorUtil.parseColor(
-        theme.titleFontColor ?: Defaults.MiniGameMenuTheme.TITLE_FONT_COLOR
-    )
-    val appliedSecondaryFontColor = ColorUtil.parseColor(
-        theme.secondaryFontColor ?: Defaults.MiniGameMenuTheme.SECONDARY_FONT_COLOR
-    )
-    val appliedBorderColor = ColorUtil.parseColor(
-        theme.borderColor ?: Defaults.MiniGameMenuTheme.BORDER_COLOR
-    )
-    val appliedBackgroundColor = if (theme.backgroundColor != null)
-        ColorUtil.parseColor(theme.backgroundColor) else Color(0xFF0B0B0F)
+    // ── Theme (parsed once per theme identity) ───────────────────────────────
+    val resolvedTheme = remember(theme) { theme.resolve() }
+    val appliedTitleFont = resolvedTheme.titleFont
+    val appliedSecondaryFont = resolvedTheme.secondaryFont
+    val appliedTitleFontColor = resolvedTheme.titleFontColor
+    val appliedSecondaryFontColor = resolvedTheme.secondaryFontColor
+    val appliedBorderColor = resolvedTheme.borderColor
+    val appliedBackgroundColor = resolvedTheme.backgroundColor
 
     // ── Fetch catalog + preload images when menu opens ───────────────────────
     LaunchedEffect(isOpen) {
         if (!isOpen) return@LaunchedEffect
 
+        // Prewarm a WebView so the game/ad iframe opens without renderer cold-start.
+        WebViewPool.prewarm(context)
         catalogLoading = true
         catalogError = false
         try {
@@ -716,7 +710,7 @@ private fun AdIframeOverlay(
                 .background(Color.White),
         ) {
             if (isBottomSheet) {
-                val borderColor = ColorUtil.parseColor(playableBorderColor)
+                val borderColor = remember(playableBorderColor) { ColorUtil.parseColor(playableBorderColor) }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -739,18 +733,11 @@ private fun AdIframeOverlay(
             Box(modifier = Modifier.fillMaxSize().weight(1f)) {
                 AndroidView(
                     factory = { ctx ->
-                        WebView(ctx).apply {
-                            setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                            )
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-
-                            webViewClient = object : WebViewClient() {
+                        WebViewPool.acquire(
+                            context = ctx,
+                            client = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, finishedUrl: String?) {
+                                    if (finishedUrl == "about:blank") return
                                     adPageLoaded = true
                                 }
                                 override fun shouldOverrideUrlLoading(
@@ -766,12 +753,11 @@ private fun AdIframeOverlay(
                                     ctx.startActivity(intent)
                                     return true
                                 }
-                            }
-                            loadUrl(url)
-                        }
+                            },
+                        ).apply { loadUrl(url) }
                     },
                     modifier = Modifier.fillMaxSize(),
-                    onRelease = { webView -> webView.destroy() },
+                    onRelease = { webView -> WebViewPool.release(webView) },
                 )
 
                 if (!adPageLoaded) {

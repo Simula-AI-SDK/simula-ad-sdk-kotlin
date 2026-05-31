@@ -39,8 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ad.simula.ad.sdk.model.Defaults.MiniGameButtonDefaults
 import ad.simula.ad.sdk.model.MiniGameButtonTheme
-import ad.simula.ad.sdk.util.ColorUtil
-import ad.simula.ad.sdk.util.FontUtil
+import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.util.applyWidth
 import ad.simula.ad.sdk.util.parseDimension
 
@@ -59,25 +58,17 @@ fun MiniGameButton(
     width: Any? = null,
     onClick: () -> Unit,
 ) {
-    // Applied theme with defaults
-    val cornerRadius = theme.cornerRadius ?: MiniGameButtonDefaults.CORNER_RADIUS
-    val bgColor = ColorUtil.parseColor(
-        theme.backgroundColor ?: MiniGameButtonDefaults.BACKGROUND_COLOR
-    )
-    val textColorValue = ColorUtil.parseColor(
-        theme.textColor ?: MiniGameButtonDefaults.TEXT_COLOR
-    )
-    val fontSize = theme.fontSize ?: MiniGameButtonDefaults.FONT_SIZE
-    val fontFamily = FontUtil.parseFont(theme.fontFamily)
-    val borderWidthVal = theme.borderWidth ?: MiniGameButtonDefaults.BORDER_WIDTH
-    val borderColorVal = ColorUtil.parseColor(
-        theme.borderColor ?: MiniGameButtonDefaults.BORDER_COLOR
-    )
-    val pulsateColor = if (!theme.pulsateColor.isNullOrBlank())
-        ColorUtil.parseColor(theme.pulsateColor) else bgColor
-    val badgeColor = ColorUtil.parseColor(
-        theme.badgeColor ?: MiniGameButtonDefaults.BADGE_COLOR
-    )
+    // Applied theme (parsed once per theme identity)
+    val resolved = remember(theme) { theme.resolve() }
+    val cornerRadius = resolved.cornerRadius
+    val bgColor = resolved.bgColor
+    val textColorValue = resolved.textColor
+    val fontSize = resolved.fontSize
+    val fontFamily = resolved.fontFamily
+    val borderWidthVal = resolved.borderWidth
+    val borderColorVal = resolved.borderColor
+    val pulsateColor = resolved.pulsateColor
+    val badgeColor = resolved.badgeColor
 
     val displayText = text ?: "\uD83C\uDFAE Play a Game" // 🎮 Play a Game
 

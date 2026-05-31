@@ -33,6 +33,7 @@ internal data class SimulaContextValue(
     val devMode: Boolean,
     val sessionId: String?,
     val hasPrivacyConsent: Boolean,
+    val ensureSession: suspend () -> String?,
     val getCachedAd: (slot: String, position: Int) -> AdData?,
     val cacheAd: (slot: String, position: Int, ad: AdData) -> Unit,
     val getCachedHeight: (slot: String, position: Int) -> Float?,

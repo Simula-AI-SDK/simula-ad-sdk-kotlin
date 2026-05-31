@@ -47,8 +47,7 @@ import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.model.Defaults.MiniGameInvitationDefaults
 import ad.simula.ad.sdk.model.MiniGameInvitationAnimation
 import ad.simula.ad.sdk.model.MiniGameInvitationTheme
-import ad.simula.ad.sdk.util.ColorUtil
-import ad.simula.ad.sdk.util.FontUtil
+import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.util.ParsedOffset
 import ad.simula.ad.sdk.util.applyWidth
 import ad.simula.ad.sdk.util.parseDimension
@@ -80,35 +79,21 @@ fun MiniGameInvitation(
     var imageError by remember { mutableStateOf(false) }
     var shouldRender by remember { mutableStateOf(false) }
 
-    // Applied theme with defaults
-    val cornerRadius = theme.cornerRadius ?: MiniGameInvitationDefaults.CORNER_RADIUS
-    val bgColor = ColorUtil.parseColor(
-        theme.backgroundColor ?: MiniGameInvitationDefaults.BACKGROUND_COLOR
-    )
-    val fallbackTextColor = theme.textColor ?: MiniGameInvitationDefaults.TEXT_COLOR
-    val titleTextColor = ColorUtil.parseColor(
-        theme.titleTextColor ?: fallbackTextColor
-    )
-    val subTextColor = ColorUtil.parseColor(
-        theme.subTextColor ?: fallbackTextColor
-    )
-    val ctaTextColor = ColorUtil.parseColor(
-        theme.ctaTextColor ?: fallbackTextColor
-    )
-    val closeButtonColor = ColorUtil.parseColor(fallbackTextColor)
-    val ctaColor = ColorUtil.parseColor(
-        theme.ctaColor ?: MiniGameInvitationDefaults.CTA_COLOR
-    )
-    val charImageCornerRadius = theme.charImageCornerRadius
-        ?: MiniGameInvitationDefaults.CHAR_IMAGE_CORNER_RADIUS
-    val charImageAnchor = theme.charImageAnchor
-        ?: MiniGameInvitationDefaults.CHAR_IMAGE_ANCHOR
-    val borderWidth = theme.borderWidth ?: MiniGameInvitationDefaults.BORDER_WIDTH
-    val borderColor = ColorUtil.parseColor(
-        theme.borderColor ?: MiniGameInvitationDefaults.BORDER_COLOR
-    )
-    val fontFamily = FontUtil.parseFont(theme.fontFamily)
-    val fontSize = theme.fontSize ?: MiniGameInvitationDefaults.FONT_SIZE
+    // Applied theme (parsed once per theme identity)
+    val resolved = remember(theme) { theme.resolve() }
+    val cornerRadius = resolved.cornerRadius
+    val bgColor = resolved.bgColor
+    val titleTextColor = resolved.titleTextColor
+    val subTextColor = resolved.subTextColor
+    val ctaTextColor = resolved.ctaTextColor
+    val closeButtonColor = resolved.closeButtonColor
+    val ctaColor = resolved.ctaColor
+    val charImageCornerRadius = resolved.charImageCornerRadius
+    val charImageAnchor = resolved.charImageAnchor
+    val borderWidth = resolved.borderWidth
+    val borderColor = resolved.borderColor
+    val fontFamily = resolved.fontFamily
+    val fontSize = resolved.fontSize
 
     val animDuration = MiniGameInvitationDefaults.ANIMATION_DURATION_MS
 
