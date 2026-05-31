@@ -98,8 +98,7 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
 
-    // Networking
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Networking (native HttpURLConnection via SimulaHttp — no third-party HTTP lib)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
     // Image loading
