@@ -78,15 +78,18 @@ object SimulaAds {
                 currentActivityRef = WeakReference(activity)
             }
 
-            override fun onActivityPaused(activity: Activity) {
+            // Keep the reference while merely paused — a paused Activity is still a
+            // valid context to launch from, which avoids a NEW_TASK fallback during
+            // a normal A→B transition. Clear only once it's actually destroyed.
+            override fun onActivityDestroyed(activity: Activity) {
                 if (currentActivityRef?.get() === activity) currentActivityRef = null
             }
 
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
             override fun onActivityStarted(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
             override fun onActivityStopped(activity: Activity) {}
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-            override fun onActivityDestroyed(activity: Activity) {}
         })
     }
 }
