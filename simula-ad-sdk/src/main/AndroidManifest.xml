@@ -1,4 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <application>
+        <!-- Full-screen host for the imperative interstitial API. -->
+        <activity
+            android:name="ad.simula.ad.sdk.ads.SimulaInterstitialActivity"
+            android:exported="false"
+            android:hardwareAccelerated="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
+            android:theme="@style/Theme.Simula.Interstitial" />
+    </application>
 </manifest>

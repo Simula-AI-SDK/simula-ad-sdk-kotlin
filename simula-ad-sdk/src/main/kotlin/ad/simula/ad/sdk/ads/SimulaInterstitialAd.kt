@@ -1,0 +1,217 @@
+package ad.simula.ad.sdk.ads
+
+import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.model.Message
+import ad.simula.ad.sdk.model.MiniGameInterstitialTheme
+import ad.simula.ad.sdk.model.MiniGameTheme
+import ad.simula.ad.sdk.network.SimulaApiClient
+import android.app.Activity
+import android.content.Intent
+import android.os.Handler
+import android.os.Looper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.UUID
+
+/**
+ * Imperative full-screen interstitial (mirrors the Swift `SimulaInterstitialAd`).
+ *
+ * Lifecycle: `load()` preloads the catalog + warms a WebView; `show(...)` presents
+ * a teaser that opens the mini-game menu, plays a game, then shows a post-game ad.
+ * Callbacks are delivered on the main thread via [listener]. After the ad closes,
+ * the next one is preloaded automatically.
+ *
+ * [load] and [show] may be called from any thread — they confine themselves to
+ * the main thread internally.
+ */
+class SimulaInterstitialAd(val adUnitId: String) {
+
+    var listener: SimulaInterstitialAdListener? = null
+    var theme: MiniGameTheme = MiniGameTheme()
+    var inviteTheme: MiniGameInterstitialTheme = MiniGameInterstitialTheme()
+    var messages: List<Message> = emptyList()
+    var maxGamesToShow: Int = 6
+    var delegateChar: Boolean = true
+    var invitationText: String = "Want to play a game?"
+    var ctaText: String = "Play a Game"
+    var backgroundImage: String? = null
+
+    private sealed interface State {
+        object Idle : State
+        object Loading : State
+        class Ready(val catalog: SimulaApiClient.CatalogResult) : State
+        object Showing : State
+    }
+
+    // Confined to the main thread (all reads/writes happen there).
+    private var state: State = State.Idle
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Preload the next interstitial. No-op if already loading, ready, or showing. */
+    fun load() {
+        if (!confineToMain { load() }) return
+
+        if (state != State.Idle) return // single in-flight load
+        if (!SimulaAds.isInitialized) {
+            failLoad(SimulaAdError.NotInitialized)
+            return
+        }
+        state = State.Loading
+        SimulaScope.launch {
+            try {
+                val sessionId = SimulaAds.store.ensureSession()
+                if (sessionId.isNullOrBlank()) {
+                    failLoadOnMain(SimulaAdError.NoSession)
+                    return@launch
+                }
+                val catalog = SimulaApiClient.fetchCatalog()
+                if (catalog.games.isEmpty()) {
+                    failLoadOnMain(SimulaAdError.NoFill)
+                    return@launch
+                }
+                withContext(Dispatchers.Main) {
+                    WebViewPool.prewarm(SimulaAds.appContext)
+                    state = State.Ready(catalog)
+                    listener?.onAdLoaded(this@SimulaInterstitialAd)
+                }
+            } catch (e: Exception) {
+                failLoadOnMain(SimulaAdError.Network(e))
+            }
+        }
+    }
+
+    /**
+     * Present a loaded interstitial from an explicit [activity] (recommended —
+     * guarantees correct same-task window stacking and transitions).
+     */
+    fun show(
+        activity: Activity,
+        charID: String,
+        charName: String,
+        charImage: String,
+        charDesc: String? = null,
+    ) {
+        if (!confineToMain { show(activity, charID, charName, charImage, charDesc) }) return
+        present(activity, charID, charName, charImage, charDesc)
+    }
+
+    /**
+     * Present a loaded interstitial using the currently-tracked Activity. Use the
+     * [show] overload that takes an explicit `Activity` when you have one.
+     */
+    fun show(
+        charID: String,
+        charName: String,
+        charImage: String,
+        charDesc: String? = null,
+    ) {
+        if (!confineToMain { show(charID, charName, charImage, charDesc) }) return
+        present(SimulaAds.currentActivity, charID, charName, charImage, charDesc)
+    }
+
+    // ── Internals ────────────────────────────────────────────────────────────
+
+    private fun present(
+        activity: Activity?,
+        charID: String,
+        charName: String,
+        charImage: String,
+        charDesc: String?,
+    ) {
+        val catalog = when (val current = state) {
+            State.Showing -> {
+                failShow(SimulaAdError.AlreadyShowing)
+                return
+            }
+            State.Idle, State.Loading -> {
+                failShow(SimulaAdError.NotReady)
+                return
+            }
+            is State.Ready -> current.catalog
+        }
+
+        val token = UUID.randomUUID().toString()
+        InterstitialHandoff.put(
+            token,
+            InterstitialPresentation(
+                catalog = catalog,
+                charID = charID,
+                charName = charName,
+                charImage = charImage,
+                charDesc = charDesc,
+                invitationText = invitationText,
+                ctaText = ctaText,
+                backgroundImage = backgroundImage,
+                theme = theme,
+                inviteTheme = inviteTheme,
+                messages = messages,
+                maxGamesToShow = maxGamesToShow,
+                delegateChar = delegateChar,
+                callbacks = bridge(),
+            ),
+        )
+
+        if (!launchActivity(token, activity)) {
+            InterstitialHandoff.remove(token) // clean up the unused handoff
+            failShow(SimulaAdError.NoPresentationContext)
+            return
+        }
+        state = State.Showing
+    }
+
+    private fun bridge(): InterstitialCallbacks = object : InterstitialCallbacks {
+        override fun onDisplayed() {
+            listener?.onAdDisplayed(this@SimulaInterstitialAd)
+        }
+
+        override fun onClicked() {
+            listener?.onAdClicked(this@SimulaInterstitialAd)
+        }
+
+        override fun onClosed() {
+            state = State.Idle
+            listener?.onAdClosed(this@SimulaInterstitialAd)
+            load() // auto-preload the next ad (iOS parity)
+        }
+    }
+
+    private fun launchActivity(token: String, activity: Activity?): Boolean {
+        val ctx = activity ?: SimulaAds.appContext
+        return try {
+            val intent = Intent(ctx, SimulaInterstitialActivity::class.java).apply {
+                putExtra(SimulaInterstitialActivity.EXTRA_TOKEN, token)
+                if (activity == null) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ctx.startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun failLoad(error: SimulaAdError) {
+        state = State.Idle
+        listener?.onAdFailedToLoad(this, error)
+    }
+
+    private suspend fun failLoadOnMain(error: SimulaAdError) {
+        withContext(Dispatchers.Main) { failLoad(error) }
+    }
+
+    private fun failShow(error: SimulaAdError) {
+        // State is unchanged (stays Ready / Showing) — matches Swift behavior.
+        listener?.onAdFailedToDisplay(this, error)
+    }
+
+    /**
+     * Returns true if already on the main thread (caller should proceed); returns
+     * false after re-posting [block] to the main thread (caller should bail out).
+     */
+    private inline fun confineToMain(crossinline block: () -> Unit): Boolean {
+        if (Looper.myLooper() == Looper.getMainLooper()) return true
+        mainHandler.post { block() }
+        return false
+    }
+}

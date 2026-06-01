@@ -59,25 +59,42 @@ fun SimulaProvider(
         SimulaSessionStore(apiKey, devMode, effectiveUserID)
     }
 
+    ProvideSimulaContext(sessionStore, apiKey, devMode, hasPrivacyConsent, content)
+}
+
+/**
+ * Provides [LocalSimulaContext] built from an existing [SimulaSessionStore].
+ *
+ * Extracted so the imperative interstitial Activity can reuse the session warmed
+ * by `SimulaAds.initialize()` instead of creating a new one.
+ */
+@Composable
+internal fun ProvideSimulaContext(
+    store: SimulaSessionStore,
+    apiKey: String,
+    devMode: Boolean,
+    hasPrivacyConsent: Boolean,
+    content: @Composable () -> Unit,
+) {
     // Ad caching infrastructure — thread-safe so I/O coroutines can populate
     // these directly from any dispatcher (matching React's useRef<Map> pattern).
     val adCache = remember { ConcurrentHashMap<String, AdData>() }
     val heightCache = remember { ConcurrentHashMap<String, Float>() }
     val noFillSet = remember { ConcurrentHashMap.newKeySet<String>() }
 
-    // Kick off session creation off the critical path.
-    LaunchedEffect(sessionStore) {
-        sessionStore.ensureSession()
+    // Kick off session creation off the critical path (idempotent / coalesced).
+    LaunchedEffect(store) {
+        store.ensureSession()
     }
 
     // Build context value — equivalent to React's useMemo
-    val contextValue = remember(apiKey, devMode, sessionStore.sessionId, hasPrivacyConsent) {
+    val contextValue = remember(apiKey, devMode, store.sessionId, hasPrivacyConsent) {
         SimulaContextValue(
             apiKey = apiKey,
             devMode = devMode,
-            sessionId = sessionStore.sessionId,
+            sessionId = store.sessionId,
             hasPrivacyConsent = hasPrivacyConsent,
-            ensureSession = { sessionStore.ensureSession() },
+            ensureSession = { store.ensureSession() },
             getCachedAd = { slot, position ->
                 adCache[getCacheKey(slot, position)]
             },
