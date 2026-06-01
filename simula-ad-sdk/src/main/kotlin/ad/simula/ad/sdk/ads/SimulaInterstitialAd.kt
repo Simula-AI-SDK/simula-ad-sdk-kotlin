@@ -131,6 +131,14 @@ class SimulaInterstitialAd(val adUnitId: String) {
             }
             is State.Ready -> current.catalog
         }
+        // A foreground Activity is required to present — matching Swift's
+        // "no presentation context" semantics and AdMob's show(activity). A
+        // background activity-start from the app context can be silently dropped
+        // on Android 10+, which would strand us in the Showing state.
+        if (activity == null) {
+            failShow(SimulaAdError.NoPresentationContext)
+            return
+        }
 
         val token = UUID.randomUUID().toString()
         InterstitialHandoff.put(
@@ -177,14 +185,11 @@ class SimulaInterstitialAd(val adUnitId: String) {
         }
     }
 
-    private fun launchActivity(token: String, activity: Activity?): Boolean {
-        val ctx = activity ?: SimulaAds.appContext
+    private fun launchActivity(token: String, activity: Activity): Boolean {
         return try {
-            val intent = Intent(ctx, SimulaInterstitialActivity::class.java).apply {
-                putExtra(SimulaInterstitialActivity.EXTRA_TOKEN, token)
-                if (activity == null) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            ctx.startActivity(intent)
+            val intent = Intent(activity, SimulaInterstitialActivity::class.java)
+                .putExtra(SimulaInterstitialActivity.EXTRA_TOKEN, token)
+            activity.startActivity(intent)
             true
         } catch (e: Exception) {
             false
