@@ -22,8 +22,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -48,7 +51,26 @@ internal fun AnimatedImage(
         StaticFromBytes(source, modifier, contentScale)
         return
     }
-    AnimatedDrawableView(source, isAnimating, modifier, contentScale)
+    // Pause decoding when the host app is backgrounded (lifecycle below RESUMED),
+    // so an off-screen GIF never keeps advancing frames. (A Dialog covering the
+    // menu does not drop the Activity below RESUMED — but in that case the menu
+    // is removed from composition anyway, so its drawables are already stopped.)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var resumed by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> resumed = true
+                Lifecycle.Event.ON_PAUSE -> resumed = false
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    AnimatedDrawableView(source, isAnimating && resumed, modifier, contentScale)
 }
 
 @RequiresApi(Build.VERSION_CODES.P)
