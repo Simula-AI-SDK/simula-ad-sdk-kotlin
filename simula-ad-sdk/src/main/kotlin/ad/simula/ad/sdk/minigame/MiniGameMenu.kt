@@ -178,6 +178,10 @@ fun MiniGameMenu(
     }
 
     fun handleIframeClose() {
+        // Closing the game returns to the catalog menu (isOpen stays true) rather
+        // than dismissing the whole menu. If a post-game ad was fetched, the ad
+        // overlay shows first; otherwise clearing selectedGameId re-reveals the
+        // catalog. The menu is dismissed only by an explicit close/back action.
         if (!adFetched) {
             val aid = currentAdId
             if (aid != null) {
@@ -192,23 +196,19 @@ fun MiniGameMenu(
                         // Ad fetch failed -- no ad to show
                     }
                     selectedGameId = null
-                    if (adIframeUrl == null) {
-                        handleClose()
-                    }
                 }
             } else {
                 selectedGameId = null
-                handleClose()
             }
         } else {
             selectedGameId = null
-            handleClose()
         }
     }
 
     fun handleAdIframeClose() {
+        // Returns to the catalog menu (isOpen stays true) instead of dismissing;
+        // the menu is dismissed only by an explicit close/back action.
         adIframeUrl = null
-        handleClose()
     }
 
     fun getInitials(name: String): String {
