@@ -3,14 +3,11 @@ package ad.simula.ad.sdk.provider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaContextValue
-import ad.simula.ad.sdk.network.SimulaApiClient
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * CompositionLocal providing the Simula context to child composables.
@@ -55,29 +52,32 @@ fun SimulaProvider(
     // Validate props early (matches React's validateSimulaProviderProps)
     require(apiKey.isNotBlank()) { "SimulaProvider requires a valid \"apiKey\" (non-blank string)" }
 
-    var sessionId by remember { mutableStateOf<String?>(null) }
+    val effectiveUserID = if (hasPrivacyConsent) primaryUserID else null
 
-    // Ad caching infrastructure (matching React's useRef<Map> pattern)
-    val adCache = remember { mutableMapOf<String, AdData>() }
-    val heightCache = remember { mutableMapOf<String, Float>() }
-    val noFillSet = remember { mutableSetOf<String>() }
+    // Session holder — coalesces concurrent creation, retryable on failure.
+    val sessionStore = remember(apiKey, devMode, effectiveUserID) {
+        SimulaSessionStore(apiKey, devMode, effectiveUserID)
+    }
 
-    // Session creation — equivalent to React's useEffect([apiKey, devMode, primaryUserID, hasPrivacyConsent])
-    LaunchedEffect(apiKey, devMode, primaryUserID, hasPrivacyConsent) {
-        val effectiveUserID = if (hasPrivacyConsent) primaryUserID else null
-        val id = SimulaApiClient.createSession(apiKey, devMode, effectiveUserID)
-        if (id != null) {
-            sessionId = id
-        }
+    // Ad caching infrastructure — thread-safe so I/O coroutines can populate
+    // these directly from any dispatcher (matching React's useRef<Map> pattern).
+    val adCache = remember { ConcurrentHashMap<String, AdData>() }
+    val heightCache = remember { ConcurrentHashMap<String, Float>() }
+    val noFillSet = remember { ConcurrentHashMap.newKeySet<String>() }
+
+    // Kick off session creation off the critical path.
+    LaunchedEffect(sessionStore) {
+        sessionStore.ensureSession()
     }
 
     // Build context value — equivalent to React's useMemo
-    val contextValue = remember(apiKey, devMode, sessionId, hasPrivacyConsent) {
+    val contextValue = remember(apiKey, devMode, sessionStore.sessionId, hasPrivacyConsent) {
         SimulaContextValue(
             apiKey = apiKey,
             devMode = devMode,
-            sessionId = sessionId,
+            sessionId = sessionStore.sessionId,
             hasPrivacyConsent = hasPrivacyConsent,
+            ensureSession = { sessionStore.ensureSession() },
             getCachedAd = { slot, position ->
                 adCache[getCacheKey(slot, position)]
             },

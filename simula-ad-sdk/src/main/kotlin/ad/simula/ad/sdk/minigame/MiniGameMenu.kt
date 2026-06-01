@@ -5,10 +5,8 @@ import android.app.Activity
 import android.os.Build
 import android.content.Intent
 import android.net.Uri
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -41,7 +39,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -79,24 +76,15 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import coil.ImageLoader
-import coil.compose.AsyncImage
-import coil.compose.AsyncImagePainter
-import coil.compose.LocalImageLoader
-import coil.decode.GifDecoder
-import coil.decode.ImageDecoderDecoder
-import coil.request.ImageRequest
+import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.R
-import ad.simula.ad.sdk.model.Defaults
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.model.MiniGameTheme
+import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
-import ad.simula.ad.sdk.util.FontUtil
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -124,19 +112,6 @@ fun MiniGameMenu(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    // ── GIF-capable ImageLoader ──────────────────────────────────────────────
-    val gifImageLoader = remember(context) {
-        ImageLoader.Builder(context)
-            .components {
-                if (Build.VERSION.SDK_INT >= 28) {
-                    add(ImageDecoderDecoder.Factory())
-                } else {
-                    add(GifDecoder.Factory())
-                }
-            }
-            .build()
-    }
-
     // ── State ────────────────────────────────────────────────────────────────
     var selectedGameId by remember { mutableStateOf<String?>(null) }
     var imageError by remember { mutableStateOf(false) }
@@ -150,48 +125,28 @@ fun MiniGameMenu(
     var lastGameHeightDp by remember { mutableStateOf<Float?>(null) }
     var lastGameWasBottomSheet by remember { mutableStateOf(false) }
 
-    // ── Theme ────────────────────────────────────────────────────────────────
-    val appliedTitleFont = FontUtil.parseFont(theme.titleFont ?: Defaults.MiniGameMenuTheme.TITLE_FONT)
-    val appliedSecondaryFont = FontUtil.parseFont(theme.secondaryFont ?: Defaults.MiniGameMenuTheme.SECONDARY_FONT)
-    val appliedTitleFontColor = ColorUtil.parseColor(
-        theme.titleFontColor ?: Defaults.MiniGameMenuTheme.TITLE_FONT_COLOR
-    )
-    val appliedSecondaryFontColor = ColorUtil.parseColor(
-        theme.secondaryFontColor ?: Defaults.MiniGameMenuTheme.SECONDARY_FONT_COLOR
-    )
-    val appliedBorderColor = ColorUtil.parseColor(
-        theme.borderColor ?: Defaults.MiniGameMenuTheme.BORDER_COLOR
-    )
-    val appliedBackgroundColor = if (theme.backgroundColor != null)
-        ColorUtil.parseColor(theme.backgroundColor) else Color(0xFF0B0B0F)
+    // ── Theme (parsed once per theme identity) ───────────────────────────────
+    val resolvedTheme = remember(theme) { theme.resolve() }
+    val appliedTitleFont = resolvedTheme.titleFont
+    val appliedSecondaryFont = resolvedTheme.secondaryFont
+    val appliedTitleFontColor = resolvedTheme.titleFontColor
+    val appliedSecondaryFontColor = resolvedTheme.secondaryFontColor
+    val appliedBorderColor = resolvedTheme.borderColor
+    val appliedBackgroundColor = resolvedTheme.backgroundColor
 
     // ── Fetch catalog + preload images when menu opens ───────────────────────
     LaunchedEffect(isOpen) {
         if (!isOpen) return@LaunchedEffect
 
+        // Prewarm a WebView so the game/ad iframe opens without renderer cold-start.
+        WebViewPool.prewarm(context)
         catalogLoading = true
         catalogError = false
         try {
             val result = SimulaApiClient.fetchCatalog()
             games = result.games
             menuId = result.menuId.takeIf { it.isNotBlank() }
-
-            // Preload all cover images before showing grid (matching React behavior)
-            val imageUrls = result.games.mapNotNull { game ->
-                (game.gifCover ?: game.iconUrl).takeIf { it.isNotBlank() }
-            }
-            imageUrls.map { url ->
-                async {
-                    try {
-                        val request = ImageRequest.Builder(context)
-                            .data(url)
-                            .build()
-                        gifImageLoader.execute(request)
-                    } catch (_: Exception) {
-                        // Errors count as "loaded" — same as React
-                    }
-                }
-            }.awaitAll()
+            // Covers load lazily per card through ImageCache — grid shows immediately.
         } catch (e: Exception) {
             catalogError = true
             games = emptyList()
@@ -223,6 +178,10 @@ fun MiniGameMenu(
     }
 
     fun handleIframeClose() {
+        // Closing the game returns to the catalog menu (isOpen stays true) rather
+        // than dismissing the whole menu. If a post-game ad was fetched, the ad
+        // overlay shows first; otherwise clearing selectedGameId re-reveals the
+        // catalog. The menu is dismissed only by an explicit close/back action.
         if (!adFetched) {
             val aid = currentAdId
             if (aid != null) {
@@ -237,23 +196,19 @@ fun MiniGameMenu(
                         // Ad fetch failed -- no ad to show
                     }
                     selectedGameId = null
-                    if (adIframeUrl == null) {
-                        handleClose()
-                    }
                 }
             } else {
                 selectedGameId = null
-                handleClose()
             }
         } else {
             selectedGameId = null
-            handleClose()
         }
     }
 
     fun handleAdIframeClose() {
+        // Returns to the catalog menu (isOpen stays true) instead of dismissing;
+        // the menu is dismissed only by an explicit close/back action.
         adIframeUrl = null
-        handleClose()
     }
 
     fun getInitials(name: String): String {
@@ -277,11 +232,7 @@ fun MiniGameMenu(
         handleClose()
     }
 
-    // Provide GIF-capable image loader to all children
-    @Suppress("DEPRECATION")
-    CompositionLocalProvider(LocalImageLoader provides gifImageLoader) {
-
-        // ── Dialog 1: Menu Card ──────────────────────────────────────────────
+    // ── Dialog 1: Menu Card ──────────────────────────────────────────────
         if (isOpen && selectedGameId == null && adIframeUrl == null) {
             val configuration = LocalConfiguration.current
             val screenWidthDp = configuration.screenWidthDp
@@ -442,15 +393,11 @@ fun MiniGameMenu(
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             if (!imageError && charImage.isNotBlank()) {
-                                                AsyncImage(
+                                                CachedAsyncImage(
                                                     model = charImage,
                                                     contentDescription = charName,
                                                     contentScale = ContentScale.Crop,
-                                                    onState = { state ->
-                                                        if (state is AsyncImagePainter.State.Error) {
-                                                            imageError = true
-                                                        }
-                                                    },
+                                                    onError = { imageError = true },
                                                     modifier = Modifier.fillMaxSize(),
                                                 )
                                             } else {
@@ -664,7 +611,6 @@ fun MiniGameMenu(
                 )
             }
         }
-    }
 }
 
 // ── Fullscreen Dialog Window Config ──────────────────────────────────────────
@@ -764,7 +710,7 @@ private fun AdIframeOverlay(
                 .background(Color.White),
         ) {
             if (isBottomSheet) {
-                val borderColor = ColorUtil.parseColor(playableBorderColor)
+                val borderColor = remember(playableBorderColor) { ColorUtil.parseColor(playableBorderColor) }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -787,18 +733,11 @@ private fun AdIframeOverlay(
             Box(modifier = Modifier.fillMaxSize().weight(1f)) {
                 AndroidView(
                     factory = { ctx ->
-                        WebView(ctx).apply {
-                            setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                            )
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-
-                            webViewClient = object : WebViewClient() {
+                        WebViewPool.acquire(
+                            context = ctx,
+                            client = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, finishedUrl: String?) {
+                                    if (finishedUrl == "about:blank") return
                                     adPageLoaded = true
                                 }
                                 override fun shouldOverrideUrlLoading(
@@ -814,12 +753,11 @@ private fun AdIframeOverlay(
                                     ctx.startActivity(intent)
                                     return true
                                 }
-                            }
-                            loadUrl(url)
-                        }
+                            },
+                        ).apply { loadUrl(url) }
                     },
                     modifier = Modifier.fillMaxSize(),
-                    onRelease = { webView -> webView.destroy() },
+                    onRelease = { webView -> WebViewPool.release(webView) },
                 )
 
                 if (!adPageLoaded) {

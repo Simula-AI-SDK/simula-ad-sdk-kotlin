@@ -15,10 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,14 +25,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
-import coil.compose.AsyncImagePainter
+import ad.simula.ad.sdk.image.CachedCoverImage
 import ad.simula.ad.sdk.model.GameData
 
 private val fallbackEmojis = listOf("🎲", "🎮", "🎰", "🧩", "🎯")
@@ -50,16 +45,9 @@ internal fun CoverCard(
     game: GameData,
     onGameSelect: (gameId: String) -> Unit,
     modifier: Modifier = Modifier,
+    isAnimating: Boolean = true,
 ) {
-    // Image fallback stage: 0 = gifCover, 1 = iconUrl, 2 = emoji
-    var imageStage by remember { mutableIntStateOf(0) }
     val randomEmoji = remember { fallbackEmojis.random() }
-
-    val currentImageUrl: String? = when (imageStage) {
-        0 -> (game.gifCover ?: game.iconUrl).takeIf { it.isNotBlank() }
-        1 -> game.iconUrl.takeIf { it.isNotBlank() }
-        else -> null
-    }
 
     // Press scale animation
     val interactionSource = remember { MutableInteractionSource() }
@@ -87,42 +75,19 @@ internal fun CoverCard(
                 onGameSelect(game.id)
             },
     ) {
-        // Cover Image
-        if (currentImageUrl != null) {
-            AsyncImage(
-                model = currentImageUrl,
-                contentDescription = game.name,
-                contentScale = ContentScale.Crop,
-                onState = { state ->
-                    if (state is AsyncImagePainter.State.Error) {
-                        if (imageStage == 0 && game.iconUrl.isNotBlank() && game.gifCover != null) {
-                            imageStage = 1 // gifCover failed, try iconUrl
-                        } else {
-                            imageStage = 2 // show emoji fallback
-                        }
-                    }
+        // Cover Image (gifCover → iconUrl → emoji), animated only when centered
+        CachedCoverImage(
+            gifCover = game.gifCover,
+            iconUrl = game.iconUrl,
+            fallbackEmoji = game.iconFallback ?: randomEmoji,
+            isAnimating = isAnimating,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = 1.04f
+                    scaleY = 1.04f
                 },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = 1.04f
-                        scaleY = 1.04f
-                    },
-            )
-        } else {
-            // Emoji fallback
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0x0AFFFFFF)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = game.iconFallback ?: randomEmoji,
-                    fontSize = 48.sp,
-                )
-            }
-        }
+        )
 
         // Dark gradient overlay
         Box(

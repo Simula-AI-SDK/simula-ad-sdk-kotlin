@@ -52,12 +52,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import coil.compose.AsyncImage
-import coil.compose.AsyncImagePainter
-import ad.simula.ad.sdk.model.Defaults.MiniGameInterstitialDefaults
+import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.model.MiniGameInterstitialTheme
-import ad.simula.ad.sdk.util.ColorUtil
-import ad.simula.ad.sdk.util.FontUtil
+import ad.simula.ad.sdk.model.resolve
 
 /**
  * Full-screen interstitial invitation composable.
@@ -80,21 +77,16 @@ fun MiniGameInterstitial(
     var imageError by remember { mutableStateOf(false) }
     var closedInternally by remember { mutableStateOf(false) }
 
-    // Applied theme
-    val ctaCornerRadius = theme.ctaCornerRadius ?: MiniGameInterstitialDefaults.CTA_CORNER_RADIUS
-    val characterSize = theme.characterSize ?: MiniGameInterstitialDefaults.CHARACTER_SIZE
-    val titleTextColor = ColorUtil.parseColor(
-        theme.titleTextColor ?: MiniGameInterstitialDefaults.TITLE_TEXT_COLOR
-    )
-    val titleFontSize = theme.titleFontSize ?: MiniGameInterstitialDefaults.TITLE_FONT_SIZE
-    val ctaTextColor = ColorUtil.parseColor(
-        theme.ctaTextColor ?: MiniGameInterstitialDefaults.CTA_TEXT_COLOR
-    )
-    val ctaFontSize = theme.ctaFontSize ?: MiniGameInterstitialDefaults.CTA_FONT_SIZE
-    val fontFamily = FontUtil.parseFont(theme.fontFamily)
-    val ctaColor = ColorUtil.parseColor(
-        theme.ctaColor ?: MiniGameInterstitialDefaults.CTA_COLOR
-    )
+    // Applied theme (parsed once per theme identity)
+    val resolved = remember(theme) { theme.resolve() }
+    val ctaCornerRadius = resolved.ctaCornerRadius
+    val characterSize = resolved.characterSize
+    val titleTextColor = resolved.titleTextColor
+    val titleFontSize = resolved.titleFontSize
+    val ctaTextColor = resolved.ctaTextColor
+    val ctaFontSize = resolved.ctaFontSize
+    val fontFamily = resolved.fontFamily
+    val ctaColor = resolved.ctaColor
 
     val isVisible = isOpen && !closedInternally
 
@@ -192,7 +184,7 @@ fun MiniGameInterstitial(
         ) {
             // Background image (user-provided URL or bundled default)
             if (backgroundImage != null) {
-                AsyncImage(
+                CachedAsyncImage(
                     model = backgroundImage,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
@@ -220,15 +212,11 @@ fun MiniGameInterstitial(
             ) {
                 // Character image in circle
                 if (!imageError) {
-                    AsyncImage(
+                    CachedAsyncImage(
                         model = charImage,
                         contentDescription = "AI companion",
                         contentScale = ContentScale.Crop,
-                        onState = { state ->
-                            if (state is AsyncImagePainter.State.Error) {
-                                imageError = true
-                            }
-                        },
+                        onError = { imageError = true },
                         modifier = Modifier
                             .size(characterSize.dp)
                             .clip(CircleShape)

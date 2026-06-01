@@ -11,27 +11,19 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
+import java.net.URLEncoder
 
 /**
  * API client for Simula ad platform.
  * All functions are suspend and safe to call from coroutine scopes.
  * Mirrors the React SDK's utils/api.ts exactly.
+ *
+ * Networking goes through [SimulaHttp] (native [java.net.HttpURLConnection]) —
+ * no third-party HTTP dependency. JSON stays on kotlinx.serialization.
  */
 internal object SimulaApiClient {
 
     private const val API_BASE_URL = "https://simula-api-701226639755.us-central1.run.app"
-
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
-        .build()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -39,7 +31,10 @@ internal object SimulaApiClient {
         encodeDefaults = true
     }
 
-    private val JSON_MEDIA_TYPE = "application/json".toMediaType()
+    private val jsonHeaders = mapOf("Content-Type" to "application/json")
+
+    private fun authHeaders(apiKey: String) =
+        jsonHeaders + ("Authorization" to "Bearer $apiKey")
 
     // ── Session ─────────────────────────────────────────────────────────────
 
@@ -53,22 +48,21 @@ internal object SimulaApiClient {
         primaryUserID: String? = null,
     ): String? = withContext(Dispatchers.IO) {
         try {
-            val urlBuilder = "$API_BASE_URL/session/create".toHttpUrl().newBuilder()
-            if (devMode != null) {
-                urlBuilder.addQueryParameter("devMode", devMode.toString())
+            val params = buildList {
+                if (devMode != null) add("devMode=$devMode")
+                if (!primaryUserID.isNullOrBlank()) {
+                    add("ppid=${URLEncoder.encode(primaryUserID, "UTF-8")}")
+                }
             }
-            if (!primaryUserID.isNullOrBlank()) {
-                urlBuilder.addQueryParameter("ppid", primaryUserID)
-            }
+            val url = "$API_BASE_URL/session/create" +
+                if (params.isEmpty()) "" else "?" + params.joinToString("&")
 
-            val request = Request.Builder()
-                .url(urlBuilder.build())
-                .post("{}".toRequestBody(JSON_MEDIA_TYPE))
-                .addHeader("Content-Type", "application/json")
-                .addHeader("Authorization", "Bearer $apiKey")
-                .build()
-
-            val response = client.newCall(request).execute()
+            val response = SimulaHttp.request(
+                url = url,
+                method = "POST",
+                headers = authHeaders(apiKey),
+                body = "{}",
+            )
 
             if (response.code == 401) {
                 throw IllegalArgumentException(
@@ -77,8 +71,7 @@ internal object SimulaApiClient {
             }
             if (!response.isSuccessful) return@withContext null
 
-            val body = response.body?.string() ?: return@withContext null
-            val data = json.decodeFromString<SessionResponse>(body)
+            val data = json.decodeFromString<SessionResponse>(response.body)
             data.sessionId?.takeIf { it.isNotEmpty() }
         } catch (e: IllegalArgumentException) {
             throw e // Re-throw 401 errors
@@ -99,21 +92,19 @@ internal object SimulaApiClient {
      * Handles both new format (catalog field) and legacy format (data field).
      */
     suspend fun fetchCatalog(): CatalogResult = withContext(Dispatchers.IO) {
-        val request = Request.Builder()
-            .url("$API_BASE_URL/minigames/catalogv2")
-            .get()
-            .addHeader("Content-Type", "application/json")
-            .build()
-
-        val response = client.newCall(request).execute()
+        val response = SimulaHttp.request(
+            url = "$API_BASE_URL/minigames/catalogv2",
+            method = "GET",
+            headers = jsonHeaders,
+        )
         if (!response.isSuccessful) {
             throw Exception("HTTP error! status: ${response.code}")
         }
+        if (response.body.isBlank()) {
+            throw Exception("Empty response body")
+        }
 
-        val body = response.body?.string()
-            ?: throw Exception("Empty response body")
-
-        val responseJson = json.parseToJsonElement(body).jsonObject
+        val responseJson = json.parseToJsonElement(response.body).jsonObject
 
         val menuId = responseJson["menu_id"]?.jsonPrimitive?.content ?: ""
 
@@ -188,20 +179,19 @@ internal object SimulaApiClient {
             menuId = menuId,
         )
 
-        val request = Request.Builder()
-            .url("$API_BASE_URL/minigames/init")
-            .post(json.encodeToString(requestBody).toRequestBody(JSON_MEDIA_TYPE))
-            .addHeader("Content-Type", "application/json")
-            .build()
-
-        val response = client.newCall(request).execute()
+        val response = SimulaHttp.request(
+            url = "$API_BASE_URL/minigames/init",
+            method = "POST",
+            headers = jsonHeaders,
+            body = json.encodeToString(requestBody),
+        )
         if (!response.isSuccessful) {
             throw Exception("HTTP error! status: ${response.code}")
         }
-
-        val body = response.body?.string()
-            ?: throw Exception("Empty response body")
-        val data = json.decodeFromString<MinigameApiResponse>(body)
+        if (response.body.isBlank()) {
+            throw Exception("Empty response body")
+        }
+        val data = json.decodeFromString<MinigameApiResponse>(response.body)
 
         MinigameResult(
             adId = data.adResponse?.adId ?: "",
@@ -217,17 +207,15 @@ internal object SimulaApiClient {
      */
     suspend fun fetchAdForMinigame(adId: String): String? = withContext(Dispatchers.IO) {
         try {
-            val request = Request.Builder()
-                .url("$API_BASE_URL/minigames/fallback_ad/$adId")
-                .post("".toRequestBody(JSON_MEDIA_TYPE))
-                .addHeader("Content-Type", "application/json")
-                .build()
-
-            val response = client.newCall(request).execute()
+            val response = SimulaHttp.request(
+                url = "$API_BASE_URL/minigames/fallback_ad/$adId",
+                method = "POST",
+                headers = jsonHeaders,
+                body = "",
+            )
             if (!response.isSuccessful) return@withContext null
 
-            val body = response.body?.string() ?: return@withContext null
-            val data = json.decodeFromString<MinigameApiResponse>(body)
+            val data = json.decodeFromString<MinigameApiResponse>(response.body)
             data.adResponse?.iframeUrl
         } catch (e: Exception) {
             null
@@ -246,14 +234,12 @@ internal object SimulaApiClient {
     ): Unit = withContext(Dispatchers.IO) {
         try {
             val clickBody = MenuGameClickBody(menuId = menuId, gameName = gameName)
-            val request = Request.Builder()
-                .url("$API_BASE_URL/minigames/menu/track/click")
-                .post(json.encodeToString(clickBody).toRequestBody(JSON_MEDIA_TYPE))
-                .addHeader("Content-Type", "application/json")
-                .addHeader("Authorization", "Bearer $apiKey")
-                .build()
-
-            client.newCall(request).execute()
+            SimulaHttp.request(
+                url = "$API_BASE_URL/minigames/menu/track/click",
+                method = "POST",
+                headers = authHeaders(apiKey),
+                body = json.encodeToString(clickBody),
+            )
         } catch (_: Exception) {
             // Silently fail — tracking is best effort
         }
@@ -267,14 +253,12 @@ internal object SimulaApiClient {
         apiKey: String,
     ): Unit = withContext(Dispatchers.IO) {
         try {
-            val request = Request.Builder()
-                .url("$API_BASE_URL/track/engagement/impression/$adId")
-                .post("{}".toRequestBody(JSON_MEDIA_TYPE))
-                .addHeader("Content-Type", "application/json")
-                .addHeader("Authorization", "Bearer $apiKey")
-                .build()
-
-            client.newCall(request).execute()
+            SimulaHttp.request(
+                url = "$API_BASE_URL/track/engagement/impression/$adId",
+                method = "POST",
+                headers = authHeaders(apiKey),
+                body = "{}",
+            )
         } catch (_: Exception) {
             // Silently fail
         }
