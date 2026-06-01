@@ -34,6 +34,8 @@ internal sealed interface DecodedImage {
  *    [ConcurrentHashMap] of [Deferred]s launched in [SimulaScope]; the download
  *    therefore survives the requesting composable being torn down and completes
  *    into the cache for next time.
+ *  - Failures are negatively cached for a short TTL only (so a transient blip
+ *    recovers, while a broken URL isn't refetched on every scroll).
  *  - Cache cleared on memory pressure via a [ComponentCallbacks2] registered on
  *    the application context.
  */
@@ -41,6 +43,7 @@ internal object ImageCache {
 
     private const val HARD_CEILING_BYTES = 96 * 1024 * 1024
     private const val MIN_BYTES = 8 * 1024 * 1024
+    private const val NEGATIVE_TTL_MS = 30_000L
 
     private val costLimit: Int = run {
         val quarterHeap = Runtime.getRuntime().maxMemory() / 4
@@ -57,10 +60,10 @@ internal object ImageCache {
 
     private val inFlight = ConcurrentHashMap<String, Deferred<DecodedImage>>()
 
-    @Volatile private var callbacksRegistered = false
+    /** url -> last failure timestamp (negative cache, TTL-bounded). */
+    private val failures = ConcurrentHashMap<String, Long>()
 
-    /** Returns a cached entry without touching the network, or null if absent. */
-    fun peek(url: String): DecodedImage? = cache.get(url)
+    @Volatile private var callbacksRegistered = false
 
     /**
      * Load (or de-duplicate a load of) [url]. Suspends the caller until the
@@ -71,6 +74,10 @@ internal object ImageCache {
         registerMemoryCallbacks(context)
         cache.get(url)?.let { return it }
         if (url.isBlank()) return DecodedImage.Failed
+        failures[url]?.let { failedAt ->
+            if (now() - failedAt < NEGATIVE_TTL_MS) return DecodedImage.Failed
+            failures.remove(url, failedAt) // TTL expired — allow a retry
+        }
 
         var created: Deferred<DecodedImage>? = null
         val deferred = inFlight.computeIfAbsent(url) { key ->
@@ -87,13 +94,25 @@ internal object ImageCache {
             val bytes = SimulaHttp.requestBytes(url)
             ImageDecoder.decode(bytes)
         } catch (ce: CancellationException) {
-            throw ce // never cache a cancellation — stays retryable
+            throw ce // never record a cancellation — stays immediately retryable
         } catch (e: Exception) {
-            DecodedImage.Failed // cache failures so a broken URL isn't refetched while scrolling
+            DecodedImage.Failed
         }
-        cache.put(url, result)
+        if (result is DecodedImage.Failed) {
+            failures[url] = now() // negative-cache for the TTL, don't pollute the LruCache
+        } else {
+            cache.put(url, result)
+            failures.remove(url)
+        }
         return result
     }
+
+    private fun clearAll() {
+        cache.evictAll()
+        failures.clear()
+    }
+
+    private fun now(): Long = System.currentTimeMillis()
 
     private fun registerMemoryCallbacks(context: Context) {
         if (callbacksRegistered) return
@@ -101,12 +120,12 @@ internal object ImageCache {
             if (callbacksRegistered) return
             context.applicationContext.registerComponentCallbacks(object : ComponentCallbacks2 {
                 override fun onTrimMemory(level: Int) {
-                    if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) cache.evictAll()
+                    if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) clearAll()
                 }
 
                 @Deprecated("Deprecated in Java")
                 override fun onLowMemory() {
-                    cache.evictAll()
+                    clearAll()
                 }
 
                 override fun onConfigurationChanged(newConfig: Configuration) {}

@@ -39,18 +39,17 @@ internal object SimulaHttp {
         body: String? = null,
     ): Response = withContext(Dispatchers.IO) {
         val conn = open(url, method, headers)
-        try {
-            if (body != null) {
-                conn.doOutput = true
-                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            }
-            val code = conn.responseCode
-            val stream = if (code in 200..299) conn.inputStream else (conn.errorStream ?: conn.inputStream)
-            val text = decode(conn, stream).bufferedReader(Charsets.UTF_8).use { it.readText() }
-            Response(code, text)
-        } finally {
-            conn.disconnect()
+        if (body != null) {
+            conn.doOutput = true
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
         }
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else (conn.errorStream ?: conn.inputStream)
+        // Fully read + close the stream (via use) to return the connection to the
+        // keep-alive pool. We deliberately do NOT call disconnect() — that closes
+        // the socket and forces a fresh TLS handshake on the next same-host request.
+        val text = decode(conn, stream).bufferedReader(Charsets.UTF_8).use { it.readText() }
+        Response(code, text)
     }
 
     /**
@@ -59,13 +58,13 @@ internal object SimulaHttp {
      */
     suspend fun requestBytes(url: String): ByteArray = withContext(Dispatchers.IO) {
         val conn = open(url, "GET", emptyMap())
-        try {
-            val code = conn.responseCode
-            if (code !in 200..299) throw IOException("HTTP $code for $url")
-            decode(conn, conn.inputStream).use { it.readBytes() }
-        } finally {
-            conn.disconnect()
+        val code = conn.responseCode
+        if (code !in 200..299) {
+            // Drain + close the error body so the connection can be reused.
+            conn.errorStream?.use { it.readBytes() }
+            throw IOException("HTTP $code for $url")
         }
+        decode(conn, conn.inputStream).use { it.readBytes() }
     }
 
     private fun open(url: String, method: String, headers: Map<String, String>): HttpURLConnection =

@@ -1,8 +1,10 @@
 package ad.simula.ad.sdk.minigame
 
 import android.annotation.SuppressLint
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.MutableContextWrapper
+import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
@@ -33,6 +35,8 @@ internal object WebViewPool {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val idle = ArrayDeque<WebView>()
 
+    @Volatile private var callbacksRegistered = false
+
     /** Swallows the prewarm `about:blank` navigation so consumers never see it. */
     private val blankIgnoringClient = object : WebViewClient() {
         override fun onPageFinished(view: WebView?, url: String?) { /* ignore about:blank */ }
@@ -41,6 +45,7 @@ internal object WebViewPool {
     /** Create and warm an idle WebView if there's room. Cheap no-op when full. */
     @MainThread
     fun prewarm(context: Context) {
+        registerTrimCallbacks(context)
         if (idle.size >= MAX_IDLE) return
         idle.addLast(create(context))
     }
@@ -51,6 +56,7 @@ internal object WebViewPool {
      */
     @MainThread
     fun acquire(context: Context, client: WebViewClient): WebView {
+        registerTrimCallbacks(context)
         val webView = idle.removeFirstOrNull() ?: create(context)
         (webView.context as? MutableContextWrapper)?.baseContext = context
         webView.webViewClient = client
@@ -77,6 +83,28 @@ internal object WebViewPool {
         } else {
             webView.destroy()
         }
+    }
+
+    /** Destroy warm idle WebViews under memory pressure (callbacks arrive on the main thread). */
+    private fun trimIdle() {
+        while (idle.isNotEmpty()) idle.removeFirst().destroy()
+    }
+
+    private fun registerTrimCallbacks(context: Context) {
+        if (callbacksRegistered) return
+        context.applicationContext.registerComponentCallbacks(object : ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) {
+                if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) trimIdle()
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onLowMemory() {
+                trimIdle()
+            }
+
+            override fun onConfigurationChanged(newConfig: Configuration) {}
+        })
+        callbacksRegistered = true
     }
 
     @SuppressLint("SetJavaScriptEnabled")
