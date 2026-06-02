@@ -85,6 +85,7 @@ object SimulaPrivacy {
         gppString: String? = null,
         gppSid: String? = null,
         gdprApplies: Boolean? = null,
+        tcfPurpose1Consent: Boolean? = null,
         coppaApplies: Boolean? = null,
         enableAdvertisingId: Boolean? = null,
     ) {
@@ -96,12 +97,39 @@ object SimulaPrivacy {
                 gppString = gppString ?: explicitConfig.gppString,
                 gppSid = gppSid ?: explicitConfig.gppSid,
                 gdprApplies = gdprApplies ?: explicitConfig.gdprApplies,
+                tcfPurpose1Consent = tcfPurpose1Consent ?: explicitConfig.tcfPurpose1Consent,
                 coppaApplies = coppaApplies ?: explicitConfig.coppaApplies,
                 enableAdvertisingId = enableAdvertisingId ?: explicitConfig.enableAdvertisingId,
             )
             if (!explicitConfig.enableAdvertisingId || explicitConfig.coppaApplies) {
                 collectedAdvertisingId = null
             }
+        }
+        recompute()
+    }
+
+    /**
+     * Clears the named explicit consent overrides back to "unset". The store then
+     * falls back to any auto-read IAB value (or null). Unlike [update], where null
+     * means "leave unchanged", this is how you *remove* a signal you set.
+     */
+    fun clearConsent(
+        tcString: Boolean = false,
+        uspString: Boolean = false,
+        gppString: Boolean = false,
+        gppSid: Boolean = false,
+        gdprApplies: Boolean = false,
+        tcfPurpose1Consent: Boolean = false,
+    ) {
+        synchronized(lock) {
+            explicitConfig = explicitConfig.copy(
+                tcString = if (tcString) null else explicitConfig.tcString,
+                uspString = if (uspString) null else explicitConfig.uspString,
+                gppString = if (gppString) null else explicitConfig.gppString,
+                gppSid = if (gppSid) null else explicitConfig.gppSid,
+                gdprApplies = if (gdprApplies) null else explicitConfig.gdprApplies,
+                tcfPurpose1Consent = if (tcfPurpose1Consent) null else explicitConfig.tcfPurpose1Consent,
+            )
         }
         recompute()
     }
@@ -142,7 +170,7 @@ object SimulaPrivacy {
                 gppSid = cfg.gppSid ?: readGppSid(p),
                 gdprApplies = cfg.gdprApplies ?: readGdprApplies(p),
                 coppaApplies = cfg.coppaApplies,
-                tcfPurpose1Consent = readPurpose1(p),
+                tcfPurpose1Consent = cfg.tcfPurpose1Consent ?: readPurpose1(p),
                 advertisingId = if (cfg.coppaApplies) null else collectedAdvertisingId,
             )
         }

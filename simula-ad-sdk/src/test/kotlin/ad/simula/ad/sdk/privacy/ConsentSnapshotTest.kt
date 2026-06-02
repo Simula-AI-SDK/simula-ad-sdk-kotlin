@@ -19,6 +19,7 @@ class ConsentSnapshotTest {
         val h = ConsentSnapshot(
             tcString = "CPtc", uspString = "1YNN", gppString = "DBABgpp",
             gppSid = "2,6", gdprApplies = true, coppaApplies = false,
+            tcfPurpose1Consent = false,
             advertisingId = "GAID1",
         ).consentHeaders()
         assertEquals("1", h["X-Simula-GDPR-Applies"])
@@ -26,6 +27,7 @@ class ConsentSnapshotTest {
         assertEquals("1YNN", h["X-Simula-Consent-USP"])
         assertEquals("DBABgpp", h["X-Simula-Consent-GPP"])
         assertEquals("2,6", h["X-Simula-Consent-GPP-SID"])
+        assertEquals("0", h["X-Simula-Consent-Purpose1"])
         assertEquals("0", h["X-Simula-COPPA"])
         // The raw advertising id is intentionally NOT in headers (session body only).
         assertNull(h["X-Simula-GAID"])
@@ -42,12 +44,14 @@ class ConsentSnapshotTest {
     @Test
     fun privacyJson_serializesExpectedFields() {
         val json = ConsentSnapshot(
-            tcString = "CPtc", gdprApplies = true, coppaApplies = true, advertisingId = "GAID1",
+            tcString = "CPtc", gdprApplies = true, coppaApplies = true,
+            tcfPurpose1Consent = true, advertisingId = "GAID1",
         ).privacyJson().toString()
         assertTrue(json.contains("\"hasPrivacyConsent\":true"))
         assertTrue(json.contains("\"coppaApplies\":true"))
         assertTrue(json.contains("\"gdprApplies\":1"))
         assertTrue(json.contains("\"tcString\":\"CPtc\""))
+        assertTrue(json.contains("\"tcfPurpose1Consent\":true"))
         assertTrue(json.contains("\"gaid\":\"GAID1\""))
     }
 
@@ -71,6 +75,14 @@ class ConsentSnapshotTest {
         assertFalse(ConsentSnapshot(gdprApplies = true, tcfPurpose1Consent = null).allowsLocalStorage)
         assertFalse(ConsentSnapshot(gdprApplies = true, tcfPurpose1Consent = false).allowsLocalStorage)
         assertTrue(ConsentSnapshot(gdprApplies = true, tcfPurpose1Consent = true).allowsLocalStorage)
+    }
+
+    @Test
+    fun clearConsent_removesOnlyNamedExplicitSignals() {
+        SimulaPrivacy.apply(SimulaPrivacyConfig(tcString = "TC", uspString = "1YNN"))
+        SimulaPrivacy.clearConsent(tcString = true)
+        assertNull(SimulaPrivacy.current.tcString)        // cleared (no IAB fallback in unit test)
+        assertEquals("1YNN", SimulaPrivacy.current.uspString) // untouched
     }
 
     @Test

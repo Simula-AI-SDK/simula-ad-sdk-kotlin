@@ -27,6 +27,12 @@ data class SimulaPrivacyConfig(
     val gppSid: String? = null,
     /** Whether GDPR applies. null = unknown/unset (mirror of `IABTCF_gdprApplies`). */
     val gdprApplies: Boolean? = null,
+    /**
+     * Explicit TCF Purpose 1 ("store/access information on a device") consent. When
+     * set, takes precedence over the auto-read `IABTCF_PurposeConsents`. Useful for
+     * hosts without a TCF CMP and for testing storage-degradation behavior.
+     */
+    val tcfPurpose1Consent: Boolean? = null,
     /** COPPA (child-directed) treatment. When true, PII and the GAID are suppressed. */
     val coppaApplies: Boolean = false,
     /**
@@ -85,6 +91,7 @@ data class ConsentSnapshot(
         uspString?.takeIf { it.isNotEmpty() }?.let { h["X-Simula-Consent-USP"] = it }
         gppString?.takeIf { it.isNotEmpty() }?.let { h["X-Simula-Consent-GPP"] = it }
         gppSid?.takeIf { it.isNotEmpty() }?.let { h["X-Simula-Consent-GPP-SID"] = it }
+        tcfPurpose1Consent?.let { h["X-Simula-Consent-Purpose1"] = if (it) "1" else "0" }
         h["X-Simula-COPPA"] = if (coppaApplies) "1" else "0"
         return h
     }
@@ -98,6 +105,7 @@ data class ConsentSnapshot(
         uspString?.takeIf { it.isNotEmpty() }?.let { put("uspString", it) }
         gppString?.takeIf { it.isNotEmpty() }?.let { put("gppString", it) }
         gppSid?.takeIf { it.isNotEmpty() }?.let { put("gppSid", it) }
+        tcfPurpose1Consent?.let { put("tcfPurpose1Consent", it) }
         advertisingId?.takeIf { it.isNotEmpty() }?.let { put("gaid", it) }
     }
 }
