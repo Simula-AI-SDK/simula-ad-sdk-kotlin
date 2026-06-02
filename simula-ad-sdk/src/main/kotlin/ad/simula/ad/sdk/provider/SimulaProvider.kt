@@ -2,16 +2,22 @@ package ad.simula.ad.sdk.provider
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaContextValue
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
+import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -70,11 +76,32 @@ fun SimulaProvider(
         privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
     }
 
-    // Feed the process-wide store and (re)read the GAID when the opt-in changes.
-    LaunchedEffect(resolvedConfig) {
-        SimulaPrivacy.attach(context)
+    // Seed the store synchronously during composition so the FIRST session
+    // reflects the explicit config (correct ppid gating) rather than the default
+    // snapshot — avoids an initial consent-less /session/create.
+    remember(resolvedConfig) {
         SimulaPrivacy.apply(resolvedConfig)
+        resolvedConfig
+    }
+
+    // Attach for IAB auto-read and (re)read the GAID — off the first frame.
+    LaunchedEffect(context, resolvedConfig) {
+        SimulaPrivacy.attach(context)
         SimulaPrivacy.refreshAdvertisingId()
+    }
+
+    // Re-read the GAID on foreground: ad-tracking permission or the GAID itself
+    // can change while the app is backgrounded.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                scope.launch { SimulaPrivacy.refreshAdvertisingId() }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // Resolved consent (explicit overrides merged over auto-read IAB keys). Drives

@@ -127,50 +127,57 @@ object SimulaPrivacy {
     // ── Snapshot building ─────────────────────────────────────────────────────
 
     private fun recompute() {
-        val cfg: SimulaPrivacyConfig
-        val adId: String?
-        val p: SharedPreferences?
+        // Build and publish the snapshot atomically under a single lock so two
+        // concurrent updates can't interleave and let an older snapshot clobber a
+        // newer one (SharedPreferences reads are in-memory and cheap).
         synchronized(lock) {
-            cfg = explicitConfig
-            adId = collectedAdvertisingId
-            p = prefs
+            val cfg = explicitConfig
+            val p = prefs
+            // Explicit (provider/CMP) values win; otherwise fall back to IAB keys.
+            _snapshot.value = ConsentSnapshot(
+                hasPrivacyConsent = cfg.hasPrivacyConsent,
+                tcString = cfg.tcString ?: getStringSafe(p, "IABTCF_TCString"),
+                uspString = cfg.uspString ?: getStringSafe(p, "IABUSPrivacy_String"),
+                gppString = cfg.gppString ?: getStringSafe(p, "IABGPP_HDR_GppString"),
+                gppSid = cfg.gppSid ?: readGppSid(p),
+                gdprApplies = cfg.gdprApplies ?: readGdprApplies(p),
+                coppaApplies = cfg.coppaApplies,
+                tcfPurpose1Consent = readPurpose1(p),
+                advertisingId = if (cfg.coppaApplies) null else collectedAdvertisingId,
+            )
         }
-        // Explicit (provider/CMP) values win; otherwise fall back to IAB-read keys.
-        _snapshot.value = ConsentSnapshot(
-            hasPrivacyConsent = cfg.hasPrivacyConsent,
-            tcString = cfg.tcString ?: getStringSafe(p, "IABTCF_TCString"),
-            uspString = cfg.uspString ?: getStringSafe(p, "IABUSPrivacy_String"),
-            gppString = cfg.gppString ?: getStringSafe(p, "IABGPP_HDR_GppString"),
-            gppSid = cfg.gppSid ?: readGppSid(p),
-            gdprApplies = cfg.gdprApplies ?: readGdprApplies(p),
-            coppaApplies = cfg.coppaApplies,
-            tcfPurpose1Consent = readPurpose1(p),
-            advertisingId = if (cfg.coppaApplies) null else adId,
-        )
     }
 
     // ── IAB key readers ───────────────────────────────────────────────────────
 
-    private fun getStringSafe(p: SharedPreferences?, key: String): String? = try {
-        p?.getString(key, null)?.takeIf { it.isNotEmpty() }
-    } catch (_: ClassCastException) {
-        null
-    }
-
-    /** `IABTCF_gdprApplies` is stored as a Number (0/1). null when unset. */
-    private fun readGdprApplies(p: SharedPreferences?): Boolean? {
+    /**
+     * Reads a key as a non-empty string, coercing Numbers (some CMPs store IAB
+     * fields as Numbers, e.g. a single-section `IABGPP_GppSID` or `gdprApplies`).
+     * Returns null for missing / empty / uncoercible values.
+     */
+    private fun getStringSafe(p: SharedPreferences?, key: String): String? {
         p ?: return null
-        if (!p.contains("IABTCF_gdprApplies")) return null
         return try {
-            p.getInt("IABTCF_gdprApplies", 0) == 1
+            // Common path: avoid the full-map copy that `p.all` would allocate.
+            p.getString(key, null)?.takeIf { it.isNotEmpty() }
         } catch (_: ClassCastException) {
-            getStringSafe(p, "IABTCF_gdprApplies") == "1"
+            // CMP stored a non-string (e.g. a single-section GppSID as Int). Coerce.
+            when (val v = p.all[key]) {
+                is Int, is Long, is Float, is Double -> v.toString()
+                else -> null
+            }
         }
     }
 
+    /** `IABTCF_gdprApplies` is stored as a Number (0/1), occasionally a String. */
+    private fun readGdprApplies(p: SharedPreferences?): Boolean? {
+        val s = getStringSafe(p, "IABTCF_gdprApplies") ?: return null
+        return s == "1"
+    }
+
     /**
-     * `IABGPP_GppSID` is stored as an underscore-separated string of section IDs
-     * (e.g. "2_6"). Normalize to comma-separated to match the wire contract.
+     * `IABGPP_GppSID` is an underscore-separated string of section IDs (e.g.
+     * "2_6"), or a bare Number for a single section. Normalize to comma-separated.
      */
     private fun readGppSid(p: SharedPreferences?): String? {
         val s = getStringSafe(p, "IABGPP_GppSID") ?: return null

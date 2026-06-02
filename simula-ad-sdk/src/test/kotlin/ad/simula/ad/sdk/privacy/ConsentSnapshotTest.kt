@@ -27,7 +27,8 @@ class ConsentSnapshotTest {
         assertEquals("DBABgpp", h["X-Simula-Consent-GPP"])
         assertEquals("2,6", h["X-Simula-Consent-GPP-SID"])
         assertEquals("0", h["X-Simula-COPPA"])
-        assertEquals("GAID1", h["X-Simula-GAID"])
+        // The raw advertising id is intentionally NOT in headers (session body only).
+        assertNull(h["X-Simula-GAID"])
     }
 
     @Test
@@ -58,9 +59,17 @@ class ConsentSnapshotTest {
     }
 
     @Test
-    fun gating_purpose1GatesLocalStorage() {
+    fun gating_purpose1GatesLocalStorageOutsideGdpr() {
         assertTrue(ConsentSnapshot(tcfPurpose1Consent = null).allowsLocalStorage)  // unknown → permit
         assertTrue(ConsentSnapshot(tcfPurpose1Consent = true).allowsLocalStorage)
         assertFalse(ConsentSnapshot(tcfPurpose1Consent = false).allowsLocalStorage)
+    }
+
+    @Test
+    fun gating_unknownPurpose1DeniedUnderGdpr() {
+        // Under GDPR an unknown Purpose 1 must be treated as denied.
+        assertFalse(ConsentSnapshot(gdprApplies = true, tcfPurpose1Consent = null).allowsLocalStorage)
+        assertFalse(ConsentSnapshot(gdprApplies = true, tcfPurpose1Consent = false).allowsLocalStorage)
+        assertTrue(ConsentSnapshot(gdprApplies = true, tcfPurpose1Consent = true).allowsLocalStorage)
     }
 }

@@ -63,12 +63,21 @@ data class ConsentSnapshot(
 
     /**
      * Whether non-essential local storage / caching is permitted. Under TCF a
-     * denied Purpose 1 means the SDK must avoid non-essential on-device storage;
-     * when unknown we permit (contextual default).
+     * denied Purpose 1 means the SDK must avoid non-essential on-device storage.
+     * When GDPR applies, an *unknown* Purpose 1 is treated as denied (consent must
+     * be explicit); outside GDPR we permit by default (contextual).
      */
-    val allowsLocalStorage: Boolean get() = tcfPurpose1Consent ?: true
+    val allowsLocalStorage: Boolean
+        get() = when {
+            gdprApplies == true -> tcfPurpose1Consent == true
+            else -> tcfPurpose1Consent ?: true
+        }
 
-    /** Consent signals as request headers (for ad-serving / tracking calls). */
+    /**
+     * Consent *metadata* as request headers (for ad-serving / tracking calls). The
+     * raw advertising identifier is intentionally **not** included here (it travels
+     * only in the session body) to minimize PII exposure on per-request calls.
+     */
     fun consentHeaders(): Map<String, String> {
         val h = LinkedHashMap<String, String>()
         gdprApplies?.let { h["X-Simula-GDPR-Applies"] = if (it) "1" else "0" }
@@ -77,7 +86,6 @@ data class ConsentSnapshot(
         gppString?.takeIf { it.isNotEmpty() }?.let { h["X-Simula-Consent-GPP"] = it }
         gppSid?.takeIf { it.isNotEmpty() }?.let { h["X-Simula-Consent-GPP-SID"] = it }
         h["X-Simula-COPPA"] = if (coppaApplies) "1" else "0"
-        advertisingId?.takeIf { it.isNotEmpty() }?.let { h["X-Simula-GAID"] = it }
         return h
     }
 
