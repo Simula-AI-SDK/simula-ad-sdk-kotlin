@@ -3,10 +3,15 @@ package ad.simula.ad.sdk.provider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.platform.LocalContext
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaContextValue
+import ad.simula.ad.sdk.privacy.SimulaPrivacy
+import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -38,7 +43,11 @@ private fun getCacheKey(slot: String, position: Int): String = "$slot:$position"
  * @param apiKey        Your Simula API key (required, non-blank).
  * @param devMode       Enable dev mode for testing. Default false.
  * @param primaryUserID Optional user identifier for targeting.
- * @param hasPrivacyConsent Privacy consent flag. When false, suppresses PII. Default true.
+ * @param hasPrivacyConsent Legacy coarse consent flag. When false, suppresses PII. Default true.
+ * @param privacy       Granular privacy / consent configuration (GDPR/CCPA/GPP/COPPA + IDFA
+ *                      opt-in). When provided it takes precedence over [hasPrivacyConsent];
+ *                      when null the SDK seeds a config from [hasPrivacyConsent] and still
+ *                      auto-reads IAB-standard CMP keys. See [SimulaPrivacy].
  * @param content       Child composable tree.
  */
 @Composable
@@ -47,15 +56,38 @@ fun SimulaProvider(
     devMode: Boolean = false,
     primaryUserID: String? = null,
     hasPrivacyConsent: Boolean = true,
+    privacy: SimulaPrivacyConfig? = null,
     content: @Composable () -> Unit,
 ) {
     // Validate props early (matches React's validateSimulaProviderProps)
     require(apiKey.isNotBlank()) { "SimulaProvider requires a valid \"apiKey\" (non-blank string)" }
 
-    val effectiveUserID = if (hasPrivacyConsent) primaryUserID else null
+    val context = LocalContext.current
 
-    // Session holder — coalesces concurrent creation, retryable on failure.
-    val sessionStore = remember(apiKey, devMode, effectiveUserID) {
+    // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
+    // seeds it so existing call sites behave exactly as before.
+    val resolvedConfig = remember(privacy, hasPrivacyConsent) {
+        privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
+    }
+
+    // Feed the process-wide store and (re)read the GAID when the opt-in changes.
+    LaunchedEffect(resolvedConfig) {
+        SimulaPrivacy.attach(context)
+        SimulaPrivacy.apply(resolvedConfig)
+        SimulaPrivacy.refreshAdvertisingId()
+    }
+
+    // Resolved consent (explicit overrides merged over auto-read IAB keys). Drives
+    // ppid gating and — via the session key below — re-sync on CMP refresh.
+    val consent by SimulaPrivacy.snapshot.collectAsState()
+
+    // ppid is suppressed without consent and additionally under COPPA.
+    val effectiveUserID = if (consent.allowsPrimaryUserID) primaryUserID else null
+
+    // Session holder — keyed on the resolved consent so a CMP refresh recreates
+    // the session and the backend sees current signals. Coalesces concurrent
+    // creation, retryable on failure.
+    val sessionStore = remember(apiKey, devMode, consent) {
         SimulaSessionStore(apiKey, devMode, effectiveUserID)
     }
 
@@ -71,12 +103,14 @@ fun SimulaProvider(
     }
 
     // Build context value — equivalent to React's useMemo
-    val contextValue = remember(apiKey, devMode, sessionStore.sessionId, hasPrivacyConsent) {
+    val contextValue = remember(apiKey, devMode, sessionStore.sessionId, consent) {
         SimulaContextValue(
             apiKey = apiKey,
             devMode = devMode,
             sessionId = sessionStore.sessionId,
-            hasPrivacyConsent = hasPrivacyConsent,
+            hasPrivacyConsent = consent.hasPrivacyConsent,
+            consent = consent,
+            updateConsent = { SimulaPrivacy.apply(it) },
             ensureSession = { sessionStore.ensureSession() },
             getCachedAd = { slot, position ->
                 adCache[getCacheKey(slot, position)]

@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.model
 
+import ad.simula.ad.sdk.privacy.ConsentSnapshot
+import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -33,6 +35,10 @@ internal data class SimulaContextValue(
     val devMode: Boolean,
     val sessionId: String?,
     val hasPrivacyConsent: Boolean,
+    /** Resolved consent snapshot (IAB-read + explicit overrides). */
+    val consent: ConsentSnapshot,
+    /** Replace the privacy configuration at runtime (e.g. CMP refresh). */
+    val updateConsent: (SimulaPrivacyConfig) -> Unit,
     val ensureSession: suspend () -> String?,
     val getCachedAd: (slot: String, position: Int) -> AdData?,
     val cacheAd: (slot: String, position: Int, ad: AdData) -> Unit,
