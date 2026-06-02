@@ -176,12 +176,14 @@ object SimulaPrivacy {
     }
 
     /**
-     * `IABGPP_GppSID` is an underscore-separated string of section IDs (e.g.
-     * "2_6"), or a bare Number for a single section. Normalize to comma-separated.
+     * `IABGPP_GppSID` may be a String ("2_6"), a single Number, or a `Set<String>`
+     * depending on the CMP. Read the raw value and normalize via [normalizeGppSid].
      */
     private fun readGppSid(p: SharedPreferences?): String? {
-        val s = getStringSafe(p, "IABGPP_GppSID") ?: return null
-        return s.replace("_", ",")
+        p ?: return null
+        if (!p.contains("IABGPP_GppSID")) return null
+        val str = try { p.getString("IABGPP_GppSID", null) } catch (_: ClassCastException) { null }
+        return normalizeGppSid(str ?: p.all["IABGPP_GppSID"])
     }
 
     /** TCF Purpose 1 consent = first char of `IABTCF_PurposeConsents` ('1' = consented). */
@@ -209,4 +211,19 @@ object SimulaPrivacy {
             null
         }
     }
+}
+
+/**
+ * Normalizes `IABGPP_GppSID` to a comma-separated string of section IDs across the
+ * shapes CMPs use: an underscore-/comma-separated String, a single Number, or a
+ * `Set<*>` (order isn't preserved by SharedPreferences, so it is sorted numerically).
+ */
+internal fun normalizeGppSid(raw: Any?): String? = when (raw) {
+    is String -> raw.takeIf { it.isNotEmpty() }?.replace("_", ",")
+    is Int, is Long, is Float, is Double -> raw.toString()
+    is Set<*> -> raw.mapNotNull { it?.toString()?.takeIf(String::isNotEmpty) }
+        .sortedBy { it.toIntOrNull() ?: Int.MAX_VALUE }
+        .joinToString(",")
+        .takeIf { it.isNotEmpty() }
+    else -> null
 }

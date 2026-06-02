@@ -17,6 +17,8 @@ import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaContextValue
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 
@@ -56,6 +58,7 @@ private fun getCacheKey(slot: String, position: Int): String = "$slot:$position"
  *                      auto-reads IAB-standard CMP keys. See [SimulaPrivacy].
  * @param content       Child composable tree.
  */
+@OptIn(FlowPreview::class) // Flow.debounce — stable in practice, contained to this module.
 @Composable
 fun SimulaProvider(
     apiKey: String,
@@ -104,17 +107,22 @@ fun SimulaProvider(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Resolved consent (explicit overrides merged over auto-read IAB keys). Drives
-    // ppid gating and — via the session key below — re-sync on CMP refresh.
+    // Resolved consent (explicit overrides merged over auto-read IAB keys); drives
+    // ppid gating and the context value.
     val consent by SimulaPrivacy.snapshot.collectAsState()
 
-    // ppid is suppressed without consent and additionally under COPPA.
-    val effectiveUserID = if (consent.allowsPrimaryUserID) primaryUserID else null
+    // CMPs write the IAB keys in a burst; debounce the snapshot that drives session
+    // re-sync so a settled consent state triggers one /session/create, not a race.
+    val sessionConsent by remember { SimulaPrivacy.snapshot.debounce(300L) }
+        .collectAsState(initial = SimulaPrivacy.current)
 
-    // Session holder — keyed on the resolved consent so a CMP refresh recreates
+    // ppid is suppressed without consent and additionally under COPPA.
+    val effectiveUserID = if (sessionConsent.allowsPrimaryUserID) primaryUserID else null
+
+    // Session holder — keyed on the (debounced) consent so a CMP refresh recreates
     // the session and the backend sees current signals. Coalesces concurrent
     // creation, retryable on failure.
-    val sessionStore = remember(apiKey, devMode, consent) {
+    val sessionStore = remember(apiKey, devMode, sessionConsent) {
         SimulaSessionStore(apiKey, devMode, effectiveUserID)
     }
 

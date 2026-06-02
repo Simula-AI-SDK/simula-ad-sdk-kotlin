@@ -72,4 +72,17 @@ class ConsentSnapshotTest {
         assertFalse(ConsentSnapshot(gdprApplies = true, tcfPurpose1Consent = false).allowsLocalStorage)
         assertTrue(ConsentSnapshot(gdprApplies = true, tcfPurpose1Consent = true).allowsLocalStorage)
     }
+
+    @Test
+    fun normalizeGppSid_handlesStringNumberAndSet() {
+        // CMPs write IABGPP_GppSID inconsistently: string, number, or a Set.
+        assertEquals("2,6", normalizeGppSid("2_6"))
+        assertEquals("2,6", normalizeGppSid("2,6"))
+        assertEquals("2", normalizeGppSid(2))
+        assertEquals("2", normalizeGppSid(2L))
+        assertEquals("2,6,10", normalizeGppSid(setOf("6", "10", "2"))) // numeric sort (order-independent)
+        assertNull(normalizeGppSid(null))
+        assertNull(normalizeGppSid(""))
+        assertNull(normalizeGppSid(emptySet<String>()))
+    }
 }
