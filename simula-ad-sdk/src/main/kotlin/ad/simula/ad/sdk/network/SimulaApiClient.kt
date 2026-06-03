@@ -54,7 +54,8 @@ internal object SimulaApiClient {
                     add("ppid=${URLEncoder.encode(primaryUserID, "UTF-8")}")
                 }
             }
-            val url = "$API_BASE_URL/session/create"
+            val url = "$API_BASE_URL/session/create" +
+                if (params.isEmpty()) "" else "?" + params.joinToString("&")
 
             val response = SimulaHttp.request(
                 url = url,
@@ -74,7 +75,7 @@ internal object SimulaApiClient {
             data.sessionId?.takeIf { it.isNotEmpty() }
         } catch (e: IllegalArgumentException) {
             throw e // Re-throw 401 errors
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
@@ -272,7 +273,7 @@ internal object SimulaApiClient {
 
             val data = json.decodeFromString<MinigameApiResponse>(response.body)
             data.adResponse?.iframeUrl
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
@@ -296,7 +297,7 @@ internal object SimulaApiClient {
                 body = json.encodeToString(clickBody),
             )
         } catch (_: Exception) {
-            // Silently fail — tracking is best effort
+            // Silently fail — tracking is the best effort
         }
     }
 

@@ -25,6 +25,14 @@ internal class InterstitialPresentation(
 
     /** Set true once the rewarded play threshold elapses; gates the reward callback. */
     var rewardEarned = false
+
+    /**
+     * `SystemClock.elapsedRealtime()` when the rewarded dwell first started, or 0 if
+     * not yet started. Anchored on the presentation (which survives Activity
+     * recreation via the handoff) so a config change resumes the remaining dwell
+     * instead of restarting it — otherwise rotating could reset/evade the gate.
+     */
+    var gateStartedAtMs = 0L
 }
 
 /**

@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.network
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -38,6 +39,12 @@ internal object SimulaHttp {
         headers: Map<String, String> = emptyMap(),
         body: String? = null,
     ): Response = withContext(Dispatchers.IO) {
+        Log.d("SimulaHttp", "--> $method $url")
+        headers.forEach { (k, v) -> Log.d("SimulaHttp", "    $k: $v") }
+        if (body != null) {
+            Log.d("SimulaHttp", "    Body: $body")
+        }
+
         val conn = open(url, method, headers)
         if (body != null) {
             conn.doOutput = true
@@ -49,6 +56,10 @@ internal object SimulaHttp {
         // keep-alive pool. We deliberately do NOT call disconnect() — that closes
         // the socket and forces a fresh TLS handshake on the next same-host request.
         val text = decode(conn, stream).bufferedReader(Charsets.UTF_8).use { it.readText() }
+        
+        Log.d("SimulaHttp", "<-- $code $url")
+        Log.d("SimulaHttp", "    Response Body: $text")
+        
         Response(code, text)
     }
 

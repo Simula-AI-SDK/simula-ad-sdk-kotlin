@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -157,6 +158,11 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
     }
 }
 
+/** True if a rewarded dwell was already started and its wall-clock window has elapsed. */
+private fun gateElapsed(p: InterstitialPresentation): Boolean =
+    p.gateStartedAtMs != 0L &&
+        SystemClock.elapsedRealtime() - p.gateStartedAtMs >= p.minPlayThresholdMs
+
 @Composable
 private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
@@ -169,15 +175,29 @@ private fun CreativeInterstitial(
 
     // FIX C2: close is enabled immediately UNLESS this is a rewarded ad with a
     // positive play threshold. A non-rewarded ad (or threshold <= 0) is closable now.
+    // Round-2 fix: a rewarded gate that already elapsed in a prior Activity instance
+    // (config-change recreation) also starts closable — anchored to wall-clock so a
+    // rotation can't reset the dwell or strand the user with close blocked.
     var closeEnabled by remember {
-        mutableStateOf(!presentation.rewarded || presentation.minPlayThresholdMs <= 0)
+        mutableStateOf(
+            !presentation.rewarded ||
+                presentation.minPlayThresholdMs <= 0 ||
+                gateElapsed(presentation),
+        )
     }
 
     // FIX C2: the reward gate runs ONLY for rewarded ads. Without this guard the
     // default minPlayThresholdMs == 0 would mark every ad as reward-earned.
     if (presentation.rewarded) {
         LaunchedEffect(Unit) {
-            delay(presentation.minPlayThresholdMs)
+            // Anchor the dwell to wall-clock on first run so a config-change
+            // recreation resumes the remaining time instead of restarting it.
+            if (presentation.gateStartedAtMs == 0L) {
+                presentation.gateStartedAtMs = SystemClock.elapsedRealtime()
+            }
+            val remaining = presentation.minPlayThresholdMs -
+                (SystemClock.elapsedRealtime() - presentation.gateStartedAtMs)
+            if (remaining > 0) delay(remaining)
             closeEnabled = true
             presentation.rewardEarned = true
         }
