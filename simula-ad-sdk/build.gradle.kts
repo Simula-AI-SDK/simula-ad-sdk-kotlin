@@ -108,4 +108,8 @@ dependencies {
 
     // Core
     implementation("androidx.core:core-ktx:1.12.0")
+
+    // Unit tests (JVM). kotlinx-serialization-json is already on the test classpath
+    // via the implementation dependency above.
+    testImplementation("junit:junit:4.13.2")
 }

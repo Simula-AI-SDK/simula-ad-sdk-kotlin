@@ -49,7 +49,6 @@ internal object SimulaHttp {
         // keep-alive pool. We deliberately do NOT call disconnect() — that closes
         // the socket and forces a fresh TLS handshake on the next same-host request.
         val text = decode(conn, stream).bufferedReader(Charsets.UTF_8).use { it.readText() }
-        
         Response(code, text)
     }
 
