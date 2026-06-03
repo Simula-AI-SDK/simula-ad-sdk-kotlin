@@ -227,15 +227,17 @@ the CTA routes to the ad's destination (Play Store via `market://`, or a web URL
 
 ### Rewarded interstitials
 
-Set `rewarded = true` and a `minPlayThresholdMs`. The close button is hidden and
+Set `rewarded = true` and a `minPlayThreshold` (a `kotlin.time.Duration`). The close button is hidden and
 system-back is blocked until the threshold elapses; only then can the user dismiss,
 and `onAdEarnedReward` fires (once, before `onAdClosed`). A non-rewarded ad never
 fires `onAdEarnedReward`.
 
 ```kotlin
+import kotlin.time.Duration.Companion.seconds
+
 val ad = SimulaInterstitialAd(adUnitId = "YOUR_AD_UNIT_ID")
 ad.rewarded = true
-ad.minPlayThresholdMs = 5_000 // user must dwell 5s to earn the reward
+ad.minPlayThreshold = 5.seconds // user must dwell 5s to earn the reward
 
 ad.listener = object : SimulaInterstitialAdListener {
     override fun onAdLoaded(ad: SimulaInterstitialAd) { ad.show(this@MainActivity) }
@@ -256,7 +258,7 @@ ad.load()
 | `onAdDisplayed` | Interstitial presented full-screen (impression tracked). |
 | `onAdFailedToDisplay` | `show()` failed — not ready, already showing, or no Activity. |
 | `onAdClicked` | The CTA was tapped (fires even if the ad has no tracking URL). |
-| `onAdEarnedReward` | Rewarded only — the `minPlayThresholdMs` dwell elapsed. |
+| `onAdEarnedReward` | Rewarded only — the `minPlayThreshold` dwell elapsed. |
 | `onAdClosed` | Dismissed; the next ad is auto-preloaded. |
 
 ## Theming Reference

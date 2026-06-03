@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.network.SimulaApiClient
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.time.Duration
 
 /** Bridge from the interstitial Activity back to the [SimulaInterstitialAd] instance. */
 internal interface InterstitialCallbacks {
@@ -17,7 +18,7 @@ internal class InterstitialPresentation(
     val ctaText: String,
     val apiKey: String,
     val rewarded: Boolean,
-    val minPlayThresholdMs: Long,
+    val minPlayThreshold: Duration,
     val callbacks: InterstitialCallbacks,
 ) {
     /** Guards a duplicate DISPLAYED/impression if the Activity is recreated on a config change. */

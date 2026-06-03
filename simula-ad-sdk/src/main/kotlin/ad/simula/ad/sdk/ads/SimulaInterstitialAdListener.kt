@@ -25,7 +25,7 @@ interface SimulaInterstitialAdListener {
 
     /**
      * The user earned the reward for a rewarded interstitial — fired once the
-     * `minPlayThresholdMs` dwell elapses. Only emitted when the ad was loaded with
+     * `minPlayThreshold` dwell elapses. Only emitted when the ad was loaded with
      * `rewarded = true`; never fired for a standard (non-rewarded) interstitial.
      */
     fun onAdEarnedReward(ad: SimulaInterstitialAd) {}

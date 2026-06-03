@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import kotlin.time.Duration
 
 /**
  * Imperative full-screen interstitial (mirrors the Swift `SimulaInterstitialAd`).
@@ -29,11 +30,14 @@ class SimulaInterstitialAd(val adUnitId: String) {
     var listener: SimulaInterstitialAdListener? = null
     var ctaText: String = "Learn More"
 
-    /** Request a rewarded interstitial. When true, the close is gated by [minPlayThresholdMs]. */
+    /** Request a rewarded interstitial. When true, the close is gated by [minPlayThreshold]. */
     var rewarded: Boolean = false
 
-    /** Minimum dwell (ms) before a rewarded ad can be closed / the reward is earned. */
-    var minPlayThresholdMs: Long = 0
+    /**
+     * Minimum dwell before a rewarded ad can be closed / the reward is earned. Only
+     * applies when [rewarded] is true. e.g. `5.seconds` (`kotlin.time.Duration`).
+     */
+    var minPlayThreshold: Duration = Duration.ZERO
 
     private sealed interface State {
         object Idle : State
@@ -135,7 +139,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 ctaText = ctaText,
                 apiKey = SimulaAds.apiKey,
                 rewarded = rewarded,
-                minPlayThresholdMs = minPlayThresholdMs,
+                minPlayThreshold = minPlayThreshold,
                 callbacks = bridge(),
             ),
         )
