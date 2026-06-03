@@ -96,14 +96,8 @@ internal object SimulaApiClient {
      * backend ties the catalog to the session); omitted when null/blank.
      */
     suspend fun fetchCatalog(sessionId: String? = null): CatalogResult = withContext(Dispatchers.IO) {
-        val url = buildString {
-            append("$API_BASE_URL/minigames/catalogv2")
-            if (!sessionId.isNullOrBlank()) {
-                append("?session_id=${URLEncoder.encode(sessionId, "UTF-8")}")
-            }
-        }
         val response = SimulaHttp.request(
-            url = url,
+            url = catalogUrl(sessionId),
             method = "GET",
             headers = jsonHeaders,
         )
@@ -148,6 +142,14 @@ internal object SimulaApiClient {
         }
 
         CatalogResult(menuId = menuId, games = games)
+    }
+
+    /** Builds the catalogv2 request URL, adding `session_id` when available. Pure/testable. */
+    internal fun catalogUrl(sessionId: String?): String = buildString {
+        append("$API_BASE_URL/minigames/catalogv2")
+        if (!sessionId.isNullOrBlank()) {
+            append("?session_id=${URLEncoder.encode(sessionId, "UTF-8")}")
+        }
     }
 
     // ── Minigame Init ───────────────────────────────────────────────────────
