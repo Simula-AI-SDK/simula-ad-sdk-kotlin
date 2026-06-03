@@ -124,3 +124,95 @@ data class MiniGameInterstitialTheme(
     val ctaColor: String? = null,
     val fontFamily: String? = null,
 )
+
+// ── Ad Behavior (server-driven A/B config) ──────────────────────────────────
+
+/** Lowercases and normalizes hyphens to underscores so the tolerant enum factories accept
+ * either wire spelling (`circular-progress` ≡ `circular_progress`). */
+private fun normalizeBehaviorToken(raw: String?): String =
+    (raw ?: "").lowercase().replace("-", "_")
+
+/** How the close button's pre-tap delay is communicated. Non-rewarded only. Unknown → NONE. */
+internal enum class CloseCountdownUi {
+    NUMERIC_ALWAYS, CIRCULAR_PROGRESS, APPEARS_AT_NS, BAR, NONE;
+
+    companion object {
+        fun from(raw: String?): CloseCountdownUi = when (normalizeBehaviorToken(raw)) {
+            "numeric_always" -> NUMERIC_ALWAYS
+            "circular_progress" -> CIRCULAR_PROGRESS
+            "appears_at_ns" -> APPEARS_AT_NS
+            "bar" -> BAR
+            else -> NONE
+        }
+    }
+}
+
+/** Close button corner. Unknown → TOP_RIGHT. Legacy `bottom_corner` → BOTTOM_RIGHT. */
+internal enum class ClosePosition {
+    TOP_RIGHT, TOP_LEFT, BOTTOM_LEFT, BOTTOM_RIGHT;
+
+    companion object {
+        fun from(raw: String?): ClosePosition = when (normalizeBehaviorToken(raw)) {
+            "top_left" -> TOP_LEFT
+            "bottom_left" -> BOTTOM_LEFT
+            "bottom_right", "bottom_corner" -> BOTTOM_RIGHT
+            else -> TOP_RIGHT
+        }
+    }
+}
+
+/** Close button size (PRD: small 16 / standard 24 / large 32). Unknown → STANDARD. */
+internal enum class CloseSize(val glyphSp: Int) {
+    SMALL(16), STANDARD(24), LARGE(32);
+
+    /** Tappable box diameter in dp (glyph + 20). */
+    val boxDp: Int get() = glyphSp + 20
+
+    companion object {
+        fun from(raw: String?): CloseSize = when (normalizeBehaviorToken(raw)) {
+            "small" -> SMALL
+            "large" -> LARGE
+            else -> STANDARD
+        }
+    }
+}
+
+/** Close button motion. Only STATIC is rendered this release (non-static not shipping). Unknown → STATIC. */
+internal enum class CloseMotion {
+    STATIC, REPOSITION_ON_TAP, DRIFT;
+
+    companion object {
+        fun from(raw: String?): CloseMotion = when (normalizeBehaviorToken(raw)) {
+            "reposition_on_tap" -> REPOSITION_ON_TAP
+            "drift" -> DRIFT
+            else -> STATIC
+        }
+    }
+}
+
+/** How a CTA tap opens the store (PRD Section 6). Unknown → EXTERNAL. `sk_overlay`/`sk_store_product`
+ * map to the native store (SKSTOREPRODUCT), which the Android router routes to the Play Store app. */
+internal enum class StoreOpen {
+    EXTERNAL, SKSTOREPRODUCT, INLINE_INSTALL;
+
+    companion object {
+        fun from(raw: String?): StoreOpen = when (normalizeBehaviorToken(raw)) {
+            "inline_install" -> INLINE_INSTALL
+            "skstoreproduct", "sk_store_product", "sk_overlay" -> SKSTOREPRODUCT
+            else -> EXTERNAL
+        }
+    }
+}
+
+internal data class CloseBehavior(
+    val delaySeconds: Int = 0,
+    val countdownUi: CloseCountdownUi = CloseCountdownUi.NONE,
+    val position: ClosePosition = ClosePosition.TOP_RIGHT,
+    val size: CloseSize = CloseSize.STANDARD,
+    val motion: CloseMotion = CloseMotion.STATIC,
+)
+
+internal data class AdBehavior(
+    val close: CloseBehavior = CloseBehavior(),
+    val storeOpen: StoreOpen = StoreOpen.EXTERNAL,
+)

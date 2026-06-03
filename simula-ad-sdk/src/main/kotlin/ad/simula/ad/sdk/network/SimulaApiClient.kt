@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.Message
 import kotlinx.coroutines.Dispatchers
@@ -210,6 +211,8 @@ internal object SimulaApiClient {
         val renderedFormat: String?,
         val renderedAssets: List<String>,
         val trackingUrl: String?,
+        // Null when the payload omits `ad_behavior` (renderer falls back to today's defaults).
+        val adBehavior: AdBehavior?,
     )
 
     /**
@@ -252,6 +255,7 @@ internal object SimulaApiClient {
             renderedFormat = data.renderedFormat,
             renderedAssets = data.renderedAssets,
             trackingUrl = data.trackingUrl,
+            adBehavior = data.adBehavior.toDomain(),
         )
     }
 

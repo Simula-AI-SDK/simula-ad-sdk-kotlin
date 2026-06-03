@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.model.StoreOpen
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -28,14 +29,29 @@ internal object CreativeCtaRouter {
     private const val CONNECT_TIMEOUT_MS = 5_000
     private const val READ_TIMEOUT_MS = 5_000
 
-    fun open(context: Context, trackingUrl: String?, destination: String) {
+    /**
+     * Opens the advertiser destination for a creative CTA.
+     *
+     * [storeOpen] selects the store surface (server-driven A/B config, PRD Section 6):
+     * - `INLINE_INSTALL` → try the Play in-app install overlay (half-sheet) first, degrading
+     *   to the normal external Play Store app if it isn't available.
+     * - `EXTERNAL` / `SKSTOREPRODUCT` (iOS-only, mapped to native store) / `null` → today's
+     *   behavior: the external Play Store app for store links, a browser otherwise.
+     */
+    fun open(
+        context: Context,
+        trackingUrl: String?,
+        destination: String,
+        storeOpen: StoreOpen? = null,
+    ) {
         val url = trackingUrl?.takeIf { it.isNotBlank() } ?: return
         val appContext = context.applicationContext
+        val inlineInstall = storeOpen == StoreOpen.INLINE_INSTALL
 
         SimulaScope.launch {
             when (destination) {
                 "web" -> openWeb(appContext, url)
-                else -> openAppStore(appContext, url) // "appstore" default
+                else -> openAppStore(appContext, url, inlineInstall) // "appstore" default
             }
         }
     }
@@ -48,13 +64,30 @@ internal object CreativeCtaRouter {
         }
     }
 
-    private fun openAppStore(context: Context, originalUrl: String) {
+    private fun openAppStore(context: Context, originalUrl: String, inlineInstall: Boolean = false) {
         val resolved = resolveRedirects(originalUrl)
 
         // Prefer the resolved URL, but also check the original in case it was already
         // a Play link (e.g. a market:// or play.google.com link with no redirect).
         val playPackage = extractPlayPackage(resolved) ?: extractPlayPackage(originalUrl)
         if (playPackage != null) {
+            // `inline_install`: ask Play for the in-app install overlay (half-sheet) first.
+            // `overlay`/`callerId` are undocumented extras; if Play ignores them we still get
+            // the standard store page, and if Play is absent the launch throws and we fall
+            // through to the external market / https intents below (degrade to external).
+            if (inlineInstall) {
+                val launchedOverlay = runCatching {
+                    val intent = Intent(
+                        Intent.ACTION_VIEW,
+                        Uri.parse("market://details?id=$playPackage"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        .putExtra("overlay", true)
+                        .putExtra("callerId", context.packageName)
+                    context.startActivity(intent)
+                }
+                if (launchedOverlay.isSuccess) return
+            }
+
             val launchedMarket = runCatching {
                 val intent = Intent(
                     Intent.ACTION_VIEW,

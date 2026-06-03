@@ -1,5 +1,12 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.model.AdBehavior
+import ad.simula.ad.sdk.model.CloseBehavior
+import ad.simula.ad.sdk.model.CloseCountdownUi
+import ad.simula.ad.sdk.model.CloseMotion
+import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.CloseSize
+import ad.simula.ad.sdk.model.StoreOpen
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -67,4 +74,44 @@ internal data class AdLoadApiResponse(
     @SerialName("rendered_format") val renderedFormat: String? = null,
     @SerialName("rendered_assets") val renderedAssets: List<String> = emptyList(),
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    // Null when the payload omits `ad_behavior` — the renderer falls back to today's defaults.
+    @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
 )
+
+// ── Ad behavior (server-driven A/B render config) ─────────────────────────────
+
+@Serializable
+internal data class ApiAdBehavior(
+    val close: ApiCloseBehavior? = null,
+    @SerialName("store_open") val storeOpen: String? = null,
+)
+
+@Serializable
+internal data class ApiCloseBehavior(
+    @SerialName("delay_seconds") val delaySeconds: Int = 0,
+    @SerialName("countdown_ui") val countdownUi: String? = null,
+    val position: String? = null,
+    val size: String? = null,
+    val motion: String? = null,
+)
+
+/** Maps the wire DTO to the domain model, normalizing enum strings. A null DTO (absent
+ * `ad_behavior`) stays null so callers can preserve today's literal behavior. */
+internal fun ApiAdBehavior?.toDomain(): AdBehavior? {
+    if (this == null) return null
+    return AdBehavior(
+        close = close.toDomain(),
+        storeOpen = StoreOpen.from(storeOpen),
+    )
+}
+
+internal fun ApiCloseBehavior?.toDomain(): CloseBehavior {
+    if (this == null) return CloseBehavior()
+    return CloseBehavior(
+        delaySeconds = delaySeconds.coerceAtLeast(0),
+        countdownUi = CloseCountdownUi.from(countdownUi),
+        position = ClosePosition.from(position),
+        size = CloseSize.from(size),
+        motion = CloseMotion.from(motion),
+    )
+}

@@ -1,10 +1,16 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.model.CloseCountdownUi
+import ad.simula.ad.sdk.model.CloseMotion
+import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.CloseSize
+import ad.simula.ad.sdk.model.StoreOpen
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -139,5 +145,128 @@ class AdLoadParsingTest {
         assertNull(r.renderedFormat)
         assertTrue(r.renderedAssets.isEmpty())
         assertNull(r.trackingUrl)
+    }
+
+    // ── Response: ad_behavior (A/B render config) ───────────────────────────────
+
+    @Test
+    fun `ad_behavior absent maps to null domain`() {
+        val r = json.decodeFromString<AdLoadApiResponse>("""{"ad_id":"x","ad_inserted":true}""")
+        // Absent ad_behavior → null so the renderer falls back to today's literal behavior.
+        assertNull(r.adBehavior)
+        assertNull(r.adBehavior.toDomain())
+    }
+
+    @Test
+    fun `ad_behavior full config maps to domain enums`() {
+        val payload = """
+            {"ad_id":"x","ad_inserted":true,
+             "ad_behavior":{"close":{"delay_seconds":5,"countdown_ui":"circular_progress",
+               "position":"bottom_left","size":"large","motion":"reposition_on_tap"},
+               "store_open":"skstoreproduct"}}
+        """.trimIndent()
+        val b = json.decodeFromString<AdLoadApiResponse>(payload).adBehavior.toDomain()!!
+        assertEquals(5, b.close.delaySeconds)
+        assertEquals(CloseCountdownUi.CIRCULAR_PROGRESS, b.close.countdownUi)
+        assertEquals(ClosePosition.BOTTOM_LEFT, b.close.position)
+        assertEquals(CloseSize.LARGE, b.close.size)
+        assertEquals(CloseMotion.REPOSITION_ON_TAP, b.close.motion)
+        assertEquals(StoreOpen.SKSTOREPRODUCT, b.storeOpen)
+    }
+
+    @Test
+    fun `ad_behavior empty object yields defaults`() {
+        val r = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_id":"x","ad_inserted":true,"ad_behavior":{}}""",
+        )
+        assertNotNull(r.adBehavior)
+        val b = r.adBehavior.toDomain()!!
+        assertEquals(0, b.close.delaySeconds)
+        assertEquals(CloseCountdownUi.NONE, b.close.countdownUi)
+        assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
+        assertEquals(CloseSize.STANDARD, b.close.size)
+        assertEquals(CloseMotion.STATIC, b.close.motion)
+        assertEquals(StoreOpen.EXTERNAL, b.storeOpen)
+    }
+
+    @Test
+    fun `ad_behavior partial close fills defaults`() {
+        val b = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"close":{"delay_seconds":3}}}""",
+        ).adBehavior.toDomain()!!
+        assertEquals(3, b.close.delaySeconds)
+        assertEquals(CloseCountdownUi.NONE, b.close.countdownUi)
+        assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
+        assertEquals(StoreOpen.EXTERNAL, b.storeOpen)
+    }
+
+    @Test
+    fun `ad_behavior normalizes hyphenated values`() {
+        val payload = """
+            {"ad_behavior":{"close":{"countdown_ui":"numeric-always","position":"top-left",
+              "motion":"reposition-on-tap"},"store_open":"external-browser"}}
+        """.trimIndent()
+        val b = json.decodeFromString<AdLoadApiResponse>(payload).adBehavior.toDomain()!!
+        assertEquals(CloseCountdownUi.NUMERIC_ALWAYS, b.close.countdownUi)
+        assertEquals(ClosePosition.TOP_LEFT, b.close.position)
+        assertEquals(CloseMotion.REPOSITION_ON_TAP, b.close.motion)
+        assertEquals(StoreOpen.EXTERNAL, b.storeOpen)
+    }
+
+    @Test
+    fun `ad_behavior honors legacy aliases`() {
+        val payload = """
+            {"ad_behavior":{"close":{"countdown_ui":"bar","position":"bottom_corner","size":"small"},
+              "store_open":"sk_overlay"}}
+        """.trimIndent()
+        val b = json.decodeFromString<AdLoadApiResponse>(payload).adBehavior.toDomain()!!
+        assertEquals(CloseCountdownUi.BAR, b.close.countdownUi)
+        assertEquals(ClosePosition.BOTTOM_RIGHT, b.close.position)
+        assertEquals(CloseSize.SMALL, b.close.size)
+        assertEquals(StoreOpen.SKSTOREPRODUCT, b.storeOpen)
+    }
+
+    @Test
+    fun `ad_behavior maps inline_install and sk_store_product`() {
+        val a = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"store_open":"inline_install"}}""",
+        ).adBehavior.toDomain()!!
+        assertEquals(StoreOpen.INLINE_INSTALL, a.storeOpen)
+
+        val b = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"store_open":"sk_store_product"}}""",
+        ).adBehavior.toDomain()!!
+        assertEquals(StoreOpen.SKSTOREPRODUCT, b.storeOpen)
+    }
+
+    @Test
+    fun `ad_behavior is resilient to unknown enum values`() {
+        val payload = """
+            {"ad_behavior":{"close":{"delay_seconds":12,"countdown_ui":"spinner","position":"middle",
+              "size":"huge","motion":"teleport"},"store_open":"warp"}}
+        """.trimIndent()
+        val b = json.decodeFromString<AdLoadApiResponse>(payload).adBehavior.toDomain()!!
+        assertEquals(12, b.close.delaySeconds)
+        assertEquals(CloseCountdownUi.NONE, b.close.countdownUi)
+        assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
+        assertEquals(CloseSize.STANDARD, b.close.size)
+        assertEquals(CloseMotion.STATIC, b.close.motion)
+        assertEquals(StoreOpen.EXTERNAL, b.storeOpen)
+    }
+
+    @Test
+    fun `ad_behavior clamps negative delay to zero`() {
+        val b = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"close":{"delay_seconds":-5}}}""",
+        ).adBehavior.toDomain()!!
+        assertEquals(0, b.close.delaySeconds)
+    }
+
+    @Test
+    fun `close size maps to PRD point values`() {
+        assertEquals(16, CloseSize.SMALL.glyphSp)
+        assertEquals(24, CloseSize.STANDARD.glyphSp)
+        assertEquals(32, CloseSize.LARGE.glyphSp)
+        assertEquals(44, CloseSize.STANDARD.boxDp)
     }
 }
