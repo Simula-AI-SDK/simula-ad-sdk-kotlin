@@ -1,30 +1,68 @@
 package ad.simula.ad.sdk.ads
 
-import ad.simula.ad.sdk.minigame.LocalPreloadedCatalog
-import ad.simula.ad.sdk.minigame.MiniGameInterstitial
-import ad.simula.ad.sdk.minigame.MiniGameMenu
+import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.image.CachedAsyncImage
+import ad.simula.ad.sdk.minigame.CloseButton
+import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Transparent, full-screen host for the imperative interstitial. Reads its
  * [InterstitialPresentation] from [InterstitialHandoff] by token, injects the
- * shared (warmed) session via [ProvideSimulaContext], and renders the teaser →
- * menu → game → ad flow in a [androidx.compose.ui.platform.ComposeView].
+ * shared (warmed) session via [ProvideSimulaContext], and renders a native
+ * carousel of the rendered creative assets with a call-to-action.
  */
 internal class SimulaInterstitialActivity : ComponentActivity() {
 
@@ -61,16 +99,26 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                 devMode = SimulaAds.devMode,
                 hasPrivacyConsent = SimulaAds.hasPrivacyConsent,
             ) {
-                InterstitialFlow(p, onFinish = ::closeOnce)
+                CreativeInterstitial(
+                    presentation = p,
+                    onFinish = ::closeOnce,
+                    openDestination = { ad ->
+                        // applicationContext so the open survives auto-dismiss.
+                        CreativeCtaRouter.open(applicationContext, ad.trackingUrl, ad.destination)
+                    },
+                )
             }
         }
     }
 
-    /** Fire CLOSED exactly once, then finish. */
+    /** Fire (reward then) CLOSED exactly once, then finish. */
     private fun closeOnce() {
         if (closed) return
         closed = true
-        presentation?.callbacks?.onClosed()
+        presentation?.let { p ->
+            if (p.rewarded && p.rewardEarned) p.callbacks.onEarnedReward()
+            p.callbacks.onClosed()
+        }
         finish() // isFinishing becomes true → onDestroy drops the handoff entry
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
@@ -85,7 +133,10 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
             token?.let { InterstitialHandoff.remove(it) }
             if (!closed) {
                 closed = true
-                presentation?.callbacks?.onClosed()
+                presentation?.let { p ->
+                    if (p.rewarded && p.rewardEarned) p.callbacks.onEarnedReward()
+                    p.callbacks.onClosed()
+                }
             }
         }
     }
@@ -107,49 +158,202 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
 }
 
 @Composable
-private fun InterstitialFlow(
+private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
     onFinish: () -> Unit,
+    openDestination: (SimulaApiClient.AdLoadResult) -> Unit,
 ) {
-    var showMenu by remember { mutableStateOf(false) }
+    val ad = presentation.ad
+    // FIX M2: defensively filter blank assets for the carousel.
+    val assets = remember(ad) { ad.renderedAssets.filter { it.isNotBlank() } }
 
-    // DISPLAYED fires once the flow first composes (parity with iOS "after present").
-    // Guarded so an Activity recreation (config change) doesn't double-report it.
+    // FIX C2: close is enabled immediately UNLESS this is a rewarded ad with a
+    // positive play threshold. A non-rewarded ad (or threshold <= 0) is closable now.
+    var closeEnabled by remember {
+        mutableStateOf(!presentation.rewarded || presentation.minPlayThresholdMs <= 0)
+    }
+
+    // FIX C2: the reward gate runs ONLY for rewarded ads. Without this guard the
+    // default minPlayThresholdMs == 0 would mark every ad as reward-earned.
+    if (presentation.rewarded) {
+        LaunchedEffect(Unit) {
+            delay(presentation.minPlayThresholdMs)
+            closeEnabled = true
+            presentation.rewardEarned = true
+        }
+    }
+
+    // DISPLAYED + impression fire once the creative first composes. Guarded so an
+    // Activity recreation (config change) doesn't double-report either.
     LaunchedEffect(Unit) {
         if (!presentation.displayedReported) {
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
+            // FIX M2: skip impression when there is no ad id.
+            if (ad.adId.isNotBlank()) {
+                SimulaScope.launch { SimulaApiClient.trackImpression(ad.adId, presentation.apiKey) }
+            }
         }
     }
 
-    CompositionLocalProvider(LocalPreloadedCatalog provides presentation.catalog) {
-        if (!showMenu) {
-            MiniGameInterstitial(
-                charImage = presentation.charImage,
-                invitationText = presentation.invitationText,
-                ctaText = presentation.ctaText,
-                backgroundImage = presentation.backgroundImage,
-                theme = presentation.inviteTheme,
-                isOpen = true,
-                onClick = {
-                    presentation.callbacks.onClicked()
-                    showMenu = true
+    // Block system back while the reward gate is active.
+    BackHandler(enabled = !closeEnabled) {}
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black),
+    ) {
+        CreativeCarousel(
+            assets = assets,
+            modifier = Modifier.fillMaxSize(),
+        )
+
+        if (closeEnabled) {
+            CloseButton(
+                onClick = onFinish,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(16.dp),
+            )
+        }
+
+        // Always-visible bottom CTA.
+        Button(
+            onClick = {
+                presentation.callbacks.onClicked()
+                openDestination(ad)
+                // For a rewarded ad the user must remain until the gate elapses.
+                if (!presentation.rewarded) onFinish()
+            },
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color.White,
+                contentColor = Color.Black,
+            ),
+            shape = RoundedCornerShape(28.dp),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(horizontal = 24.dp, vertical = 24.dp),
+        ) {
+            Text(
+                text = presentation.ctaText,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(vertical = 6.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Native creative carousel. A single asset renders static (no swipe / no dots).
+ * Multiple assets use a STABLE swipe driven by a single [Animatable] scroll
+ * position (mirrors `GameGrid.MobileCarousel`) — no experimental HorizontalPager.
+ * Position is clamped to [0, n-1] (non-wrapping).
+ */
+@Composable
+private fun CreativeCarousel(
+    assets: List<String>,
+    modifier: Modifier = Modifier,
+) {
+    val n = assets.size
+    if (n == 0) return
+
+    if (n == 1) {
+        CachedAsyncImage(
+            model = assets[0],
+            contentDescription = null,
+            modifier = modifier,
+            contentScale = ContentScale.Crop,
+        )
+        return
+    }
+
+    val scrollPosition = remember { Animatable(0f) }
+    val velocityTracker = remember { VelocityTracker() }
+    val coroutineScope = rememberCoroutineScope()
+
+    // The current settled page (for the dot indicator).
+    val page by remember {
+        derivedStateOf { kotlin.math.round(scrollPosition.value).toInt().coerceIn(0, n - 1) }
+    }
+
+    Box(modifier = modifier) {
+        var widthPx by remember { mutableStateOf(1f) }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
+                .pointerInput(n) {
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            coroutineScope.launch { scrollPosition.stop() }
+                            velocityTracker.resetTracking()
+                        },
+                        onDragEnd = {
+                            val velocityPx = velocityTracker.calculateVelocity().x
+                            val velocityPages = velocityPx / widthPx
+                            val decayFactor = 0.4f
+                            val projected = scrollPosition.value - velocityPages * decayFactor
+                            val snapTarget = kotlin.math.round(projected)
+                                .coerceIn(0f, (n - 1).toFloat())
+                            coroutineScope.launch {
+                                scrollPosition.animateTo(
+                                    snapTarget,
+                                    spring(dampingRatio = 0.85f, stiffness = 220f),
+                                )
+                            }
+                        },
+                        onHorizontalDrag = { change, dragAmount ->
+                            velocityTracker.addPosition(change.uptimeMillis, change.position)
+                            val scrollDelta = dragAmount / widthPx
+                            coroutineScope.launch {
+                                val next = (scrollPosition.value - scrollDelta)
+                                    .coerceIn(0f, (n - 1).toFloat())
+                                scrollPosition.snapTo(next)
+                            }
+                        },
+                    )
                 },
-                onClose = onFinish,
-            )
-        } else {
-            MiniGameMenu(
-                isOpen = true,
-                onClose = onFinish,
-                charName = presentation.charName,
-                charID = presentation.charID,
-                charImage = presentation.charImage,
-                messages = presentation.messages,
-                charDesc = presentation.charDesc,
-                maxGamesToShow = presentation.maxGamesToShow,
-                theme = presentation.theme,
-                delegateChar = presentation.delegateChar,
-            )
+        ) {
+            val currentPos = scrollPosition.value
+            for (i in 0 until n) {
+                val offset = i.toFloat() - currentPos
+                // Only render on-screen and immediately-adjacent assets.
+                if (kotlin.math.abs(offset) > 1.05f) continue
+                CachedAsyncImage(
+                    model = assets[i],
+                    contentDescription = null,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer { translationX = offset * widthPx },
+                    contentScale = ContentScale.Crop,
+                )
+            }
+        }
+
+        // Dot indicator — only when there is more than one asset.
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = 96.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            for (i in 0 until n) {
+                val active = i == page
+                Box(
+                    modifier = Modifier
+                        .size(if (active) 9.dp else 7.dp)
+                        .clip(CircleShape)
+                        .background(if (active) Color.White else Color(0x66FFFFFF)),
+                )
+            }
         }
     }
 }

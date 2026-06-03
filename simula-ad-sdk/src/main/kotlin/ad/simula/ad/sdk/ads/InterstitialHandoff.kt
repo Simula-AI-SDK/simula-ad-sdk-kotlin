@@ -1,8 +1,5 @@
 package ad.simula.ad.sdk.ads
 
-import ad.simula.ad.sdk.model.Message
-import ad.simula.ad.sdk.model.MiniGameInterstitialTheme
-import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.network.SimulaApiClient
 import java.util.concurrent.ConcurrentHashMap
 
@@ -10,34 +7,30 @@ import java.util.concurrent.ConcurrentHashMap
 internal interface InterstitialCallbacks {
     fun onDisplayed()
     fun onClicked()
+    fun onEarnedReward()
     fun onClosed()
 }
 
 /** Everything [SimulaInterstitialActivity] needs to render one presentation. */
 internal class InterstitialPresentation(
-    val catalog: SimulaApiClient.CatalogResult,
-    val charID: String,
-    val charName: String,
-    val charImage: String,
-    val charDesc: String?,
-    val invitationText: String,
+    val ad: SimulaApiClient.AdLoadResult,
     val ctaText: String,
-    val backgroundImage: String?,
-    val theme: MiniGameTheme,
-    val inviteTheme: MiniGameInterstitialTheme,
-    val messages: List<Message>,
-    val maxGamesToShow: Int,
-    val delegateChar: Boolean,
+    val apiKey: String,
+    val rewarded: Boolean,
+    val minPlayThresholdMs: Long,
     val callbacks: InterstitialCallbacks,
 ) {
-    /** Guards a duplicate DISPLAYED if the Activity is recreated on a config change. */
-    var displayedReported: Boolean = false
+    /** Guards a duplicate DISPLAYED/impression if the Activity is recreated on a config change. */
+    var displayedReported = false
+
+    /** Set true once the rewarded play threshold elapses; gates the reward callback. */
+    var rewardEarned = false
 }
 
 /**
  * Hands a non-parcelable [InterstitialPresentation] to [SimulaInterstitialActivity]
- * via a token placed in the launch Intent — the loaded catalog and the callback
- * bridge can't travel through Intent extras. This is the standard ad-SDK pattern.
+ * via a token placed in the launch Intent — the loaded ad and the callback bridge
+ * can't travel through Intent extras. This is the standard ad-SDK pattern.
  *
  * Reads are non-destructive ([get]) so the presentation survives an Activity
  * recreation (e.g. a config change not covered by `configChanges`); the entry is

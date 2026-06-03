@@ -23,7 +23,7 @@ import java.net.URLEncoder
  */
 internal object SimulaApiClient {
 
-    private const val API_BASE_URL = "https://simula-api-701226639755.us-central1.run.app"
+    private const val API_BASE_URL = "https://simula-staging.ngrok.dev"
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -54,8 +54,7 @@ internal object SimulaApiClient {
                     add("ppid=${URLEncoder.encode(primaryUserID, "UTF-8")}")
                 }
             }
-            val url = "$API_BASE_URL/session/create" +
-                if (params.isEmpty()) "" else "?" + params.joinToString("&")
+            val url = "$API_BASE_URL/session/create"
 
             val response = SimulaHttp.request(
                 url = url,
@@ -196,6 +195,62 @@ internal object SimulaApiClient {
         MinigameResult(
             adId = data.adResponse?.adId ?: "",
             iframeUrl = data.adResponse?.iframeUrl ?: "",
+        )
+    }
+
+    // ── Native Creative Ad Load ─────────────────────────────────────────────
+
+    data class AdLoadResult(
+        val adId: String,
+        val adInserted: Boolean,
+        val adUnitId: String,
+        val rewarded: Boolean,
+        val destination: String,
+        val renderedFormat: String?,
+        val renderedAssets: List<String>,
+        val trackingUrl: String?,
+    )
+
+    /**
+     * Load a native-creative interstitial via `POST /ads/load`.
+     *
+     * `ad_inserted == false` is a valid no-fill response (NOT an error); callers
+     * inspect [AdLoadResult.adInserted]/[AdLoadResult.renderedAssets] to decide.
+     */
+    suspend fun loadAd(
+        adUnitId: String,
+        rewarded: Boolean = false,
+        sessionId: String = "",
+    ): AdLoadResult = withContext(Dispatchers.IO) {
+        val requestBody = AdLoadRequestBody(
+            adUnitId = adUnitId,
+            rewarded = rewarded,
+            sessionId = sessionId,
+        )
+
+        val response = SimulaHttp.request(
+            url = "$API_BASE_URL/ads/load",
+            method = "POST",
+            headers = jsonHeaders,
+            body = json.encodeToString(requestBody),
+        )
+        if (!response.isSuccessful) {
+            throw Exception("HTTP error! status: ${response.code}")
+        }
+        if (response.body.isBlank()) {
+            throw Exception("Empty response body")
+        }
+        val data = json.decodeFromString<AdLoadApiResponse>(response.body)
+
+        AdLoadResult(
+            adId = data.adId,
+            adInserted = data.adInserted,
+            adUnitId = data.adUnitId,
+            rewarded = data.rewarded,
+            destination = data.destination,
+            renderedFormat = data.renderedFormat,
+            renderedAssets = data.renderedAssets,
+            trackingUrl = data.trackingUrl,
         )
     }
 

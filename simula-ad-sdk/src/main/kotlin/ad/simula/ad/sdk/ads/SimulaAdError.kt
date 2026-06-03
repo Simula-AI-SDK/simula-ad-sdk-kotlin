@@ -14,8 +14,8 @@ sealed class SimulaAdError(message: String, cause: Throwable? = null) : Exceptio
     /** A server session could not be created (e.g. network failure). */
     object NoSession : SimulaAdError("Session could not be created")
 
-    /** The catalog returned no games. */
-    object NoFill : SimulaAdError("No games available (no fill)")
+    /** The server returned no creative to display. */
+    object NoFill : SimulaAdError("No ad available (no fill)")
 
     /** `show()` was called before `load()` completed. */
     object NotReady : SimulaAdError("Ad not ready — call load() first")

@@ -20,13 +20,17 @@ interface SimulaInterstitialAdListener {
     /** Presentation failed (e.g. not ready, already showing, no Activity). */
     fun onAdFailedToDisplay(ad: SimulaInterstitialAd, error: SimulaAdError) {}
 
-    /** The user tapped the teaser's call-to-action. */
+    /** The user tapped the call-to-action. */
     fun onAdClicked(ad: SimulaInterstitialAd) {}
 
-    /** Reserved for a future reward feature — not emitted yet. */
+    /**
+     * The user earned the reward for a rewarded interstitial — fired once the
+     * `minPlayThresholdMs` dwell elapses. Only emitted when the ad was loaded with
+     * `rewarded = true`; never fired for a standard (non-rewarded) interstitial.
+     */
     fun onAdEarnedReward(ad: SimulaInterstitialAd) {}
 
-    /** Reserved for a future reward feature — not emitted yet. */
+    /** Reserved for a future reward-verification feature — not emitted yet. */
     fun onAdRewardVerificationFailed(ad: SimulaInterstitialAd) {}
 
     /** The interstitial was dismissed. The next ad is auto-preloaded. */

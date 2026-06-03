@@ -1,10 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
-import ad.simula.ad.sdk.minigame.WebViewPool
-import ad.simula.ad.sdk.model.Message
-import ad.simula.ad.sdk.model.MiniGameInterstitialTheme
-import ad.simula.ad.sdk.model.MiniGameTheme
+import ad.simula.ad.sdk.image.ImagePrefetch
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.app.Activity
 import android.content.Intent
@@ -18,10 +15,11 @@ import java.util.UUID
 /**
  * Imperative full-screen interstitial (mirrors the Swift `SimulaInterstitialAd`).
  *
- * Lifecycle: `load()` preloads the catalog + warms a WebView; `show(...)` presents
- * a teaser that opens the mini-game menu, plays a game, then shows a post-game ad.
- * Callbacks are delivered on the main thread via [listener]. After the ad closes,
- * the next one is preloaded automatically.
+ * Lifecycle: `load()` calls `POST /ads/load`, prefetches the rendered creative
+ * assets, then reports LOADED; `show(...)` presents a native carousel of those
+ * assets with a call-to-action that routes to the ad's destination. Callbacks are
+ * delivered on the main thread via [listener]. After the ad closes, the next one
+ * is preloaded automatically.
  *
  * [load] and [show] may be called from any thread — they confine themselves to
  * the main thread internally.
@@ -29,19 +27,18 @@ import java.util.UUID
 class SimulaInterstitialAd(val adUnitId: String) {
 
     var listener: SimulaInterstitialAdListener? = null
-    var theme: MiniGameTheme = MiniGameTheme()
-    var inviteTheme: MiniGameInterstitialTheme = MiniGameInterstitialTheme()
-    var messages: List<Message> = emptyList()
-    var maxGamesToShow: Int = 6
-    var delegateChar: Boolean = true
-    var invitationText: String = "Want to play a game?"
-    var ctaText: String = "Play a Game"
-    var backgroundImage: String? = null
+    var ctaText: String = "Learn More"
+
+    /** Request a rewarded interstitial. When true, the close is gated by [minPlayThresholdMs]. */
+    var rewarded: Boolean = false
+
+    /** Minimum dwell (ms) before a rewarded ad can be closed / the reward is earned. */
+    var minPlayThresholdMs: Long = 0
 
     private sealed interface State {
         object Idle : State
         object Loading : State
-        class Ready(val catalog: SimulaApiClient.CatalogResult) : State
+        class Ready(val ad: SimulaApiClient.AdLoadResult) : State
         object Showing : State
     }
 
@@ -66,14 +63,21 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     failLoadOnMain(SimulaAdError.NoSession)
                     return@launch
                 }
-                val catalog = SimulaApiClient.fetchCatalog()
-                if (catalog.games.isEmpty()) {
+                val ad = SimulaApiClient.loadAd(
+                    adUnitId = adUnitId,
+                    rewarded = rewarded,
+                    sessionId = sessionId,
+                )
+                // FIX M2: blank-asset no-fill + filter blanks before everything else.
+                val assets = ad.renderedAssets.filter { it.isNotBlank() }
+                if (!ad.adInserted || assets.isEmpty()) {
                     failLoadOnMain(SimulaAdError.NoFill)
                     return@launch
                 }
+                // FIX M1: await the asset prefetch (off-main) BEFORE reporting LOADED.
+                ImagePrefetch.preload(SimulaAds.appContext, assets)
                 withContext(Dispatchers.Main) {
-                    WebViewPool.prewarm(SimulaAds.appContext)
-                    state = State.Ready(catalog)
+                    state = State.Ready(ad)
                     listener?.onAdLoaded(this@SimulaInterstitialAd)
                 }
             } catch (e: Exception) {
@@ -86,41 +90,24 @@ class SimulaInterstitialAd(val adUnitId: String) {
      * Present a loaded interstitial from an explicit [activity] (recommended —
      * guarantees correct same-task window stacking and transitions).
      */
-    fun show(
-        activity: Activity,
-        charID: String,
-        charName: String,
-        charImage: String,
-        charDesc: String? = null,
-    ) {
-        if (!confineToMain { show(activity, charID, charName, charImage, charDesc) }) return
-        present(activity, charID, charName, charImage, charDesc)
+    fun show(activity: Activity) {
+        if (!confineToMain { show(activity) }) return
+        present(activity)
     }
 
     /**
      * Present a loaded interstitial using the currently-tracked Activity. Use the
      * [show] overload that takes an explicit `Activity` when you have one.
      */
-    fun show(
-        charID: String,
-        charName: String,
-        charImage: String,
-        charDesc: String? = null,
-    ) {
-        if (!confineToMain { show(charID, charName, charImage, charDesc) }) return
-        present(SimulaAds.currentActivity, charID, charName, charImage, charDesc)
+    fun show() {
+        if (!confineToMain { show() }) return
+        present(SimulaAds.currentActivity)
     }
 
     // ── Internals ────────────────────────────────────────────────────────────
 
-    private fun present(
-        activity: Activity?,
-        charID: String,
-        charName: String,
-        charImage: String,
-        charDesc: String?,
-    ) {
-        val catalog = when (val current = state) {
+    private fun present(activity: Activity?) {
+        val ad = when (val current = state) {
             State.Showing -> {
                 failShow(SimulaAdError.AlreadyShowing)
                 return
@@ -129,7 +116,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 failShow(SimulaAdError.NotReady)
                 return
             }
-            is State.Ready -> current.catalog
+            is State.Ready -> current.ad
         }
         // A foreground Activity is required to present — matching Swift's
         // "no presentation context" semantics and AdMob's show(activity). A
@@ -144,19 +131,11 @@ class SimulaInterstitialAd(val adUnitId: String) {
         InterstitialHandoff.put(
             token,
             InterstitialPresentation(
-                catalog = catalog,
-                charID = charID,
-                charName = charName,
-                charImage = charImage,
-                charDesc = charDesc,
-                invitationText = invitationText,
+                ad = ad,
                 ctaText = ctaText,
-                backgroundImage = backgroundImage,
-                theme = theme,
-                inviteTheme = inviteTheme,
-                messages = messages,
-                maxGamesToShow = maxGamesToShow,
-                delegateChar = delegateChar,
+                apiKey = SimulaAds.apiKey,
+                rewarded = rewarded,
+                minPlayThresholdMs = minPlayThresholdMs,
                 callbacks = bridge(),
             ),
         )
@@ -176,6 +155,10 @@ class SimulaInterstitialAd(val adUnitId: String) {
 
         override fun onClicked() {
             listener?.onAdClicked(this@SimulaInterstitialAd)
+        }
+
+        override fun onEarnedReward() {
+            listener?.onAdEarnedReward(this@SimulaInterstitialAd)
         }
 
         override fun onClosed() {
