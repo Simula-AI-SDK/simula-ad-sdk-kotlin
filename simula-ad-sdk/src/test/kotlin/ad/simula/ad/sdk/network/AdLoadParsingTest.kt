@@ -4,8 +4,8 @@ import ad.simula.ad.sdk.model.CloseCountdownUi
 import ad.simula.ad.sdk.model.CloseMotion
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseSize
+import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.StoreOpen
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -260,6 +260,15 @@ class AdLoadParsingTest {
             """{"ad_behavior":{"close":{"delay_seconds":-5}}}""",
         ).adBehavior.toDomain()!!
         assertEquals(0, b.close.delaySeconds)
+    }
+
+    @Test
+    fun `ad_behavior clamps oversized delay to max`() {
+        // A bad/oversized delay must clamp so it can't trap the user behind a blocked close + Back.
+        val b = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"close":{"delay_seconds":600}}}""",
+        ).adBehavior.toDomain()!!
+        assertEquals(MAX_CLOSE_DELAY_SECONDS, b.close.delaySeconds)
     }
 
     @Test

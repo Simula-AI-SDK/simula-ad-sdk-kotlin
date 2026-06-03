@@ -41,8 +41,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -61,6 +61,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -501,7 +503,9 @@ private fun BoxScope.InterstitialCloseButton(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.statusBars)
+                // safeDrawing (not statusBars, which is 0 while system bars are hidden) keeps the
+                // bar clear of display cutouts / notches.
+                .windowInsetsPadding(WindowInsets.safeDrawing)
                 .padding(horizontal = 16.dp, vertical = 12.dp)
                 .height(4.dp)
                 .clip(CircleShape)
@@ -522,7 +526,9 @@ private fun BoxScope.InterstitialCloseButton(
     Box(
         modifier = Modifier
             .align(alignment)
-            .windowInsetsPadding(WindowInsets.navigationBars)
+            // safeDrawing merges system bars + display cutout so a top-corner button never
+            // lands under a notch (system bars are hidden, so navigationBars alone gave 0 at top).
+            .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(16.dp)
             .padding(bottom = if (isBottom) 96.dp else 0.dp),
     ) {
@@ -544,12 +550,17 @@ private fun BoxScope.InterstitialCloseButton(
                 Box(contentAlignment = Alignment.Center) {
                     CloseCircle(close.size, alpha = 0.5f) { CloseGlyph(close.size) }
                     Canvas(modifier = Modifier.size(close.size.boxDp.dp)) {
+                        // Stroke in dp (not raw px, which was ~1dp on a 3x screen), inset by half
+                        // its width so the ring isn't drawn half-outside the canvas bounds.
+                        val stroke = 3.dp.toPx()
                         drawArc(
                             color = Color.White,
                             startAngle = -90f,
                             sweepAngle = 360f * progress.coerceIn(0f, 1f),
                             useCenter = false,
-                            style = Stroke(width = 4f, cap = StrokeCap.Round),
+                            topLeft = Offset(stroke / 2f, stroke / 2f),
+                            size = Size(size.width - stroke, size.height - stroke),
+                            style = Stroke(width = stroke, cap = StrokeCap.Round),
                         )
                     }
                 }
@@ -558,7 +569,12 @@ private fun BoxScope.InterstitialCloseButton(
     }
 }
 
-/** White circular control at the configured size; tappable only when [onClick] is non-null. */
+/** Material minimum touch-target size. The visual circle may be smaller (the `small` arm), but
+ * the tappable area is never below this so a tiny close button can't inflate accidental CTA taps. */
+private const val MIN_TOUCH_TARGET_DP = 48
+
+/** White circular control at the configured size; tappable only when [onClick] is non-null.
+ * When tappable, the hit area is expanded to at least [MIN_TOUCH_TARGET_DP] around the circle. */
 @Composable
 private fun CloseCircle(
     size: CloseSize,
@@ -566,20 +582,26 @@ private fun CloseCircle(
     onClick: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
-    val base = Modifier
+    val circle = Modifier
         .size(size.boxDp.dp)
         .clip(CircleShape)
         .background(Color.White.copy(alpha = 0.9f * alpha))
-    val modifier = if (onClick != null) {
-        base.clickable(
-            interactionSource = remember { MutableInteractionSource() },
-            indication = null,
-            onClick = onClick,
-        )
+    if (onClick != null) {
+        Box(
+            modifier = Modifier
+                .size(maxOf(MIN_TOUCH_TARGET_DP, size.boxDp).dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onClick,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(circle, contentAlignment = Alignment.Center) { content() }
+        }
     } else {
-        base
+        Box(circle, contentAlignment = Alignment.Center) { content() }
     }
-    Box(modifier = modifier, contentAlignment = Alignment.Center) { content() }
 }
 
 /** The "✕" glyph at the configured point size. */

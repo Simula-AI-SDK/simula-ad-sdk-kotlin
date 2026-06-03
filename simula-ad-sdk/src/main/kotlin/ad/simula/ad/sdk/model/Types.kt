@@ -132,6 +132,11 @@ data class MiniGameInterstitialTheme(
 private fun normalizeBehaviorToken(raw: String?): String =
     (raw ?: "").lowercase().replace("-", "_")
 
+/** Hard cap on the server-driven close delay. The close button — and the system Back button,
+ * which is blocked while the gate is active — stays locked until the delay elapses, so an
+ * out-of-range value would otherwise trap the user. PRD arms are 0/3/5s; 15s leaves headroom. */
+internal const val MAX_CLOSE_DELAY_SECONDS = 15
+
 /** How the close button's pre-tap delay is communicated. Non-rewarded only. Unknown → NONE. */
 internal enum class CloseCountdownUi {
     NUMERIC_ALWAYS, CIRCULAR_PROGRESS, APPEARS_AT_NS, BAR, NONE;

@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.model.CloseCountdownUi
 import ad.simula.ad.sdk.model.CloseMotion
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseSize
+import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.StoreOpen
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -108,7 +109,8 @@ internal fun ApiAdBehavior?.toDomain(): AdBehavior? {
 internal fun ApiCloseBehavior?.toDomain(): CloseBehavior {
     if (this == null) return CloseBehavior()
     return CloseBehavior(
-        delaySeconds = delaySeconds.coerceAtLeast(0),
+        // Clamp to [0, MAX] so a bad/oversized value can't trap the user behind a blocked close.
+        delaySeconds = delaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS),
         countdownUi = CloseCountdownUi.from(countdownUi),
         position = ClosePosition.from(position),
         size = CloseSize.from(size),
