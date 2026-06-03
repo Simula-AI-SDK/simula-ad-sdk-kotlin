@@ -91,10 +91,19 @@ internal object SimulaApiClient {
     /**
      * Fetch the game catalog. Returns menuId + list of games.
      * Handles both new format (catalog field) and legacy format (data field).
+     *
+     * [sessionId] is passed through as the `session_id` query param when available (the
+     * backend ties the catalog to the session); omitted when null/blank.
      */
-    suspend fun fetchCatalog(): CatalogResult = withContext(Dispatchers.IO) {
+    suspend fun fetchCatalog(sessionId: String? = null): CatalogResult = withContext(Dispatchers.IO) {
+        val url = buildString {
+            append("$API_BASE_URL/minigames/catalogv2")
+            if (!sessionId.isNullOrBlank()) {
+                append("?session_id=${URLEncoder.encode(sessionId, "UTF-8")}")
+            }
+        }
         val response = SimulaHttp.request(
-            url = "$API_BASE_URL/minigames/catalogv2",
+            url = url,
             method = "GET",
             headers = jsonHeaders,
         )
