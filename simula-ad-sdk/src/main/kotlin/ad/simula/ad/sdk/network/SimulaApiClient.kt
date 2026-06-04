@@ -236,6 +236,8 @@ internal object SimulaApiClient {
         rewarded: Boolean = false,
         sessionId: String = "",
         charId: String? = null,
+        charName: String? = null,
+        charImage: String? = null,
         charDesc: String? = null,
     ): AdLoadResult = withContext(Dispatchers.IO) {
         val requestBody = AdLoadRequestBody(
@@ -243,6 +245,8 @@ internal object SimulaApiClient {
             rewarded = rewarded,
             sessionId = sessionId,
             charId = charId,
+            charName = charName,
+            charImage = charImage,
             charDesc = charDesc,
         )
 

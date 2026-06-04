@@ -49,18 +49,30 @@ class AdLoadParsingTest {
         assertFalse(body.rewarded)
         assertEquals("", body.sessionId)
         assertNull(body.charId)
+        assertNull(body.charName)
+        assertNull(body.charImage)
         assertNull(body.charDesc)
     }
 
     @Test
     fun `request encodes char fields when set`() {
-        val body = AdLoadRequestBody(adUnitId = "u", charId = "char_7", charDesc = "a wise mentor")
+        val body = AdLoadRequestBody(
+            adUnitId = "u",
+            charId = "char_7",
+            charName = "Mentor",
+            charImage = "https://cdn.example.com/avatar.png",
+            charDesc = "a wise mentor",
+        )
         val encoded = json.encodeToString(body)
         assertTrue(encoded.contains("\"char_id\""))
+        assertTrue(encoded.contains("\"char_name\""))
+        assertTrue(encoded.contains("\"char_image\""))
         assertTrue(encoded.contains("\"char_desc\""))
 
         val decoded = json.decodeFromString<AdLoadRequestBody>(encoded)
         assertEquals("char_7", decoded.charId)
+        assertEquals("Mentor", decoded.charName)
+        assertEquals("https://cdn.example.com/avatar.png", decoded.charImage)
         assertEquals("a wise mentor", decoded.charDesc)
     }
 

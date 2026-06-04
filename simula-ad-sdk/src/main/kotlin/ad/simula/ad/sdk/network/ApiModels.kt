@@ -57,6 +57,8 @@ internal data class AdLoadRequestBody(
     @SerialName("session_id") val sessionId: String = "",
     // Optional character context the backend can use to target the creative.
     @SerialName("char_id") val charId: String? = null,
+    @SerialName("char_name") val charName: String? = null,
+    @SerialName("char_image") val charImage: String? = null,
     @SerialName("char_desc") val charDesc: String? = null,
 )
 

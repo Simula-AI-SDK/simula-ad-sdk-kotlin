@@ -38,6 +38,12 @@ class SimulaInterstitialAd(val adUnitId: String) {
      * target the creative. Left out of targeting when null.
      */
     var charId: String? = null
+
+    /** Character name displayed in the creative header. */
+    var charName: String? = null
+
+    /** Character avatar URL. */
+    var charImage: String? = null
     var charDesc: String? = null
 
     /**
@@ -79,6 +85,8 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     rewarded = rewarded,
                     sessionId = sessionId,
                     charId = charId,
+                    charName = charName,
+                    charImage = charImage,
                     charDesc = charDesc,
                 )
                 // A non-blank `rendered_html` takes precedence over the image assets.
