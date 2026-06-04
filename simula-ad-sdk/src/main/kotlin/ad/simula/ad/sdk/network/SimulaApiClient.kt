@@ -26,7 +26,7 @@ import java.net.URLEncoder
  */
 internal object SimulaApiClient {
 
-    private const val API_BASE_URL = "https://simula-staging.ngrok.dev"
+    private const val API_BASE_URL = "https://simula-api-701226639755.us-central1.run.app"
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -235,11 +235,15 @@ internal object SimulaApiClient {
         adUnitId: String,
         rewarded: Boolean = false,
         sessionId: String = "",
+        charId: String? = null,
+        charDesc: String? = null,
     ): AdLoadResult = withContext(Dispatchers.IO) {
         val requestBody = AdLoadRequestBody(
             adUnitId = adUnitId,
             rewarded = rewarded,
             sessionId = sessionId,
+            charId = charId,
+            charDesc = charDesc,
         )
 
         val response = SimulaHttp.request(

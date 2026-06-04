@@ -34,6 +34,13 @@ class SimulaInterstitialAd(val adUnitId: String) {
     var rewarded: Boolean = false
 
     /**
+     * Optional character context sent on the `/ads/load` request so the backend can
+     * target the creative. Left out of targeting when null.
+     */
+    var charId: String? = null
+    var charDesc: String? = null
+
+    /**
      * Minimum dwell before a rewarded ad can be closed / the reward is earned. Only
      * applies when [rewarded] is true. e.g. `5.seconds` (`kotlin.time.Duration`).
      */
@@ -71,6 +78,8 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     adUnitId = adUnitId,
                     rewarded = rewarded,
                     sessionId = sessionId,
+                    charId = charId,
+                    charDesc = charDesc,
                 )
                 // A non-blank `rendered_html` takes precedence over the image assets.
                 val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
