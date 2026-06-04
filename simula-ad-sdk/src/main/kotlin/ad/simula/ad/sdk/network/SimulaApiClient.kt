@@ -244,7 +244,7 @@ internal object SimulaApiClient {
         val response = SimulaHttp.request(
             url = "$API_BASE_URL/ads/load",
             method = "POST",
-            headers = jsonHeaders,
+            headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
         )
         if (!response.isSuccessful) {

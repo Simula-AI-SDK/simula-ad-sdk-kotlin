@@ -8,8 +8,6 @@ import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
-import kotlin.time.Duration
-import kotlin.time.Duration.Companion.milliseconds
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -20,7 +18,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -35,7 +32,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -60,6 +56,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Transparent, full-screen host for the imperative interstitial. Reads its
@@ -100,7 +98,6 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                 store = SimulaAds.store,
                 apiKey = SimulaAds.apiKey,
                 devMode = SimulaAds.devMode,
-                hasPrivacyConsent = SimulaAds.hasPrivacyConsent,
             ) {
                 CreativeInterstitial(
                     presentation = p,

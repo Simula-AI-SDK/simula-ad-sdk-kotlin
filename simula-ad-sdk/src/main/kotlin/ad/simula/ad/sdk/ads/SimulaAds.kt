@@ -1,6 +1,8 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.privacy.SimulaPrivacy
+import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.provider.SimulaSessionStore
 import android.app.Activity
 import android.app.Application
@@ -28,8 +30,6 @@ object SimulaAds {
     internal var apiKey: String = ""
         private set
     internal var devMode: Boolean = false
-        private set
-    internal var hasPrivacyConsent: Boolean = true
         private set
     internal lateinit var store: SimulaSessionStore
         private set
@@ -60,7 +60,14 @@ object SimulaAds {
         appContext = context.applicationContext
         this.apiKey = apiKey
         this.devMode = devMode
-        this.hasPrivacyConsent = hasPrivacyConsent
+
+        // Seed the process-wide privacy store so the imperative path honors the
+        // consent flag: SimulaApiClient reads SimulaPrivacy.current for the
+        // /session/create body and per-request consent headers. attach() also wires
+        // IAB-standard CMP auto-read, matching SimulaProvider.
+        SimulaPrivacy.apply(SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent))
+        SimulaPrivacy.attach(appContext)
+
         val effectiveUserID = if (hasPrivacyConsent) primaryUserID else null
         store = SimulaSessionStore(apiKey, devMode, effectiveUserID)
 
