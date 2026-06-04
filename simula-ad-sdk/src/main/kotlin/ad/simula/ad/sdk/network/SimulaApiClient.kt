@@ -220,7 +220,6 @@ internal object SimulaApiClient {
         val rewarded: Boolean,
         val destination: String,
         val renderedFormat: String?,
-        val renderedAssets: List<String>,
         val trackingUrl: String?,
         val renderedHtml: String?,
     )
@@ -229,7 +228,7 @@ internal object SimulaApiClient {
      * Load a native-creative interstitial via `POST /ads/load`.
      *
      * `ad_inserted == false` is a valid no-fill response (NOT an error); callers
-     * inspect [AdLoadResult.adInserted]/[AdLoadResult.renderedAssets] to decide.
+     * inspect [AdLoadResult.adInserted]/[AdLoadResult.renderedHtml] to decide.
      */
     suspend fun loadAd(
         adUnitId: String,
@@ -271,7 +270,6 @@ internal object SimulaApiClient {
             rewarded = data.rewarded,
             destination = data.destination,
             renderedFormat = data.renderedFormat,
-            renderedAssets = data.renderedAssets,
             trackingUrl = data.trackingUrl,
             renderedHtml = data.renderedHtml,
         )

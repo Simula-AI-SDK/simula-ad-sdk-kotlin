@@ -70,9 +70,8 @@ internal data class AdLoadApiResponse(
     val rewarded: Boolean = false,
     val destination: String = "appstore",
     @SerialName("rendered_format") val renderedFormat: String? = null,
-    @SerialName("rendered_assets") val renderedAssets: List<String> = emptyList(),
     @SerialName("tracking_url") val trackingUrl: String? = null,
-    // Server-rendered HTML creative. When present (non-blank), it is rendered
-    // full-screen in a WebView and takes precedence over [renderedAssets].
+    // Server-rendered HTML creative. When present (non-blank) it is rendered
+    // full-screen in a WebView — the imperative interstitial's sole creative.
     @SerialName("rendered_html") val renderedHtml: String? = null,
 )

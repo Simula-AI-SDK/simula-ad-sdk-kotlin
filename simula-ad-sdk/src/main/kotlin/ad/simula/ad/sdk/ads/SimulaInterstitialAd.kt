@@ -1,7 +1,6 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
-import ad.simula.ad.sdk.image.ImagePrefetch
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.app.Activity
 import android.content.Intent
@@ -28,7 +27,6 @@ import kotlin.time.Duration
 class SimulaInterstitialAd(val adUnitId: String) {
 
     var listener: SimulaInterstitialAdListener? = null
-    var ctaText: String = "Learn More"
 
     /** Request a rewarded interstitial. When true, the close is gated by [minPlayThreshold]. */
     var rewarded: Boolean = false
@@ -89,19 +87,12 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     charImage = charImage,
                     charDesc = charDesc,
                 )
-                // A non-blank `rendered_html` takes precedence over the image assets.
+                // Fillable only when the payload carries a non-blank `rendered_html`
+                // creative (whitespace-only HTML is treated as no-fill).
                 val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
-                // FIX M2: blank-asset no-fill + filter blanks before everything else.
-                val assets = ad.renderedAssets.filter { it.isNotBlank() }
-                // Fillable when we have an HTML creative OR at least one valid asset.
-                if (!ad.adInserted || (html == null && assets.isEmpty())) {
+                if (!ad.adInserted || html == null) {
                     failLoadOnMain(SimulaAdError.NoFill)
                     return@launch
-                }
-                // FIX M1: await the asset prefetch (off-main) BEFORE reporting LOADED.
-                // HTML creatives have no image assets to prefetch.
-                if (html == null) {
-                    ImagePrefetch.preload(SimulaAds.appContext, assets)
                 }
                 withContext(Dispatchers.Main) {
                     state = State.Ready(ad)
@@ -159,7 +150,6 @@ class SimulaInterstitialAd(val adUnitId: String) {
             token,
             InterstitialPresentation(
                 ad = ad,
-                ctaText = ctaText,
                 apiKey = SimulaAds.apiKey,
                 rewarded = rewarded,
                 minPlayThreshold = minPlayThreshold,
