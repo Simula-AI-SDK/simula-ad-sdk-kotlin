@@ -10,5 +10,13 @@
             android:hardwareAccelerated="true"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
             android:theme="@style/Theme.Simula.Interstitial" />
+
+        <!-- Full-screen host for the imperative rewarded minigame API. -->
+        <activity
+            android:name="ad.simula.ad.sdk.ads.SimulaRewardedActivity"
+            android:exported="false"
+            android:hardwareAccelerated="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
+            android:theme="@style/Theme.Simula.Interstitial" />
     </application>
 </manifest>

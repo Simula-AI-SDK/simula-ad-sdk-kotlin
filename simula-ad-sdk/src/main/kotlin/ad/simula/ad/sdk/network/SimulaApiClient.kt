@@ -23,7 +23,7 @@ import java.net.URLEncoder
  */
 internal object SimulaApiClient {
 
-    private const val API_BASE_URL = "https://simula-api-701226639755.us-central1.run.app"
+    private const val API_BASE_URL = "https://simula-staging.ngrok.dev"
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -253,6 +253,87 @@ internal object SimulaApiClient {
             renderedAssets = data.renderedAssets,
             trackingUrl = data.trackingUrl,
         )
+    }
+
+    // ── Rewarded Minigame ───────────────────────────────────────────────────
+
+    data class RewardedInitResult(
+        val serveId: String,
+        val iframeUrl: String,
+        val adId: String,
+        val durationSeconds: Int,
+    )
+
+    /**
+     * Initialize a rewarded minigame via `POST /minigames/init/rewarded`. Returns the
+     * iframe URL, the `serve_id` tying this play to its later verification, and the
+     * `duration_seconds` the SDK must enforce before a reward can be earned.
+     */
+    suspend fun initRewarded(
+        adUnitId: String,
+        sessionId: String = "",
+        minPlayThreshold: Int? = null,
+    ): RewardedInitResult = withContext(Dispatchers.IO) {
+        val requestBody = RewardedInitRequestBody(
+            adUnitId = adUnitId,
+            sessionId = sessionId,
+            minPlayThreshold = minPlayThreshold,
+        )
+        val response = SimulaHttp.request(
+            url = "$API_BASE_URL/minigames/init/rewarded",
+            method = "POST",
+            headers = jsonHeaders,
+            body = json.encodeToString(requestBody),
+        )
+        if (!response.isSuccessful) {
+            throw Exception("HTTP error! status: ${response.code}")
+        }
+        if (response.body.isBlank()) {
+            throw Exception("Empty response body")
+        }
+        val data = json.decodeFromString<RewardedInitApiResponse>(response.body)
+        RewardedInitResult(
+            serveId = data.serveId,
+            iframeUrl = data.iframeUrl,
+            adId = data.adId,
+            durationSeconds = data.durationSeconds,
+        )
+    }
+
+    /**
+     * Verify a rewarded play via `POST /minigames/verify-reward`. On a verified call
+     * the backend fires the publisher's SSV postback server-side and returns the reward
+     * token. Idempotent: a repeated call for the same `serve_id` returns HTTP 409, which
+     * is treated here as a successful (already-claimed) verification so retries converge
+     * without double-rewarding.
+     */
+    suspend fun verifyReward(
+        serveId: String,
+        sessionId: String,
+        elapsedPlayTime: Double,
+    ): VerifyRewardApiResponse = withContext(Dispatchers.IO) {
+        val requestBody = VerifyRewardRequestBody(
+            serveId = serveId,
+            sessionId = sessionId,
+            elapsedPlayTime = elapsedPlayTime,
+        )
+        val response = SimulaHttp.request(
+            url = "$API_BASE_URL/minigames/verify-reward",
+            method = "POST",
+            headers = jsonHeaders,
+            body = json.encodeToString(requestBody),
+        )
+        // Already claimed — treat as a successful idempotent verification.
+        if (response.code == 409) {
+            return@withContext VerifyRewardApiResponse(verified = true, token = null)
+        }
+        if (!response.isSuccessful) {
+            throw Exception("HTTP error! status: ${response.code}")
+        }
+        if (response.body.isBlank()) {
+            throw Exception("Empty response body")
+        }
+        json.decodeFromString<VerifyRewardApiResponse>(response.body)
     }
 
     // ── Minigame Fallback Ad ────────────────────────────────────────────────

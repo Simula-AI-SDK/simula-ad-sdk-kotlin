@@ -68,3 +68,31 @@ internal data class AdLoadApiResponse(
     @SerialName("rendered_assets") val renderedAssets: List<String> = emptyList(),
     @SerialName("tracking_url") val trackingUrl: String? = null,
 )
+
+@Serializable
+internal data class RewardedInitRequestBody(
+    @SerialName("ad_unit_id") val adUnitId: String,
+    @SerialName("session_id") val sessionId: String = "",
+    @SerialName("min_play_threshold") val minPlayThreshold: Int? = null,
+)
+
+@Serializable
+internal data class RewardedInitApiResponse(
+    @SerialName("serve_id") val serveId: String = "",
+    @SerialName("iframe_url") val iframeUrl: String = "",
+    @SerialName("ad_id") val adId: String = "",
+    @SerialName("duration_seconds") val durationSeconds: Int = 0,
+)
+
+@Serializable
+internal data class VerifyRewardRequestBody(
+    @SerialName("serve_id") val serveId: String,
+    @SerialName("session_id") val sessionId: String,
+    @SerialName("elapsed_play_time") val elapsedPlayTime: Double,
+)
+
+@Serializable
+internal data class VerifyRewardApiResponse(
+    val verified: Boolean = false,
+    val token: String? = null,
+)

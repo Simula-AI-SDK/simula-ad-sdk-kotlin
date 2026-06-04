@@ -1,0 +1,59 @@
+package ad.simula.ad.sdk.ads
+
+import java.util.concurrent.ConcurrentHashMap
+
+/** Bridge from the rewarded Activity back to the [SimulaRewardedAd] instance. */
+internal interface RewardedCallbacks {
+    fun onDisplayed()
+
+    /**
+     * The surface was dismissed. [earned] is whether the play reached the required
+     * duration; [elapsedPlayTimeSeconds] is the measured play time to verify with.
+     */
+    fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double)
+}
+
+/** Everything [SimulaRewardedActivity] needs to render one rewarded presentation. */
+internal class RewardedPresentation(
+    val iframeUrl: String,
+    val durationSeconds: Int,
+    val adId: String,
+    val apiKey: String,
+    val callbacks: RewardedCallbacks,
+) {
+    /** Guards a duplicate DISPLAYED/impression if the Activity is recreated on a config change. */
+    var displayedReported = false
+
+    /** Set true once the required play duration elapses; gates the reward. */
+    var rewardEarned = false
+
+    /**
+     * `SystemClock.elapsedRealtime()` when play tracking first started, or 0 if not yet
+     * started. Anchored on the presentation (which survives Activity recreation via the
+     * handoff) so a config change resumes the remaining time instead of restarting it —
+     * otherwise rotating could reset/evade the gate.
+     */
+    var gateStartedAtMs = 0L
+}
+
+/**
+ * Hands a non-parcelable [RewardedPresentation] to [SimulaRewardedActivity] via a
+ * token placed in the launch Intent — the loaded ad and the callback bridge can't
+ * travel through Intent extras. Mirrors [InterstitialHandoff].
+ *
+ * Reads are non-destructive ([get]) so the presentation survives an Activity
+ * recreation; the entry is only dropped via [remove] when the Activity finishes.
+ */
+internal object RewardedHandoff {
+    private val pending = ConcurrentHashMap<String, RewardedPresentation>()
+
+    fun put(token: String, presentation: RewardedPresentation) {
+        pending[token] = presentation
+    }
+
+    fun get(token: String): RewardedPresentation? = pending[token]
+
+    fun remove(token: String) {
+        pending.remove(token)
+    }
+}
