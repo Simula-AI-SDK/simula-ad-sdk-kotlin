@@ -55,6 +55,11 @@ internal data class AdLoadRequestBody(
     @SerialName("ad_unit_id") val adUnitId: String,
     val rewarded: Boolean = false,
     @SerialName("session_id") val sessionId: String = "",
+    // Optional character context the backend can use to target the creative.
+    @SerialName("char_id") val charId: String? = null,
+    @SerialName("char_name") val charName: String? = null,
+    @SerialName("char_image") val charImage: String? = null,
+    @SerialName("char_desc") val charDesc: String? = null,
 )
 
 @Serializable
@@ -65,8 +70,10 @@ internal data class AdLoadApiResponse(
     val rewarded: Boolean = false,
     val destination: String = "appstore",
     @SerialName("rendered_format") val renderedFormat: String? = null,
-    @SerialName("rendered_assets") val renderedAssets: List<String> = emptyList(),
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    // Server-rendered HTML creative. When present (non-blank) it is rendered
+    // full-screen in a WebView — the imperative interstitial's sole creative.
+    @SerialName("rendered_html") val renderedHtml: String? = null,
 )
 
 @Serializable

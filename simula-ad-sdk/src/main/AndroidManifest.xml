@@ -2,6 +2,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!--
+      Advertising ID (GAID) is OPT-IN and OFF by default, so the AD_ID permission
+      is intentionally NOT declared here — declaring it would force every host into
+      Google Play Data Safety AD_ID disclosure. Apps that enable IDFA/GAID
+      attribution add it to their own manifest:
+
+        <uses-permission android:name="com.google.android.gms.permission.AD_ID" />
+
+      See docs/GOOGLE_PLAY_DATA_SAFETY.md → "Advertising ID (GAID) — Opt-in".
+    -->
+
     <application>
         <!-- Full-screen host for the imperative interstitial API. -->
         <activity

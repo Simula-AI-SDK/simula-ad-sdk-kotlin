@@ -48,6 +48,32 @@ class AdLoadParsingTest {
         val body = AdLoadRequestBody(adUnitId = "unit_1")
         assertFalse(body.rewarded)
         assertEquals("", body.sessionId)
+        assertNull(body.charId)
+        assertNull(body.charName)
+        assertNull(body.charImage)
+        assertNull(body.charDesc)
+    }
+
+    @Test
+    fun `request encodes char fields when set`() {
+        val body = AdLoadRequestBody(
+            adUnitId = "u",
+            charId = "char_7",
+            charName = "Mentor",
+            charImage = "https://cdn.example.com/avatar.png",
+            charDesc = "a wise mentor",
+        )
+        val encoded = json.encodeToString(body)
+        assertTrue(encoded.contains("\"char_id\""))
+        assertTrue(encoded.contains("\"char_name\""))
+        assertTrue(encoded.contains("\"char_image\""))
+        assertTrue(encoded.contains("\"char_desc\""))
+
+        val decoded = json.decodeFromString<AdLoadRequestBody>(encoded)
+        assertEquals("char_7", decoded.charId)
+        assertEquals("Mentor", decoded.charName)
+        assertEquals("https://cdn.example.com/avatar.png", decoded.charImage)
+        assertEquals("a wise mentor", decoded.charDesc)
     }
 
     // ── Response: happy path ────────────────────────────────────────────────────
@@ -62,7 +88,7 @@ class AdLoadParsingTest {
               "rewarded": true,
               "destination": "web",
               "rendered_format": "rewarded_video",
-              "rendered_assets": ["https://cdn/a.jpg", "https://cdn/b.jpg"],
+              "rendered_html": "<b>hi</b>",
               "tracking_url": "https://track/click"
             }
         """.trimIndent()
@@ -75,15 +101,8 @@ class AdLoadParsingTest {
         assertTrue(r.rewarded)
         assertEquals("web", r.destination)
         assertEquals("rewarded_video", r.renderedFormat)
-        assertEquals(listOf("https://cdn/a.jpg", "https://cdn/b.jpg"), r.renderedAssets)
+        assertEquals("<b>hi</b>", r.renderedHtml)
         assertEquals("https://track/click", r.trackingUrl)
-    }
-
-    @Test
-    fun `rendered_assets preserves server order`() {
-        val payload = """{"rendered_assets":["c","a","b"]}"""
-        val r = json.decodeFromString<AdLoadApiResponse>(payload)
-        assertEquals(listOf("c", "a", "b"), r.renderedAssets)
     }
 
     // ── Response: tolerance / defaults ──────────────────────────────────────────
@@ -97,8 +116,8 @@ class AdLoadParsingTest {
         assertFalse(r.rewarded)
         assertEquals("appstore", r.destination)
         assertNull(r.renderedFormat)
-        assertTrue(r.renderedAssets.isEmpty())
         assertNull(r.trackingUrl)
+        assertNull(r.renderedHtml)
     }
 
     @Test
@@ -125,10 +144,10 @@ class AdLoadParsingTest {
 
     @Test
     fun `ad_inserted false decodes as no-fill signal`() {
-        // The no-fill case: server returns ad_inserted=false (and typically no assets).
-        val r = json.decodeFromString<AdLoadApiResponse>("""{"ad_inserted":false,"rendered_assets":[]}""")
+        // The no-fill case: server returns ad_inserted=false (and typically no html).
+        val r = json.decodeFromString<AdLoadApiResponse>("""{"ad_inserted":false}""")
         assertFalse(r.adInserted)
-        assertTrue(r.renderedAssets.isEmpty())
+        assertNull(r.renderedHtml)
     }
 
     @Test
@@ -137,7 +156,30 @@ class AdLoadParsingTest {
         val r = json.decodeFromString<AdLoadApiResponse>(payload)
         assertEquals("appstore", r.destination)
         assertNull(r.renderedFormat)
-        assertTrue(r.renderedAssets.isEmpty())
         assertNull(r.trackingUrl)
+        assertNull(r.renderedHtml)
+    }
+
+    // ── Response: rendered_html (HTML creative precedence) ──────────────────────
+
+    @Test
+    fun `rendered_html decodes when present`() {
+        val payload = """
+            {
+              "ad_id": "abc-123",
+              "ad_inserted": true,
+              "rendered_html": "<html><body>hi</body></html>"
+            }
+        """.trimIndent()
+        val r = json.decodeFromString<AdLoadApiResponse>(payload)
+        assertEquals("<html><body>hi</body></html>", r.renderedHtml)
+    }
+
+    @Test
+    fun `rendered_html absent is null`() {
+        val r = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_id":"x","ad_inserted":true}""",
+        )
+        assertNull(r.renderedHtml)
     }
 }

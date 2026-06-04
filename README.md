@@ -176,9 +176,9 @@ MiniGameInviteKit.Interstitial(charImage = "...", isOpen = true, onClick = { })
 ## Imperative Interstitial
 
 A load-then-show, full-screen interstitial in the style of AdMob/AppLovin. It calls
-`POST /ads/load`, prefetches the rendered creative, and presents a native carousel
-of the creative assets with a single call-to-action — no minigame, no Compose state
-to manage in your app.
+`POST /ads/load`, prefetches the server-rendered HTML creative, and presents it
+full-screen in a web view — the creative owns its own call-to-action. No minigame,
+no Compose state to manage in your app.
 
 ### 1. Initialize once at startup
 
@@ -202,16 +202,15 @@ import ad.simula.ad.sdk.ads.SimulaInterstitialAdListener
 import ad.simula.ad.sdk.ads.SimulaAdError
 
 val ad = SimulaInterstitialAd(adUnitId = "YOUR_AD_UNIT_ID")
-ad.ctaText = "Learn More" // default
 
 ad.listener = object : SimulaInterstitialAdListener {
     override fun onAdLoaded(ad: SimulaInterstitialAd) {
-        // Ready to show — assets are already prefetched.
+        // Ready to show — the HTML creative is already prefetched.
         ad.show(this@MainActivity) // or ad.show() to use the tracked Activity
     }
     override fun onAdFailedToLoad(ad: SimulaInterstitialAd, error: SimulaAdError) { /* no fill, network, etc. */ }
     override fun onAdDisplayed(ad: SimulaInterstitialAd) {}
-    override fun onAdClicked(ad: SimulaInterstitialAd) {} // CTA tapped
+    override fun onAdClicked(ad: SimulaInterstitialAd) {} // creative link tapped
     override fun onAdClosed(ad: SimulaInterstitialAd) {}   // next ad auto-preloads
 }
 
@@ -220,10 +219,10 @@ ad.load()
 
 `show(activity)` is preferred (correct same-task window stacking); `show()` falls
 back to the currently-tracked foreground Activity. Neither takes character
-arguments — the creative comes entirely from the server. The full-screen UI is a
-native swipeable carousel of the rendered assets (a single asset renders static
-with no swipe or dots) plus an always-visible bottom CTA labeled `ctaText`. Tapping
-the CTA routes to the ad's destination (Play Store via `market://`, or a web URL).
+arguments — the creative comes entirely from the server. The full-screen UI is the
+server-rendered HTML creative in a web view, which owns its own CTA: a user-initiated
+link tap routes to the ad's destination (Play Store via `market://`, or a web URL)
+and fires `onAdClicked`. Dismissal is via the close button (gated for rewarded ads).
 
 ### Rewarded interstitials
 

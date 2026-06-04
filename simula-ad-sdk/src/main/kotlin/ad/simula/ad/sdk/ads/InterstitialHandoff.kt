@@ -15,7 +15,6 @@ internal interface InterstitialCallbacks {
 /** Everything [SimulaInterstitialActivity] needs to render one presentation. */
 internal class InterstitialPresentation(
     val ad: SimulaApiClient.AdLoadResult,
-    val ctaText: String,
     val apiKey: String,
     val rewarded: Boolean,
     val minPlayThreshold: Duration,

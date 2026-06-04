@@ -1,7 +1,6 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
-import ad.simula.ad.sdk.image.ImagePrefetch
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.app.Activity
 import android.content.Intent
@@ -28,10 +27,22 @@ import kotlin.time.Duration
 class SimulaInterstitialAd(val adUnitId: String) {
 
     var listener: SimulaInterstitialAdListener? = null
-    var ctaText: String = "Learn More"
 
     /** Request a rewarded interstitial. When true, the close is gated by [minPlayThreshold]. */
     var rewarded: Boolean = false
+
+    /**
+     * Optional character context sent on the `/ads/load` request so the backend can
+     * target the creative. Left out of targeting when null.
+     */
+    var charId: String? = null
+
+    /** Character name displayed in the creative header. */
+    var charName: String? = null
+
+    /** Character avatar URL. */
+    var charImage: String? = null
+    var charDesc: String? = null
 
     /**
      * Minimum dwell before a rewarded ad can be closed / the reward is earned. Only
@@ -71,15 +82,18 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     adUnitId = adUnitId,
                     rewarded = rewarded,
                     sessionId = sessionId,
+                    charId = charId,
+                    charName = charName,
+                    charImage = charImage,
+                    charDesc = charDesc,
                 )
-                // FIX M2: blank-asset no-fill + filter blanks before everything else.
-                val assets = ad.renderedAssets.filter { it.isNotBlank() }
-                if (!ad.adInserted || assets.isEmpty()) {
+                // Fillable only when the payload carries a non-blank `rendered_html`
+                // creative (whitespace-only HTML is treated as no-fill).
+                val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
+                if (!ad.adInserted || html == null) {
                     failLoadOnMain(SimulaAdError.NoFill)
                     return@launch
                 }
-                // FIX M1: await the asset prefetch (off-main) BEFORE reporting LOADED.
-                ImagePrefetch.preload(SimulaAds.appContext, assets)
                 withContext(Dispatchers.Main) {
                     state = State.Ready(ad)
                     listener?.onAdLoaded(this@SimulaInterstitialAd)
@@ -136,7 +150,6 @@ class SimulaInterstitialAd(val adUnitId: String) {
             token,
             InterstitialPresentation(
                 ad = ad,
-                ctaText = ctaText,
                 apiKey = SimulaAds.apiKey,
                 rewarded = rewarded,
                 minPlayThreshold = minPlayThreshold,
