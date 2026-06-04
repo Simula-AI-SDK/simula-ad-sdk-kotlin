@@ -99,6 +99,7 @@ class AdLoadParsingTest {
         assertNull(r.renderedFormat)
         assertTrue(r.renderedAssets.isEmpty())
         assertNull(r.trackingUrl)
+        assertNull(r.renderedHtml)
     }
 
     @Test
@@ -139,5 +140,32 @@ class AdLoadParsingTest {
         assertNull(r.renderedFormat)
         assertTrue(r.renderedAssets.isEmpty())
         assertNull(r.trackingUrl)
+        assertNull(r.renderedHtml)
+    }
+
+    // ── Response: rendered_html (HTML creative precedence) ──────────────────────
+
+    @Test
+    fun `rendered_html decodes when present`() {
+        val payload = """
+            {
+              "ad_id": "abc-123",
+              "ad_inserted": true,
+              "rendered_assets": ["https://cdn/a.jpg"],
+              "rendered_html": "<html><body>hi</body></html>"
+            }
+        """.trimIndent()
+        val r = json.decodeFromString<AdLoadApiResponse>(payload)
+        assertEquals("<html><body>hi</body></html>", r.renderedHtml)
+        // Assets still decode; precedence is decided by the SDK at render time.
+        assertEquals(listOf("https://cdn/a.jpg"), r.renderedAssets)
+    }
+
+    @Test
+    fun `rendered_html absent is null`() {
+        val r = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_id":"x","ad_inserted":true,"rendered_assets":["https://cdn/a.jpg"]}""",
+        )
+        assertNull(r.renderedHtml)
     }
 }

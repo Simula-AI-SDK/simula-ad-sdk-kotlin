@@ -67,4 +67,7 @@ internal data class AdLoadApiResponse(
     @SerialName("rendered_format") val renderedFormat: String? = null,
     @SerialName("rendered_assets") val renderedAssets: List<String> = emptyList(),
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    // Server-rendered HTML creative. When present (non-blank), it is rendered
+    // full-screen in a WebView and takes precedence over [renderedAssets].
+    @SerialName("rendered_html") val renderedHtml: String? = null,
 )

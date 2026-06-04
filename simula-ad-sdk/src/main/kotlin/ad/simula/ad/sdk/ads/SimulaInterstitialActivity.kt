@@ -3,12 +3,16 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.minigame.CloseButton
+import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.WindowManager
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -48,9 +52,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -169,6 +175,9 @@ private fun CreativeInterstitial(
     openDestination: (SimulaApiClient.AdLoadResult) -> Unit,
 ) {
     val ad = presentation.ad
+    // A non-blank `rendered_html` renders full-screen and takes precedence over the
+    // image carousel.
+    val html = remember(ad) { ad.renderedHtml?.takeIf { it.isNotBlank() } }
     // FIX M2: defensively filter blank assets for the carousel.
     val assets = remember(ad) { ad.renderedAssets.filter { it.isNotBlank() } }
 
@@ -223,10 +232,19 @@ private fun CreativeInterstitial(
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        CreativeCarousel(
-            assets = assets,
-            modifier = Modifier.fillMaxSize(),
-        )
+        if (html != null) {
+            CreativeHtml(
+                html = html,
+                destination = ad.destination,
+                onAdClick = { presentation.callbacks.onClicked() },
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            CreativeCarousel(
+                assets = assets,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
         if (closeEnabled) {
             CloseButton(
@@ -238,33 +256,84 @@ private fun CreativeInterstitial(
             )
         }
 
-        // Always-visible bottom CTA.
-        Button(
-            onClick = {
-                presentation.callbacks.onClicked()
-                openDestination(ad)
-                // For a rewarded ad the user must remain until the gate elapses.
-                if (!presentation.rewarded) onFinish()
-            },
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color.White,
-                contentColor = Color.Black,
-            ),
-            shape = RoundedCornerShape(28.dp),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(horizontal = 24.dp, vertical = 24.dp),
-        ) {
-            Text(
-                text = presentation.ctaText,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(vertical = 6.dp),
-            )
+        // Always-visible bottom CTA — carousel (asset) path only. An HTML creative
+        // owns its own CTA, so the SDK button is suppressed and the in-creative link
+        // drives CLICKED instead.
+        if (html == null) {
+            Button(
+                onClick = {
+                    presentation.callbacks.onClicked()
+                    openDestination(ad)
+                    // For a rewarded ad the user must remain until the gate elapses.
+                    if (!presentation.rewarded) onFinish()
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.White,
+                    contentColor = Color.Black,
+                ),
+                shape = RoundedCornerShape(28.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(horizontal = 24.dp, vertical = 24.dp),
+            ) {
+                Text(
+                    text = presentation.ctaText,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(vertical = 6.dp),
+                )
+            }
         }
     }
+}
+
+/**
+ * Full-screen HTML creative. The server-rendered `rendered_html` owns its own CTA:
+ * a user-initiated link navigation (gesture) is intercepted, reported as CLICKED via
+ * [onAdClick], and routed to the advertiser destination through [CreativeCtaRouter]
+ * (the same redirect-resolution the carousel CTA uses). Non-gesture navigations
+ * (impression pixels, JS/meta auto-redirects) load normally so they can't fake a
+ * click. The interstitial is NOT dismissed on click — the close button (gated for
+ * rewarded creatives) drives dismissal.
+ */
+@Composable
+private fun CreativeHtml(
+    html: String,
+    destination: String,
+    onAdClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // applicationContext so the store/browser open survives if the interstitial is
+    // later dismissed.
+    val appContext = LocalContext.current.applicationContext
+    AndroidView(
+        factory = { ctx ->
+            WebViewPool.acquire(
+                context = ctx,
+                client = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                    ): Boolean {
+                        val url = request?.url?.toString() ?: return false
+                        // Only a user gesture counts as the ad click-through; pixels
+                        // and auto-redirects (no gesture) navigate normally.
+                        if (!request.hasGesture()) return false
+                        onAdClick() // CLICKED
+                        CreativeCtaRouter.open(appContext, url, destination)
+                        return true
+                    }
+                },
+            ).apply {
+                // Self-contained creative: asset URLs are absolute (baseURL = null).
+                loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+            }
+        },
+        modifier = modifier,
+        onRelease = { webView -> WebViewPool.release(webView) },
+    )
 }
 
 /**

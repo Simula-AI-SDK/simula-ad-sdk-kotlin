@@ -72,14 +72,20 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     rewarded = rewarded,
                     sessionId = sessionId,
                 )
+                // A non-blank `rendered_html` takes precedence over the image assets.
+                val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
                 // FIX M2: blank-asset no-fill + filter blanks before everything else.
                 val assets = ad.renderedAssets.filter { it.isNotBlank() }
-                if (!ad.adInserted || assets.isEmpty()) {
+                // Fillable when we have an HTML creative OR at least one valid asset.
+                if (!ad.adInserted || (html == null && assets.isEmpty())) {
                     failLoadOnMain(SimulaAdError.NoFill)
                     return@launch
                 }
                 // FIX M1: await the asset prefetch (off-main) BEFORE reporting LOADED.
-                ImagePrefetch.preload(SimulaAds.appContext, assets)
+                // HTML creatives have no image assets to prefetch.
+                if (html == null) {
+                    ImagePrefetch.preload(SimulaAds.appContext, assets)
+                }
                 withContext(Dispatchers.Main) {
                     state = State.Ready(ad)
                     listener?.onAdLoaded(this@SimulaInterstitialAd)
