@@ -1,6 +1,9 @@
 package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.model.AdBehavior
+import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.Message
 import kotlinx.coroutines.Dispatchers
@@ -9,6 +12,8 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -224,7 +229,16 @@ internal object SimulaApiClient {
         val trackingUrl: String?,
         // Null when the payload omits `ad_behavior` (renderer falls back to today's defaults).
         val adBehavior: AdBehavior?,
-    )
+        // Creative descriptor (`creative` node) and experiment metadata; null when omitted.
+        val creative: Creative? = null,
+        val experiment: Experiment? = null,
+    ) {
+        /** The ad format. Prefers the nested `creative.ad_unit_type`; falls back to the legacy flat
+         * `rewarded` flag / `rendered_format` so older payloads keep working. Drives close copy. */
+        val adUnitType: AdUnitType
+            get() = creative?.adUnitType
+                ?: if (rewarded || renderedFormat == "rewarded_video") AdUnitType.REWARDED else AdUnitType.INTERSTITIAL
+    }
 
     /**
      * Load a native-creative interstitial via `POST /ads/load`.
@@ -241,6 +255,7 @@ internal object SimulaApiClient {
             adUnitId = adUnitId,
             rewarded = rewarded,
             sessionId = sessionId,
+            capabilities = currentDeviceCapabilities(),
         )
 
         val response = SimulaHttp.request(
@@ -267,6 +282,8 @@ internal object SimulaApiClient {
             renderedAssets = data.renderedAssets,
             trackingUrl = data.trackingUrl,
             adBehavior = data.adBehavior.toDomain(),
+            creative = data.creative.toDomain(),
+            experiment = data.experiment.toDomain(),
         )
     }
 
@@ -317,18 +334,26 @@ internal object SimulaApiClient {
     }
 
     /**
-     * Track an ad impression. Best-effort, silently fails.
+     * Track an ad impression. Best-effort, silently fails. When the load response carried an
+     * `experiment` node, its assignment metadata rides along so impressions can be attributed
+     * to the A/B variant.
      */
     suspend fun trackImpression(
         adId: String,
         apiKey: String,
+        experiment: Experiment? = null,
     ): Unit = withContext(Dispatchers.IO) {
         try {
+            val body = buildJsonObject {
+                experiment?.experimentId?.let { put("experiment_id", it) }
+                experiment?.variantId?.let { put("variant_id", it) }
+                experiment?.layer?.let { put("layer", it) }
+            }
             SimulaHttp.request(
                 url = "$API_BASE_URL/track/engagement/impression/$adId",
                 method = "POST",
                 headers = authHeaders(apiKey),
-                body = "{}",
+                body = json.encodeToString(body),
             )
         } catch (_: Exception) {
             // Silently fail

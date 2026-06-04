@@ -1,11 +1,13 @@
 package ad.simula.ad.sdk.network
 
-import ad.simula.ad.sdk.model.CloseCountdownUi
-import ad.simula.ad.sdk.model.CloseMotion
+import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.ClosePosition
-import ad.simula.ad.sdk.model.CloseSize
+import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
-import ad.simula.ad.sdk.model.StoreOpen
+import ad.simula.ad.sdk.model.OverlayPosition
+import ad.simula.ad.sdk.model.OverlayTiming
+import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.validatedHexColor
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -147,7 +149,7 @@ class AdLoadParsingTest {
         assertNull(r.trackingUrl)
     }
 
-    // ── Response: ad_behavior (A/B render config) ───────────────────────────────
+    // ── Response: ad_behavior (A/B render config, v2 schema) ─────────────────────
 
     @Test
     fun `ad_behavior absent maps to null domain`() {
@@ -155,23 +157,45 @@ class AdLoadParsingTest {
         // Absent ad_behavior → null so the renderer falls back to today's literal behavior.
         assertNull(r.adBehavior)
         assertNull(r.adBehavior.toDomain())
+        assertNull(r.creative)
+        assertNull(r.experiment)
     }
 
     @Test
-    fun `ad_behavior full config maps to domain enums`() {
+    fun `ad_behavior full config maps to domain`() {
         val payload = """
             {"ad_id":"x","ad_inserted":true,
-             "ad_behavior":{"close":{"delay_seconds":5,"countdown_ui":"circular_progress",
-               "position":"bottom_left","size":"large","motion":"reposition_on_tap"},
-               "store_open":"skstoreproduct"}}
+             "creative":{"type":"playable","bundle_url":"https://b","ad_unit_type":"rewarded"},
+             "experiment":{"experiment_id":"playable_close_q3","variant_id":"v1","layer":"close_chrome"},
+             "ad_behavior":{"close":{"delay_seconds":3,"treatment":"countdown_circle",
+               "position":"top_right","progress_bar_color":"#00FF00"},
+               "store_prompt":{"enabled":true,"trigger":"midpoint","position":"top_left","platform":"android"},
+               "skoverlay":{"enabled":true,"timing":"on_click","delay_seconds":0,"position":"bottom","dismissible":true}}}
         """.trimIndent()
-        val b = json.decodeFromString<AdLoadApiResponse>(payload).adBehavior.toDomain()!!
-        assertEquals(5, b.close.delaySeconds)
-        assertEquals(CloseCountdownUi.CIRCULAR_PROGRESS, b.close.countdownUi)
-        assertEquals(ClosePosition.BOTTOM_LEFT, b.close.position)
-        assertEquals(CloseSize.LARGE, b.close.size)
-        assertEquals(CloseMotion.REPOSITION_ON_TAP, b.close.motion)
-        assertEquals(StoreOpen.SKSTOREPRODUCT, b.storeOpen)
+        val r = json.decodeFromString<AdLoadApiResponse>(payload)
+        val b = r.adBehavior.toDomain()!!
+        assertEquals(3, b.close.delaySeconds)
+        assertEquals(CloseTreatment.COUNTDOWN_CIRCLE, b.close.treatment)
+        assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
+        assertEquals("#00FF00", b.close.progressBarColor)
+
+        val prompt = b.storePrompt!!
+        assertTrue(prompt.enabled)
+        assertEquals(ClosePosition.TOP_LEFT, prompt.position)
+        assertEquals(StorePromptPlatform.ANDROID, prompt.platform)
+
+        val overlay = b.skoverlay!!
+        assertTrue(overlay.enabled)
+        assertEquals(OverlayTiming.ON_CLICK, overlay.timing)
+        assertEquals(OverlayPosition.BOTTOM, overlay.position)
+        assertTrue(overlay.dismissible)
+
+        val creative = r.creative.toDomain()!!
+        assertEquals(AdUnitType.REWARDED, creative.adUnitType)
+        assertEquals("https://b", creative.bundleUrl)
+        val experiment = r.experiment.toDomain()!!
+        assertEquals("playable_close_q3", experiment.experimentId)
+        assertEquals("close_chrome", experiment.layer)
     }
 
     @Test
@@ -182,11 +206,11 @@ class AdLoadParsingTest {
         assertNotNull(r.adBehavior)
         val b = r.adBehavior.toDomain()!!
         assertEquals(0, b.close.delaySeconds)
-        assertEquals(CloseCountdownUi.NONE, b.close.countdownUi)
+        assertEquals(CloseTreatment.HIDDEN, b.close.treatment)
         assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
-        assertEquals(CloseSize.STANDARD, b.close.size)
-        assertEquals(CloseMotion.STATIC, b.close.motion)
-        assertEquals(StoreOpen.EXTERNAL, b.storeOpen)
+        assertEquals("#FFFFFF", b.close.progressBarColor)
+        assertNull(b.storePrompt)
+        assertNull(b.skoverlay)
     }
 
     @Test
@@ -195,63 +219,150 @@ class AdLoadParsingTest {
             """{"ad_behavior":{"close":{"delay_seconds":3}}}""",
         ).adBehavior.toDomain()!!
         assertEquals(3, b.close.delaySeconds)
-        assertEquals(CloseCountdownUi.NONE, b.close.countdownUi)
+        assertEquals(CloseTreatment.HIDDEN, b.close.treatment)
         assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
-        assertEquals(StoreOpen.EXTERNAL, b.storeOpen)
+        assertEquals("#FFFFFF", b.close.progressBarColor)
     }
 
     @Test
     fun `ad_behavior normalizes hyphenated values`() {
         val payload = """
-            {"ad_behavior":{"close":{"countdown_ui":"numeric-always","position":"top-left",
-              "motion":"reposition-on-tap"},"store_open":"external-browser"}}
+            {"ad_behavior":{"close":{"treatment":"reward-or-close-label","position":"top-left"},
+              "skoverlay":{"enabled":true,"timing":"during-play","position":"bottom-raised"}}}
         """.trimIndent()
         val b = json.decodeFromString<AdLoadApiResponse>(payload).adBehavior.toDomain()!!
-        assertEquals(CloseCountdownUi.NUMERIC_ALWAYS, b.close.countdownUi)
+        assertEquals(CloseTreatment.REWARD_OR_CLOSE_LABEL, b.close.treatment)
         assertEquals(ClosePosition.TOP_LEFT, b.close.position)
-        assertEquals(CloseMotion.REPOSITION_ON_TAP, b.close.motion)
-        assertEquals(StoreOpen.EXTERNAL, b.storeOpen)
+        assertEquals(OverlayTiming.DURING_PLAY, b.skoverlay!!.timing)
+        assertEquals(OverlayPosition.BOTTOM_RAISED, b.skoverlay!!.position)
     }
 
     @Test
-    fun `ad_behavior honors legacy aliases`() {
-        val payload = """
-            {"ad_behavior":{"close":{"countdown_ui":"bar","position":"bottom_corner","size":"small"},
-              "store_open":"sk_overlay"}}
-        """.trimIndent()
-        val b = json.decodeFromString<AdLoadApiResponse>(payload).adBehavior.toDomain()!!
-        assertEquals(CloseCountdownUi.BAR, b.close.countdownUi)
-        assertEquals(ClosePosition.BOTTOM_RIGHT, b.close.position)
-        assertEquals(CloseSize.SMALL, b.close.size)
-        assertEquals(StoreOpen.SKSTOREPRODUCT, b.storeOpen)
+    fun `close position excludes bottom_right`() {
+        // v2 excludes bottom_right (and legacy bottom_corner) → snaps to the safe top_right default.
+        for (raw in listOf("bottom_right", "bottom_corner")) {
+            val b = json.decodeFromString<AdLoadApiResponse>(
+                """{"ad_behavior":{"close":{"treatment":"hidden","position":"$raw"}}}""",
+            ).adBehavior.toDomain()!!
+            assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
+        }
     }
 
     @Test
-    fun `ad_behavior maps inline_install and sk_store_product`() {
-        val a = json.decodeFromString<AdLoadApiResponse>(
-            """{"ad_behavior":{"store_open":"inline_install"}}""",
-        ).adBehavior.toDomain()!!
-        assertEquals(StoreOpen.INLINE_INSTALL, a.storeOpen)
+    fun `close position snaps for edge-anchored treatments`() {
+        // countdown_circle / progress_bar can't render bottom_left → snap to top_right.
+        for (treatment in listOf("countdown_circle", "progress_bar")) {
+            val b = json.decodeFromString<AdLoadApiResponse>(
+                """{"ad_behavior":{"close":{"treatment":"$treatment","position":"bottom_left"}}}""",
+            ).adBehavior.toDomain()!!
+            assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
+        }
+        // hidden / reward_or_close_label keep bottom_left.
+        for (treatment in listOf("hidden", "reward_or_close_label")) {
+            val b = json.decodeFromString<AdLoadApiResponse>(
+                """{"ad_behavior":{"close":{"treatment":"$treatment","position":"bottom_left"}}}""",
+            ).adBehavior.toDomain()!!
+            assertEquals(ClosePosition.BOTTOM_LEFT, b.close.position)
+        }
+    }
 
+    @Test
+    fun `close treatment unknown falls back to hidden`() {
         val b = json.decodeFromString<AdLoadApiResponse>(
-            """{"ad_behavior":{"store_open":"sk_store_product"}}""",
+            """{"ad_behavior":{"close":{"treatment":"sparkles","position":"galaxy"}}}""",
         ).adBehavior.toDomain()!!
-        assertEquals(StoreOpen.SKSTOREPRODUCT, b.storeOpen)
+        assertEquals(CloseTreatment.HIDDEN, b.close.treatment)
+        assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
+    }
+
+    @Test
+    fun `progress_bar_color validates and falls back`() {
+        // Valid 6-digit hex (with/without #) is normalized to upper-case with a #.
+        assertEquals("#3B82F6", validatedHexColor("#3b82f6"))
+        assertEquals("#00FF00", validatedHexColor("00FF00"))
+        // Malformed → white fallback.
+        assertEquals("#FFFFFF", validatedHexColor("#FFF"))
+        assertEquals("#FFFFFF", validatedHexColor("#GGGGGG"))
+        assertEquals("#FFFFFF", validatedHexColor(null))
+
+        // And through the decode path.
+        val good = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"close":{"progress_bar_color":"#abcdef"}}}""",
+        ).adBehavior.toDomain()!!
+        assertEquals("#ABCDEF", good.close.progressBarColor)
+        val bad = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"close":{"progress_bar_color":"not-a-color"}}}""",
+        ).adBehavior.toDomain()!!
+        assertEquals("#FFFFFF", bad.close.progressBarColor)
+    }
+
+    @Test
+    fun `store_prompt position is verbatim and platform parsed`() {
+        val b = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"store_prompt":{"enabled":true,"position":"bottom_left","platform":"ios"}}}""",
+        ).adBehavior.toDomain()!!
+        val prompt = b.storePrompt!!
+        assertTrue(prompt.enabled)
+        assertEquals(ClosePosition.BOTTOM_LEFT, prompt.position) // rendered verbatim — never recomputed
+        assertEquals(StorePromptPlatform.IOS, prompt.platform)
+        assertEquals("midpoint", prompt.trigger)
+    }
+
+    @Test
+    fun `skoverlay defaults and explicit values`() {
+        // Empty skoverlay object → defaults (disabled, on_click, bottom, dismissible).
+        val d = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"skoverlay":{}}}""",
+        ).adBehavior.toDomain()!!.skoverlay!!
+        assertFalse(d.enabled)
+        assertEquals(OverlayTiming.ON_CLICK, d.timing)
+        assertEquals(OverlayPosition.BOTTOM, d.position)
+        assertTrue(d.dismissible)
+
+        // Explicit values, including a clamped negative delay.
+        val o = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"skoverlay":{"enabled":true,"timing":"delayed","delay_seconds":-3,
+                "position":"bottom_raised","dismissible":false}}}""",
+        ).adBehavior.toDomain()!!.skoverlay!!
+        assertTrue(o.enabled)
+        assertEquals(OverlayTiming.DELAYED, o.timing)
+        assertEquals(0, o.delaySeconds) // negative clamps to 0
+        assertEquals(OverlayPosition.BOTTOM_RAISED, o.position)
+        assertFalse(o.dismissible)
+    }
+
+    @Test
+    fun `ad_unit_type falls back to legacy flags`() {
+        // No creative node: adUnitType derives from the legacy rewarded flag / rendered_format.
+        val rewardedFlag = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_id":"x","ad_inserted":true,"rewarded":true}""",
+        )
+        val r1 = SimulaApiClient.AdLoadResult(
+            adId = rewardedFlag.adId, adInserted = rewardedFlag.adInserted, adUnitId = rewardedFlag.adUnitId,
+            rewarded = rewardedFlag.rewarded, destination = rewardedFlag.destination,
+            renderedFormat = rewardedFlag.renderedFormat, renderedAssets = rewardedFlag.renderedAssets,
+            trackingUrl = rewardedFlag.trackingUrl, adBehavior = null,
+        )
+        assertEquals(AdUnitType.REWARDED, r1.adUnitType)
+
+        val plain = SimulaApiClient.AdLoadResult(
+            adId = "x", adInserted = true, adUnitId = "u", rewarded = false, destination = "appstore",
+            renderedFormat = null, renderedAssets = emptyList(), trackingUrl = null, adBehavior = null,
+        )
+        assertEquals(AdUnitType.INTERSTITIAL, plain.adUnitType)
     }
 
     @Test
     fun `ad_behavior is resilient to unknown enum values`() {
         val payload = """
-            {"ad_behavior":{"close":{"delay_seconds":12,"countdown_ui":"spinner","position":"middle",
-              "size":"huge","motion":"teleport"},"store_open":"warp"}}
+            {"ad_behavior":{"close":{"delay_seconds":12,"treatment":"spinner","position":"middle",
+              "progress_bar_color":"warp"}}}
         """.trimIndent()
         val b = json.decodeFromString<AdLoadApiResponse>(payload).adBehavior.toDomain()!!
         assertEquals(12, b.close.delaySeconds)
-        assertEquals(CloseCountdownUi.NONE, b.close.countdownUi)
+        assertEquals(CloseTreatment.HIDDEN, b.close.treatment)
         assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
-        assertEquals(CloseSize.STANDARD, b.close.size)
-        assertEquals(CloseMotion.STATIC, b.close.motion)
-        assertEquals(StoreOpen.EXTERNAL, b.storeOpen)
+        assertEquals("#FFFFFF", b.close.progressBarColor)
     }
 
     @Test
@@ -269,13 +380,5 @@ class AdLoadParsingTest {
             """{"ad_behavior":{"close":{"delay_seconds":600}}}""",
         ).adBehavior.toDomain()!!
         assertEquals(MAX_CLOSE_DELAY_SECONDS, b.close.delaySeconds)
-    }
-
-    @Test
-    fun `close size maps to PRD point values`() {
-        assertEquals(16, CloseSize.SMALL.glyphSp)
-        assertEquals(24, CloseSize.STANDARD.glyphSp)
-        assertEquals(32, CloseSize.LARGE.glyphSp)
-        assertEquals(44, CloseSize.STANDARD.boxDp)
     }
 }
