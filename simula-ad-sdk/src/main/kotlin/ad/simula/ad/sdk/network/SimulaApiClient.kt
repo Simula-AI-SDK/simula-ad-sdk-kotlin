@@ -2,15 +2,18 @@ package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.Message
+import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.net.URLEncoder
 
 /**
@@ -31,10 +34,13 @@ internal object SimulaApiClient {
         encodeDefaults = true
     }
 
-    private val jsonHeaders = mapOf("Content-Type" to "application/json")
+    // Consent signals ride along on every request from this single chokepoint,
+    // read from the process-wide store (see SimulaPrivacy).
+    private fun jsonHeaders(): Map<String, String> =
+        mapOf("Content-Type" to "application/json") + SimulaPrivacy.current.consentHeaders()
 
     private fun authHeaders(apiKey: String) =
-        jsonHeaders + ("Authorization" to "Bearer $apiKey")
+        jsonHeaders() + ("Authorization" to "Bearer $apiKey")
 
     // ── Session ─────────────────────────────────────────────────────────────
 
@@ -57,11 +63,17 @@ internal object SimulaApiClient {
             val url = "$API_BASE_URL/session/create" +
                 if (params.isEmpty()) "" else "?" + params.joinToString("&")
 
+            // Establish consent at session creation: the backend ties the `privacy`
+            // block to the session and inherits it on subsequent calls.
+            val body = buildJsonObject {
+                put("privacy", SimulaPrivacy.current.privacyJson())
+            }.toString()
+
             val response = SimulaHttp.request(
                 url = url,
                 method = "POST",
                 headers = authHeaders(apiKey),
-                body = "{}",
+                body = body,
             )
 
             if (response.code == 401) {
@@ -95,7 +107,7 @@ internal object SimulaApiClient {
         val response = SimulaHttp.request(
             url = "$API_BASE_URL/minigames/catalogv2",
             method = "GET",
-            headers = jsonHeaders,
+            headers = jsonHeaders(),
         )
         if (!response.isSuccessful) {
             throw Exception("HTTP error! status: ${response.code}")
@@ -182,7 +194,7 @@ internal object SimulaApiClient {
         val response = SimulaHttp.request(
             url = "$API_BASE_URL/minigames/init",
             method = "POST",
-            headers = jsonHeaders,
+            headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
         )
         if (!response.isSuccessful) {
@@ -210,7 +222,7 @@ internal object SimulaApiClient {
             val response = SimulaHttp.request(
                 url = "$API_BASE_URL/minigames/fallback_ad/$adId",
                 method = "POST",
-                headers = jsonHeaders,
+                headers = jsonHeaders(),
                 body = "",
             )
             if (!response.isSuccessful) return@withContext null

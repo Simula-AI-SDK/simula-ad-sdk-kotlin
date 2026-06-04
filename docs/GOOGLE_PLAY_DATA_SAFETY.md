@@ -92,7 +92,84 @@ Explicitly select **"Not collected"** for:
 - **Files and docs**
 - **Calendar**
 - **Web browsing history**
-- **Advertising ID** (AAID/GAID)
+- **Advertising ID** (AAID/GAID) — *unless you opt in; see below*
+
+---
+
+## Consent Signals (GDPR / CCPA / GPP / COPPA)
+
+The SDK **consumes** consent — it does not gather it. Supply signals two ways:
+
+1. **Automatic (recommended).** If your app uses an IAB-registered CMP, the SDK
+   auto-reads the standard keys it writes to the default `SharedPreferences`
+   (`IABTCF_TCString`, `IABTCF_gdprApplies`, `IABTCF_PurposeConsents`,
+   `IABUSPrivacy_String`, `IABGPP_HDR_GppString`, `IABGPP_GppSID`) and refreshes
+   automatically when they change.
+2. **Explicit overrides** via `SimulaPrivacyConfig`:
+
+```kotlin
+SimulaProvider(
+    apiKey = "your-key",
+    privacy = SimulaPrivacyConfig(
+        tcString = tc, uspString = usp, gppString = gpp,
+        coppaApplies = false,
+    ),
+) { /* content */ }
+```
+
+Refresh at runtime when your CMP updates (via the context's `updateConsent`):
+
+```kotlin
+val simula = useSimula()
+simula.updateConsent(SimulaPrivacyConfig(tcString = newTc, gppString = newGpp))
+```
+
+`coppaApplies = true` suppresses the `ppid` and the GAID regardless of settings.
+A denied TCF Purpose 1 disables non-essential on-device caching.
+
+---
+
+## Advertising ID (GAID) — Opt-in
+
+GAID collection is **off by default** (the table above assumes the default). To
+enable attribution:
+
+**1. Opt in** when configuring the provider:
+
+```kotlin
+SimulaProvider(
+    apiKey = "your-key",
+    privacy = SimulaPrivacyConfig(enableAdvertisingId = true),
+) { /* content */ }
+```
+
+**2. Declare the `AD_ID` permission** in your **app's** `AndroidManifest.xml`
+(the SDK intentionally does **not** declare it, so contextual-only apps are not
+forced into Data Safety AD_ID disclosure):
+
+```xml
+<uses-permission android:name="com.google.android.gms.permission.AD_ID" />
+```
+
+**3. Add the Play Services dependency** (the SDK reads the GAID reflectively, so
+this stays optional — absent it, GAID simply stays unavailable):
+
+```kotlin
+implementation("com.google.android.gms:play-services-ads-identifier:18.0.1")
+```
+
+**4. Update your Data Safety form:** declare **Advertising ID → Collected/Shared:
+Yes**, purpose *Advertising*.
+
+### Graceful degradation (API 33+)
+
+The SDK never crashes on a missing GAID. It returns no advertising id — and sends
+none — when any of these hold: the `AD_ID` permission is absent, Play Services is
+not present, the user enabled *Limit ad tracking* / opted out of personalization,
+or COPPA applies. Targeting falls back to contextual signals.
+
+> ⚠️ If you do **not** enable GAID, change nothing here — the contextual default
+> keeps *Advertising ID* at **Not collected**.
 
 ---
 
