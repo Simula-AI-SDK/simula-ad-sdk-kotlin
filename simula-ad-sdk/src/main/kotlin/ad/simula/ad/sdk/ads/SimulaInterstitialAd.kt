@@ -1,7 +1,6 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
-import ad.simula.ad.sdk.image.ImagePrefetch
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.app.Activity
 import android.content.Intent
@@ -11,16 +10,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
-import kotlin.time.Duration
 
 /**
  * Imperative full-screen interstitial (mirrors the Swift `SimulaInterstitialAd`).
  *
- * Lifecycle: `load()` calls `POST /ads/load`, prefetches the rendered creative
- * assets, then reports LOADED; `show(...)` presents a native carousel of those
- * assets with a call-to-action that routes to the ad's destination. Callbacks are
- * delivered on the main thread via [listener]. After the ad closes, the next one
- * is preloaded automatically.
+ * Lifecycle: `load()` calls `POST /ads/load/interstitial`, prefetches the
+ * server-rendered HTML creative, then reports LOADED; `show(...)` presents that
+ * creative full-screen in a web view (it owns its own CTA, routing to the ad's
+ * destination). Callbacks are delivered on the main thread via [listener]. After
+ * the ad closes, the next one is preloaded automatically.
  *
  * [load] and [show] may be called from any thread — they confine themselves to
  * the main thread internally.
@@ -28,16 +26,9 @@ import kotlin.time.Duration
 class SimulaInterstitialAd(val adUnitId: String) {
 
     var listener: SimulaInterstitialAdListener? = null
-    var ctaText: String = "Learn More"
 
-    /** Request a rewarded interstitial. When true, the close is gated by [minPlayThreshold]. */
-    var rewarded: Boolean = false
-
-    /**
-     * Minimum dwell before a rewarded ad can be closed / the reward is earned. Only
-     * applies when [rewarded] is true. e.g. `5.seconds` (`kotlin.time.Duration`).
-     */
-    var minPlayThreshold: Duration = Duration.ZERO
+    // Character context is global: set it on `SimulaAds` (via initialize() or
+    // setCharacter()), and every load() reads the current values from there.
 
     private sealed interface State {
         object Idle : State
@@ -69,17 +60,19 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 }
                 val ad = SimulaApiClient.loadAd(
                     adUnitId = adUnitId,
-                    rewarded = rewarded,
                     sessionId = sessionId,
+                    charId = SimulaAds.charId,
+                    charName = SimulaAds.charName,
+                    charImage = SimulaAds.charImage,
+                    charDesc = SimulaAds.charDesc,
                 )
-                // FIX M2: blank-asset no-fill + filter blanks before everything else.
-                val assets = ad.renderedAssets.filter { it.isNotBlank() }
-                if (!ad.adInserted || assets.isEmpty()) {
+                // Fillable only when the payload carries a non-blank `rendered_html`
+                // creative (whitespace-only HTML is treated as no-fill).
+                val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
+                if (!ad.adInserted || html == null) {
                     failLoadOnMain(SimulaAdError.NoFill)
                     return@launch
                 }
-                // FIX M1: await the asset prefetch (off-main) BEFORE reporting LOADED.
-                ImagePrefetch.preload(SimulaAds.appContext, assets)
                 withContext(Dispatchers.Main) {
                     state = State.Ready(ad)
                     listener?.onAdLoaded(this@SimulaInterstitialAd)
@@ -136,10 +129,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
             token,
             InterstitialPresentation(
                 ad = ad,
-                ctaText = ctaText,
                 apiKey = SimulaAds.apiKey,
-                rewarded = rewarded,
-                minPlayThreshold = minPlayThreshold,
                 callbacks = bridge(),
             ),
         )
@@ -159,10 +149,6 @@ class SimulaInterstitialAd(val adUnitId: String) {
 
         override fun onClicked() {
             listener?.onAdClicked(this@SimulaInterstitialAd)
-        }
-
-        override fun onEarnedReward() {
-            listener?.onAdEarnedReward(this@SimulaInterstitialAd)
         }
 
         override fun onClosed() {

@@ -13,7 +13,7 @@ import org.junit.Test
  * Serialization-contract tests for the other request/response DTOs the
  * [SimulaApiClient] relies on (session, minigame init, fallback ad, menu click).
  * Mirrors the production JSON config; pure kotlinx.serialization on the JVM, no
- * Android framework. See [AdLoadParsingTest] for the `/ads/load` contract.
+ * Android framework. See [AdLoadParsingTest] for the `/ads/load/interstitial` contract.
  */
 class ApiModelsSerializationTest {
 

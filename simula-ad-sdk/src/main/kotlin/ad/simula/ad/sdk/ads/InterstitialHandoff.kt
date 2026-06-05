@@ -2,37 +2,26 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.network.SimulaApiClient
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.time.Duration
 
 /** Bridge from the interstitial Activity back to the [SimulaInterstitialAd] instance. */
 internal interface InterstitialCallbacks {
     fun onDisplayed()
     fun onClicked()
-    fun onEarnedReward()
     fun onClosed()
 }
 
 /** Everything [SimulaInterstitialActivity] needs to render one presentation. */
 internal class InterstitialPresentation(
     val ad: SimulaApiClient.AdLoadResult,
-    val ctaText: String,
     val apiKey: String,
-    val rewarded: Boolean,
-    val minPlayThreshold: Duration,
     val callbacks: InterstitialCallbacks,
 ) {
     /** Guards a duplicate DISPLAYED/impression if the Activity is recreated on a config change. */
     var displayedReported = false
 
-    /** Set true once the rewarded play threshold elapses; gates the reward callback. */
-    var rewardEarned = false
-
-    /**
-     * `SystemClock.elapsedRealtime()` when the rewarded dwell first started, or 0 if
-     * not yet started. Anchored on the presentation (which survives Activity
-     * recreation via the handoff) so a config change resumes the remaining dwell
-     * instead of restarting it — otherwise rotating could reset/evade the gate.
-     */
+    /** Wall-clock anchor (`SystemClock.elapsedRealtime()`) for the close-delay gate, set on first
+     * render. Lives here (not in the Activity) so a config-change recreation resumes the remaining
+     * dwell instead of restarting it. `0L` until the gate first starts. */
     var gateStartedAtMs = 0L
 }
 

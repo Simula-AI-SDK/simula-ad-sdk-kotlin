@@ -1,8 +1,8 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
-import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.minigame.CloseButton
+import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
@@ -17,25 +17,19 @@ import ad.simula.ad.sdk.util.ColorUtil
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
-import kotlin.math.ceil
-import kotlin.time.Duration
-import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.seconds
-import kotlin.time.DurationUnit
 import android.view.WindowManager
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -55,13 +49,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,25 +62,29 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.util.VelocityTracker
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import kotlin.math.ceil
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.DurationUnit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
  * Transparent, full-screen host for the imperative interstitial. Reads its
  * [InterstitialPresentation] from [InterstitialHandoff] by token, injects the
- * shared (warmed) session via [ProvideSimulaContext], and renders a native
- * carousel of the rendered creative assets with a call-to-action.
+ * shared (warmed) session via [ProvideSimulaContext], and renders the
+ * server-rendered HTML creative (which owns its own CTA), with the server-driven
+ * `ad_behavior` A/B chrome (close treatment, mid-ad store prompt, install banner)
+ * layered on top.
  */
 internal class SimulaInterstitialActivity : ComponentActivity() {
 
@@ -124,7 +119,6 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                 store = SimulaAds.store,
                 apiKey = SimulaAds.apiKey,
                 devMode = SimulaAds.devMode,
-                hasPrivacyConsent = SimulaAds.hasPrivacyConsent,
             ) {
                 CreativeInterstitial(
                     presentation = p,
@@ -144,14 +138,11 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
         }
     }
 
-    /** Fire (reward then) CLOSED exactly once, then finish. */
+    /** Fire CLOSED exactly once, then finish. */
     private fun closeOnce() {
         if (closed) return
         closed = true
-        presentation?.let { p ->
-            if (p.rewarded && p.rewardEarned) p.callbacks.onEarnedReward()
-            p.callbacks.onClosed()
-        }
+        presentation?.callbacks?.onClosed()
         finish() // isFinishing becomes true → onDestroy drops the handoff entry
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
@@ -166,10 +157,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
             token?.let { InterstitialHandoff.remove(it) }
             if (!closed) {
                 closed = true
-                presentation?.let { p ->
-                    if (p.rewarded && p.rewardEarned) p.callbacks.onEarnedReward()
-                    p.callbacks.onClosed()
-                }
+                presentation?.callbacks?.onClosed()
             }
         }
     }
@@ -197,7 +185,7 @@ private fun gateAlreadyElapsed(p: InterstitialPresentation, total: Duration): Bo
         (SystemClock.elapsedRealtime() - p.gateStartedAtMs).milliseconds >= total
 
 /** Fallback playable length used to time the store prompt's 50% trigger when no playable
- * `midpoint` JS-bridge event is available (the image-carousel creative emits none). */
+ * `midpoint` JS-bridge event is available. */
 private const val NOMINAL_PLAYABLE_DURATION_MS = 30_000L
 
 @Composable
@@ -207,8 +195,9 @@ private fun CreativeInterstitial(
     openDestination: (SimulaApiClient.AdLoadResult) -> Unit,
 ) {
     val ad = presentation.ad
-    // FIX M2: defensively filter blank assets for the carousel.
-    val assets = remember(ad) { ad.renderedAssets.filter { it.isNotBlank() } }
+    // The server-rendered HTML creative is the sole creative. load() only readies an
+    // ad once `rendered_html` is non-blank, so this is effectively always present.
+    val html = remember(ad) { ad.renderedHtml?.takeIf { it.isNotBlank() } }
 
     // Server-driven render config (null → render today's literal close button / store path).
     val behavior = ad.adBehavior
@@ -216,15 +205,10 @@ private fun CreativeInterstitial(
     // "Reward in X" vs "Close in X" copy for the reward_or_close_label treatment.
     val isRewardCopy = ad.adUnitType == AdUnitType.REWARDED
 
-    // Unified close gate. Rewarded ads gate on `minPlayThreshold` (and earn the reward when it
-    // elapses); non-rewarded gate on the server-driven `close.delay_seconds`.
-    val gateTotal: Duration = if (presentation.rewarded) {
-        presentation.minPlayThreshold
-    } else {
-        (behavior?.close?.delaySeconds ?: 0).seconds
-    }
+    // Close gate: the interstitial gates its close button on the server-driven `close.delay_seconds`.
+    val gateTotal: Duration = (behavior?.close?.delaySeconds ?: 0).seconds
 
-    // FIX C2: close is enabled immediately UNLESS a gate applies. A gate that already elapsed in a
+    // Close is enabled immediately UNLESS a delay gate applies. A gate that already elapsed in a
     // prior Activity instance (config-change recreation) also starts closable — anchored to
     // wall-clock so rotation can't reset the dwell or strand the user with close blocked.
     var closeEnabled by remember {
@@ -271,7 +255,6 @@ private fun CreativeInterstitial(
                 }
             }
             closeEnabled = true
-            if (presentation.rewarded) presentation.rewardEarned = true
         }
     }
 
@@ -316,20 +299,30 @@ private fun CreativeInterstitial(
         }
     }
 
-    // Block system back while the reward gate is active.
-    BackHandler(enabled = !closeEnabled) {}
-
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        CreativeCarousel(
-            assets = assets,
-            modifier = Modifier.fillMaxSize(),
-        )
+        // The server-rendered HTML creative is the sole creative; it owns its own CTA.
+        if (html != null) {
+            CreativeHtml(
+                html = html,
+                destination = ad.destination,
+                onAdClick = {
+                    presentation.callbacks.onClicked()
+                    // Play install banner timed to the click (independent of the store the CTA opens).
+                    if (skoverlay != null && skoverlay.enabled &&
+                        skoverlay.timing == OverlayTiming.ON_CLICK && Build.VERSION.SDK_INT >= 21
+                    ) {
+                        installBannerVisible = true
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
-        // Close button — driven by `ad_behavior` when present; otherwise today's literal
+        // Close button — driven by `ad_behavior` when present; otherwise today's always-available
         // top-right button (an absent ad_behavior renders exactly as before).
         if (behavior != null) {
             InterstitialCloseButton(
@@ -342,7 +335,7 @@ private fun CreativeInterstitial(
                 progress = closeProgress.value,
                 onClose = onFinish,
             )
-        } else if (closeEnabled) {
+        } else {
             CloseButton(
                 onClick = onFinish,
                 modifier = Modifier
@@ -365,150 +358,53 @@ private fun CreativeInterstitial(
                 onDismiss = { installBannerVisible = false },
             )
         }
-
-        // Always-visible bottom CTA.
-        Button(
-            onClick = {
-                presentation.callbacks.onClicked()
-                // SKOverlay/Play banner timed to the click (independent of the store the CTA opens).
-                if (skoverlay != null && skoverlay.enabled &&
-                    skoverlay.timing == OverlayTiming.ON_CLICK && Build.VERSION.SDK_INT >= 21
-                ) {
-                    installBannerVisible = true
-                }
-                openDestination(ad)
-                // For a rewarded ad the user must remain until the gate elapses.
-                if (!presentation.rewarded) onFinish()
-            },
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color.White,
-                contentColor = Color.Black,
-            ),
-            shape = RoundedCornerShape(28.dp),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(horizontal = 24.dp, vertical = 24.dp),
-        ) {
-            Text(
-                text = presentation.ctaText,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(vertical = 6.dp),
-            )
-        }
     }
 }
 
 /**
- * Native creative carousel. A single asset renders static (no swipe / no dots).
- * Multiple assets use a STABLE swipe driven by a single [Animatable] scroll
- * position (mirrors `GameGrid.MobileCarousel`) — no experimental HorizontalPager.
- * Position is clamped to [0, n-1] (non-wrapping).
+ * Full-screen HTML creative. The server-rendered `rendered_html` owns its own CTA:
+ * a user-initiated link navigation (gesture) is intercepted, reported as CLICKED via
+ * [onAdClick], and routed to the advertiser destination through [CreativeCtaRouter].
+ * Non-gesture navigations (impression pixels, JS/meta auto-redirects) load normally
+ * so they can't fake a click. The interstitial is NOT dismissed on click — the close
+ * button drives dismissal.
  */
 @Composable
-private fun CreativeCarousel(
-    assets: List<String>,
+private fun CreativeHtml(
+    html: String,
+    destination: String,
+    onAdClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val n = assets.size
-    if (n == 0) return
-
-    if (n == 1) {
-        CachedAsyncImage(
-            model = assets[0],
-            contentDescription = null,
-            modifier = modifier,
-            contentScale = ContentScale.Crop,
-        )
-        return
-    }
-
-    val scrollPosition = remember { Animatable(0f) }
-    val velocityTracker = remember { VelocityTracker() }
-    val coroutineScope = rememberCoroutineScope()
-
-    // The current settled page (for the dot indicator).
-    val page by remember {
-        derivedStateOf { kotlin.math.round(scrollPosition.value).toInt().coerceIn(0, n - 1) }
-    }
-
-    Box(modifier = modifier) {
-        var widthPx by remember { mutableStateOf(1f) }
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
-                .pointerInput(n) {
-                    detectHorizontalDragGestures(
-                        onDragStart = {
-                            coroutineScope.launch { scrollPosition.stop() }
-                            velocityTracker.resetTracking()
-                        },
-                        onDragEnd = {
-                            val velocityPx = velocityTracker.calculateVelocity().x
-                            val velocityPages = velocityPx / widthPx
-                            val decayFactor = 0.4f
-                            val projected = scrollPosition.value - velocityPages * decayFactor
-                            val snapTarget = kotlin.math.round(projected)
-                                .coerceIn(0f, (n - 1).toFloat())
-                            coroutineScope.launch {
-                                scrollPosition.animateTo(
-                                    snapTarget,
-                                    spring(dampingRatio = 0.85f, stiffness = 220f),
-                                )
-                            }
-                        },
-                        onHorizontalDrag = { change, dragAmount ->
-                            velocityTracker.addPosition(change.uptimeMillis, change.position)
-                            val scrollDelta = dragAmount / widthPx
-                            coroutineScope.launch {
-                                val next = (scrollPosition.value - scrollDelta)
-                                    .coerceIn(0f, (n - 1).toFloat())
-                                scrollPosition.snapTo(next)
-                            }
-                        },
-                    )
+    // applicationContext so the store/browser open survives if the interstitial is
+    // later dismissed.
+    val appContext = LocalContext.current.applicationContext
+    AndroidView(
+        factory = { ctx ->
+            WebViewPool.acquire(
+                context = ctx,
+                client = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                    ): Boolean {
+                        val url = request?.url?.toString() ?: return false
+                        // Only a user gesture counts as the ad click-through; pixels
+                        // and auto-redirects (no gesture) navigate normally.
+                        if (!request.hasGesture()) return false
+                        onAdClick() // CLICKED
+                        CreativeCtaRouter.open(appContext, url, destination)
+                        return true
+                    }
                 },
-        ) {
-            val currentPos = scrollPosition.value
-            for (i in 0 until n) {
-                val offset = i.toFloat() - currentPos
-                // Only render on-screen and immediately-adjacent assets.
-                if (kotlin.math.abs(offset) > 1.05f) continue
-                CachedAsyncImage(
-                    model = assets[i],
-                    contentDescription = null,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer { translationX = offset * widthPx },
-                    contentScale = ContentScale.Crop,
-                )
+            ).apply {
+                // Self-contained creative: asset URLs are absolute (baseURL = null).
+                loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
             }
-        }
-
-        // Dot indicator — only when there is more than one asset.
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(bottom = 96.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            for (i in 0 until n) {
-                val active = i == page
-                Box(
-                    modifier = Modifier
-                        .size(if (active) 9.dp else 7.dp)
-                        .clip(CircleShape)
-                        .background(if (active) Color.White else Color(0x66FFFFFF)),
-                )
-            }
-        }
-    }
+        },
+        modifier = modifier,
+        onRelease = { webView -> WebViewPool.release(webView) },
+    )
 }
 
 // ── Ad-behavior close button ──────────────────────────────────────────────────
