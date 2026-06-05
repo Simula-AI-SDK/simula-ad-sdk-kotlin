@@ -10,16 +10,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
-import kotlin.time.Duration
 
 /**
  * Imperative full-screen interstitial (mirrors the Swift `SimulaInterstitialAd`).
  *
- * Lifecycle: `load()` calls `POST /ads/load`, prefetches the rendered creative
- * assets, then reports LOADED; `show(...)` presents a native carousel of those
- * assets with a call-to-action that routes to the ad's destination. Callbacks are
- * delivered on the main thread via [listener]. After the ad closes, the next one
- * is preloaded automatically.
+ * Lifecycle: `load()` calls `POST /ads/load/interstitial`, prefetches the
+ * server-rendered HTML creative, then reports LOADED; `show(...)` presents that
+ * creative full-screen in a web view (it owns its own CTA, routing to the ad's
+ * destination). Callbacks are delivered on the main thread via [listener]. After
+ * the ad closes, the next one is preloaded automatically.
  *
  * [load] and [show] may be called from any thread — they confine themselves to
  * the main thread internally.
@@ -28,27 +27,8 @@ class SimulaInterstitialAd(val adUnitId: String) {
 
     var listener: SimulaInterstitialAdListener? = null
 
-    /** Request a rewarded interstitial. When true, the close is gated by [minPlayThreshold]. */
-    var rewarded: Boolean = false
-
-    /**
-     * Optional character context sent on the `/ads/load` request so the backend can
-     * target the creative. Left out of targeting when null.
-     */
-    var charId: String? = null
-
-    /** Character name displayed in the creative header. */
-    var charName: String? = null
-
-    /** Character avatar URL. */
-    var charImage: String? = null
-    var charDesc: String? = null
-
-    /**
-     * Minimum dwell before a rewarded ad can be closed / the reward is earned. Only
-     * applies when [rewarded] is true. e.g. `5.seconds` (`kotlin.time.Duration`).
-     */
-    var minPlayThreshold: Duration = Duration.ZERO
+    // Character context is global: set it on `SimulaAds` (via initialize() or
+    // setCharacter()), and every load() reads the current values from there.
 
     private sealed interface State {
         object Idle : State
@@ -80,12 +60,11 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 }
                 val ad = SimulaApiClient.loadAd(
                     adUnitId = adUnitId,
-                    rewarded = rewarded,
                     sessionId = sessionId,
-                    charId = charId,
-                    charName = charName,
-                    charImage = charImage,
-                    charDesc = charDesc,
+                    charId = SimulaAds.charId,
+                    charName = SimulaAds.charName,
+                    charImage = SimulaAds.charImage,
+                    charDesc = SimulaAds.charDesc,
                 )
                 // Fillable only when the payload carries a non-blank `rendered_html`
                 // creative (whitespace-only HTML is treated as no-fill).
@@ -151,8 +130,6 @@ class SimulaInterstitialAd(val adUnitId: String) {
             InterstitialPresentation(
                 ad = ad,
                 apiKey = SimulaAds.apiKey,
-                rewarded = rewarded,
-                minPlayThreshold = minPlayThreshold,
                 callbacks = bridge(),
             ),
         )
@@ -172,10 +149,6 @@ class SimulaInterstitialAd(val adUnitId: String) {
 
         override fun onClicked() {
             listener?.onAdClicked(this@SimulaInterstitialAd)
-        }
-
-        override fun onEarnedReward() {
-            listener?.onAdEarnedReward(this@SimulaInterstitialAd)
         }
 
         override fun onClosed() {

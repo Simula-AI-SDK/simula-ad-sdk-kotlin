@@ -23,16 +23,6 @@ interface SimulaInterstitialAdListener {
     /** The user tapped the call-to-action. */
     fun onAdClicked(ad: SimulaInterstitialAd) {}
 
-    /**
-     * The user earned the reward for a rewarded interstitial — fired once the
-     * `minPlayThreshold` dwell elapses. Only emitted when the ad was loaded with
-     * `rewarded = true`; never fired for a standard (non-rewarded) interstitial.
-     */
-    fun onAdEarnedReward(ad: SimulaInterstitialAd) {}
-
-    /** Reserved for a future reward-verification feature — not emitted yet. */
-    fun onAdRewardVerificationFailed(ad: SimulaInterstitialAd) {}
-
     /** The interstitial was dismissed. The next ad is auto-preloaded. */
     fun onAdClosed(ad: SimulaInterstitialAd) {}
 }

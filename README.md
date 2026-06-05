@@ -176,7 +176,7 @@ MiniGameInviteKit.Interstitial(charImage = "...", isOpen = true, onClick = { })
 ## Imperative Interstitial
 
 A load-then-show, full-screen interstitial in the style of AdMob/AppLovin. It calls
-`POST /ads/load`, prefetches the server-rendered HTML creative, and presents it
+`POST /ads/load/interstitial`, prefetches the server-rendered HTML creative, and presents it
 full-screen in a web view — the creative owns its own call-to-action. No minigame,
 no Compose state to manage in your app.
 
@@ -192,6 +192,29 @@ SimulaAds.initialize(
     // primaryUserID = null,
     // hasPrivacyConsent = true,
 )
+```
+
+The interstitial sends optional **character context** (`charId`, `charName`,
+`charImage`, `charDesc`) on the `/ads/load/interstitial` request so the backend can
+target the creative. It lives globally on `SimulaAds` — seed it in `initialize`, then
+update it whenever the active character changes. The next `load()` uses the current
+values, so there is nothing to set per ad instance.
+
+```kotlin
+SimulaAds.initialize(
+    context = applicationContext,
+    apiKey = "YOUR_API_KEY",
+    charId = "char_123",
+    charName = "Luna",
+    charImage = "https://example.com/avatar.png",
+    charDesc = "a witty companion",
+)
+
+// Later, when the active character changes (replaces all fields):
+SimulaAds.setCharacter(charId = "char_456", charName = "Sage")
+
+// …or tweak a single field on the fly:
+SimulaAds.charName = "Sage"
 ```
 
 ### 2. Create, load, and show
@@ -222,31 +245,7 @@ back to the currently-tracked foreground Activity. Neither takes character
 arguments — the creative comes entirely from the server. The full-screen UI is the
 server-rendered HTML creative in a web view, which owns its own CTA: a user-initiated
 link tap routes to the ad's destination (Play Store via `market://`, or a web URL)
-and fires `onAdClicked`. Dismissal is via the close button (gated for rewarded ads).
-
-### Rewarded interstitials
-
-Set `rewarded = true` and a `minPlayThreshold` (a `kotlin.time.Duration`). The close button is hidden and
-system-back is blocked until the threshold elapses; only then can the user dismiss,
-and `onAdEarnedReward` fires (once, before `onAdClosed`). A non-rewarded ad never
-fires `onAdEarnedReward`.
-
-```kotlin
-import kotlin.time.Duration.Companion.seconds
-
-val ad = SimulaInterstitialAd(adUnitId = "YOUR_AD_UNIT_ID")
-ad.rewarded = true
-ad.minPlayThreshold = 5.seconds // user must dwell 5s to earn the reward
-
-ad.listener = object : SimulaInterstitialAdListener {
-    override fun onAdLoaded(ad: SimulaInterstitialAd) { ad.show(this@MainActivity) }
-    override fun onAdEarnedReward(ad: SimulaInterstitialAd) {
-        // Grant the reward.
-    }
-    override fun onAdClosed(ad: SimulaInterstitialAd) {}
-}
-ad.load()
-```
+and fires `onAdClicked`. Dismissal is via the close button.
 
 ### Events
 
@@ -257,7 +256,6 @@ ad.load()
 | `onAdDisplayed` | Interstitial presented full-screen (impression tracked). |
 | `onAdFailedToDisplay` | `show()` failed — not ready, already showing, or no Activity. |
 | `onAdClicked` | The CTA was tapped (fires even if the ad has no tracking URL). |
-| `onAdEarnedReward` | Rewarded only — the `minPlayThreshold` dwell elapsed. |
 | `onAdClosed` | Dismissed; the next ad is auto-preloaded. |
 
 ## Theming Reference
