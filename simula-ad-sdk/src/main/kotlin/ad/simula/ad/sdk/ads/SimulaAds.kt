@@ -121,14 +121,15 @@ object SimulaAds {
         registerActivityTracking()
         initialized = true
 
-        // Warm the session before the first load() so it's off the ad critical path,
-        // then drain any reward verifications a prior process left pending (e.g. a
-        // crash/kill before a verify could land) so their server-side SSV postbacks
-        // still fire without waiting for the next rewarded play.
-        SimulaScope.launch {
-            store.ensureSession()
-            RewardVerificationManager.triggerProcessQueue(appContext)
-        }
+        // Warm the session before the first load() so it's off the ad critical path.
+        SimulaScope.launch { store.ensureSession() }
+
+        // Independently of session warm-up (each queued verification carries its own
+        // session), drain any reward verifications a prior process left pending (e.g. a
+        // crash/kill before a verify could land) so their server-side SSV postbacks fire
+        // without waiting for the next rewarded play. triggerProcessQueue launches its
+        // own coroutine, so a slow/failed session create can't delay or skip recovery.
+        RewardVerificationManager.triggerProcessQueue(appContext)
     }
 
     /**

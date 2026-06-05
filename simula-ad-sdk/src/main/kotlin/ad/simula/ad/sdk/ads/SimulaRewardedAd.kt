@@ -11,6 +11,7 @@ import android.os.Looper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.lang.ref.WeakReference
 import java.util.UUID
 
 /**
@@ -166,19 +167,28 @@ class SimulaRewardedAd(val adUnitId: String) {
                 val sess = sessionId
                 if (!sid.isNullOrBlank() && !sess.isNullOrBlank()) {
                     // Off-UI, durable, idempotent verification → SSV postback server-side.
+                    // Capture the ad weakly (and `mainHandler` as a local, so the lambda
+                    // doesn't capture `this`): a verification still pending in the durable
+                    // queue — e.g. retrying after an outage — must not pin the ad, and its
+                    // listener (often an Activity), in memory until the next drain. If the
+                    // ad has been collected by the time verification lands, the server-side
+                    // SSV postback still fires; only the client callback is skipped.
+                    val weakAd = WeakReference(this@SimulaRewardedAd)
+                    val handler = mainHandler
                     RewardVerificationManager.queueVerification(
                         context = SimulaAds.appContext,
                         serveId = sid,
                         sessionId = sess,
                         elapsedPlayTime = elapsedPlayTimeSeconds,
                     ) { result ->
-                        mainHandler.post {
+                        handler.post {
+                            val ad = weakAd.get() ?: return@post
                             result.fold(
                                 onSuccess = { token ->
-                                    listener?.onAdRewardVerified(this@SimulaRewardedAd, token)
+                                    ad.listener?.onAdRewardVerified(ad, token)
                                 },
                                 onFailure = { err ->
-                                    listener?.onAdRewardVerificationFailed(this@SimulaRewardedAd, err)
+                                    ad.listener?.onAdRewardVerificationFailed(ad, err)
                                 },
                             )
                         }

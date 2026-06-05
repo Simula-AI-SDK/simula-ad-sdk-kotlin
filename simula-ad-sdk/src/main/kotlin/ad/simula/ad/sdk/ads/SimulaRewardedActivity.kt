@@ -137,24 +137,24 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     }
 }
 
-/** True if enough foreground play time has already accrued to satisfy the gate. */
-private fun gateElapsed(p: RewardedPresentation): Boolean =
-    p.durationSeconds > 0 && p.accumulatedPlayTimeMs / 1000.0 >= p.durationSeconds
-
 @Composable
 private fun RewardedMinigame(
     presentation: RewardedPresentation,
     onFinish: (earned: Boolean) -> Unit,
 ) {
     // Earned immediately when there is no gate; otherwise resolved by the timer below.
-    // A gate that already elapsed in a prior Activity instance (config-change
-    // recreation) also starts earned — anchored to wall-clock so a rotation can't reset it.
+    // A gate that already elapsed in a prior Activity instance (config-change recreation)
+    // also starts earned — accumulated play time survives on the presentation.
     var rewardEarned by remember {
-        mutableStateOf(presentation.durationSeconds <= 0 || presentation.rewardEarned || gateElapsed(presentation))
+        mutableStateOf(
+            presentation.durationSeconds <= 0 ||
+                presentation.rewardEarned ||
+                RewardGate.isEarned(presentation.accumulatedPlayTimeMs, presentation.durationSeconds),
+        )
     }
     var secondsLeft by remember {
         // Resume from already-accrued play time (config-change recovery), not full duration.
-        mutableStateOf(maxOf(0, presentation.durationSeconds - (presentation.accumulatedPlayTimeMs / 1000L).toInt()))
+        mutableStateOf(RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds))
     }
     var showExitDialog by remember { mutableStateOf(false) }
 
@@ -198,9 +198,8 @@ private fun RewardedMinigame(
                 val now = SystemClock.elapsedRealtime()
                 presentation.accumulatedPlayTimeMs += now - lastTickMs
                 lastTickMs = now
-                val elapsedSeconds = presentation.accumulatedPlayTimeMs / 1000.0
-                secondsLeft = maxOf(0, presentation.durationSeconds - elapsedSeconds.toInt())
-                if (elapsedSeconds >= presentation.durationSeconds) {
+                secondsLeft = RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)
+                if (RewardGate.isEarned(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)) {
                     presentation.rewardEarned = true
                     rewardEarned = true
                     break
