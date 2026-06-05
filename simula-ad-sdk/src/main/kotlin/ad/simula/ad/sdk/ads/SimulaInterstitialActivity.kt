@@ -409,10 +409,11 @@ private fun CreativeHtml(
 
 // ── Ad-behavior close button ──────────────────────────────────────────────────
 
-// v2 dropped the per-size config; the close glyph renders at the former `.standard` size, with the
-// circle pinned to the Material-minimum tappable target.
-private const val CLOSE_GLYPH_SP = 24
-private const val CLOSE_BOX_DP = 44
+// Visible close affordance sized to match AdMob / AppLovin (a compact ~30dp circle), while the
+// tappable area stays at the 48dp Material minimum (see [MIN_TOUCH_TARGET_DP]). The 44dp circle used
+// before was the touch-target minimum mistakenly used as the visual size.
+private const val CLOSE_GLYPH_SP = 16
+private const val CLOSE_BOX_DP = 30
 private const val MIN_TOUCH_TARGET_DP = 48
 
 /**
@@ -433,47 +434,40 @@ private fun BoxScope.InterstitialCloseButton(
     onClose: () -> Unit,
 ) {
     val tint = remember(progressBarColor) { ColorUtil.parseColor(progressBarColor) }
-    val isBottom = position == ClosePosition.BOTTOM_LEFT
     val alignment = when (position) {
         ClosePosition.TOP_RIGHT -> Alignment.TopEnd
         ClosePosition.TOP_LEFT -> Alignment.TopStart
         ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
     }
 
-    // `progress_bar`: a slim top-edge bar shown during the delay, tinted by color.
+    // `progress_bar`: a full-width bar pinned to the very top edge of the screen (inside the top
+    // nav / status-bar region), shown during the delay and tinted by color. Edge-to-edge, no insets.
     if (!enabled && treatment == CloseTreatment.PROGRESS_BAR) {
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                // safeDrawing (not statusBars, which is 0 while system bars are hidden) keeps the
-                // bar clear of display cutouts / notches.
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(horizontal = 16.dp, vertical = 12.dp)
                 .height(4.dp)
-                .clip(CircleShape)
                 .background(Color(0x40FFFFFF)),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(progress.coerceIn(0f, 1f))
                     .height(4.dp)
-                    .clip(CircleShape)
                     .background(tint),
             )
         }
     }
 
-    // The button (or its in-delay indicator), pinned to the configured corner. Bottom corners
-    // sit above the full-width CTA so they can't overlap it.
+    // The button (or its in-delay indicator), pinned to the configured corner with a tight 8dp inset
+    // so it sits close to the edge (AdMob / AppLovin-style); each corner (incl. bottom-left) honored.
     Box(
         modifier = Modifier
             .align(alignment)
             // safeDrawing merges system bars + display cutout so a top-corner button never
             // lands under a notch (system bars are hidden, so navigationBars alone gave 0 at top).
             .windowInsetsPadding(WindowInsets.safeDrawing)
-            .padding(16.dp)
-            .padding(bottom = if (isBottom) 96.dp else 0.dp),
+            .padding(8.dp),
     ) {
         when {
             // The resolved tap target: a labelled pill for reward_or_close_label, the circular X otherwise.
@@ -487,7 +481,11 @@ private fun BoxScope.InterstitialCloseButton(
             treatment == CloseTreatment.REWARD_OR_CLOSE_LABEL ->
                 LabelPill(text = "${if (isRewardCopy) "Reward" else "Close"} in ${remaining.coerceAtLeast(0)}")
             treatment == CloseTreatment.COUNTDOWN_CIRCLE -> {
-                Box(contentAlignment = Alignment.Center) {
+                // Same footprint as the unlocked button so the glyph doesn't jump when it activates.
+                Box(
+                    modifier = Modifier.size(maxOf(MIN_TOUCH_TARGET_DP, CLOSE_BOX_DP).dp),
+                    contentAlignment = Alignment.Center,
+                ) {
                     CloseCircle(alpha = 0.5f) { CloseGlyph() }
                     Canvas(modifier = Modifier.size(CLOSE_BOX_DP.dp)) {
                         // Stroke in dp (not raw px, which was ~1dp on a 3x screen), inset by half
@@ -520,7 +518,8 @@ private fun CloseCircle(
     val circle = Modifier
         .size(CLOSE_BOX_DP.dp)
         .clip(CircleShape)
-        .background(Color.White.copy(alpha = 0.9f * alpha))
+        // Gray / translucent dark circle (AdMob / AppLovin style) rather than opaque white.
+        .background(Color.Black.copy(alpha = 0.5f * alpha))
     if (onClick != null) {
         Box(
             modifier = Modifier
@@ -539,12 +538,12 @@ private fun CloseCircle(
     }
 }
 
-/** The "✕" glyph at the standard point size. */
+/** The "✕" glyph at the standard point size — white, to sit on the dark/translucent circle. */
 @Composable
 private fun CloseGlyph() {
     Text(
         text = "✕",
-        color = Color(0xFF1F2937),
+        color = Color.White,
         fontSize = CLOSE_GLYPH_SP.sp,
         fontWeight = FontWeight.Bold,
     )
@@ -583,7 +582,6 @@ private fun BoxScope.StorePromptBadge(
     onTap: () -> Unit,
 ) {
     val label = if (prompt.platform == StorePromptPlatform.IOS) "▶| App Store" else "▶| Google Play"
-    val isBottom = prompt.position == ClosePosition.BOTTOM_LEFT
     val alignment = when (prompt.position) {
         ClosePosition.TOP_RIGHT -> Alignment.TopEnd
         ClosePosition.TOP_LEFT -> Alignment.TopStart
@@ -594,7 +592,6 @@ private fun BoxScope.StorePromptBadge(
             .align(alignment)
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(16.dp)
-            .padding(bottom = if (isBottom) 96.dp else 0.dp)
             .clip(RoundedCornerShape(20.dp))
             .background(Color(0xA6000000))
             .clickable(onClick = onTap)
@@ -625,7 +622,8 @@ private fun BoxScope.PlayInstallBanner(
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.navigationBars)
             .padding(horizontal = 16.dp)
-            .padding(bottom = if (config.position == OverlayPosition.BOTTOM_RAISED) 150.dp else 96.dp)
+            // Sit a little lower / closer to the bottom edge (BOTTOM_RAISED still floats higher).
+            .padding(bottom = if (config.position == OverlayPosition.BOTTOM_RAISED) 120.dp else 60.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(Color.White)
             .clickable(onClick = onTap)

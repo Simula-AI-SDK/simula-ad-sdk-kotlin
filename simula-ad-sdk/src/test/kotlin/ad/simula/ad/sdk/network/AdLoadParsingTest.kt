@@ -288,15 +288,15 @@ class AdLoadParsingTest {
 
     @Test
     fun `close position snaps for edge-anchored treatments`() {
-        // countdown_circle / progress_bar can't render bottom_left → snap to top_right.
-        for (treatment in listOf("countdown_circle", "progress_bar")) {
+        // progress_bar is a full-width top-edge bar → can't render bottom_left → snap to top_right.
+        for (treatment in listOf("progress_bar")) {
             val b = json.decodeFromString<AdLoadApiResponse>(
                 """{"ad_behavior":{"close":{"treatment":"$treatment","position":"bottom_left"}}}""",
             ).adBehavior.toDomain()!!
             assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
         }
-        // hidden / reward_or_close_label keep bottom_left.
-        for (treatment in listOf("hidden", "reward_or_close_label")) {
+        // hidden / reward_or_close_label / countdown_circle keep bottom_left.
+        for (treatment in listOf("hidden", "reward_or_close_label", "countdown_circle")) {
             val b = json.decodeFromString<AdLoadApiResponse>(
                 """{"ad_behavior":{"close":{"treatment":"$treatment","position":"bottom_left"}}}""",
             ).adBehavior.toDomain()!!

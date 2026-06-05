@@ -159,9 +159,10 @@ internal fun validatedHexColor(raw: String?, fallback: String = "#FFFFFF"): Stri
 internal enum class CloseTreatment {
     HIDDEN, COUNTDOWN_CIRCLE, PROGRESS_BAR, REWARD_OR_CLOSE_LABEL;
 
-    /** countdown_circle / progress_bar are edge-anchored (top only) and cannot render bottom_left. */
+    /** progress_bar is a full-width top-edge bar, so it's the only treatment that can't render
+     * bottom_left; hidden / reward_or_close_label / countdown_circle allow all three corners. */
     val allowsBottomLeft: Boolean
-        get() = this == HIDDEN || this == REWARD_OR_CLOSE_LABEL
+        get() = this != PROGRESS_BAR
 
     companion object {
         fun from(raw: String?): CloseTreatment = when (normalizeBehaviorToken(raw)) {

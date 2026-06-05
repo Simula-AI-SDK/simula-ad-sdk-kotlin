@@ -1,7 +1,6 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
-import ad.simula.ad.sdk.minigame.CloseButton
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
@@ -18,16 +17,16 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -156,7 +155,6 @@ private fun RewardedMinigame(
         // Resume from already-accrued play time (config-change recovery), not full duration.
         mutableStateOf(RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds))
     }
-    var showExitDialog by remember { mutableStateOf(false) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -208,12 +206,8 @@ private fun RewardedMinigame(
         }
     }
 
-    val handleCloseAttempt = {
-        if (rewardEarned) onFinish(true) else showExitDialog = true
-    }
-
-    // The user may leave at any time; back triggers the same close attempt.
-    BackHandler(enabled = true) { handleCloseAttempt() }
+    // No early exit: Back does nothing until the reward is earned, then it closes (earned).
+    BackHandler(enabled = true) { if (rewardEarned) onFinish(true) }
 
     Box(
         modifier = Modifier
@@ -248,60 +242,54 @@ private fun RewardedMinigame(
             onRelease = { webView -> WebViewPool.release(webView) },
         )
 
-        // Bottom controls: close (bottom-start, hugging the edge) + reward status
-        // pill (bottom-end).
-        CloseButton(
-            onClick = handleCloseAttempt,
-            size = 36,
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(8.dp),
-        )
-        RewardStatusPill(
+        // Top-right reward/close pill: a "Play to earn" countdown while earning (display-only —
+        // no early exit), which becomes the close button ("✕ Reward unlocked") once earned.
+        RewardClosePill(
             rewardEarned = rewardEarned,
             secondsLeft = secondsLeft,
+            onClose = { onFinish(true) },
             modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(16.dp),
-        )
-    }
-
-    if (showExitDialog) {
-        AlertDialog(
-            onDismissRequest = { showExitDialog = false },
-            title = { Text("Exit game?") },
-            text = { Text("You haven't played long enough to earn your reward. If you exit now, you'll lose it.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showExitDialog = false
-                    onFinish(false)
-                }) { Text("Exit anyway", color = Color.Red) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showExitDialog = false }) { Text("Keep playing") }
-            },
+                .align(Alignment.TopEnd)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(8.dp),
         )
     }
 }
 
 @Composable
-private fun RewardStatusPill(rewardEarned: Boolean, secondsLeft: Int, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(Color(0xC0000000))
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-    ) {
-        if (rewardEarned) {
+private fun RewardClosePill(
+    rewardEarned: Boolean,
+    secondsLeft: Int,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (rewardEarned) {
+        // Earned: the entire pill is the close button.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = modifier
+                .clip(RoundedCornerShape(20.dp))
+                .background(Color(0xC0000000))
+                .clickable(onClick = onClose)
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            Text("✕", color = Color(0xFF4ADE80), fontSize = 14.sp, fontWeight = FontWeight.Bold)
             Text(
-                text = "🎁 Reward unlocked!",
+                text = "Reward unlocked",
                 color = Color(0xFF4ADE80),
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 6.dp),
             )
-        } else {
+        }
+    } else {
+        // Still earning: a display-only status — no close affordance yet.
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(20.dp))
+                .background(Color(0xC0000000))
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+        ) {
             Text(
                 text = "🎮 Play to earn: ${secondsLeft}s",
                 color = Color.White,
