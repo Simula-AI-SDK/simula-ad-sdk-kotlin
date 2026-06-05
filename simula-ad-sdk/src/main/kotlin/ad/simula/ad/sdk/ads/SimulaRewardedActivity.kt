@@ -18,14 +18,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -234,18 +231,24 @@ private fun RewardedMinigame(
             onRelease = { webView -> WebViewPool.release(webView) },
         )
 
-        // Top bar: close (start) + reward status pill (end).
-        Row(
+        // Bottom controls: close (bottom-start, hugging the edge) + reward status
+        // pill (bottom-end).
+        CloseButton(
+            onClick = handleCloseAttempt,
+            size = 36,
             modifier = Modifier
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.statusBars)
+                .align(Alignment.BottomStart)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(8.dp),
+        )
+        RewardStatusPill(
+            rewardEarned = rewardEarned,
+            secondsLeft = secondsLeft,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .windowInsetsPadding(WindowInsets.navigationBars)
                 .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top,
-        ) {
-            CloseButton(onClick = handleCloseAttempt, size = 36)
-            RewardStatusPill(rewardEarned = rewardEarned, secondsLeft = secondsLeft)
-        }
+        )
     }
 
     if (showExitDialog) {
@@ -267,9 +270,9 @@ private fun RewardedMinigame(
 }
 
 @Composable
-private fun RewardStatusPill(rewardEarned: Boolean, secondsLeft: Int) {
+private fun RewardStatusPill(rewardEarned: Boolean, secondsLeft: Int, modifier: Modifier = Modifier) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(20.dp))
             .background(Color(0xC0000000))
             .padding(horizontal = 16.dp, vertical = 8.dp),
