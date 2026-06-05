@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Transparent, full-screen theme for the imperative interstitial Activity.
+      Parented on a plain framework theme so the SDK needs no AppCompat/Material
+      dependency (ComponentActivity + Compose setContent require none).
+    -->
+    <style name="Theme.Simula.Interstitial" parent="@android:style/Theme.Translucent.NoTitleBar.Fullscreen" />
+</resources>

@@ -173,6 +173,91 @@ MiniGameInviteKit.Invitation(charImage = "...", isOpen = true, onClick = { })
 MiniGameInviteKit.Interstitial(charImage = "...", isOpen = true, onClick = { })
 ```
 
+## Imperative Interstitial
+
+A load-then-show, full-screen interstitial in the style of AdMob/AppLovin. It calls
+`POST /ads/load/interstitial`, prefetches the server-rendered HTML creative, and presents it
+full-screen in a web view — the creative owns its own call-to-action. No minigame,
+no Compose state to manage in your app.
+
+### 1. Initialize once at startup
+
+```kotlin
+import ad.simula.ad.sdk.ads.SimulaAds
+
+SimulaAds.initialize(
+    context = applicationContext,
+    apiKey = "YOUR_API_KEY",
+    // devMode = false,
+    // primaryUserID = null,
+    // hasPrivacyConsent = true,
+)
+```
+
+The interstitial sends optional **character context** (`charId`, `charName`,
+`charImage`, `charDesc`) on the `/ads/load/interstitial` request so the backend can
+target the creative. It lives globally on `SimulaAds` — seed it in `initialize`, then
+update it whenever the active character changes. The next `load()` uses the current
+values, so there is nothing to set per ad instance.
+
+```kotlin
+SimulaAds.initialize(
+    context = applicationContext,
+    apiKey = "YOUR_API_KEY",
+    charId = "char_123",
+    charName = "Luna",
+    charImage = "https://example.com/avatar.png",
+    charDesc = "a witty companion",
+)
+
+// Later, when the active character changes (replaces all fields):
+SimulaAds.setCharacter(charId = "char_456", charName = "Sage")
+
+// …or tweak a single field on the fly:
+SimulaAds.charName = "Sage"
+```
+
+### 2. Create, load, and show
+
+```kotlin
+import ad.simula.ad.sdk.ads.SimulaInterstitialAd
+import ad.simula.ad.sdk.ads.SimulaInterstitialAdListener
+import ad.simula.ad.sdk.ads.SimulaAdError
+
+val ad = SimulaInterstitialAd(adUnitId = "YOUR_AD_UNIT_ID")
+
+ad.listener = object : SimulaInterstitialAdListener {
+    override fun onAdLoaded(ad: SimulaInterstitialAd) {
+        // Ready to show — the HTML creative is already prefetched.
+        ad.show(this@MainActivity) // or ad.show() to use the tracked Activity
+    }
+    override fun onAdFailedToLoad(ad: SimulaInterstitialAd, error: SimulaAdError) { /* no fill, network, etc. */ }
+    override fun onAdDisplayed(ad: SimulaInterstitialAd) {}
+    override fun onAdClicked(ad: SimulaInterstitialAd) {} // creative link tapped
+    override fun onAdClosed(ad: SimulaInterstitialAd) {}   // next ad auto-preloads
+}
+
+ad.load()
+```
+
+`show(activity)` is preferred (correct same-task window stacking); `show()` falls
+back to the currently-tracked foreground Activity. Neither takes character
+arguments — the creative comes entirely from the server. The full-screen UI is the
+server-rendered HTML creative in a web view, which owns its own CTA: a user-initiated
+link tap routes to the ad's destination (Play Store via `market://`, or a web URL)
+and fires `onAdClicked`. Dismissal is via the close button.
+
+### Events
+
+| Callback | When |
+| --- | --- |
+| `onAdLoaded` | Creative loaded and prefetched; safe to `show()`. |
+| `onAdFailedToLoad` | Load failed — no fill, no session, or network error. |
+| `onAdDisplayed` | Interstitial presented full-screen (impression tracked). |
+| `onAdFailedToDisplay` | `show()` failed — not ready, already showing, or no Activity. |
+| `onAdClicked` | The CTA was tapped (fires even if the ad has no tracking URL). |
+| `onAdClosed` | Dismissed; the next ad is auto-preloaded. |
+
 ## Theming Reference
 
 ### MiniGameInvitationTheme

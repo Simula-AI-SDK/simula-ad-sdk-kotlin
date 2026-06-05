@@ -87,7 +87,7 @@ internal object SimulaApiClient {
             data.sessionId?.takeIf { it.isNotEmpty() }
         } catch (e: IllegalArgumentException) {
             throw e // Re-throw 401 errors
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
@@ -211,6 +211,66 @@ internal object SimulaApiClient {
         )
     }
 
+    // ── Native Creative Ad Load ─────────────────────────────────────────────
+
+    data class AdLoadResult(
+        val adId: String,
+        val adInserted: Boolean,
+        val adUnitId: String,
+        val destination: String,
+        val renderedFormat: String?,
+        val trackingUrl: String?,
+        val renderedHtml: String?,
+    )
+
+    /**
+     * Load a native-creative interstitial via `POST /ads/load/interstitial`.
+     *
+     * `ad_inserted == false` is a valid no-fill response (NOT an error); callers
+     * inspect [AdLoadResult.adInserted]/[AdLoadResult.renderedHtml] to decide.
+     */
+    suspend fun loadAd(
+        adUnitId: String,
+        sessionId: String = "",
+        charId: String? = null,
+        charName: String? = null,
+        charImage: String? = null,
+        charDesc: String? = null,
+    ): AdLoadResult = withContext(Dispatchers.IO) {
+        val requestBody = AdLoadRequestBody(
+            adUnitId = adUnitId,
+            sessionId = sessionId,
+            charId = charId,
+            charName = charName,
+            charImage = charImage,
+            charDesc = charDesc,
+        )
+
+        val response = SimulaHttp.request(
+            url = "$API_BASE_URL/ads/load/interstitial",
+            method = "POST",
+            headers = jsonHeaders(),
+            body = json.encodeToString(requestBody),
+        )
+        if (!response.isSuccessful) {
+            throw Exception("HTTP error! status: ${response.code}")
+        }
+        if (response.body.isBlank()) {
+            throw Exception("Empty response body")
+        }
+        val data = json.decodeFromString<AdLoadApiResponse>(response.body)
+
+        AdLoadResult(
+            adId = data.adId,
+            adInserted = data.adInserted,
+            adUnitId = data.adUnitId,
+            destination = data.destination,
+            renderedFormat = data.renderedFormat,
+            trackingUrl = data.trackingUrl,
+            renderedHtml = data.renderedHtml,
+        )
+    }
+
     // ── Minigame Fallback Ad ────────────────────────────────────────────────
 
     /**
@@ -229,7 +289,7 @@ internal object SimulaApiClient {
 
             val data = json.decodeFromString<MinigameApiResponse>(response.body)
             data.adResponse?.iframeUrl
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
@@ -253,7 +313,7 @@ internal object SimulaApiClient {
                 body = json.encodeToString(clickBody),
             )
         } catch (_: Exception) {
-            // Silently fail — tracking is best effort
+            // Silently fail — tracking is the best effort
         }
     }
 

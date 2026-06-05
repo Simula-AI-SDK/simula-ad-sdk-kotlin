@@ -46,6 +46,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -89,6 +90,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
+ * Preloaded catalog for the imperative interstitial flow. When non-null, the
+ * menu renders these games immediately instead of fetching the catalog itself.
+ */
+internal val LocalPreloadedCatalog =
+    staticCompositionLocalOf<SimulaApiClient.CatalogResult?> { null }
+
+/**
  * Full-screen mini game menu composable.
  * Equivalent to React's MiniGameMenu.tsx.
  *
@@ -111,6 +119,7 @@ fun MiniGameMenu(
     val simulaContext = useSimula()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val preloadedCatalog = LocalPreloadedCatalog.current
 
     // ── State ────────────────────────────────────────────────────────────────
     var selectedGameId by remember { mutableStateOf<String?>(null) }
@@ -140,6 +149,17 @@ fun MiniGameMenu(
 
         // Prewarm a WebView so the game/ad iframe opens without renderer cold-start.
         WebViewPool.prewarm(context)
+
+        // Imperative interstitial path: catalog was already fetched by load().
+        val preloaded = preloadedCatalog
+        if (preloaded != null) {
+            games = preloaded.games
+            menuId = preloaded.menuId.takeIf { it.isNotBlank() }
+            catalogError = false
+            catalogLoading = false
+            return@LaunchedEffect
+        }
+
         catalogLoading = true
         catalogError = false
         try {

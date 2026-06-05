@@ -85,6 +85,28 @@ class ConsentSnapshotTest {
         assertEquals("1YNN", SimulaPrivacy.current.uspString) // untouched
     }
 
+    // ── Imperative SimulaAds.initialize: resolution + ppid gate ────────────────
+
+    @Test
+    fun initialize_explicitPrivacyWithCoppaSuppressesPrimaryUserID() {
+        // An explicit privacy config flows through (coppaApplies observed). Consent is
+        // granted but COPPA applies, so the ppid is suppressed. SimulaAds.initialize now
+        // gates on allowsPrimaryUserID (consent && !coppa) — the flag-only gate it
+        // replaced would have leaked the ppid here.
+        SimulaPrivacy.apply(SimulaPrivacyConfig(hasPrivacyConsent = true, coppaApplies = true))
+        assertTrue(SimulaPrivacy.current.coppaApplies)
+        assertFalse(SimulaPrivacy.current.allowsPrimaryUserID)
+    }
+
+    @Test
+    fun initialize_seedFromLegacyFlagGatesPrimaryUserID() {
+        // privacy == null → config seeded from hasPrivacyConsent → drives the ppid gate.
+        SimulaPrivacy.apply(SimulaPrivacyConfig(hasPrivacyConsent = false))
+        assertFalse(SimulaPrivacy.current.allowsPrimaryUserID)
+        SimulaPrivacy.apply(SimulaPrivacyConfig(hasPrivacyConsent = true))
+        assertTrue(SimulaPrivacy.current.allowsPrimaryUserID)
+    }
+
     @Test
     fun normalizeGppSid_handlesStringNumberAndSet() {
         // CMPs write IABGPP_GppSID inconsistently: string, number, or a Set.

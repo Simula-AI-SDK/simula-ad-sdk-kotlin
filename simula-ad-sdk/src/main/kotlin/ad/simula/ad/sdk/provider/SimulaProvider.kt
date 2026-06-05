@@ -107,10 +107,6 @@ fun SimulaProvider(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Resolved consent (explicit overrides merged over auto-read IAB keys); drives
-    // ppid gating and the context value.
-    val consent by SimulaPrivacy.snapshot.collectAsState()
-
     // CMPs write the IAB keys in a burst; debounce the snapshot that drives session
     // re-sync so a settled consent state triggers one /session/create, not a race.
     val sessionConsent by remember { SimulaPrivacy.snapshot.debounce(300L) }
@@ -126,27 +122,54 @@ fun SimulaProvider(
         SimulaSessionStore(apiKey, devMode, effectiveUserID)
     }
 
-    // Ad caching infrastructure — thread-safe so I/O coroutines can populate
+    // Delegate cache + context construction to the shared builder. The imperative
+    // interstitial Activity uses the same path with a session warmed by SimulaAds,
+    // so the two entry points stay in lock-step.
+    ProvideSimulaContext(sessionStore, apiKey, devMode, content)
+}
+
+/**
+ * Builds [LocalSimulaContext] from an existing [SimulaSessionStore] and provides it
+ * to [content].
+ *
+ * Extracted from [SimulaProvider] so the imperative interstitial Activity
+ * ([ad.simula.ad.sdk.ads.SimulaInterstitialActivity]) can reuse the session warmed
+ * by `SimulaAds.initialize()` instead of creating a new one. Consent is read from
+ * the process-wide [SimulaPrivacy] snapshot, so both entry points present identical
+ * privacy signals to the nested game/ad composables.
+ */
+@Composable
+internal fun ProvideSimulaContext(
+    store: SimulaSessionStore,
+    apiKey: String,
+    devMode: Boolean,
+    content: @Composable () -> Unit,
+) {
+    // Resolved consent (explicit overrides merged over auto-read IAB keys); drives
+    // ppid gating and the context value.
+    val consent by SimulaPrivacy.snapshot.collectAsState()
+
+    // Ad caching infrastructure — thread-safe, so I/O coroutines can populate
     // these directly from any dispatcher (matching React's useRef<Map> pattern).
     val adCache = remember { ConcurrentHashMap<String, AdData>() }
     val heightCache = remember { ConcurrentHashMap<String, Float>() }
     val noFillSet = remember { ConcurrentHashMap.newKeySet<String>() }
 
-    // Kick off session creation off the critical path.
-    LaunchedEffect(sessionStore) {
-        sessionStore.ensureSession()
+    // Kick off session creation off the critical path (idempotent / coalesced).
+    LaunchedEffect(store) {
+        store.ensureSession()
     }
 
     // Build context value — equivalent to React's useMemo
-    val contextValue = remember(apiKey, devMode, sessionStore.sessionId, consent) {
+    val contextValue = remember(apiKey, devMode, store.sessionId, consent) {
         SimulaContextValue(
             apiKey = apiKey,
             devMode = devMode,
-            sessionId = sessionStore.sessionId,
+            sessionId = store.sessionId,
             hasPrivacyConsent = consent.hasPrivacyConsent,
             consent = consent,
             updateConsent = { SimulaPrivacy.apply(it) },
-            ensureSession = { sessionStore.ensureSession() },
+            ensureSession = { store.ensureSession() },
             getCachedAd = { slot, position ->
                 adCache[getCacheKey(slot, position)]
             },
