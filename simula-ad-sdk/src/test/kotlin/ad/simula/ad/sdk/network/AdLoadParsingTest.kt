@@ -10,7 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Contract tests for the `POST /ads/load` request/response models. Mirrors the
+ * Contract tests for the `POST /ads/load/interstitial` request/response models. Mirrors the
  * production [SimulaApiClient] JSON config (lenient, ignore-unknown, encode-defaults)
  * so these exercise the same decode/encode behavior the client relies on.
  *
@@ -28,25 +28,24 @@ class AdLoadParsingTest {
 
     @Test
     fun `request encodes snake_case keys with defaults`() {
-        val body = AdLoadRequestBody(adUnitId = "unit_1", rewarded = true, sessionId = "sess_9")
+        val body = AdLoadRequestBody(adUnitId = "unit_1", sessionId = "sess_9")
         val encoded = json.encodeToString(body)
 
         // Round-trip is the most robust assertion (key ordering is not guaranteed).
         val decoded = json.decodeFromString<AdLoadRequestBody>(encoded)
         assertEquals("unit_1", decoded.adUnitId)
-        assertTrue(decoded.rewarded)
         assertEquals("sess_9", decoded.sessionId)
 
         // The wire keys are snake_case, and defaults are emitted (encodeDefaults).
         assertTrue(encoded.contains("\"ad_unit_id\""))
         assertTrue(encoded.contains("\"session_id\""))
-        assertTrue(encoded.contains("\"rewarded\""))
+        // `rewarded` is no longer part of the request body.
+        assertFalse(encoded.contains("\"rewarded\""))
     }
 
     @Test
-    fun `request defaults rewarded false and empty session`() {
+    fun `request defaults empty session`() {
         val body = AdLoadRequestBody(adUnitId = "unit_1")
-        assertFalse(body.rewarded)
         assertEquals("", body.sessionId)
         assertNull(body.charId)
         assertNull(body.charName)
@@ -85,7 +84,6 @@ class AdLoadParsingTest {
               "ad_id": "abc-123",
               "ad_inserted": true,
               "ad_unit_id": "unit_1",
-              "rewarded": true,
               "destination": "web",
               "rendered_format": "rewarded_video",
               "rendered_html": "<b>hi</b>",
@@ -98,7 +96,6 @@ class AdLoadParsingTest {
         assertEquals("abc-123", r.adId)
         assertTrue(r.adInserted)
         assertEquals("unit_1", r.adUnitId)
-        assertTrue(r.rewarded)
         assertEquals("web", r.destination)
         assertEquals("rewarded_video", r.renderedFormat)
         assertEquals("<b>hi</b>", r.renderedHtml)
@@ -113,7 +110,6 @@ class AdLoadParsingTest {
         assertEquals("", r.adId)
         assertFalse(r.adInserted)
         assertEquals("", r.adUnitId)
-        assertFalse(r.rewarded)
         assertEquals("appstore", r.destination)
         assertNull(r.renderedFormat)
         assertNull(r.trackingUrl)
@@ -152,7 +148,7 @@ class AdLoadParsingTest {
 
     @Test
     fun `missing optional fields use defaults`() {
-        val payload = """{"ad_id":"x","ad_inserted":true,"ad_unit_id":"u","rewarded":false}"""
+        val payload = """{"ad_id":"x","ad_inserted":true,"ad_unit_id":"u"}"""
         val r = json.decodeFromString<AdLoadApiResponse>(payload)
         assertEquals("appstore", r.destination)
         assertNull(r.renderedFormat)

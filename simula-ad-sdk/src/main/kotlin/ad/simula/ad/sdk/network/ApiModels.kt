@@ -53,7 +53,6 @@ internal data class MenuGameClickBody(
 @Serializable
 internal data class AdLoadRequestBody(
     @SerialName("ad_unit_id") val adUnitId: String,
-    val rewarded: Boolean = false,
     @SerialName("session_id") val sessionId: String = "",
     // Optional character context the backend can use to target the creative.
     @SerialName("char_id") val charId: String? = null,
@@ -67,7 +66,6 @@ internal data class AdLoadApiResponse(
     @SerialName("ad_id") val adId: String = "",
     @SerialName("ad_inserted") val adInserted: Boolean = false,
     @SerialName("ad_unit_id") val adUnitId: String = "",
-    val rewarded: Boolean = false,
     val destination: String = "appstore",
     @SerialName("rendered_format") val renderedFormat: String? = null,
     @SerialName("tracking_url") val trackingUrl: String? = null,
