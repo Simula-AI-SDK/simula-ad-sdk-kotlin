@@ -8,6 +8,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.pow
 
 /**
@@ -45,6 +46,14 @@ internal object RewardVerificationManager {
     private var isProcessing = false
 
     /**
+     * Per-`serveId` result callbacks, so a verification's outcome reaches the caller
+     * that enqueued it — not whoever happens to be draining the queue. One-shot:
+     * removed the first time the task is attempted, so it can't be misrouted to another
+     * play and can't retain the caller (e.g. the ad/listener) beyond a single attempt.
+     */
+    private val activeCallbacks = ConcurrentHashMap<String, (Result<String?>) -> Unit>()
+
+    /**
      * Enqueues a verification, persists it, and starts draining the queue. [onResult]
      * is invoked per attempt: `success(token)` once verified (or already-claimed),
      * `failure` on a (possibly retryable) error. Safe to call repeatedly for the same
@@ -58,6 +67,11 @@ internal object RewardVerificationManager {
         onResult: ((Result<String?>) -> Unit)? = null,
     ) {
         val appContext = context.applicationContext
+        // Register before enqueueing so a drain already in flight (which reloads the
+        // queue each iteration and can pick this task up) still routes the result here.
+        if (onResult != null) {
+            activeCallbacks[serveId] = onResult
+        }
         SimulaScope.launch {
             mutex.withLock {
                 val list = loadQueue(appContext).toMutableList()
@@ -74,7 +88,7 @@ internal object RewardVerificationManager {
                     saveQueue(appContext, list)
                 }
             }
-            processQueue(appContext, onResult)
+            processQueue(appContext)
         }
     }
 
@@ -82,16 +96,19 @@ internal object RewardVerificationManager {
      * Drains any persisted verifications eligible under their backoff. Call at app
      * startup to recover work left over from a previous session.
      */
-    fun triggerProcessQueue(context: Context, onResult: ((Result<String?>) -> Unit)? = null) {
+    fun triggerProcessQueue(context: Context) {
         val appContext = context.applicationContext
-        SimulaScope.launch { processQueue(appContext, onResult) }
+        SimulaScope.launch { processQueue(appContext) }
     }
 
-    private suspend fun processQueue(context: Context, onResult: ((Result<String?>) -> Unit)?) {
+    private suspend fun processQueue(context: Context) {
         mutex.withLock {
             if (isProcessing) return
             isProcessing = true
         }
+        // True when we stopped because a task hit a retryable error: its peers (if any)
+        // are intentionally left for a later trigger, so we must NOT immediately re-drain.
+        var bailedForBackoff = false
         try {
             while (true) {
                 val task = mutex.withLock {
@@ -108,22 +125,39 @@ internal object RewardVerificationManager {
                         elapsedPlayTime = task.elapsedPlayTime,
                     )
                     removeTask(context, task.serveId)
-                    onResult?.invoke(Result.success(res.token))
+                    activeCallbacks.remove(task.serveId)?.invoke(Result.success(res.token))
                 } catch (e: Exception) {
                     if (isPermanentClientError(e)) {
                         // 4xx (except 408/429): retrying won't help, so drop it.
                         removeTask(context, task.serveId)
-                        onResult?.invoke(Result.failure(e))
+                        activeCallbacks.remove(task.serveId)?.invoke(Result.failure(e))
                     } else {
+                        // Keep the task for a later trigger; deliver this attempt's
+                        // failure to its caller once (the server-side SSV postback still
+                        // lands on a successful retry — the client signal is one-shot).
                         recordAttempt(context, task.serveId)
-                        onResult?.invoke(Result.failure(e))
-                        // Stop here; the remaining backoff is awaited by a later trigger.
+                        activeCallbacks.remove(task.serveId)?.invoke(Result.failure(e))
+                        bailedForBackoff = true
                         break
                     }
                 }
             }
         } finally {
-            mutex.withLock { isProcessing = false }
+            // Clear the claim and, under the SAME lock that observes the queue, decide
+            // whether to re-drain. This closes the race where a verification enqueued
+            // just as the drain finished would otherwise sit idle until some later
+            // trigger: a task persisted concurrently is either seen here (→ re-trigger)
+            // or seen by the enqueuer's own processQueue once isProcessing is false.
+            val reDrain = mutex.withLock {
+                isProcessing = false
+                if (bailedForBackoff) {
+                    false
+                } else {
+                    val now = System.currentTimeMillis()
+                    loadQueue(context).any { now - it.lastAttemptTimestamp >= backoffMs(it.retryCount) }
+                }
+            }
+            if (reDrain) triggerProcessQueue(context)
         }
     }
 

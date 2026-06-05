@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.provider.SimulaSessionStore
@@ -120,8 +121,14 @@ object SimulaAds {
         registerActivityTracking()
         initialized = true
 
-        // Warm the session before the first load() so it's off the ad critical path.
-        SimulaScope.launch { store.ensureSession() }
+        // Warm the session before the first load() so it's off the ad critical path,
+        // then drain any reward verifications a prior process left pending (e.g. a
+        // crash/kill before a verify could land) so their server-side SSV postbacks
+        // still fire without waiting for the next rewarded play.
+        SimulaScope.launch {
+            store.ensureSession()
+            RewardVerificationManager.triggerProcessQueue(appContext)
+        }
     }
 
     /**

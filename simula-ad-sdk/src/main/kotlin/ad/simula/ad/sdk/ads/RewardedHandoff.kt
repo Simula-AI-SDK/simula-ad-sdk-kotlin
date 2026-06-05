@@ -28,12 +28,14 @@ internal class RewardedPresentation(
     var rewardEarned = false
 
     /**
-     * `SystemClock.elapsedRealtime()` when play tracking first started, or 0 if not yet
-     * started. Anchored on the presentation (which survives Activity recreation via the
-     * handoff) so a config change resumes the remaining time instead of restarting it —
-     * otherwise rotating could reset/evade the gate.
+     * Foreground-only accumulated play time, in milliseconds. Time accrues only while
+     * the Activity is RESUMED (see [SimulaRewardedActivity]'s gate), so backgrounding
+     * the app can't advance it toward the reward. Anchored on the presentation (which
+     * survives Activity recreation via the handoff) so a config change resumes the
+     * remaining time instead of restarting it. Also the `elapsed_play_time` reported to
+     * `verify-reward`.
      */
-    var gateStartedAtMs = 0L
+    var accumulatedPlayTimeMs = 0L
 }
 
 /**

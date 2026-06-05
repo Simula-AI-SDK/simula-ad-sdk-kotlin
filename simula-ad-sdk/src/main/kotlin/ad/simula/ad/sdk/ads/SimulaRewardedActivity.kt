@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -45,6 +46,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -115,8 +118,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     }
 
     private fun elapsedSeconds(p: RewardedPresentation): Double {
-        if (p.gateStartedAtMs == 0L) return 0.0
-        return (SystemClock.elapsedRealtime() - p.gateStartedAtMs) / 1000.0
+        return p.accumulatedPlayTimeMs / 1000.0
     }
 
     private fun configureWindow() {
@@ -135,10 +137,9 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     }
 }
 
-/** True if play tracking already started and the required duration has elapsed. */
+/** True if enough foreground play time has already accrued to satisfy the gate. */
 private fun gateElapsed(p: RewardedPresentation): Boolean =
-    p.gateStartedAtMs != 0L &&
-        (SystemClock.elapsedRealtime() - p.gateStartedAtMs) / 1000.0 >= p.durationSeconds
+    p.durationSeconds > 0 && p.accumulatedPlayTimeMs / 1000.0 >= p.durationSeconds
 
 @Composable
 private fun RewardedMinigame(
@@ -152,9 +153,12 @@ private fun RewardedMinigame(
         mutableStateOf(presentation.durationSeconds <= 0 || presentation.rewardEarned || gateElapsed(presentation))
     }
     var secondsLeft by remember {
-        mutableStateOf(maxOf(0, presentation.durationSeconds))
+        // Resume from already-accrued play time (config-change recovery), not full duration.
+        mutableStateOf(maxOf(0, presentation.durationSeconds - (presentation.accumulatedPlayTimeMs / 1000L).toInt()))
     }
     var showExitDialog by remember { mutableStateOf(false) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     // DISPLAYED + impression fire once the creative first composes. Guarded so an
     // Activity recreation doesn't double-report either.
@@ -168,26 +172,40 @@ private fun RewardedMinigame(
         }
     }
 
-    // Wall-clock play gate, anchored on the presentation so a config change resumes the
-    // remaining time instead of restarting it.
+    // Foreground-only play gate. Time accrues only while the Activity is RESUMED:
+    // repeatOnLifecycle cancels the ticking loop when the app is backgrounded and
+    // restarts it on return, so the gate can't be satisfied by simply backgrounding the
+    // app for the required duration. The accumulated time lives on the presentation, so
+    // a config change (rotation) resumes the remaining time instead of restarting it.
     LaunchedEffect(Unit) {
         if (presentation.durationSeconds <= 0) {
             presentation.rewardEarned = true
             rewardEarned = true
             return@LaunchedEffect
         }
-        if (presentation.gateStartedAtMs == 0L) {
-            presentation.gateStartedAtMs = SystemClock.elapsedRealtime()
+        if (presentation.rewardEarned) {
+            rewardEarned = true
+            return@LaunchedEffect
         }
-        while (true) {
-            val elapsed = (SystemClock.elapsedRealtime() - presentation.gateStartedAtMs) / 1000.0
-            secondsLeft = maxOf(0, presentation.durationSeconds - elapsed.toInt())
-            if (elapsed >= presentation.durationSeconds) {
-                presentation.rewardEarned = true
-                rewardEarned = true
-                break
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            // A re-run after the reward was already earned (background → resume) must not
+            // keep accruing time.
+            if (presentation.rewardEarned) return@repeatOnLifecycle
+            // Re-anchor on each resume so the backgrounded interval is never counted.
+            var lastTickMs = SystemClock.elapsedRealtime()
+            while (true) {
+                delay(250L)
+                val now = SystemClock.elapsedRealtime()
+                presentation.accumulatedPlayTimeMs += now - lastTickMs
+                lastTickMs = now
+                val elapsedSeconds = presentation.accumulatedPlayTimeMs / 1000.0
+                secondsLeft = maxOf(0, presentation.durationSeconds - elapsedSeconds.toInt())
+                if (elapsedSeconds >= presentation.durationSeconds) {
+                    presentation.rewardEarned = true
+                    rewardEarned = true
+                    break
+                }
             }
-            delay(250L)
         }
     }
 
