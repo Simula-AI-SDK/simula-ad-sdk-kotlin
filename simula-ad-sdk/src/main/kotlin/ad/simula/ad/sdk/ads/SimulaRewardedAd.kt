@@ -75,6 +75,10 @@ class SimulaRewardedAd(val adUnitId: String) {
                     adUnitId = adUnitId,
                     sessionId = session,
                     minPlayThreshold = minPlayThreshold.takeIf { it > 0 },
+                    charId = SimulaAds.charId,
+                    charName = SimulaAds.charName,
+                    charImage = SimulaAds.charImage,
+                    charDesc = SimulaAds.charDesc,
                 )
                 // A rewarded ad with no iframe to render is a no-fill.
                 if (ad.iframeUrl.isBlank()) {

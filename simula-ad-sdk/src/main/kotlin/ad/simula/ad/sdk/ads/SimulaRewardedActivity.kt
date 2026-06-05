@@ -88,7 +88,6 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                 store = SimulaAds.store,
                 apiKey = SimulaAds.apiKey,
                 devMode = SimulaAds.devMode,
-                hasPrivacyConsent = SimulaAds.hasPrivacyConsent,
             ) {
                 RewardedMinigame(presentation = p, onFinish = ::closeOnce)
             }

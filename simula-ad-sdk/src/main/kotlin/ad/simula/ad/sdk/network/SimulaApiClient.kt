@@ -289,16 +289,24 @@ internal object SimulaApiClient {
         adUnitId: String,
         sessionId: String = "",
         minPlayThreshold: Int? = null,
+        charId: String? = null,
+        charName: String? = null,
+        charImage: String? = null,
+        charDesc: String? = null,
     ): RewardedInitResult = withContext(Dispatchers.IO) {
         val requestBody = RewardedInitRequestBody(
             adUnitId = adUnitId,
             sessionId = sessionId,
             minPlayThreshold = minPlayThreshold,
+            charId = charId,
+            charName = charName,
+            charImage = charImage,
+            charDesc = charDesc,
         )
         val response = SimulaHttp.request(
             url = "$API_BASE_URL/minigames/init/rewarded",
             method = "POST",
-            headers = jsonHeaders,
+            headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
         )
         if (!response.isSuccessful) {
@@ -336,7 +344,7 @@ internal object SimulaApiClient {
         val response = SimulaHttp.request(
             url = "$API_BASE_URL/minigames/verify-reward",
             method = "POST",
-            headers = jsonHeaders,
+            headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
         )
         // Already claimed — treat as a successful idempotent verification.

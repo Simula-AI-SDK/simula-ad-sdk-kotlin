@@ -79,6 +79,11 @@ internal data class RewardedInitRequestBody(
     @SerialName("ad_unit_id") val adUnitId: String,
     @SerialName("session_id") val sessionId: String = "",
     @SerialName("min_play_threshold") val minPlayThreshold: Int? = null,
+    // Optional character context the backend can use to target the minigame.
+    @SerialName("char_id") val charId: String? = null,
+    @SerialName("char_name") val charName: String? = null,
+    @SerialName("char_image") val charImage: String? = null,
+    @SerialName("char_desc") val charDesc: String? = null,
 )
 
 @Serializable
