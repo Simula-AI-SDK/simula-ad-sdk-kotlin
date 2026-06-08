@@ -35,6 +35,8 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -364,7 +366,12 @@ private fun CreativeInterstitial(
         }
 
         // Persistent ad-info "i" + report sheet (required disclosure). Last so its sheet overlays.
-        AdInfoReportOverlay(adId = ad.adId, apiKey = presentation.apiKey, advertiser = ad.creative?.bundleUrl)
+        AdInfoReportOverlay(
+            adId = ad.adId,
+            apiKey = presentation.apiKey,
+            advertiser = ad.creative?.bundleUrl,
+            closeAtBottomLeft = (behavior?.close?.position ?: CloseBehavior().position) == ClosePosition.BOTTOM_LEFT,
+        )
     }
 }
 
@@ -419,8 +426,8 @@ private fun CreativeHtml(
 // Visible close affordance sized to match AppLovin (a compact ~22dp circle); the tappable area stays
 // at the 48dp Material minimum (see [MIN_TOUCH_TARGET_DP]), close to IAB MRAID's 50×50dp close
 // region. The visible graphic and the touch target are deliberately decoupled.
-private const val CLOSE_GLYPH_SP = 12
-private const val CLOSE_BOX_DP = 22
+private const val CLOSE_GLYPH_SP = 10
+private const val CLOSE_BOX_DP = 16
 private const val MIN_TOUCH_TARGET_DP = 48
 
 /**
@@ -447,12 +454,13 @@ private fun BoxScope.InterstitialCloseButton(
         ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
     }
 
-    // `progress_bar`: a full-width bar pinned to the very top edge of the screen (inside the top
-    // nav / status-bar region), shown during the delay and tinted by color. Edge-to-edge, no insets.
+    // `progress_bar`: a full-width bar pinned just below the top safe-area inset (so it clears the
+    // notch / status-bar region), shown during the delay and tinted by color. Edge-to-edge.
     if (!enabled && treatment == CloseTreatment.PROGRESS_BAR) {
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
                 .fillMaxWidth()
                 .height(4.dp)
                 .background(Color(0x40FFFFFF)),
@@ -474,6 +482,10 @@ private fun BoxScope.InterstitialCloseButton(
             // safeDrawing merges system bars + display cutout so a top-corner button never
             // lands under a notch (system bars are hidden, so navigationBars alone gave 0 at top).
             .windowInsetsPadding(WindowInsets.safeDrawing)
+            // When pinned bottom-left, nudge right just enough to clear the always-present info "i"
+            // that sits tight in that corner (the "i" stays closest to the edge), so the two sit
+            // snug side by side. (Tuned for the 16dp circles inside the 48dp touch frame.)
+            .padding(start = if (position == ClosePosition.BOTTOM_LEFT) 2.dp else 0.dp)
             .padding(8.dp),
     ) {
         when {
@@ -556,12 +568,15 @@ private fun CloseGlyph() {
     )
 }
 
-/** The text pill used by the `reward_or_close_label` treatment (counting down, then "Close"). */
+/**
+ * The text pill used by the `reward_or_close_label` treatment (counting down, then "Close").
+ * Compact, to match the small close chrome of the other treatments.
+ */
 @Composable
 private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
     val base = Modifier
-        .clip(RoundedCornerShape(22.dp))
-        .background(Color.White.copy(alpha = 0.9f))
+        .clip(RoundedCornerShape(12.dp))
+        .background(Color.Black.copy(alpha = 0.5f))
     val mod = if (onClick != null) {
         base.clickable(
             interactionSource = remember { MutableInteractionSource() },
@@ -571,8 +586,8 @@ private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
     } else {
         base
     }
-    Box(mod.padding(horizontal = 14.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
-        Text(text, color = Color(0xFF1F2937), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+    Box(mod.padding(horizontal = 10.dp, vertical = 5.dp), contentAlignment = Alignment.Center) {
+        Text(text, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

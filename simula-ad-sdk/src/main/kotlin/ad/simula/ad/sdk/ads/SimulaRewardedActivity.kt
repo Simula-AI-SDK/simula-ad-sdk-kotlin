@@ -292,12 +292,12 @@ private fun RewardClosePill(
         ) {
             Box(
                 modifier = Modifier
-                    .size(22.dp)
+                    .size(16.dp)
                     .clip(CircleShape)
                     .background(Color.Black.copy(alpha = 0.5f)),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("✕", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("✕", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
             }
         }
     } else {

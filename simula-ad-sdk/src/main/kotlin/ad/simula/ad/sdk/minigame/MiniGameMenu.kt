@@ -797,17 +797,19 @@ private fun AdIframeOverlay(
                         onClick = onClose,
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(16.dp),
+                            .padding(8.dp),
                     )
                 } else {
+                    // Countdown ring: a 16dp circle centered in the same 48dp footprint as the close
+                    // button so nothing jumps when it unlocks.
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(16.dp)
-                            .size(22.dp),
+                            .padding(8.dp)
+                            .size(48.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Canvas(modifier = Modifier.fillMaxSize()) {
+                        Canvas(modifier = Modifier.size(16.dp)) {
                             val strokeWidth = 2.dp.toPx()
                             val radius = size.minDimension / 2f
 
@@ -831,7 +833,7 @@ private fun AdIframeOverlay(
                         Text(
                             text = "$adCountdown",
                             color = Color.White,
-                            fontSize = 11.sp,
+                            fontSize = 9.sp,
                             fontWeight = FontWeight.SemiBold,
                             textAlign = TextAlign.Center,
                         )

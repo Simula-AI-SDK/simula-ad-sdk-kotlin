@@ -52,26 +52,37 @@ internal fun BoxScope.AdInfoReportOverlay(
     adId: String,
     apiKey: String? = null,
     advertiser: String? = null,
+    closeAtBottomLeft: Boolean = false,
 ) {
     var sheetVisible by remember { mutableStateOf(false) }
 
-    // Persistent "i"-in-a-circle — bottom-left (AdChoices convention), tight to the edge.
+    // Persistent "i"-in-a-circle — bottom-left (AdChoices convention), tight to the edge. The visible
+    // glyph stays 16dp; the hit area is enlarged (up, plus right when there's room) with the glyph
+    // pinned to the corner. When the close button is also bottom-left, the hit area stays vertical-
+    // only so it doesn't swallow taps meant for the close button beside it.
     Box(
         modifier = Modifier
             .align(Alignment.BottomStart)
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(6.dp)
-            .size(22.dp)
-            .clip(CircleShape)
-            .background(Color.Black.copy(alpha = 0.5f))
-            .border(1.dp, Color.White.copy(alpha = 0.5f), CircleShape)
+            .height(48.dp)
+            .width(if (closeAtBottomLeft) 16.dp else 48.dp)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
             ) { sheetVisible = true },
-        contentAlignment = Alignment.Center,
+        contentAlignment = Alignment.BottomStart,
     ) {
-        Text("i", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Box(
+            modifier = Modifier
+                .size(16.dp)
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.5f))
+                .border(1.dp, Color.White.copy(alpha = 0.5f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("i", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        }
     }
 
     if (sheetVisible) {

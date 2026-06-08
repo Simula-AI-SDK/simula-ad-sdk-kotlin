@@ -136,32 +136,38 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(16.dp)
-                .size(22.dp),
+                .padding(8.dp)
+                .size(48.dp),
             contentAlignment = Alignment.Center,
         ) {
             if (countdown <= 0) {
-                // Compact close button, matching the interstitial/rewarded default.
+                // Compact close button (16dp circle) with a full 48dp tap target so it's easy to hit.
                 Box(
                     modifier = Modifier
-                        .size(22.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.5f))
+                        .fillMaxSize()
                         .clickable(onClick = onClose),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text("✕", color = Color.White, fontSize = 12.sp)
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.5f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("✕", color = Color.White, fontSize = 10.sp)
+                    }
                 }
             } else {
-                // Countdown ring, sized to the same compact footprint.
+                // Countdown ring, a 16dp circle centered in the same footprint.
                 Box(
                     modifier = Modifier
-                        .size(22.dp)
+                        .size(16.dp)
                         .clip(CircleShape)
                         .background(Color.Black.copy(alpha = 0.4f)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Canvas(modifier = Modifier.size(18.dp)) {
+                    Canvas(modifier = Modifier.size(12.dp)) {
                         val stroke = 2.dp.toPx()
                         drawArc(
                             color = Color.White,
@@ -171,7 +177,7 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
                             style = Stroke(width = stroke, cap = StrokeCap.Round),
                         )
                     }
-                    Text("$countdown", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text("$countdown", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
