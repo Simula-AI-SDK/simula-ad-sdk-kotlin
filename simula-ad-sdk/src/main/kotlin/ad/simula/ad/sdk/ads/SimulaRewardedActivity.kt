@@ -269,6 +269,9 @@ private fun RewardedMinigame(
                 .windowInsetsPadding(WindowInsets.safeDrawing)
                 .padding(8.dp),
         )
+
+        // Persistent ad-info "i" + report sheet (required disclosure). Last so its sheet overlays.
+        AdInfoReportOverlay(adId = presentation.adId, apiKey = presentation.apiKey, advertiser = null)
     }
 }
 

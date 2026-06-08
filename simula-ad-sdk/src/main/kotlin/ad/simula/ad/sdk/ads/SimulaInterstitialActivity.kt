@@ -362,6 +362,9 @@ private fun CreativeInterstitial(
                 onDismiss = { installBannerVisible = false },
             )
         }
+
+        // Persistent ad-info "i" + report sheet (required disclosure). Last so its sheet overlays.
+        AdInfoReportOverlay(adId = ad.adId, apiKey = presentation.apiKey, advertiser = ad.creative?.bundleUrl)
     }
 }
 

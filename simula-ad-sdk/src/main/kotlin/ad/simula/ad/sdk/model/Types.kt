@@ -296,3 +296,13 @@ internal data class AdBehavior(
     val storePrompt: StorePrompt? = null,
     val skoverlay: SkOverlayConfig? = null,
 )
+
+/** User-selectable reasons for the in-ad report flow (the "i" → report sheet). [flag] is the wire
+ * value posted to `POST /impressions/{adId}/report`; [label] is the user-facing copy. */
+internal enum class AdReportReason(val flag: String, val label: String) {
+    AD_NOT_SHOWING("ad_not_showing", "Ad isn't showing properly"),
+    AD_INAPPROPRIATE("ad_inappropriate", "Inappropriate or offensive"),
+    AD_LOOKS_WRONG("ad_looks_wrong", "Ad looks wrong or misleading"),
+    DISLIKE("dislike", "I don't want to see this"),
+    OTHER("other", "Other"),
+}

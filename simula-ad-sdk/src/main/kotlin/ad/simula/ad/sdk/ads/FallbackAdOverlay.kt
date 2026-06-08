@@ -77,7 +77,7 @@ internal fun FallbackAdHost(
         }
         // Brief, on a black backdrop (the fetch is fast); avoids a flash of the host behind.
         FallbackPhase.Fetching -> Box(Modifier.fillMaxSize().background(Color.Black))
-        is FallbackPhase.Showing -> FallbackAdOverlay(iframeUrl = p.url, onClose = { phase = FallbackPhase.Done })
+        is FallbackPhase.Showing -> FallbackAdOverlay(iframeUrl = p.url, adId = adId, onClose = { phase = FallbackPhase.Done })
         FallbackPhase.Done -> LaunchedEffect(Unit) { onFullyClosed() }
     }
 }
@@ -94,7 +94,7 @@ private sealed interface FallbackPhase {
  * a top-right close button (the same shape as the minigame menu's post-game overlay).
  */
 @Composable
-private fun FallbackAdOverlay(iframeUrl: String, onClose: () -> Unit) {
+private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Unit) {
     var countdown by remember { mutableStateOf(5) }
     val ring = remember { Animatable(1f) }
     LaunchedEffect(Unit) {
@@ -174,6 +174,11 @@ private fun FallbackAdOverlay(iframeUrl: String, onClose: () -> Unit) {
                     Text("$countdown", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
             }
+        }
+
+        // Persistent ad-info "i" + report sheet (required disclosure on the fallback ad).
+        if (adId.isNotEmpty()) {
+            AdInfoReportOverlay(adId = adId)
         }
     }
 }

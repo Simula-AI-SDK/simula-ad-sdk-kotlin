@@ -463,4 +463,33 @@ internal object SimulaApiClient {
             // Silently fail
         }
     }
+
+    /**
+     * Submit a user-initiated ad report against the impression (`POST /impressions/{adId}/report`).
+     * [flag] is one of the `AdReportReason` wire values; [note] is optional free text. The backend
+     * stores flag + note against the ad serve (no moderation on receipt). Best-effort, silently
+     * fails — a report must never disrupt the ad experience.
+     */
+    suspend fun reportAd(
+        adId: String,
+        flag: String,
+        note: String? = null,
+        apiKey: String,
+    ): Unit = withContext(Dispatchers.IO) {
+        if (adId.isBlank()) return@withContext
+        try {
+            val reportBody = buildJsonObject {
+                put("flag", flag)
+                if (!note.isNullOrBlank()) put("note", note)
+            }
+            SimulaHttp.request(
+                url = "$API_BASE_URL/impressions/$adId/report",
+                method = "POST",
+                headers = authHeaders(apiKey),
+                body = json.encodeToString(reportBody),
+            )
+        } catch (_: Exception) {
+            // Silently fail
+        }
+    }
 }
