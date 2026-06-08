@@ -73,3 +73,36 @@ internal data class AdLoadApiResponse(
     // full-screen in a WebView — the imperative interstitial's sole creative.
     @SerialName("rendered_html") val renderedHtml: String? = null,
 )
+
+@Serializable
+internal data class RewardedInitRequestBody(
+    @SerialName("ad_unit_id") val adUnitId: String,
+    @SerialName("session_id") val sessionId: String = "",
+    @SerialName("min_play_threshold") val minPlayThreshold: Int? = null,
+    // Optional character context the backend can use to target the minigame.
+    @SerialName("char_id") val charId: String? = null,
+    @SerialName("char_name") val charName: String? = null,
+    @SerialName("char_image") val charImage: String? = null,
+    @SerialName("char_desc") val charDesc: String? = null,
+)
+
+@Serializable
+internal data class RewardedInitApiResponse(
+    @SerialName("serve_id") val serveId: String = "",
+    @SerialName("iframe_url") val iframeUrl: String = "",
+    @SerialName("ad_id") val adId: String = "",
+    @SerialName("duration_seconds") val durationSeconds: Int = 0,
+)
+
+@Serializable
+internal data class VerifyRewardRequestBody(
+    @SerialName("serve_id") val serveId: String,
+    @SerialName("session_id") val sessionId: String,
+    @SerialName("elapsed_play_time") val elapsedPlayTime: Double,
+)
+
+@Serializable
+internal data class VerifyRewardApiResponse(
+    val verified: Boolean = false,
+    val token: String? = null,
+)

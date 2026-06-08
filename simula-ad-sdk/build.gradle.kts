@@ -112,4 +112,7 @@ dependencies {
     // Unit tests (JVM). kotlinx-serialization-json is already on the test classpath
     // via the implementation dependency above.
     testImplementation("junit:junit:4.13.2")
+    // Deterministic coroutine testing (runTest / StandardTestDispatcher / virtual time)
+    // for the reward-verification queue engine. Version tracks kotlinx-coroutines-android.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
 }
