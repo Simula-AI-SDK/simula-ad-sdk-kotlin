@@ -180,18 +180,13 @@ internal fun ApiAdBehavior?.toDomain(): AdBehavior? {
 
 internal fun ApiCloseBehavior?.toDomain(): CloseBehavior {
     if (this == null) return CloseBehavior()
-    val resolvedTreatment = CloseTreatment.from(treatment)
-    var resolvedPosition = ClosePosition.from(position)
-    // Snap an out-of-spec position (bottom_left under an edge-anchored treatment) to a safe default,
-    // per "snap to safe default" — so the SDK renders the field exactly as constrained.
-    if (resolvedPosition == ClosePosition.BOTTOM_LEFT && !resolvedTreatment.allowsBottomLeft) {
-        resolvedPosition = ClosePosition.TOP_RIGHT
-    }
+    // Every treatment honors the configured corner. (`progress_bar` renders its bar at the top edge
+    // regardless; only its resolved close ✕ follows `position`.)
     return CloseBehavior(
         // Clamp to [0, MAX] so a bad/oversized value can't trap the user behind a blocked close.
         delaySeconds = delaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS),
-        treatment = resolvedTreatment,
-        position = resolvedPosition,
+        treatment = CloseTreatment.from(treatment),
+        position = ClosePosition.from(position),
         progressBarColor = validatedHexColor(progressBarColor),
     )
 }

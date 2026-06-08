@@ -157,11 +157,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
         }
 
         val treatment = CloseTreatment.from(closeTreatment)
-        var position = ClosePosition.from(closePosition)
-        // Mirror the wire→domain snap: an edge-anchored treatment can't sit bottom_left.
-        if (position == ClosePosition.BOTTOM_LEFT && !treatment.allowsBottomLeft) {
-            position = ClosePosition.TOP_RIGHT
-        }
+        val position = ClosePosition.from(closePosition)
         // Mirror the server's collision rule: render the store-prompt badge opposite the close button.
         val storePromptPosition =
             if (position == ClosePosition.TOP_RIGHT) ClosePosition.TOP_LEFT else ClosePosition.TOP_RIGHT

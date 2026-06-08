@@ -1,9 +1,9 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
-import ad.simula.ad.sdk.minigame.CloseButton
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.OverlayPosition
@@ -120,29 +120,41 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                 apiKey = SimulaAds.apiKey,
                 devMode = SimulaAds.devMode,
             ) {
-                CreativeInterstitial(
-                    presentation = p,
-                    onFinish = ::closeOnce,
-                    openDestination = { ad ->
-                        // applicationContext so the open survives auto-dismiss. `storeOpen` is
-                        // null when the payload omits `ad_behavior` → today's store path.
-                        CreativeCtaRouter.open(
-                            applicationContext,
-                            ad.trackingUrl,
-                            ad.destination,
-                            ad.adBehavior?.storeOpen,
-                        )
-                    },
-                )
+                // On close, fetch + show a fallback ad before finishing (minigame parity). CLOSED is
+                // reported when the primary creative closes; the Activity finishes after the fallback.
+                FallbackAdHost(adId = p.ad.adId, onFullyClosed = ::finishAd) { onClose ->
+                    CreativeInterstitial(
+                        presentation = p,
+                        onFinish = {
+                            reportClosed()
+                            onClose()
+                        },
+                        openDestination = { ad ->
+                            // applicationContext so the open survives auto-dismiss. `storeOpen` is
+                            // null when the payload omits `ad_behavior` → today's store path.
+                            CreativeCtaRouter.open(
+                                applicationContext,
+                                ad.trackingUrl,
+                                ad.destination,
+                                ad.adBehavior?.storeOpen,
+                            )
+                        },
+                    )
+                }
             }
         }
     }
 
-    /** Fire CLOSED exactly once, then finish. */
-    private fun closeOnce() {
+    /** Fire CLOSED exactly once when the primary creative closes. Does NOT finish — the fallback-ad
+     * host finishes the Activity via [finishAd] once any post-close fallback ad is done. */
+    private fun reportClosed() {
         if (closed) return
         closed = true
         presentation?.callbacks?.onClosed()
+    }
+
+    /** Tear the Activity down (after the optional fallback ad). */
+    private fun finishAd() {
         finish() // isFinishing becomes true → onDestroy drops the handoff entry
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
@@ -322,28 +334,20 @@ private fun CreativeInterstitial(
             )
         }
 
-        // Close button — driven by `ad_behavior` when present; otherwise today's always-available
-        // top-right button (an absent ad_behavior renders exactly as before).
-        if (behavior != null) {
-            InterstitialCloseButton(
-                treatment = behavior.close.treatment,
-                position = behavior.close.position,
-                progressBarColor = behavior.close.progressBarColor,
-                isRewardCopy = isRewardCopy,
-                enabled = closeEnabled,
-                remaining = closeRemaining,
-                progress = closeProgress.value,
-                onClose = onFinish,
-            )
-        } else {
-            CloseButton(
-                onClick = onFinish,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .windowInsetsPadding(WindowInsets.navigationBars)
-                    .padding(16.dp),
-            )
-        }
+        // Close button — always shown with the compact AppLovin-style chrome. Driven by
+        // `ad_behavior.close` when present; otherwise a default (top-right, always available) so ads
+        // with no `ad_behavior` still get the small close, not a big one.
+        val close = behavior?.close ?: CloseBehavior()
+        InterstitialCloseButton(
+            treatment = close.treatment,
+            position = close.position,
+            progressBarColor = close.progressBarColor,
+            isRewardCopy = isRewardCopy,
+            enabled = closeEnabled,
+            remaining = closeRemaining,
+            progress = closeProgress.value,
+            onClose = onFinish,
+        )
 
         // Mid-ad store prompt — rendered at the server-resolved position (never recomputed).
         if (storePrompt != null && storePrompt.enabled && storePromptVisible) {
@@ -409,11 +413,11 @@ private fun CreativeHtml(
 
 // ── Ad-behavior close button ──────────────────────────────────────────────────
 
-// Visible close affordance sized to match AdMob / AppLovin (a compact ~30dp circle), while the
-// tappable area stays at the 48dp Material minimum (see [MIN_TOUCH_TARGET_DP]). The 44dp circle used
-// before was the touch-target minimum mistakenly used as the visual size.
-private const val CLOSE_GLYPH_SP = 16
-private const val CLOSE_BOX_DP = 30
+// Visible close affordance sized to match AppLovin (a compact ~22dp circle); the tappable area stays
+// at the 48dp Material minimum (see [MIN_TOUCH_TARGET_DP]), close to IAB MRAID's 50×50dp close
+// region. The visible graphic and the touch target are deliberately decoupled.
+private const val CLOSE_GLYPH_SP = 12
+private const val CLOSE_BOX_DP = 22
 private const val MIN_TOUCH_TARGET_DP = 48
 
 /**

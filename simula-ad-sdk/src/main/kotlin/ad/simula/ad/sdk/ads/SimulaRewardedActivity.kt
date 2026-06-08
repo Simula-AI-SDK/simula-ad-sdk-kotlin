@@ -19,12 +19,13 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -88,16 +89,31 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                 apiKey = SimulaAds.apiKey,
                 devMode = SimulaAds.devMode,
             ) {
-                RewardedMinigame(presentation = p, onFinish = ::closeOnce)
+                // On close, fetch + show a fallback ad before finishing (minigame parity). CLOSE is
+                // reported when the minigame closes; the Activity finishes after the fallback.
+                FallbackAdHost(adId = p.adId, onFullyClosed = ::finishAd) { onClose ->
+                    RewardedMinigame(
+                        presentation = p,
+                        onFinish = { earned ->
+                            reportClosed(earned)
+                            onClose()
+                        },
+                    )
+                }
             }
         }
     }
 
-    /** Fire CLOSE (with reward state + measured play time) exactly once, then finish. */
-    private fun closeOnce(earned: Boolean) {
+    /** Fire CLOSE (with reward state + measured play time) exactly once when the minigame closes.
+     * Does NOT finish — the fallback-ad host finishes via [finishAd] once any fallback ad is done. */
+    private fun reportClosed(earned: Boolean) {
         if (closed) return
         closed = true
         presentation?.let { p -> p.callbacks.onClose(earned, elapsedSeconds(p)) }
+    }
+
+    /** Tear the Activity down (after the optional fallback ad). */
+    private fun finishAd() {
         finish()
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
@@ -264,36 +280,35 @@ private fun RewardClosePill(
     modifier: Modifier = Modifier,
 ) {
     if (rewardEarned) {
-        // Earned: the entire pill is the close button.
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = modifier
-                .clip(RoundedCornerShape(20.dp))
-                .background(Color(0xC0000000))
-                .clickable(onClick = onClose)
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-        ) {
-            Text("✕", color = Color(0xFF4ADE80), fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            Text(
-                text = "Reward unlocked",
-                color = Color(0xFF4ADE80),
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 6.dp),
-            )
-        }
-    } else {
-        // Still earning: a display-only status — no close affordance yet.
+        // Earned: a compact circular X close button (AppLovin-style); tapping it dismisses.
         Box(
             modifier = modifier
-                .clip(RoundedCornerShape(20.dp))
-                .background(Color(0xC0000000))
-                .padding(horizontal = 14.dp, vertical = 8.dp),
+                .size(44.dp)
+                .clickable(onClick = onClose),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.5f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("✕", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    } else {
+        // Still earning: a small display-only status — no close affordance yet.
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0x99000000))
+                .padding(horizontal = 10.dp, vertical = 5.dp),
         ) {
             Text(
                 text = "🎮 Play to earn: ${secondsLeft}s",
                 color = Color.White,
-                fontSize = 14.sp,
+                fontSize = 11.sp,
                 fontWeight = FontWeight.Medium,
             )
         }
