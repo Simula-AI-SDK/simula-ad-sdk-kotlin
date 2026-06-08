@@ -163,7 +163,7 @@ fun MiniGameMenu(
         catalogLoading = true
         catalogError = false
         try {
-            val result = SimulaApiClient.fetchCatalog()
+            val result = SimulaApiClient.fetchCatalog(simulaContext.ensureSession())
             games = result.games
             menuId = result.menuId.takeIf { it.isNotBlank() }
             // Covers load lazily per card through ImageCache — grid shows immediately.

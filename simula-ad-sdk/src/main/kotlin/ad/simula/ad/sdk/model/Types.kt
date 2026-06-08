@@ -130,3 +130,174 @@ data class MiniGameInterstitialTheme(
     val ctaColor: String? = null,
     val fontFamily: String? = null,
 )
+
+// ── Ad Behavior (server-driven A/B config) ──────────────────────────────────
+
+/** Lowercases and normalizes hyphens to underscores so the tolerant enum factories accept
+ * either wire spelling (`circular-progress` ≡ `circular_progress`). */
+private fun normalizeBehaviorToken(raw: String?): String =
+    (raw ?: "").lowercase().replace("-", "_")
+
+/** Hard cap on the server-driven close delay. The close button — and the system Back button,
+ * which is blocked while the gate is active — stays locked until the delay elapses, so an
+ * out-of-range value would otherwise trap the user. PRD arms are 0/3/5s; 15s leaves headroom. */
+internal const val MAX_CLOSE_DELAY_SECONDS = 15
+
+/**
+ * Validates a server-supplied progress-bar color. Accepts an optional leading `#` followed by
+ * exactly 6 hex digits; anything else (missing, wrong length, non-hex) falls back to white per
+ * spec. Returned WITH a leading `#` so it drops straight into `ColorUtil.parseColor`.
+ */
+internal fun validatedHexColor(raw: String?, fallback: String = "#FFFFFF"): String {
+    val body = (raw ?: return fallback).removePrefix("#")
+    val isHex = body.length == 6 && body.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+    return if (isHex) "#" + body.uppercase() else fallback
+}
+
+/** The close-button visual treatment (v2 replaces `countdown_ui`). Unknown/missing → HIDDEN
+ * (safest: shows no affordance, so a malformed value never presents a false tap target). */
+internal enum class CloseTreatment {
+    HIDDEN, COUNTDOWN_CIRCLE, PROGRESS_BAR, REWARD_OR_CLOSE_LABEL;
+
+    /** progress_bar is a full-width top-edge bar, so it's the only treatment that can't render
+     * bottom_left; hidden / reward_or_close_label / countdown_circle allow all three corners. */
+    val allowsBottomLeft: Boolean
+        get() = this != PROGRESS_BAR
+
+    companion object {
+        fun from(raw: String?): CloseTreatment = when (normalizeBehaviorToken(raw)) {
+            "countdown_circle" -> COUNTDOWN_CIRCLE
+            "progress_bar" -> PROGRESS_BAR
+            "reward_or_close_label" -> REWARD_OR_CLOSE_LABEL
+            else -> HIDDEN
+        }
+    }
+}
+
+/** Close button corner. v2 narrows this to three corners — `bottom_right` is excluded (it collides
+ * with the install prompt and OS nav gestures). Unknown/missing/excluded → TOP_RIGHT. Reused
+ * verbatim for the server-resolved store-prompt position. */
+internal enum class ClosePosition {
+    TOP_RIGHT, TOP_LEFT, BOTTOM_LEFT;
+
+    companion object {
+        fun from(raw: String?): ClosePosition = when (normalizeBehaviorToken(raw)) {
+            "top_left" -> TOP_LEFT
+            "bottom_left" -> BOTTOM_LEFT
+            // top_right, plus excluded bottom_right / legacy bottom_corner, plus unknown → safe default.
+            else -> TOP_RIGHT
+        }
+    }
+}
+
+/** How a CTA tap opens the store. Unknown → EXTERNAL. `sk_overlay`/`sk_store_product` map to the
+ * native store (SKSTOREPRODUCT), which the Android router routes to the Play Store app. Retained
+ * from v1; the v2 payload omits `store_open`, so it simply defaults. */
+internal enum class StoreOpen {
+    EXTERNAL, SKSTOREPRODUCT, INLINE_INSTALL;
+
+    companion object {
+        fun from(raw: String?): StoreOpen = when (normalizeBehaviorToken(raw)) {
+            "inline_install" -> INLINE_INSTALL
+            "skstoreproduct", "sk_store_product", "sk_overlay" -> SKSTOREPRODUCT
+            else -> EXTERNAL
+        }
+    }
+}
+
+/** Ad format, used to pick `reward_or_close_label` copy. Unknown/missing → INTERSTITIAL. */
+internal enum class AdUnitType {
+    REWARDED, INTERSTITIAL;
+
+    companion object {
+        fun from(raw: String?): AdUnitType = when (normalizeBehaviorToken(raw)) {
+            "rewarded" -> REWARDED
+            else -> INTERSTITIAL
+        }
+    }
+}
+
+/** Which store the mid-ad prompt badge advertises. Unknown/missing → ANDROID. */
+internal enum class StorePromptPlatform {
+    IOS, ANDROID;
+
+    companion object {
+        fun from(raw: String?): StorePromptPlatform = when (normalizeBehaviorToken(raw)) {
+            "ios" -> IOS
+            else -> ANDROID
+        }
+    }
+}
+
+/** When the install overlay is presented. Unknown/missing → ON_CLICK. */
+internal enum class OverlayTiming {
+    DURING_PLAY, ON_CLICK, DELAYED;
+
+    companion object {
+        fun from(raw: String?): OverlayTiming = when (normalizeBehaviorToken(raw)) {
+            "during_play" -> DURING_PLAY
+            "delayed" -> DELAYED
+            else -> ON_CLICK
+        }
+    }
+}
+
+/** Where the install overlay is pinned. Unknown/missing → BOTTOM. */
+internal enum class OverlayPosition {
+    BOTTOM, BOTTOM_RAISED;
+
+    companion object {
+        fun from(raw: String?): OverlayPosition = when (normalizeBehaviorToken(raw)) {
+            "bottom_raised" -> BOTTOM_RAISED
+            else -> BOTTOM
+        }
+    }
+}
+
+internal data class CloseBehavior(
+    val delaySeconds: Int = 0,
+    val treatment: CloseTreatment = CloseTreatment.HIDDEN,
+    val position: ClosePosition = ClosePosition.TOP_RIGHT,
+    /** Validated 6-digit hex (with leading `#`); tints the countdown_circle / progress_bar fill. */
+    val progressBarColor: String = "#FFFFFF",
+)
+
+/** The creative descriptor (`creative` node). `adUnitType` drives format-aware close copy. */
+internal data class Creative(
+    val type: String = "",
+    val bundleUrl: String? = null,
+    val adUnitType: AdUnitType = AdUnitType.INTERSTITIAL,
+)
+
+/** Experiment-assignment metadata (`experiment` node), carried for telemetry only. */
+internal data class Experiment(
+    val experimentId: String? = null,
+    val variantId: String? = null,
+    val layer: String? = null,
+)
+
+/** Mid-ad store prompt (`store_prompt` node). `position` is resolved server-side (opposite the
+ * close button) and rendered verbatim — the SDK never recomputes collisions. */
+internal data class StorePrompt(
+    val enabled: Boolean = false,
+    val trigger: String = "midpoint",
+    val position: ClosePosition = ClosePosition.TOP_LEFT,
+    val platform: StorePromptPlatform = StorePromptPlatform.ANDROID,
+)
+
+/** Play Install Prompt (Android) / SKOverlay (iOS) config (`skoverlay` node): a native,
+ * SDK-presented install banner, independent of the creative click handler. */
+internal data class SkOverlayConfig(
+    val enabled: Boolean = false,
+    val timing: OverlayTiming = OverlayTiming.ON_CLICK,
+    val delaySeconds: Int = 0,
+    val position: OverlayPosition = OverlayPosition.BOTTOM,
+    val dismissible: Boolean = true,
+)
+
+internal data class AdBehavior(
+    val close: CloseBehavior = CloseBehavior(),
+    val storeOpen: StoreOpen = StoreOpen.EXTERNAL,
+    val storePrompt: StorePrompt? = null,
+    val skoverlay: SkOverlayConfig? = null,
+)

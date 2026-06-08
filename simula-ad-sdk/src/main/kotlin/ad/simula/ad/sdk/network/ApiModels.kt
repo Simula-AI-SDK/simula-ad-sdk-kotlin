@@ -1,5 +1,20 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.model.AdBehavior
+import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.CloseBehavior
+import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.CloseTreatment
+import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.Experiment
+import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
+import ad.simula.ad.sdk.model.OverlayPosition
+import ad.simula.ad.sdk.model.OverlayTiming
+import ad.simula.ad.sdk.model.SkOverlayConfig
+import ad.simula.ad.sdk.model.StoreOpen
+import ad.simula.ad.sdk.model.StorePrompt
+import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.validatedHexColor
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -59,6 +74,10 @@ internal data class AdLoadRequestBody(
     @SerialName("char_name") val charName: String? = null,
     @SerialName("char_image") val charImage: String? = null,
     @SerialName("char_desc") val charDesc: String? = null,
+    // Device capability snapshot so the backend never assigns an unsupported variant. Defaults to a
+    // neutral value (no framework access) so pure-JVM tests can construct this; the ad path injects
+    // the real values via `currentDeviceCapabilities()`.
+    val capabilities: ApiDeviceCapabilities = ApiDeviceCapabilities(),
 )
 
 @Serializable
@@ -72,7 +91,143 @@ internal data class AdLoadApiResponse(
     // Server-rendered HTML creative. When present (non-blank) it is rendered
     // full-screen in a WebView — the imperative interstitial's sole creative.
     @SerialName("rendered_html") val renderedHtml: String? = null,
+    // Null when the payload omits `ad_behavior` — the renderer falls back to today's defaults.
+    @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
+    val creative: ApiCreative? = null,
+    val experiment: ApiExperiment? = null,
 )
+
+// ── Capability handshake ──────────────────────────────────────────────────────
+
+@Serializable
+internal data class ApiDeviceCapabilities(
+    @SerialName("os_version") val osVersion: String = "",
+    @SerialName("api_level") val apiLevel: Int = 0,
+    @SerialName("play_services_available") val playServicesAvailable: Boolean = false,
+    @SerialName("install_referrer_available") val installReferrerAvailable: Boolean = false,
+)
+
+/** Reads the running device's capabilities (Android framework). Called from the ad path only —
+ * never from pure-JVM parsing tests — so the `Build` access here stays out of those tests. */
+internal fun currentDeviceCapabilities(): ApiDeviceCapabilities = ApiDeviceCapabilities(
+    osVersion = android.os.Build.VERSION.RELEASE ?: "",
+    apiLevel = android.os.Build.VERSION.SDK_INT,
+    // Play Install Prompt requires API 21+; refine with a GoogleApiAvailability check if the dep is present.
+    playServicesAvailable = android.os.Build.VERSION.SDK_INT >= 21,
+    installReferrerAvailable = android.os.Build.VERSION.SDK_INT >= 21,
+)
+
+// ── Ad behavior (server-driven A/B render config) ─────────────────────────────
+
+@Serializable
+internal data class ApiAdBehavior(
+    val close: ApiCloseBehavior? = null,
+    @SerialName("store_open") val storeOpen: String? = null,
+    @SerialName("store_prompt") val storePrompt: ApiStorePrompt? = null,
+    val skoverlay: ApiSkOverlay? = null,
+)
+
+@Serializable
+internal data class ApiCloseBehavior(
+    @SerialName("delay_seconds") val delaySeconds: Int = 0,
+    val treatment: String? = null,
+    val position: String? = null,
+    @SerialName("progress_bar_color") val progressBarColor: String? = null,
+)
+
+@Serializable
+internal data class ApiCreative(
+    val type: String = "",
+    @SerialName("bundle_url") val bundleUrl: String? = null,
+    @SerialName("ad_unit_type") val adUnitType: String? = null,
+)
+
+@Serializable
+internal data class ApiExperiment(
+    @SerialName("experiment_id") val experimentId: String? = null,
+    @SerialName("variant_id") val variantId: String? = null,
+    val layer: String? = null,
+)
+
+@Serializable
+internal data class ApiStorePrompt(
+    val enabled: Boolean = false,
+    val trigger: String = "midpoint",
+    val position: String? = null,
+    val platform: String? = null,
+)
+
+@Serializable
+internal data class ApiSkOverlay(
+    val enabled: Boolean = false,
+    val timing: String? = null,
+    @SerialName("delay_seconds") val delaySeconds: Int = 0,
+    val position: String? = null,
+    val dismissible: Boolean = true,
+)
+
+/** Maps the wire DTO to the domain model, normalizing enum strings. A null DTO (absent
+ * `ad_behavior`) stays null so callers can preserve today's literal behavior. */
+internal fun ApiAdBehavior?.toDomain(): AdBehavior? {
+    if (this == null) return null
+    return AdBehavior(
+        close = close.toDomain(),
+        storeOpen = StoreOpen.from(storeOpen),
+        storePrompt = storePrompt.toDomain(),
+        skoverlay = skoverlay.toDomain(),
+    )
+}
+
+internal fun ApiCloseBehavior?.toDomain(): CloseBehavior {
+    if (this == null) return CloseBehavior()
+    val resolvedTreatment = CloseTreatment.from(treatment)
+    var resolvedPosition = ClosePosition.from(position)
+    // Snap an out-of-spec position (bottom_left under an edge-anchored treatment) to a safe default,
+    // per "snap to safe default" — so the SDK renders the field exactly as constrained.
+    if (resolvedPosition == ClosePosition.BOTTOM_LEFT && !resolvedTreatment.allowsBottomLeft) {
+        resolvedPosition = ClosePosition.TOP_RIGHT
+    }
+    return CloseBehavior(
+        // Clamp to [0, MAX] so a bad/oversized value can't trap the user behind a blocked close.
+        delaySeconds = delaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS),
+        treatment = resolvedTreatment,
+        position = resolvedPosition,
+        progressBarColor = validatedHexColor(progressBarColor),
+    )
+}
+
+internal fun ApiCreative?.toDomain(): Creative? {
+    if (this == null) return null
+    return Creative(type = type, bundleUrl = bundleUrl, adUnitType = AdUnitType.from(adUnitType))
+}
+
+internal fun ApiExperiment?.toDomain(): Experiment? {
+    if (this == null) return null
+    return Experiment(experimentId = experimentId, variantId = variantId, layer = layer)
+}
+
+internal fun ApiStorePrompt?.toDomain(): StorePrompt? {
+    if (this == null) return null
+    return StorePrompt(
+        enabled = enabled,
+        trigger = trigger,
+        position = ClosePosition.from(position),
+        platform = StorePromptPlatform.from(platform),
+    )
+}
+
+internal fun ApiSkOverlay?.toDomain(): SkOverlayConfig? {
+    if (this == null) return null
+    return SkOverlayConfig(
+        enabled = enabled,
+        timing = OverlayTiming.from(timing),
+        delaySeconds = delaySeconds.coerceAtLeast(0),
+        position = OverlayPosition.from(position),
+        dismissible = dismissible,
+    )
+}
+
+// ── Rewarded minigame (init / verify) ─────────────────────────────────────────
 
 @Serializable
 internal data class RewardedInitRequestBody(

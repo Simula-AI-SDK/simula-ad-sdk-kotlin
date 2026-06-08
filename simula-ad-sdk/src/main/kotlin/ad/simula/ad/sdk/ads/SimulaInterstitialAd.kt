@@ -1,6 +1,18 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.model.AdBehavior
+import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.CloseBehavior
+import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.CloseTreatment
+import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
+import ad.simula.ad.sdk.model.OverlayTiming
+import ad.simula.ad.sdk.model.SkOverlayConfig
+import ad.simula.ad.sdk.model.StorePrompt
+import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.validatedHexColor
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.app.Activity
 import android.content.Intent
@@ -101,6 +113,109 @@ class SimulaInterstitialAd(val adUnitId: String) {
         present(SimulaAds.currentActivity)
     }
 
+    // ── Preview (debug / QA) ──────────────────────────────────────────────────
+
+    /**
+     * Present the interstitial with a **hardcoded** `ad_behavior` and a placeholder creative —
+     * no network call and no impression tracked. Lets a host/sample app preview the A/B
+     * close-button treatments without the backend assigning the variant.
+     *
+     * Parameters take the same wire strings the server would send; unknown values fall back
+     * exactly as a real payload would (e.g. an unknown treatment → `hidden`).
+     *
+     * @param activity foreground Activity to present from.
+     * @param closeTreatment `hidden` / `countdown_circle` / `progress_bar` / `reward_or_close_label`.
+     * @param closePosition `top_right` / `top_left` / `bottom_left`.
+     * @param delaySeconds the pre-tap close delay the treatment animates over.
+     * @param progressBarColor 6-digit hex (optional leading `#`) tinting the ring / bar fill.
+     * @param adUnitType `interstitial` / `rewarded` — drives the `reward_or_close_label` copy.
+     * @param storePrompt also show the mid-ad store-prompt badge.
+     * @param installBanner also present the Play install banner.
+     */
+    @JvmOverloads
+    fun showPreview(
+        activity: Activity,
+        closeTreatment: String,
+        closePosition: String = "top_right",
+        delaySeconds: Int = 5,
+        progressBarColor: String = "#FFFFFF",
+        adUnitType: String = "interstitial",
+        storePrompt: Boolean = false,
+        installBanner: Boolean = false,
+    ) {
+        if (!confineToMain {
+                showPreview(
+                    activity, closeTreatment, closePosition, delaySeconds,
+                    progressBarColor, adUnitType, storePrompt, installBanner,
+                )
+            }
+        ) return
+
+        if (state == State.Showing) {
+            failShow(SimulaAdError.AlreadyShowing)
+            return
+        }
+
+        val treatment = CloseTreatment.from(closeTreatment)
+        var position = ClosePosition.from(closePosition)
+        // Mirror the wire→domain snap: an edge-anchored treatment can't sit bottom_left.
+        if (position == ClosePosition.BOTTOM_LEFT && !treatment.allowsBottomLeft) {
+            position = ClosePosition.TOP_RIGHT
+        }
+        // Mirror the server's collision rule: render the store-prompt badge opposite the close button.
+        val storePromptPosition =
+            if (position == ClosePosition.TOP_RIGHT) ClosePosition.TOP_LEFT else ClosePosition.TOP_RIGHT
+        val behavior = AdBehavior(
+            close = CloseBehavior(
+                delaySeconds = delaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS),
+                treatment = treatment,
+                position = position,
+                progressBarColor = validatedHexColor(progressBarColor),
+            ),
+            storePrompt = if (storePrompt) {
+                StorePrompt(enabled = true, position = storePromptPosition, platform = StorePromptPlatform.ANDROID)
+            } else null,
+            skoverlay = if (installBanner) {
+                SkOverlayConfig(enabled = true, timing = OverlayTiming.DURING_PLAY)
+            } else null,
+        )
+        val ad = SimulaApiClient.AdLoadResult(
+            adId = "",                  // empty → CreativeInterstitial skips impression tracking
+            adInserted = true,
+            adUnitId = adUnitId,
+            destination = "appstore",
+            renderedFormat = null,
+            trackingUrl = PREVIEW_TRACKING_URL,  // lets a store-prompt / install-banner tap route
+            renderedHtml = PREVIEW_CREATIVE_HTML,
+            adBehavior = behavior,
+            creative = Creative(type = "preview", adUnitType = AdUnitType.from(adUnitType)),
+        )
+
+        val token = UUID.randomUUID().toString()
+        InterstitialHandoff.put(
+            token,
+            InterstitialPresentation(
+                ad = ad,
+                apiKey = SimulaAds.apiKey,
+                // Preview is local-only: report lifecycle but do NOT auto-preload a real ad on close.
+                callbacks = object : InterstitialCallbacks {
+                    override fun onDisplayed() { listener?.onAdDisplayed(this@SimulaInterstitialAd) }
+                    override fun onClicked() { listener?.onAdClicked(this@SimulaInterstitialAd) }
+                    override fun onClosed() {
+                        state = State.Idle
+                        listener?.onAdClosed(this@SimulaInterstitialAd)
+                    }
+                },
+            ),
+        )
+        if (!launchActivity(token, activity)) {
+            InterstitialHandoff.remove(token)
+            failShow(SimulaAdError.NoPresentationContext)
+            return
+        }
+        state = State.Showing
+    }
+
     // ── Internals ────────────────────────────────────────────────────────────
 
     private fun present(activity: Activity?) {
@@ -193,3 +308,20 @@ class SimulaInterstitialAd(val adUnitId: String) {
         return false
     }
 }
+
+/** A self-contained placeholder creative so [SimulaInterstitialAd.showPreview] can render the
+ * close-button A/B chrome over a visible surface without fetching a network creative. */
+private const val PREVIEW_CREATIVE_HTML =
+    "<!doctype html><html><head><meta name=\"viewport\" " +
+        "content=\"width=device-width, initial-scale=1, viewport-fit=cover\"></head>" +
+        "<body style=\"margin:0;height:100vh;display:flex;align-items:center;justify-content:center;" +
+        "background:linear-gradient(160deg,#1e3a8a,#7c3aed);font-family:sans-serif;color:#fff;text-align:center\">" +
+        "<div><div style=\"font-size:22px;font-weight:700\">A/B Close Button Preview</div>" +
+        "<div style=\"opacity:.8;margin-top:8px;font-size:15px\">Hardcoded ad_behavior — no network</div></div>" +
+        "</body></html>"
+
+/** A real Play Store URL used only by [SimulaInterstitialAd.showPreview] so a store-prompt-badge or
+ * install-banner tap can resolve a Play package and route there (the banner itself renders without
+ * it; only the tap needs a destination). */
+private const val PREVIEW_TRACKING_URL =
+    "https://play.google.com/store/apps/details?id=com.google.android.apps.maps"
