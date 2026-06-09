@@ -7,7 +7,6 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -81,8 +80,7 @@ internal fun BoxScope.AdInfoReportOverlay(
             modifier = Modifier
                 .size(16.dp)
                 .clip(CircleShape)
-                .background(Color.Black.copy(alpha = 0.5f))
-                .border(1.dp, Color.White.copy(alpha = 0.5f), CircleShape),
+                .background(Color.Black.copy(alpha = 0.5f)),
             contentAlignment = Alignment.Center,
         ) {
             Text("i", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
