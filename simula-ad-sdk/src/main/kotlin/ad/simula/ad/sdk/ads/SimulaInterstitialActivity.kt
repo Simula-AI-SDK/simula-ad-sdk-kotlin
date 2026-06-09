@@ -198,10 +198,6 @@ private fun gateAlreadyElapsed(p: InterstitialPresentation, total: Duration): Bo
     p.gateStartedAtMs != 0L &&
         (SystemClock.elapsedRealtime() - p.gateStartedAtMs).milliseconds >= total
 
-/** Fallback playable length used to time the store prompt's 50% trigger when no playable
- * `midpoint` JS-bridge event is available. */
-private const val NOMINAL_PLAYABLE_DURATION_MS = 30_000L
-
 @Composable
 private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
@@ -272,13 +268,23 @@ private fun CreativeInterstitial(
         }
     }
 
-    // Mid-ad store prompt (`store_prompt`) — revealed at the 50% playable mark via a timer fallback
-    // (a true playable would post a `midpoint` JS-bridge event). Independent of close + skoverlay.
+    // Mid-ad store prompt (`store_prompt`) — an early install affordance shown at the halfway point
+    // to the close button (`closeTime / 2`, where closeTime is the server-driven close delay) and
+    // removed the instant the real close button appears (see `!closeEnabled` at the render site).
+    // Independent of close chrome + skoverlay. When the close is immediately available (no gate)
+    // there is no pre-close window, so it never shows.
     val storePrompt = behavior?.storePrompt
     var storePromptVisible by remember { mutableStateOf(false) }
-    if (storePrompt != null && storePrompt.enabled) {
+    if (storePrompt != null && storePrompt.enabled && gateTotal > Duration.ZERO) {
         LaunchedEffect(Unit) {
-            delay(NOMINAL_PLAYABLE_DURATION_MS / 2)
+            // Anchor to the same wall-clock start as the close gate so a config-change recreation
+            // resumes the half-way reveal rather than restarting it.
+            if (presentation.gateStartedAtMs == 0L) {
+                presentation.gateStartedAtMs = SystemClock.elapsedRealtime()
+            }
+            val elapsed = (SystemClock.elapsedRealtime() - presentation.gateStartedAtMs).milliseconds
+            val remaining = gateTotal / 2 - elapsed
+            if (remaining.isPositive()) delay(remaining)
             storePromptVisible = true
         }
     }
@@ -352,8 +358,10 @@ private fun CreativeInterstitial(
             onClose = onFinish,
         )
 
-        // Mid-ad store prompt — rendered at the server-resolved position (never recomputed).
-        if (storePrompt != null && storePrompt.enabled && storePromptVisible) {
+        // Mid-ad store prompt — rendered at the server-resolved position (never recomputed) during
+        // the [closeTime/2, closeTime) window. `!closeEnabled` removes it the instant the real close
+        // button appears, so the two affordances never overlap.
+        if (storePrompt != null && storePrompt.enabled && storePromptVisible && !closeEnabled) {
             StorePromptBadge(prompt = storePrompt, onTap = { openDestination(ad) })
         }
 
@@ -609,17 +617,18 @@ private fun BoxScope.StorePromptBadge(
         ClosePosition.TOP_LEFT -> Alignment.TopStart
         ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
     }
+    // Sized to match the rewarded minigame's "Play to earn" status pill (RewardClosePill).
     Box(
         modifier = Modifier
             .align(alignment)
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(16.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .background(Color(0xA6000000))
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0x99000000))
             .clickable(onClick = onTap)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 10.dp, vertical = 5.dp),
     ) {
-        Text(label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Medium)
     }
 }
 

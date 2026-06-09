@@ -185,7 +185,7 @@ class SimulaRewardedAd(val adUnitId: String) {
      */
     private fun dedupKey(charId: String?, charName: String?): String {
         val session = SimulaAds.store.sessionId.orEmpty()
-        return "$adUnitId ${charId.orEmpty()} ${charName.orEmpty()} $session"
+        return "$adUnitId\u0000${charId.orEmpty()}\u0000${charName.orEmpty()}\u0000$session"
     }
 
     /**

@@ -180,7 +180,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
      */
     private fun dedupKey(charId: String?, charName: String?): String {
         val session = SimulaAds.store.sessionId.orEmpty()
-        return "$adUnitId ${charId.orEmpty()} ${charName.orEmpty()} $session"
+        return "$adUnitId\u0000${charId.orEmpty()}\u0000${charName.orEmpty()}\u0000$session"
     }
 
     /**
@@ -246,9 +246,14 @@ class SimulaInterstitialAd(val adUnitId: String) {
 
         val treatment = CloseTreatment.from(closeTreatment)
         val position = ClosePosition.from(closePosition)
-        // Mirror the server's collision rule: render the store-prompt badge opposite the close button.
-        val storePromptPosition =
-            if (position == ClosePosition.TOP_RIGHT) ClosePosition.TOP_LEFT else ClosePosition.TOP_RIGHT
+        // Mirror the server's collision rule: place the store-prompt badge opposite the close button.
+        // top_right → top_left; top_left → top_right; bottom_left → top_left (the default position,
+        // since a bottom-left close doesn't occupy either top corner).
+        val storePromptPosition = when (position) {
+            ClosePosition.TOP_RIGHT -> ClosePosition.TOP_LEFT
+            ClosePosition.TOP_LEFT -> ClosePosition.TOP_RIGHT
+            ClosePosition.BOTTOM_LEFT -> ClosePosition.TOP_LEFT
+        }
         val behavior = AdBehavior(
             close = CloseBehavior(
                 delaySeconds = delaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS),
