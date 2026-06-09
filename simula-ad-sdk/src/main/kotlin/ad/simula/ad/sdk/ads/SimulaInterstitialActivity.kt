@@ -370,7 +370,6 @@ private fun CreativeInterstitial(
         AdInfoReportOverlay(
             adId = ad.adId,
             apiKey = presentation.apiKey,
-            advertiser = ad.creative?.bundleUrl,
             closeAtBottomLeft = (behavior?.close?.position ?: CloseBehavior().position) == ClosePosition.BOTTOM_LEFT,
         )
     }

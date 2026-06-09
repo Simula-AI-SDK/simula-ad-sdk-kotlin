@@ -3,6 +3,8 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.model.AdReportReason
 import ad.simula.ad.sdk.network.SimulaApiClient
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -42,8 +46,9 @@ import kotlinx.coroutines.launch
 /**
  * Persistent in-ad info ("i") affordance + report sheet — required ad disclosure on every ad surface
  * (Apple/Google expectations; advertisers expect a working report path). The small "i" sits in a
- * corner; tapping it opens a sheet with "Why this ad?", "About this advertiser", and a report flow
- * whose submission posts to `POST /impressions/{adId}/report`, tagged by impression id.
+ * corner; tapping it opens an AppLovin-style menu (Interested / Not interested / Report) plus an
+ * "About Simula Ads" link. Feedback and report selections post to `POST /impressions/{adId}/report`,
+ * tagged by impression id.
  *
  * Reusable across surfaces — call it inside any ad's `Box` (last, so the sheet covers the rest).
  */
@@ -51,7 +56,6 @@ import kotlinx.coroutines.launch
 internal fun BoxScope.AdInfoReportOverlay(
     adId: String,
     apiKey: String? = null,
-    advertiser: String? = null,
     closeAtBottomLeft: Boolean = false,
 ) {
     var sheetVisible by remember { mutableStateOf(false) }
@@ -87,23 +91,26 @@ internal fun BoxScope.AdInfoReportOverlay(
 
     if (sheetVisible) {
         AdReportSheet(
-            advertiser = advertiser,
-            onSubmit = { reason, note ->
+            onReport = { flag ->
                 val key = apiKey ?: SimulaAds.apiKey
-                SimulaScope.launch { SimulaApiClient.reportAd(adId, reason.flag, note, key) }
+                SimulaScope.launch { SimulaApiClient.reportAd(adId, flag, null, key) }
             },
             onClose = { sheetVisible = false },
         )
     }
 }
 
+/**
+ * AppLovin-style ad-feedback menu: Interested / Not interested / Report (which expands to reason
+ * codes), plus a separate "About Simula Ads" link to simula.ad. [onReport] posts the chosen flag.
+ */
 @Composable
 private fun AdReportSheet(
-    advertiser: String?,
-    onSubmit: (AdReportReason, String?) -> Unit,
+    onReport: (String) -> Unit,
     onClose: () -> Unit,
 ) {
-    // 0 = info, 1 = reasons, 2 = done
+    val context = LocalContext.current
+    // 0 = menu, 1 = reasons, 2 = done
     var phase by remember { mutableStateOf(0) }
 
     BackHandler(enabled = true) { onClose() }
@@ -117,73 +124,71 @@ private fun AdReportSheet(
                 indication = null,
                 onClick = onClose,
             ),
-        contentAlignment = Alignment.BottomCenter,
+        contentAlignment = Alignment.BottomStart,
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(10.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(Color(0xFF1C1C1E))
-                // Consume taps on the card so they don't fall through and dismiss the sheet.
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
+                .padding(horizontal = 12.dp)
                 .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+                .padding(bottom = 12.dp)
+                // Size the menu to its widest row (+ padding), left-aligned, not the full width.
+                .width(IntrinsicSize.Max),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Box(
-                    Modifier
-                        .width(36.dp)
-                        .height(5.dp)
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(Color.White.copy(alpha = 0.25f)),
-                )
-            }
-
-            when (phase) {
-                0 -> {
-                    Text("About this ad", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    InfoRow("Why this ad?", "This ad was selected for you by Simula based on the app you're using.")
-                    InfoRow(
-                        "About this advertiser",
-                        advertiser?.takeIf { it.isNotBlank() } ?: "Advertiser details aren't available for this ad.",
-                    )
-                    ActionRow(text = "Report this ad", chevron = true) { phase = 1 }
-                }
-                1 -> {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "‹",
-                            color = Color.White,
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = null,
-                                ) { phase = 0 }
-                                .padding(end = 8.dp),
-                        )
-                        Text("Report this ad", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            // The menu / reasons / done card.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xFF2C2C2E))
+                    // Consume taps on the card so they don't fall through and dismiss the sheet.
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
+            ) {
+                when (phase) {
+                    0 -> {
+                        MenuRow(glyph = "✓", text = "Interested") { onReport("interested"); phase = 2 }
+                        MenuDivider()
+                        // "Not interested" maps to the existing `dislike` flag (BE adds `interested` later).
+                        MenuRow(glyph = "✕", text = "Not interested") { onReport("dislike"); phase = 2 }
+                        MenuDivider()
+                        MenuRow(glyph = "⚑", text = "Report", tint = Color(0xFFFF453A)) { phase = 1 }
                     }
-                    AdReportReason.values().forEach { reason ->
-                        ActionRow(text = reason.label, chevron = false) {
-                            onSubmit(reason, null)
-                            phase = 2
+                    1 -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 15.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "‹",
+                                color = Color.White,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
+                                    ) { phase = 0 }
+                                    .padding(end = 10.dp),
+                            )
+                            Text("Report this ad", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        }
+                        MenuDivider()
+                        val reasons = AdReportReason.values()
+                        reasons.forEachIndexed { index, reason ->
+                            MenuRow(glyph = null, text = reason.label) { onReport(reason.flag); phase = 2 }
+                            if (index < reasons.size - 1) MenuDivider()
                         }
                     }
-                }
-                else -> {
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    else -> {
                         Column(
+                            modifier = Modifier.fillMaxWidth().padding(18.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Text("✓", color = Color(0xFF4ADE80), fontSize = 32.sp, fontWeight = FontWeight.Bold)
-                            Text("Report received", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                            Text("Thanks for your feedback", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                             Text(
-                                "Thanks — our team will review this ad.",
+                                "We use it to show you better ads.",
                                 color = Color.White.copy(alpha = 0.7f),
                                 fontSize = 13.sp,
                             )
@@ -207,34 +212,55 @@ private fun AdReportSheet(
                     }
                 }
             }
+
+            // Separate "About Simula Ads" pill (only on the top-level menu), opens simula.ad.
+            if (phase == 0) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xFF2C2C2E))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) {
+                            runCatching {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://simula.ad")))
+                            }
+                            onClose()
+                        }
+                        .padding(horizontal = 18.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("ⓘ", color = Color.White, fontSize = 18.sp, modifier = Modifier.width(28.dp))
+                    Text("About Simula Ads", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun InfoRow(title: String, body: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text(body, color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp)
-    }
+private fun MenuDivider() {
+    Box(Modifier.fillMaxWidth().height(0.5.dp).background(Color.White.copy(alpha = 0.12f)))
 }
 
 @Composable
-private fun ActionRow(text: String, chevron: Boolean, onClick: () -> Unit) {
+private fun MenuRow(glyph: String?, text: String, tint: Color = Color.White, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color.White.copy(alpha = 0.07f))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onClick,
             )
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 18.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(text, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-        if (chevron) Text("›", color = Color.White.copy(alpha = 0.6f), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Box(Modifier.width(28.dp)) {
+            if (glyph != null) Text(glyph, color = tint, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+        Text(text, color = tint, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
     }
 }
