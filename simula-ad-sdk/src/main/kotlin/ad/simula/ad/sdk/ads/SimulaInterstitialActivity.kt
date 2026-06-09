@@ -332,7 +332,8 @@ private fun CreativeInterstitial(
                         installBannerVisible = true
                     }
                 },
-                modifier = Modifier.fillMaxSize(),
+                // Sits below the safe area (the black Box fills the cutout / nav-bar region).
+                modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
             )
         }
 

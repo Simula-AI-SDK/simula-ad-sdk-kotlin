@@ -254,7 +254,8 @@ private fun RewardedMinigame(
                     },
                 ).apply { loadUrl(url) }
             },
-            modifier = Modifier.fillMaxSize(),
+            // Sits below the safe area (the black Box fills the cutout / nav-bar region).
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
             onRelease = { webView -> WebViewPool.release(webView) },
         )
 
@@ -309,7 +310,7 @@ private fun RewardClosePill(
                 .padding(horizontal = 10.dp, vertical = 5.dp),
         ) {
             Text(
-                text = "🎮 Play to earn: ${secondsLeft}s",
+                text = "Play to earn: ${secondsLeft}s",
                 color = Color.White,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Medium,
