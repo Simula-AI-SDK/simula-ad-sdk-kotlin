@@ -4,6 +4,7 @@ import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
 import android.content.Intent
 import android.os.Handler
@@ -55,11 +56,16 @@ class SimulaRewardedAd(val adUnitId: String) {
     private var sessionId: String? = null
     private var serveId: String? = null
 
+    // Monotonic stage markers for telemetry latencies (0 = not yet started).
+    private var loadStartNanos = 0L
+    private var showStartNanos = 0L
+
     /** Preload the next rewarded minigame. No-op if already loading, ready, or showing. */
     fun load() {
         if (!confineToMain { load() }) return
 
         if (state != State.Idle) return // single in-flight load
+        loadStartNanos = System.nanoTime()
         if (!SimulaAds.isInitialized) {
             failLoad(SimulaAdError.NotInitialized)
             return
@@ -86,6 +92,15 @@ class SimulaRewardedAd(val adUnitId: String) {
                     failLoadOnMain(SimulaAdError.NoFill)
                     return@launch
                 }
+                Telemetry.recordLifecycle(
+                    stage = "load_success",
+                    adFormat = AD_FORMAT,
+                    adUnitId = adUnitId,
+                    adId = ad.adId,
+                    serveId = ad.serveId,
+                    durationMs = elapsedSinceLoad(),
+                    errorCode = null,
+                )
                 withContext(Dispatchers.Main) {
                     sessionId = session
                     serveId = ad.serveId
@@ -95,6 +110,12 @@ class SimulaRewardedAd(val adUnitId: String) {
                     listener?.onAdLoaded(this@SimulaRewardedAd)
                 }
             } catch (e: Exception) {
+                Telemetry.recordError(
+                    signature = "rewarded:load",
+                    errorCode = e.javaClass.simpleName,
+                    message = e.message,
+                    breadcrumb = "SimulaRewardedAd.load",
+                )
                 failLoadOnMain(SimulaAdError.Network(e))
             }
         }
@@ -135,6 +156,7 @@ class SimulaRewardedAd(val adUnitId: String) {
         }
 
         val token = UUID.randomUUID().toString()
+        showStartNanos = System.nanoTime()
         RewardedHandoff.put(
             token,
             RewardedPresentation(
@@ -142,7 +164,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                 durationSeconds = ad.durationSeconds,
                 adId = ad.adId,
                 apiKey = SimulaAds.apiKey,
-                callbacks = bridge(),
+                callbacks = bridge(ad.adId),
             ),
         )
 
@@ -154,14 +176,16 @@ class SimulaRewardedAd(val adUnitId: String) {
         state = State.Showing
     }
 
-    private fun bridge(): RewardedCallbacks = object : RewardedCallbacks {
+    private fun bridge(adId: String): RewardedCallbacks = object : RewardedCallbacks {
         override fun onDisplayed() {
+            Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, serveId, elapsedSinceShow(), null)
             listener?.onAdDisplayed(this@SimulaRewardedAd)
         }
 
         override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
             state = State.Idle
             if (earned) {
+                Telemetry.recordLifecycle("reward_earned", AD_FORMAT, adUnitId, adId, serveId, null, null)
                 listener?.onAdEarnedReward(this@SimulaRewardedAd)
                 val sid = serveId
                 val sess = sessionId
@@ -175,12 +199,27 @@ class SimulaRewardedAd(val adUnitId: String) {
                     // SSV postback still fires; only the client callback is skipped.
                     val weakAd = WeakReference(this@SimulaRewardedAd)
                     val handler = mainHandler
+                    // End-to-end verification latency, including durable-queue backoff/retries.
+                    val verifyStartNanos = System.nanoTime()
                     RewardVerificationManager.queueVerification(
                         context = SimulaAds.appContext,
                         serveId = sid,
                         sessionId = sess,
                         elapsedPlayTime = elapsedPlayTimeSeconds,
                     ) { result ->
+                        val verifyMs = (System.nanoTime() - verifyStartNanos) / 1_000_000
+                        Telemetry.recordOperation("reward_verification", verifyMs, success = result.isSuccess)
+                        if (result.isSuccess) {
+                            Telemetry.recordLifecycle("reward_verified", AD_FORMAT, adUnitId, adId, sid, verifyMs, null)
+                        } else {
+                            Telemetry.recordLifecycle("reward_verification_failed", AD_FORMAT, adUnitId, adId, sid, verifyMs, "verify_failed")
+                            Telemetry.recordError(
+                                signature = "rewarded:verify",
+                                errorCode = result.exceptionOrNull()?.javaClass?.simpleName,
+                                message = result.exceptionOrNull()?.message,
+                                breadcrumb = "RewardVerificationManager.queueVerification",
+                            )
+                        }
                         handler.post {
                             val ad = weakAd.get() ?: return@post
                             result.fold(
@@ -195,6 +234,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     }
                 }
             }
+            Telemetry.recordLifecycle("closed", AD_FORMAT, adUnitId, adId, serveId, null, null)
             listener?.onAdClosed(this@SimulaRewardedAd)
             load() // auto-preload the next ad (iOS parity)
         }
@@ -213,6 +253,7 @@ class SimulaRewardedAd(val adUnitId: String) {
 
     private fun failLoad(error: SimulaAdError) {
         state = State.Idle
+        Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, elapsedSinceLoad(), error.telemetryCode())
         listener?.onAdFailedToLoad(this, error)
     }
 
@@ -222,8 +263,17 @@ class SimulaRewardedAd(val adUnitId: String) {
 
     private fun failShow(error: SimulaAdError) {
         // State is unchanged (stays Ready / Showing) — matches the interstitial.
+        Telemetry.recordLifecycle("show_fail", AD_FORMAT, adUnitId, null, null, null, error.telemetryCode())
         listener?.onAdFailedToDisplay(this, error)
     }
+
+    /** Monotonic ms since load() began (null if not started). */
+    private fun elapsedSinceLoad(): Long? =
+        if (loadStartNanos == 0L) null else (System.nanoTime() - loadStartNanos) / 1_000_000
+
+    /** Monotonic ms since present() began (null if not started). */
+    private fun elapsedSinceShow(): Long? =
+        if (showStartNanos == 0L) null else (System.nanoTime() - showStartNanos) / 1_000_000
 
     /**
      * Returns true if already on the main thread (caller should proceed); returns false
@@ -235,3 +285,6 @@ class SimulaRewardedAd(val adUnitId: String) {
         return false
     }
 }
+
+/** Ad-format tag on this class's telemetry events. */
+private const val AD_FORMAT = "rewarded"

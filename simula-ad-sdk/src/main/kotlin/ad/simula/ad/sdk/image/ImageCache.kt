@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.image
 
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.network.SimulaHttp
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.res.Configuration
@@ -72,7 +73,10 @@ internal object ImageCache {
      */
     suspend fun load(context: Context, url: String): DecodedImage {
         registerMemoryCallbacks(context)
-        cache.get(url)?.let { return it }
+        cache.get(url)?.let {
+            Telemetry.recordOperation("image_cache_hit", 0L, success = true)
+            return it
+        }
         if (url.isBlank()) return DecodedImage.Failed
         failures[url]?.let { failedAt ->
             if (now() - failedAt < NEGATIVE_TTL_MS) return DecodedImage.Failed
@@ -91,8 +95,15 @@ internal object ImageCache {
 
     private suspend fun performLoad(url: String): DecodedImage {
         val result = try {
-            val bytes = SimulaHttp.requestBytes(url)
-            ImageDecoder.decode(bytes)
+            val bytes = SimulaHttp.requestBytes(url) // download is recorded as a network event
+            val decodeStart = System.nanoTime()
+            val decoded = ImageDecoder.decode(bytes)
+            Telemetry.recordOperation(
+                name = "image_decode",
+                durationMs = (System.nanoTime() - decodeStart) / 1_000_000,
+                success = decoded !is DecodedImage.Failed,
+            )
+            decoded
         } catch (ce: CancellationException) {
             throw ce // never record a cancellation — stays immediately retryable
         } catch (e: Exception) {

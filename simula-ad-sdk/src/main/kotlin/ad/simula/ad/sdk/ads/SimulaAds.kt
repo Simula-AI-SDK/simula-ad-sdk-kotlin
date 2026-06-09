@@ -5,6 +5,7 @@ import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.provider.SimulaSessionStore
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
 import android.app.Application
 import android.content.Context
@@ -77,6 +78,9 @@ object SimulaAds {
      * @param charId/charName/charImage/charDesc Optional initial character context for the
      *                imperative interstitial. Updatable later via [setCharacter] or by assigning
      *                the [charId]/[charName]/[charImage]/[charDesc] properties.
+     * @param telemetryEnabled Opt out of in-house SDK telemetry (handled-error + performance
+     *                metrics sent to Simula). Default true. PII in telemetry is consent-gated
+     *                exactly like ad tracking; set false to disable the pipeline entirely.
      */
     fun initialize(
         context: Context,
@@ -89,6 +93,7 @@ object SimulaAds {
         charName: String? = null,
         charImage: String? = null,
         charDesc: String? = null,
+        telemetryEnabled: Boolean = true,
     ) {
         if (initialized) return
         require(apiKey.isNotBlank()) { "SimulaAds.initialize requires a non-blank apiKey" }
@@ -117,6 +122,18 @@ object SimulaAds {
         // resolved snapshot, matching SimulaProvider's `sessionConsent.allowsPrimaryUserID` gate.
         val effectiveUserID = if (SimulaPrivacy.current.allowsPrimaryUserID) primaryUserID else null
         store = SimulaSessionStore(apiKey, devMode, effectiveUserID)
+
+        // Install telemetry before the session warm-up so the /session/create call (and every
+        // subsequent SDK request) is captured. The facade re-gates PII on the live consent
+        // snapshot, so pass the raw primaryUserID, not the init-time effectiveUserID.
+        Telemetry.initialize(
+            context = appContext,
+            apiKey = apiKey,
+            devMode = devMode,
+            enabled = telemetryEnabled,
+            sessionIdProvider = { store.sessionId },
+            primaryUserId = primaryUserID,
+        )
 
         registerActivityTracking()
         initialized = true
@@ -168,7 +185,14 @@ object SimulaAds {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
             override fun onActivityStarted(activity: Activity) {}
             override fun onActivityPaused(activity: Activity) {}
-            override fun onActivityStopped(activity: Activity) {}
+
+            // Persist + deliver buffered telemetry as the app heads to the background — the
+            // window where a process is most likely to be killed. Cheap + guarded (no-op when
+            // the buffer is empty / telemetry is disabled).
+            override fun onActivityStopped(activity: Activity) {
+                Telemetry.flush()
+            }
+
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
         })
     }
