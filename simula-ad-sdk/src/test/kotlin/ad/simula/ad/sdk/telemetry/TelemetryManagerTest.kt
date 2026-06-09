@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -59,6 +60,7 @@ class TelemetryManagerTest {
         sessionId: String? = "sess",
         ppid: String? = null,
         gaid: String? = null,
+        debugLog: ((String) -> Unit)? = null,
     ) = TelemetryManager(
         ctx = TelemetryContext(sdkVersion = "9.9", osVersion = "14", deviceModel = "Test Pixel", hostAppId = "com.test", devMode = true),
         store = store,
@@ -71,6 +73,7 @@ class TelemetryManagerTest {
         clock = { 1_000L },
         scope = scope,
         random = random,
+        debugLog = debugLog,
     )
 
     private fun List<TelemetryEnvelope>.allEvents() = flatMap { it.events }
@@ -196,6 +199,41 @@ class TelemetryManagerTest {
         val events = sender.batches.allEvents()
         assertTrue("perf suppressed by sampling", events.none { it.type == TYPE_NETWORK })
         assertTrue("errors always sent", events.any { it.type == TYPE_ERROR })
+    }
+
+    // ── Dev-mode console log + redaction ───────────────────────────────────────
+
+    @Test
+    fun `the debug log receives a line per recorded event`() = runTest {
+        val lines = mutableListOf<String>()
+        val m = build(this, FakeStore(), FakeSender(), debugLog = { lines.add(it) })
+
+        m.recordNetwork("/load/interstitial", "POST", 200, durationMs = 12, requestBytes = 0, responseBytes = 100, failureClass = null)
+        m.recordError("api:x", "x", "boom")
+        advanceUntilIdle()
+
+        assertEquals(2, lines.size)
+        assertTrue(lines.any { it.startsWith("network POST /load/interstitial") })
+        assertTrue(lines.any { it.startsWith("error api:x") })
+    }
+
+    @Test
+    fun `error messages are sanitized of secrets before send and log`() = runTest {
+        val lines = mutableListOf<String>()
+        val sender = FakeSender()
+        val m = build(this, FakeStore(), sender, debugLog = { lines.add(it) })
+
+        m.recordError("api:net", "net", "GET https://x.com/cb?token=abc123&u=9 failed; Authorization: Bearer xyz789 apiKey=SEKRIT")
+        advanceUntilIdle()
+
+        val sent = sender.batches.allEvents().first { it.type == TYPE_ERROR }.message ?: ""
+        val logged = lines.first { it.startsWith("error api:net") }
+        for (haystack in listOf(sent, logged)) {
+            assertFalse("query/token stripped", haystack.contains("abc123"))
+            assertFalse("bearer token stripped", haystack.contains("xyz789"))
+            assertFalse("key value stripped", haystack.contains("SEKRIT"))
+            assertFalse("query string stripped", haystack.contains("?token"))
+        }
     }
 
     @Test

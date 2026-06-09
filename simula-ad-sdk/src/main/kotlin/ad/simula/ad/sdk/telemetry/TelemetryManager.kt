@@ -57,6 +57,8 @@ internal class TelemetryManager(
     private val clock: () -> Long = System::currentTimeMillis,
     private val scope: CoroutineScope = SimulaScope,
     private val random: () -> Double = { Random.nextDouble() },
+    // Dev-only sink: when set (devMode), each recorded event is logged here (already redacted).
+    private val debugLog: ((String) -> Unit)? = null,
 ) {
     private val json = Json { encodeDefaults = false; ignoreUnknownKeys = true }
 
@@ -147,10 +149,13 @@ internal class TelemetryManager(
         if (!isEnabled) return
         val event = newEvent(TYPE_ERROR, name = signature).copy(
             errorCode = errorCode,
-            message = message?.take(MAX_MESSAGE_LEN),
+            // Sanitize at the source so secrets are stripped from BOTH the dev log and the
+            // payload sent to the backend (exception text can embed URLs/tokens).
+            message = redact(message),
             breadcrumb = breadcrumb,
             count = 1,
         )
+        debugLog?.invoke(formatForLog(event))
         scope.launch {
             mutex.withLock {
                 val existing = errorAgg[signature]
@@ -178,8 +183,40 @@ internal class TelemetryManager(
     private fun newEvent(type: String, name: String) =
         TelemetryEvent(type = type, name = name, eventId = UUID.randomUUID().toString(), timestamp = clock())
 
+    /** Compact one-line view for the dev console. Carries only non-sensitive event fields —
+     * never the envelope's apiKey/ppid/advertising-id — and the message is already redacted. */
+    private fun formatForLog(e: TelemetryEvent): String = buildString {
+        append(e.type).append(' ').append(e.name)
+        e.statusCode?.let { append(" status=").append(it) }
+        e.durationMs?.let { append(" dur=").append(it).append("ms") }
+        e.failureClass?.let { append(" fail=").append(it) }
+        e.requestBytes?.let { append(" reqB=").append(it) }
+        e.responseBytes?.let { append(" respB=").append(it) }
+        e.success?.let { append(" ok=").append(it) }
+        e.cacheHit?.let { append(" cache=").append(it) }
+        e.adFormat?.let { append(" fmt=").append(it) }
+        e.adUnitId?.let { append(" unit=").append(it) }
+        e.adId?.let { append(" ad=").append(it) }
+        e.serveId?.let { append(" serve=").append(it) }
+        e.errorCode?.let { append(" code=").append(it) }
+        e.count?.let { append(" count=").append(it) }
+        e.message?.let { append(" msg=").append(it) }
+    }
+
+    /** Strips likely secrets from free-text (URL query strings, bearer tokens, key/secret
+     * assignments) and caps length. Applied to error messages before they're stored or logged. */
+    private fun redact(message: String?): String? {
+        if (message == null) return null
+        var r = message
+        r = QUERY_RE.replace(r, "?…")
+        r = BEARER_RE.replace(r, "Bearer ***")
+        r = SECRET_RE.replace(r) { "${it.groupValues[1]}${it.groupValues[2]}***" }
+        return r.take(MAX_MESSAGE_LEN)
+    }
+
     private fun enqueuePerf(event: TelemetryEvent) {
         if (!isEnabled || !perfSampledIn) return
+        debugLog?.invoke(formatForLog(event))
         scope.launch {
             val shouldFlush = mutex.withLock {
                 buffer.addLast(event)
@@ -294,6 +331,11 @@ internal class TelemetryManager(
         const val FLUSH_INTERVAL_MS = 30_000L
         const val MAX_ERROR_SIGNATURES = 50
         const val MAX_MESSAGE_LEN = 300
+
+        // Redaction patterns for free-text error messages.
+        val QUERY_RE = Regex("\\?\\S*")
+        val BEARER_RE = Regex("(?i)bearer\\s+\\S+")
+        val SECRET_RE = Regex("(?i)(api[_-]?key|token|secret|password)([=:])\\S+")
     }
 }
 

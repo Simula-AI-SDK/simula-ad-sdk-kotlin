@@ -3,6 +3,7 @@ package ad.simula.ad.sdk.telemetry
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import kotlinx.serialization.json.Json
 
 /**
@@ -10,6 +11,9 @@ import kotlinx.serialization.json.Json
  * version in `simula-ad-sdk/build.gradle.kts`.
  */
 internal const val SIMULA_SDK_VERSION = "1.0.3"
+
+/** logcat tag for the dev-mode telemetry mirror. */
+private const val LOG_TAG = "SimulaTelemetry"
 
 /**
  * Process-wide facade for in-house telemetry (handled errors + performance), mirroring the
@@ -61,6 +65,8 @@ internal object Telemetry {
             // advertising id is already nulled by the snapshot when not collectible.
             primaryUserIdProvider = { if (SimulaPrivacy.current.allowsPrimaryUserID) primaryUserId else null },
             advertisingIdProvider = { SimulaPrivacy.current.advertisingId },
+            // In dev mode, mirror every (redacted) event to logcat for local verification.
+            debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
         ).also { it.start() }
     }
 

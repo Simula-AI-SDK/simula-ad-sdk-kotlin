@@ -341,19 +341,6 @@ All color properties accept these formats:
 - CSS: `rgb(255, 0, 0)`, `rgba(255, 0, 0, 0.5)`
 - Named: `transparent`
 
-## Telemetry
-
-The SDK reports **handled errors** and **performance metrics** (request timing, ad-load /
-render latencies, reward-verification timing, asset & WebView timings) to Simula for
-fleet-level diagnostics. It's batched, persisted across launches, and **consent-gated** — PII
-follows the same rules as ad tracking and is suppressed under COPPA. Disable it entirely:
-
-```kotlin
-SimulaAds.initialize(context, apiKey = "YOUR_KEY", telemetryEnabled = false)
-```
-
-Wire format + backend endpoint contract: [docs/TELEMETRY.md](docs/TELEMETRY.md).
-
 ## Privacy & Compliance
 
 - [Google Play Data Safety Guide](docs/GOOGLE_PLAY_DATA_SAFETY.md)
