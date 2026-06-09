@@ -72,7 +72,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     failLoadOnMain(SimulaAdError.NoSession)
                     return@launch
                 }
-                val ad = SimulaApiClient.initRewarded(
+                val ad = SimulaApiClient.loadRewarded(
                     adUnitId = adUnitId,
                     sessionId = session,
                     minPlayThreshold = minPlayThreshold.takeIf { it > 0 },

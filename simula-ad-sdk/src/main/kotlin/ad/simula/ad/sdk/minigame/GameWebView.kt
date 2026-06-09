@@ -331,7 +331,7 @@ fun GameWebView(
                     onClick = handleClose,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(16.dp),
+                        .padding(8.dp),
                 )
             }
         }
@@ -386,15 +386,17 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
 internal fun CloseButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    size: Int = 32,
-    backgroundColor: Color = Color(0x99000000),
+    // Compact AppLovin-style default (~16dp dark-translucent circle), matching the interstitial /
+    // rewarded / fallback-ad close across the SDK.
+    size: Int = 16,
+    backgroundColor: Color = Color(0x80000000),
     contentColor: Color = Color.White,
 ) {
+    // Visible glyph stays compact; the hit area is a full 48dp touch target so the small button
+    // is easy to tap.
     Box(
         modifier = modifier
-            .size(size.dp)
-            .clip(CircleShape)
-            .background(backgroundColor)
+            .size(48.dp)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -402,12 +404,20 @@ internal fun CloseButton(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = "✕",
-            color = contentColor,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Normal,
-        )
+        Box(
+            modifier = Modifier
+                .size(size.dp)
+                .clip(CircleShape)
+                .background(backgroundColor),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "✕",
+                color = contentColor,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Normal,
+            )
+        }
     }
 }
 

@@ -159,9 +159,9 @@ internal object SimulaApiClient {
         CatalogResult(menuId = menuId, games = games)
     }
 
-    /** Builds the catalogv2 request URL, adding `session_id` when available. Pure/testable. */
+    /** Builds the catalog request URL, adding `session_id` when available. Pure/testable. */
     internal fun catalogUrl(sessionId: String?): String = buildString {
-        append("$API_BASE_URL/minigames/catalogv2")
+        append("$API_BASE_URL/minigames/catalog")
         if (!sessionId.isNullOrBlank()) {
             append("?session_id=${URLEncoder.encode(sessionId, "UTF-8")}")
         }
@@ -275,7 +275,7 @@ internal object SimulaApiClient {
         )
 
         val response = SimulaHttp.request(
-            url = "$API_BASE_URL/ads/load/interstitial",
+            url = "$API_BASE_URL/load/interstitial",
             method = "POST",
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
@@ -316,7 +316,7 @@ internal object SimulaApiClient {
      * iframe URL, the `serve_id` tying this play to its later verification, and the
      * `duration_seconds` the SDK must enforce before a reward can be earned.
      */
-    suspend fun initRewarded(
+    suspend fun loadRewarded(
         adUnitId: String,
         sessionId: String = "",
         minPlayThreshold: Int? = null,
@@ -335,7 +335,7 @@ internal object SimulaApiClient {
             charDesc = charDesc,
         )
         val response = SimulaHttp.request(
-            url = "$API_BASE_URL/minigames/init/rewarded",
+            url = "$API_BASE_URL/load/rewarded",
             method = "POST",
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
@@ -458,6 +458,35 @@ internal object SimulaApiClient {
                 method = "POST",
                 headers = authHeaders(apiKey),
                 body = json.encodeToString(body),
+            )
+        } catch (_: Exception) {
+            // Silently fail
+        }
+    }
+
+    /**
+     * Submit a user-initiated ad report against the impression (`POST /impressions/{adId}/report`).
+     * [flag] is one of the `AdReportReason` wire values; [note] is optional free text. The backend
+     * stores flag + note against the ad serve (no moderation on receipt). Best-effort, silently
+     * fails — a report must never disrupt the ad experience.
+     */
+    suspend fun reportAd(
+        adId: String,
+        flag: String,
+        note: String? = null,
+        apiKey: String,
+    ): Unit = withContext(Dispatchers.IO) {
+        if (adId.isBlank()) return@withContext
+        try {
+            val reportBody = buildJsonObject {
+                put("flag", flag)
+                if (!note.isNullOrBlank()) put("note", note)
+            }
+            SimulaHttp.request(
+                url = "$API_BASE_URL/impressions/$adId/report",
+                method = "POST",
+                headers = authHeaders(apiKey),
+                body = json.encodeToString(reportBody),
             )
         } catch (_: Exception) {
             // Silently fail

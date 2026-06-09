@@ -5,7 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Verifies the catalogv2 request URL carries `session_id` when available and omits it otherwise.
+ * Verifies the catalog request URL carries `session_id` when available and omits it otherwise.
  * Pure URL construction — no network.
  */
 class CatalogRequestTest {
@@ -13,13 +13,13 @@ class CatalogRequestTest {
     @Test
     fun `catalog url appends session_id when present`() {
         val url = SimulaApiClient.catalogUrl("sess_9")
-        assertTrue(url.endsWith("/minigames/catalogv2?session_id=sess_9"))
+        assertTrue(url.endsWith("/minigames/catalog?session_id=sess_9"))
     }
 
     @Test
     fun `catalog url omits session_id when null`() {
         val url = SimulaApiClient.catalogUrl(null)
-        assertTrue(url.endsWith("/minigames/catalogv2"))
+        assertTrue(url.endsWith("/minigames/catalog"))
         assertFalse(url.contains("session_id"))
     }
 

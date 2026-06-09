@@ -77,6 +77,7 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import ad.simula.ad.sdk.ads.AdInfoReportOverlay
 import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.R
 import ad.simula.ad.sdk.model.GameData
@@ -597,6 +598,7 @@ fun MiniGameMenu(
                     onClose = { handleAdIframeClose() },
                     playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
                     playableBorderColor = theme.playableBorderColor ?: "#262626",
+                    adId = currentAdId ?: "",
                 )
             }
         }
@@ -666,6 +668,7 @@ private fun AdIframeOverlay(
     onClose: () -> Unit,
     playableHeightDp: Float? = null,
     playableBorderColor: String = "#262626",
+    adId: String = "",
 ) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -794,18 +797,20 @@ private fun AdIframeOverlay(
                         onClick = onClose,
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(16.dp),
+                            .padding(8.dp),
                     )
                 } else {
+                    // Countdown ring: a 16dp circle centered in the same 48dp footprint as the close
+                    // button so nothing jumps when it unlocks.
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(16.dp)
-                            .size(32.dp),
+                            .padding(8.dp)
+                            .size(48.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val strokeWidth = 3.dp.toPx()
+                        Canvas(modifier = Modifier.size(16.dp)) {
+                            val strokeWidth = 2.dp.toPx()
                             val radius = size.minDimension / 2f
 
                             drawCircle(
@@ -828,13 +833,18 @@ private fun AdIframeOverlay(
                         Text(
                             text = "$adCountdown",
                             color = Color.White,
-                            fontSize = 14.sp,
+                            fontSize = 9.sp,
                             fontWeight = FontWeight.SemiBold,
                             textAlign = TextAlign.Center,
                         )
                     }
                 }
             }
+        }
+
+        // Persistent ad-info "i" + report sheet (required disclosure on the post-game ad).
+        if (adId.isNotEmpty()) {
+            AdInfoReportOverlay(adId = adId)
         }
     }
 }

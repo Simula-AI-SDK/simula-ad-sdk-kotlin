@@ -1,9 +1,9 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
-import ad.simula.ad.sdk.minigame.CloseButton
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.OverlayPosition
@@ -35,6 +35,8 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -120,29 +122,41 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                 apiKey = SimulaAds.apiKey,
                 devMode = SimulaAds.devMode,
             ) {
-                CreativeInterstitial(
-                    presentation = p,
-                    onFinish = ::closeOnce,
-                    openDestination = { ad ->
-                        // applicationContext so the open survives auto-dismiss. `storeOpen` is
-                        // null when the payload omits `ad_behavior` → today's store path.
-                        CreativeCtaRouter.open(
-                            applicationContext,
-                            ad.trackingUrl,
-                            ad.destination,
-                            ad.adBehavior?.storeOpen,
-                        )
-                    },
-                )
+                // On close, fetch + show a fallback ad before finishing (minigame parity). CLOSED is
+                // reported when the primary creative closes; the Activity finishes after the fallback.
+                FallbackAdHost(adId = p.ad.adId, onFullyClosed = ::finishAd) { onClose ->
+                    CreativeInterstitial(
+                        presentation = p,
+                        onFinish = {
+                            reportClosed()
+                            onClose()
+                        },
+                        openDestination = { ad ->
+                            // applicationContext so the open survives auto-dismiss. `storeOpen` is
+                            // null when the payload omits `ad_behavior` → today's store path.
+                            CreativeCtaRouter.open(
+                                applicationContext,
+                                ad.trackingUrl,
+                                ad.destination,
+                                ad.adBehavior?.storeOpen,
+                            )
+                        },
+                    )
+                }
             }
         }
     }
 
-    /** Fire CLOSED exactly once, then finish. */
-    private fun closeOnce() {
+    /** Fire CLOSED exactly once when the primary creative closes. Does NOT finish — the fallback-ad
+     * host finishes the Activity via [finishAd] once any post-close fallback ad is done. */
+    private fun reportClosed() {
         if (closed) return
         closed = true
         presentation?.callbacks?.onClosed()
+    }
+
+    /** Tear the Activity down (after the optional fallback ad). */
+    private fun finishAd() {
         finish() // isFinishing becomes true → onDestroy drops the handoff entry
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
@@ -318,32 +332,25 @@ private fun CreativeInterstitial(
                         installBannerVisible = true
                     }
                 },
-                modifier = Modifier.fillMaxSize(),
+                // Sits below the safe area (the black Box fills the cutout / nav-bar region).
+                modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
             )
         }
 
-        // Close button — driven by `ad_behavior` when present; otherwise today's always-available
-        // top-right button (an absent ad_behavior renders exactly as before).
-        if (behavior != null) {
-            InterstitialCloseButton(
-                treatment = behavior.close.treatment,
-                position = behavior.close.position,
-                progressBarColor = behavior.close.progressBarColor,
-                isRewardCopy = isRewardCopy,
-                enabled = closeEnabled,
-                remaining = closeRemaining,
-                progress = closeProgress.value,
-                onClose = onFinish,
-            )
-        } else {
-            CloseButton(
-                onClick = onFinish,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .windowInsetsPadding(WindowInsets.navigationBars)
-                    .padding(16.dp),
-            )
-        }
+        // Close button — always shown with the compact AppLovin-style chrome. Driven by
+        // `ad_behavior.close` when present; otherwise a default (top-right, always available) so ads
+        // with no `ad_behavior` still get the small close, not a big one.
+        val close = behavior?.close ?: CloseBehavior()
+        InterstitialCloseButton(
+            treatment = close.treatment,
+            position = close.position,
+            progressBarColor = close.progressBarColor,
+            isRewardCopy = isRewardCopy,
+            enabled = closeEnabled,
+            remaining = closeRemaining,
+            progress = closeProgress.value,
+            onClose = onFinish,
+        )
 
         // Mid-ad store prompt — rendered at the server-resolved position (never recomputed).
         if (storePrompt != null && storePrompt.enabled && storePromptVisible) {
@@ -358,6 +365,13 @@ private fun CreativeInterstitial(
                 onDismiss = { installBannerVisible = false },
             )
         }
+
+        // Persistent ad-info "i" + report sheet (required disclosure). Last so its sheet overlays.
+        AdInfoReportOverlay(
+            adId = ad.adId,
+            apiKey = presentation.apiKey,
+            closeAtBottomLeft = (behavior?.close?.position ?: CloseBehavior().position) == ClosePosition.BOTTOM_LEFT,
+        )
     }
 }
 
@@ -409,11 +423,11 @@ private fun CreativeHtml(
 
 // ── Ad-behavior close button ──────────────────────────────────────────────────
 
-// Visible close affordance sized to match AdMob / AppLovin (a compact ~30dp circle), while the
-// tappable area stays at the 48dp Material minimum (see [MIN_TOUCH_TARGET_DP]). The 44dp circle used
-// before was the touch-target minimum mistakenly used as the visual size.
-private const val CLOSE_GLYPH_SP = 16
-private const val CLOSE_BOX_DP = 30
+// Visible close affordance sized to match AppLovin (a compact ~22dp circle); the tappable area stays
+// at the 48dp Material minimum (see [MIN_TOUCH_TARGET_DP]), close to IAB MRAID's 50×50dp close
+// region. The visible graphic and the touch target are deliberately decoupled.
+private const val CLOSE_GLYPH_SP = 10
+private const val CLOSE_BOX_DP = 16
 private const val MIN_TOUCH_TARGET_DP = 48
 
 /**
@@ -440,12 +454,13 @@ private fun BoxScope.InterstitialCloseButton(
         ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
     }
 
-    // `progress_bar`: a full-width bar pinned to the very top edge of the screen (inside the top
-    // nav / status-bar region), shown during the delay and tinted by color. Edge-to-edge, no insets.
+    // `progress_bar`: a full-width bar pinned just below the top safe-area inset (so it clears the
+    // notch / status-bar region), shown during the delay and tinted by color. Edge-to-edge.
     if (!enabled && treatment == CloseTreatment.PROGRESS_BAR) {
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
                 .fillMaxWidth()
                 .height(4.dp)
                 .background(Color(0x40FFFFFF)),
@@ -467,6 +482,10 @@ private fun BoxScope.InterstitialCloseButton(
             // safeDrawing merges system bars + display cutout so a top-corner button never
             // lands under a notch (system bars are hidden, so navigationBars alone gave 0 at top).
             .windowInsetsPadding(WindowInsets.safeDrawing)
+            // When pinned bottom-left, nudge right just enough to clear the always-present info "i"
+            // that sits tight in that corner (the "i" stays closest to the edge), so the two sit
+            // snug side by side. (Tuned for the 16dp circles inside the 48dp touch frame.)
+            .padding(start = if (position == ClosePosition.BOTTOM_LEFT) 2.dp else 0.dp)
             .padding(8.dp),
     ) {
         when {
@@ -549,12 +568,15 @@ private fun CloseGlyph() {
     )
 }
 
-/** The text pill used by the `reward_or_close_label` treatment (counting down, then "Close"). */
+/**
+ * The text pill used by the `reward_or_close_label` treatment (counting down, then "Close").
+ * Compact, to match the small close chrome of the other treatments.
+ */
 @Composable
 private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
     val base = Modifier
-        .clip(RoundedCornerShape(22.dp))
-        .background(Color.White.copy(alpha = 0.9f))
+        .clip(RoundedCornerShape(12.dp))
+        .background(Color.Black.copy(alpha = 0.5f))
     val mod = if (onClick != null) {
         base.clickable(
             interactionSource = remember { MutableInteractionSource() },
@@ -564,8 +586,8 @@ private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
     } else {
         base
     }
-    Box(mod.padding(horizontal = 14.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
-        Text(text, color = Color(0xFF1F2937), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+    Box(mod.padding(horizontal = 10.dp, vertical = 5.dp), contentAlignment = Alignment.Center) {
+        Text(text, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
