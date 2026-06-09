@@ -18,6 +18,7 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -39,13 +40,14 @@ class SimulaInterstitialAd(val adUnitId: String) {
 
     var listener: SimulaInterstitialAdListener? = null
 
-    // Character context is global: set it on `SimulaAds` (via initialize() or
-    // setCharacter()), and every load() reads the current values from there.
+    // Character context is passed per `load()` call (see below); there is no global
+    // character state to keep in sync.
 
     private sealed interface State {
         object Idle : State
         object Loading : State
-        class Ready(val ad: SimulaApiClient.AdLoadResult) : State
+        /** [loadedAtMs] is `elapsedRealtime()` at the moment the creative became ready (for staleness). */
+        class Ready(val ad: SimulaApiClient.AdLoadResult, val loadedAtMs: Long) : State
         object Showing : State
     }
 
@@ -53,46 +55,132 @@ class SimulaInterstitialAd(val adUnitId: String) {
     private var state: State = State.Idle
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** Preload the next interstitial. No-op if already loading, ready, or showing. */
-    fun load() {
-        if (!confineToMain { load() }) return
+    // Dedup: the (ad unit, character, session) key of the load currently in flight or
+    // ready, and when that load was initiated. Re-loads of the same key are blocked for
+    // [DEDUP_WINDOW_MS]. Confined to the main thread.
+    private var currentKey: String? = null
+    private var currentKeyAtMs: Long = 0L
 
-        if (state != State.Idle) return // single in-flight load
+    // Character context of the last load(), replayed by the post-close auto-preload.
+    private var lastCharId: String? = null
+    private var lastCharName: String? = null
+    private var lastCharImage: String? = null
+    private var lastCharDesc: String? = null
+
+    // Bumped on every load() that starts; an async result whose generation no longer
+    // matches has been superseded (a newer load replaced it) and is dropped.
+    @Volatile
+    private var loadGeneration: Int = 0
+
+    /**
+     * Preload an interstitial for the given character context.
+     *
+     * The character fields are sent on the `/ads/load/interstitial` request so the
+     * backend can target the creative; all are optional. Behavior:
+     *
+     * - **Single in-flight load.** While a load for the same ad is in flight or ready,
+     *   calling `load()` again with the **same** key — (ad unit id, [charId],
+     *   [charName], session id) — is blocked for 5 minutes and reports
+     *   [SimulaAdError.DuplicateRequest]. A **different** ad unit or character is treated
+     *   as new and supersedes the pending/ready ad.
+     * - **Staleness.** A loaded ad expires after 1 hour; `show()` then fails with
+     *   [SimulaAdError.Stale].
+     * - **No-op while showing.** Ignored while an ad is on screen; the next ad is
+     *   preloaded automatically on close.
+     */
+    @JvmOverloads
+    fun load(
+        charId: String? = null,
+        charName: String? = null,
+        charImage: String? = null,
+        charDesc: String? = null,
+    ) {
+        if (!confineToMain { load(charId, charName, charImage, charDesc) }) return
+
         if (!SimulaAds.isInitialized) {
             failLoad(SimulaAdError.NotInitialized)
             return
         }
+
+        // Replay the same character context on the post-close auto-preload.
+        lastCharId = charId
+        lastCharName = charName
+        lastCharImage = charImage
+        lastCharDesc = charDesc
+
+        val key = dedupKey(charId, charName)
+        val now = SystemClock.elapsedRealtime()
+
+        when (state) {
+            // An ad is on screen — the next one preloads on close. Don't start a load.
+            State.Showing -> return
+            // A matching ad is already loading/ready: block a same-key re-load within
+            // the dedup window; a different key falls through and supersedes it.
+            State.Loading, is State.Ready ->
+                if (currentKey == key && now - currentKeyAtMs < DEDUP_WINDOW_MS) {
+                    reportLoadBlocked()
+                    return
+                }
+            // Nothing held — proceed.
+            State.Idle -> Unit
+        }
+
+        // Supersede any in-flight load / discard any ready ad, then start fresh.
+        val generation = ++loadGeneration
+        currentKey = key
+        currentKeyAtMs = now
         state = State.Loading
         SimulaScope.launch {
             try {
                 val sessionId = SimulaAds.store.ensureSession()
+                if (generation != loadGeneration) return@launch // superseded
                 if (sessionId.isNullOrBlank()) {
-                    failLoadOnMain(SimulaAdError.NoSession)
+                    failLoadOnMain(generation, SimulaAdError.NoSession)
                     return@launch
                 }
+                // The real session id is now known. Refresh the dedup key — the
+                // synchronous gate at load() time may have keyed on an empty session
+                // during cold-start warm-up — so a subsequent same-key load() still
+                // deduplicates. The throttle timestamp (currentKeyAtMs) intentionally
+                // stays at the original load time.
+                withContext(Dispatchers.Main) {
+                    if (generation == loadGeneration) currentKey = dedupKey(charId, charName)
+                }
+                if (generation != loadGeneration) return@launch // superseded during the hop
                 val ad = SimulaApiClient.loadAd(
                     adUnitId = adUnitId,
                     sessionId = sessionId,
-                    charId = SimulaAds.charId,
-                    charName = SimulaAds.charName,
-                    charImage = SimulaAds.charImage,
-                    charDesc = SimulaAds.charDesc,
+                    charId = charId,
+                    charName = charName,
+                    charImage = charImage,
+                    charDesc = charDesc,
                 )
+                if (generation != loadGeneration) return@launch // superseded
                 // Fillable only when the payload carries a non-blank `rendered_html`
                 // creative (whitespace-only HTML is treated as no-fill).
                 val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
                 if (!ad.adInserted || html == null) {
-                    failLoadOnMain(SimulaAdError.NoFill)
+                    failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
                 withContext(Dispatchers.Main) {
-                    state = State.Ready(ad)
+                    if (generation != loadGeneration) return@withContext // superseded
+                    state = State.Ready(ad, SystemClock.elapsedRealtime())
                     listener?.onAdLoaded(this@SimulaInterstitialAd)
                 }
             } catch (e: Exception) {
-                failLoadOnMain(SimulaAdError.Network(e))
+                failLoadOnMain(generation, SimulaAdError.Network(e))
             }
         }
+    }
+
+    /**
+     * Dedup key: (ad unit id, character id, character name, current session id), joined
+     * with a NUL separator so values containing spaces can't collide across fields.
+     */
+    private fun dedupKey(charId: String?, charName: String?): String {
+        val session = SimulaAds.store.sessionId.orEmpty()
+        return "$adUnitId ${charId.orEmpty()} ${charName.orEmpty()} $session"
     }
 
     /**
@@ -224,7 +312,16 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 failShow(SimulaAdError.NotReady)
                 return
             }
-            is State.Ready -> current.ad
+            is State.Ready -> {
+                // A loaded ad expires after 1 hour. Drop it (back to Idle so the host
+                // can load() again — the dedup window is long gone) and report Stale.
+                if (SystemClock.elapsedRealtime() - current.loadedAtMs > STALE_AFTER_MS) {
+                    state = State.Idle
+                    failShow(SimulaAdError.Stale)
+                    return
+                }
+                current.ad
+            }
         }
         // A foreground Activity is required to present — matching Swift's
         // "no presentation context" semantics and AdMob's show(activity). A
@@ -265,7 +362,8 @@ class SimulaInterstitialAd(val adUnitId: String) {
         override fun onClosed() {
             state = State.Idle
             listener?.onAdClosed(this@SimulaInterstitialAd)
-            load() // auto-preload the next ad (iOS parity)
+            // Auto-preload the next ad (iOS parity), reusing the last character context.
+            load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
         }
     }
 
@@ -285,8 +383,19 @@ class SimulaInterstitialAd(val adUnitId: String) {
         listener?.onAdFailedToLoad(this, error)
     }
 
-    private suspend fun failLoadOnMain(error: SimulaAdError) {
-        withContext(Dispatchers.Main) { failLoad(error) }
+    private suspend fun failLoadOnMain(generation: Int, error: SimulaAdError) {
+        withContext(Dispatchers.Main) {
+            if (generation != loadGeneration) return@withContext // superseded
+            failLoad(error)
+        }
+    }
+
+    /**
+     * Report a dedup-blocked load without disturbing state — the in-flight or ready ad
+     * that triggered the block must survive (it stays loadable/showable).
+     */
+    private fun reportLoadBlocked() {
+        listener?.onAdFailedToLoad(this, SimulaAdError.DuplicateRequest)
     }
 
     private fun failShow(error: SimulaAdError) {
@@ -302,6 +411,14 @@ class SimulaInterstitialAd(val adUnitId: String) {
         if (Looper.myLooper() == Looper.getMainLooper()) return true
         mainHandler.post { block() }
         return false
+    }
+
+    private companion object {
+        /** A loaded ad expires this long after it became ready (staleness). */
+        const val STALE_AFTER_MS = 60 * 60 * 1000L // 1 hour
+
+        /** Re-loads of the same dedup key are blocked for this long. */
+        const val DEDUP_WINDOW_MS = 5 * 60 * 1000L // 5 minutes
     }
 }
 

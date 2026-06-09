@@ -196,26 +196,28 @@ SimulaAds.initialize(
 
 The interstitial sends optional **character context** (`charId`, `charName`,
 `charImage`, `charDesc`) on the `/ads/load/interstitial` request so the backend can
-target the creative. It lives globally on `SimulaAds` — seed it in `initialize`, then
-update it whenever the active character changes. The next `load()` uses the current
-values, so there is nothing to set per ad instance.
+target the creative. Pass it on each `load(...)` call — there is no global character
+state. To switch characters, just `load(...)` with the new values:
 
 ```kotlin
-SimulaAds.initialize(
-    context = applicationContext,
-    apiKey = "YOUR_API_KEY",
+ad.load(
     charId = "char_123",
     charName = "Luna",
     charImage = "https://example.com/avatar.png",
     charDesc = "a witty companion",
 )
 
-// Later, when the active character changes (replaces all fields):
-SimulaAds.setCharacter(charId = "char_456", charName = "Sage")
-
-// …or tweak a single field on the fly:
-SimulaAds.charName = "Sage"
+// Later, when the active character changes, load with the new values:
+ad.load(charId = "char_456", charName = "Sage")
 ```
+
+**Loading rules.** A loaded ad is cached and **expires after 1 hour** — calling
+`show()` on an expired ad fails with `onAdFailedToDisplay(SimulaAdError.Stale)`
+(`"Ad is stale, please load again"`); just `load()` again. Loads are **deduplicated**
+by (ad unit id, character id, character name, session id): while a matching ad is
+already loaded or in flight, a re-load of the same key within 5 minutes is blocked
+with `onAdFailedToLoad(SimulaAdError.DuplicateRequest)`. A different ad unit or
+character is treated as new and supersedes the pending/ready ad.
 
 ### 2. Create, load, and show
 
