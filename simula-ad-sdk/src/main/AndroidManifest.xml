@@ -3,6 +3,17 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!--
+      Required by the IAB Open Measurement SDK (OMID) for viewability/verification
+      measurement. INTERNET (above) is also used by OMID's verification scripts.
+
+      The OMID AAR additionally declares an OPTIONAL com.amazon.privacypass
+      uses-library + ATTEST permission (Fire TV device attestation). We embed OMID
+      as a local jar rather than the AAR specifically so that manifest entry does
+      NOT merge into every host app — Amazon attestation is not used here.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
       Advertising ID (GAID) is OPT-IN and OFF by default, so the AD_ID permission
       is intentionally NOT declared here — declaring it would force every host into
       Google Play Data Safety AD_ID disclosure. Apps that enable IDFA/GAID

@@ -106,6 +106,11 @@ dependencies {
     // WebView
     implementation("androidx.webkit:webkit:1.10.0")
 
+    // IAB Open Measurement SDK (OMID) 1.6.6, partner-namespaced as "simulaad".
+    // Embedded as a local jar (extracted from the official AAR's classes.jar) so it
+    // is packaged into our published AAR under libs/ — host apps need no extra setup.
+    implementation(files("libs/omsdk-android-1.6.6.jar"))
+
     // Core
     implementation("androidx.core:core-ktx:1.12.0")
 

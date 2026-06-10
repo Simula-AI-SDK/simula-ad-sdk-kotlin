@@ -423,4 +423,53 @@ class AdLoadParsingTest {
         ).adBehavior.toDomain()!!
         assertEquals(MAX_CLOSE_DELAY_SECONDS, b.close.delaySeconds)
     }
+
+    // ── Response: ad_verifications (OMID, forward-compatible) ────────────────────
+
+    @Test
+    fun `ad_verifications absent maps to empty domain list`() {
+        val r = json.decodeFromString<AdLoadApiResponse>("""{"impression_id":"x","ad_inserted":true}""")
+        assertNull(r.adVerifications)
+        assertTrue(r.adVerifications.toOmVerifications().isEmpty())
+    }
+
+    @Test
+    fun `ad_verifications full entry maps to domain`() {
+        val payload = """
+            {"impression_id":"x","ad_inserted":true,
+             "ad_verifications":[
+               {"vendor_key":"iabtechlab.com-omid",
+                "javascript_resource_url":"https://verify.example.com/omid.js",
+                "verification_parameters":"https://verify.example.com/event"}]}
+        """.trimIndent()
+        val v = json.decodeFromString<AdLoadApiResponse>(payload).adVerifications.toOmVerifications()
+        assertEquals(1, v.size)
+        assertEquals("iabtechlab.com-omid", v[0].vendorKey)
+        assertEquals("https://verify.example.com/omid.js", v[0].url)
+        assertEquals("https://verify.example.com/event", v[0].parameters)
+    }
+
+    @Test
+    fun `ad_verifications drops entries without a js resource url`() {
+        // An entry missing javascript_resource_url is unusable → filtered out; a valid one survives.
+        val payload = """
+            {"ad_verifications":[
+               {"vendor_key":"no-url"},
+               {"javascript_resource_url":"https://ok.example/v.js"}]}
+        """.trimIndent()
+        val v = json.decodeFromString<AdLoadApiResponse>(payload).adVerifications.toOmVerifications()
+        assertEquals(1, v.size)
+        assertEquals("https://ok.example/v.js", v[0].url)
+        assertNull(v[0].vendorKey)
+        assertNull(v[0].parameters)
+    }
+
+    @Test
+    fun `ad_verifications unknown keys are tolerated`() {
+        val payload =
+            """{"ad_verifications":[{"javascript_resource_url":"https://v","future":true}]}"""
+        val v = json.decodeFromString<AdLoadApiResponse>(payload).adVerifications.toOmVerifications()
+        assertEquals(1, v.size)
+        assertEquals("https://v", v[0].url)
+    }
 }

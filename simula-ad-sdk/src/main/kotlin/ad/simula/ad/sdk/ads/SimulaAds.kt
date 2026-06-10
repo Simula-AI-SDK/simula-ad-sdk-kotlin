@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.network.RewardVerificationManager
+import ad.simula.ad.sdk.om.OpenMeasurement
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.provider.SimulaSessionStore
@@ -59,6 +60,9 @@ object SimulaAds {
      * @param telemetryEnabled Opt out of in-house SDK telemetry (handled-error + performance
      *                metrics sent to Simula). Default true. PII in telemetry is consent-gated
      *                exactly like ad tracking; set false to disable the pipeline entirely.
+     * @param openMeasurementEnabled Opt out of IAB Open Measurement (OMID) viewability/verification
+     *                measurement. Default true. When false, OMID is never activated and ads render
+     *                identically, just unmeasured. Measurement failures never affect ad delivery.
      */
     fun initialize(
         context: Context,
@@ -68,6 +72,7 @@ object SimulaAds {
         hasPrivacyConsent: Boolean = true,
         privacy: SimulaPrivacyConfig? = null,
         telemetryEnabled: Boolean = true,
+        openMeasurementEnabled: Boolean = true,
     ) {
         if (initialized) return
         require(apiKey.isNotBlank()) { "SimulaAds.initialize requires a non-blank apiKey" }
@@ -103,6 +108,10 @@ object SimulaAds {
             sessionIdProvider = { store.sessionId },
             primaryUserId = primaryUserID,
         )
+
+        // Activate OMID after telemetry so activation failures are captured. Cheap, main
+        // thread; the service-script read is deferred to IO inside initialize().
+        OpenMeasurement.initialize(appContext, openMeasurementEnabled)
 
         registerActivityTracking()
         initialized = true

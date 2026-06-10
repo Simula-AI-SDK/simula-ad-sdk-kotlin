@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.AdBehavior
+import ad.simula.ad.sdk.om.OmVerification
 import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the rewarded Activity back to the [SimulaRewardedAd] instance. */
@@ -27,9 +28,14 @@ internal class RewardedPresentation(
     val adBehavior: AdBehavior? = null,
     val trackingUrl: String? = null,
     val destination: String = "appstore",
+    // OMID verification resources for the game iframe (empty unless the backend sends them).
+    val verifications: List<OmVerification> = emptyList(),
 ) {
     /** Guards a duplicate DISPLAYED/impression if the Activity is recreated on a config change. */
     var displayedReported = false
+
+    /** Guards a duplicate OMID impression if the Activity is recreated (mirrors [displayedReported]). */
+    var omImpressionReported = false
 
     /** Set true once the required play duration elapses; gates the reward. */
     var rewardEarned = false

@@ -33,6 +33,11 @@ import androidx.annotation.MainThread
 internal object WebViewPool {
 
     private const val MAX_IDLE = 2
+
+    /** OMID verification scripts need a moment after `session.finish()` to flush their
+     * final beacons; the WebView (and its JS context) must stay alive until then. */
+    private const val OM_FLUSH_DELAY_MS = 1_000L
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val idle = ArrayDeque<WebView>()
 
@@ -72,6 +77,21 @@ internal object WebViewPool {
             success = true,
         )
         return webView
+    }
+
+    /**
+     * Like [release], but for a WebView that hosted an OMID session: the reset is
+     * deferred ~1s so an in-page verification script can flush after `session.finish()`.
+     *
+     * The reset loads `about:blank` (which tears down the page's JS context), so the
+     * *entire* [release] — not just the pooling step — must wait out the flush window.
+     * The view is detached from its parent immediately so the closing ad's hierarchy
+     * can be torn down now; the WebView is retained by the posted callback until reset.
+     */
+    @MainThread
+    fun releaseAfterOmFlush(webView: WebView) {
+        (webView.parent as? ViewGroup)?.removeView(webView)
+        mainHandler.postDelayed({ release(webView) }, OM_FLUSH_DELAY_MS)
     }
 
     /** Reset a finished WebView and return it to the pool (or destroy if full). */

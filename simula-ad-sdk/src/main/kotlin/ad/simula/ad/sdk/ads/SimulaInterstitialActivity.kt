@@ -3,6 +3,8 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.om.OmAdSession
+import ad.simula.ad.sdk.om.OmSessionRef
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
@@ -332,6 +334,7 @@ private fun CreativeInterstitial(
             CreativeHtml(
                 html = html,
                 destination = ad.destination,
+                impressionId = ad.impressionId,
                 onAdClick = {
                     presentation.callbacks.onClicked()
                     // Play install banner timed to the click (independent of the store the CTA opens).
@@ -393,17 +396,25 @@ private fun CreativeInterstitial(
  * Non-gesture navigations (impression pixels, JS/meta auto-redirects) load normally
  * so they can't fake a click. The interstitial is NOT dismissed on click — the close
  * button drives dismissal.
+ *
+ * OMID: the OM service script is already spliced into [html] (at load time). Once the
+ * page finishes loading, an HTML ad session is started and `loaded`/`impressionOccurred`
+ * fire — the creative does not emit OMID events itself ([impressionId] rides along as the
+ * session's reference data). On release the session is finished and the WebView is held
+ * an extra ~1s so the verification script can flush.
  */
 @Composable
 private fun CreativeHtml(
     html: String,
     destination: String,
+    impressionId: String,
     onAdClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // applicationContext so the store/browser open survives if the interstitial is
     // later dismissed.
     val appContext = LocalContext.current.applicationContext
+    val om = remember { OmSessionRef() }
     AndroidView(
         factory = { ctx ->
             WebViewPool.acquire(
@@ -421,6 +432,18 @@ private fun CreativeHtml(
                         CreativeCtaRouter.open(appContext, url, destination)
                         return true
                     }
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        // Start the OMID HTML session once the creative is loaded (one attempt
+                        // per WebView; no-op when OM is inactive). about:blank is the pool's
+                        // reset, never a real creative.
+                        if (view == null || url == "about:blank" || om.attempted) return
+                        om.attempted = true
+                        om.session = OmAdSession.startHtml(view, impressionId)?.also {
+                            it.fireLoaded()
+                            it.fireImpression()
+                        }
+                    }
                 },
             ).apply {
                 // Self-contained creative: asset URLs are absolute (baseURL = null).
@@ -428,7 +451,17 @@ private fun CreativeHtml(
             }
         },
         modifier = modifier,
-        onRelease = { webView -> WebViewPool.release(webView) },
+        onRelease = { webView ->
+            val session = om.session
+            if (session != null) {
+                // Finish measurement, then keep the WebView alive ~1s so the verification
+                // script can flush before the JS context is torn down.
+                session.finish()
+                WebViewPool.releaseAfterOmFlush(webView)
+            } else {
+                WebViewPool.release(webView)
+            }
+        },
     )
 }
 

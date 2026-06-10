@@ -55,6 +55,9 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.om.OmAdSession
+import ad.simula.ad.sdk.om.OmSessionRef
+import ad.simula.ad.sdk.om.OmVerification
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
 import kotlinx.coroutines.launch
@@ -97,6 +100,10 @@ fun GameWebView(
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var pageLoaded by remember { mutableStateOf(false) }
+    // OMID verification resources + serve id for the game iframe (empty/blank unless the
+    // backend sends `ad_verifications`). Drives an optional native-display OMID session.
+    var omVerifications by remember { mutableStateOf<List<OmVerification>>(emptyList()) }
+    var omServeId by remember { mutableStateOf("") }
 
     // Warm a spare WebView for the post-game ad iframe while the game loads.
     LaunchedEffect(Unit) {
@@ -128,6 +135,8 @@ fun GameWebView(
                 menuId = menuId,
             )
             iframeUrl = result.iframeUrl
+            omVerifications = result.verifications
+            omServeId = result.serveId
             if (result.serveId.isNotBlank()) {
                 onServeIdReceived?.invoke(result.serveId)
             }
@@ -283,6 +292,8 @@ fun GameWebView(
                         // WebView loads in background
                         GameWebViewContent(
                             url = iframeUrl!!,
+                            verifications = omVerifications,
+                            impressionId = omServeId,
                             onPageFinished = { pageLoaded = true },
                         )
                         // Loading overlay stays visible until page finishes painting
@@ -345,8 +356,16 @@ fun GameWebView(
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
+private fun GameWebViewContent(
+    url: String,
+    verifications: List<OmVerification> = emptyList(),
+    impressionId: String = "",
+    onPageFinished: () -> Unit = {},
+) {
     val context = LocalContext.current
+    // OMID native-display session for the game iframe — created only when the response
+    // carried `ad_verifications` (no-op otherwise). Remote page, registered as the ad view.
+    val om = remember { OmSessionRef() }
 
     AndroidView(
         factory = { ctx ->
@@ -356,6 +375,15 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
                     override fun onPageCommitVisible(view: WebView?, committedUrl: String?) {
                         if (committedUrl == "about:blank") return
                         onPageFinished()
+                        // Start the native OMID session on first real paint (one attempt per
+                        // WebView; no-op when OM is inactive or no verifications).
+                        if (view != null && !om.attempted) {
+                            om.attempted = true
+                            om.session = OmAdSession.startNative(view, verifications, impressionId)?.also {
+                                it.fireLoaded()
+                                it.fireImpression()
+                            }
+                        }
                     }
                     override fun shouldOverrideUrlLoading(
                         view: WebView?,
@@ -377,7 +405,15 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
             ).apply { loadUrl(url) }
         },
         modifier = Modifier.fillMaxSize(),
-        onRelease = { webView -> WebViewPool.release(webView) },
+        onRelease = { webView ->
+            val session = om.session
+            if (session != null) {
+                session.finish()
+                WebViewPool.releaseAfterOmFlush(webView)
+            } else {
+                WebViewPool.release(webView)
+            }
+        },
     )
 }
 
