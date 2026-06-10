@@ -417,7 +417,7 @@ internal fun CloseButton(
                 text = "✕",
                 color = contentColor,
                 fontSize = 10.sp,
-                fontWeight = FontWeight.Normal,
+                fontWeight = FontWeight.Bold,
             )
         }
     }

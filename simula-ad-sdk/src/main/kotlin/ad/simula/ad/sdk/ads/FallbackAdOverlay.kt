@@ -113,9 +113,10 @@ private sealed interface FallbackPhase {
 @Composable
 private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Unit) {
     var countdown by remember { mutableStateOf(5) }
-    val ring = remember { Animatable(1f) }
+    // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
+    val ring = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
-        launch { ring.animateTo(0f, tween(5000, easing = LinearEasing)) }
+        launch { ring.animateTo(1f, tween(5000, easing = LinearEasing)) }
         repeat(5) { delay(1000); countdown-- }
     }
     // Back can only close once the countdown elapses (parity with the creative's gated close).
@@ -172,7 +173,7 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
                             .background(Color.Black.copy(alpha = 0.5f)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("✕", color = Color.White, fontSize = 10.sp)
+                        Text("✕", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             } else {

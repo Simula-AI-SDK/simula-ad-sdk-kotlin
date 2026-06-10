@@ -518,7 +518,8 @@ private fun BoxScope.InterstitialCloseButton(
                     Canvas(modifier = Modifier.size(CLOSE_BOX_DP.dp)) {
                         // Stroke in dp (not raw px, which was ~1dp on a 3x screen), inset by half
                         // its width so the ring isn't drawn half-outside the canvas bounds.
-                        val stroke = 3.dp.toPx()
+                        // 2dp matches the Swift SDK's ring stroke.
+                        val stroke = 2.dp.toPx()
                         drawArc(
                             color = tint,
                             startAngle = -90f,

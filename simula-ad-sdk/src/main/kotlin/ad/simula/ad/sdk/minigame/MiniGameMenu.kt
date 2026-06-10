@@ -689,11 +689,12 @@ private fun AdIframeOverlay(
     val view = LocalView.current
 
     var adCountdown by remember { mutableStateOf(5) }
-    val ringProgress = remember { Animatable(1f) }
+    // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
+    val ringProgress = remember { Animatable(0f) }
     var adPageLoaded by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        launch { ringProgress.animateTo(0f, tween(5000, easing = LinearEasing)) }
+        launch { ringProgress.animateTo(1f, tween(5000, easing = LinearEasing)) }
         repeat(5) { delay(1000); adCountdown-- }
     }
 
@@ -837,7 +838,7 @@ private fun AdIframeOverlay(
                             val arcSize = size.minDimension - strokeWidth
                             drawArc(
                                 color = Color.White,
-                                startAngle = -90f + 360f * (1f - ringProgress.value),
+                                startAngle = -90f,
                                 sweepAngle = 360f * ringProgress.value,
                                 useCenter = false,
                                 topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f),
@@ -849,7 +850,7 @@ private fun AdIframeOverlay(
                             text = "$adCountdown",
                             color = Color.White,
                             fontSize = 9.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             textAlign = TextAlign.Center,
                         )
                     }

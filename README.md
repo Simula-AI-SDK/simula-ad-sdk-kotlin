@@ -213,11 +213,14 @@ ad.load(charId = "char_456", charName = "Sage")
 
 **Loading rules.** A loaded ad is cached and **expires after 1 hour** — calling
 `show()` on an expired ad fails with `onAdFailedToDisplay(SimulaAdError.Stale)`
-(`"Ad is stale, please load again"`); just `load()` again. Loads are **deduplicated**
-by (ad unit id, character id, character name, session id): while a matching ad is
-already loaded or in flight, a re-load of the same key within 5 minutes is blocked
-with `onAdFailedToLoad(SimulaAdError.DuplicateRequest)`. A different ad unit or
-character is treated as new and supersedes the pending/ready ad.
+(`"The loaded ad has expired (1 hour limit) and can no longer be shown. Call load()
+to request a new ad."`); just `load()` again. Loads are **deduplicated** by (ad unit
+id, character id, character name, session id): while a matching ad is already loaded
+or in flight, a re-load of the same key within 5 minutes is blocked with
+`onAdFailedToLoad(SimulaAdError.DuplicateRequest)` — the message says whether the
+matching ad is ready (call `show()`, or `load()` again once the window ends) or
+still loading (wait for `onAdLoaded`). A different ad unit or character is treated
+as new and supersedes the pending/ready ad.
 
 ### 2. Create, load, and show
 

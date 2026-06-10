@@ -25,15 +25,36 @@ sealed class SimulaAdError(message: String, cause: Throwable? = null) : Exceptio
      * expires after 1 hour; load a fresh one. The message is part of the public
      * contract (shared verbatim with the Swift SDK).
      */
-    object Stale : SimulaAdError("Ad is stale, please load again")
+    object Stale : SimulaAdError(
+        "The loaded ad has expired (1 hour limit) and can no longer be shown. " +
+            "Call load() to request a new ad.",
+    )
 
     /**
      * `load()` was blocked because a matching ad — same (ad unit id, character id,
      * character name, session id) — is already loaded or in flight. Re-loads of the
      * same key are throttled for 5 minutes; load with a different ad unit or
-     * character to bypass it.
+     * character to bypass it. The message says whether the matching ad is ready or
+     * still loading (and, when ready, how long until `load()` unblocks). Messages are
+     * part of the public contract, shared with the Swift SDK — verbatim except the
+     * "loading" copy names this platform's load callback (`onAdLoaded`, vs the iOS
+     * `didLoad` delegate callback).
      */
-    object DuplicateRequest : SimulaAdError("Duplicate ad request — a matching ad is already loaded or loading")
+    class DuplicateRequest private constructor(message: String) : SimulaAdError(message) {
+        internal companion object {
+            /** The matching ad is loaded and showable; [remainingSec] is the time left in the dedup window. */
+            fun ready(remainingSec: Int) = DuplicateRequest(
+                "An ad for this placement is already loaded. Call show() to display it, " +
+                    "or load() again in $remainingSec seconds.",
+            )
+
+            /** The matching ad's load is still in flight. */
+            fun loading() = DuplicateRequest(
+                "An ad for this placement is already loading. " +
+                    "Wait for the onAdLoaded callback before calling load() again.",
+            )
+        }
+    }
 
     /** `show()` was called while an interstitial is already showing. */
     object AlreadyShowing : SimulaAdError("An interstitial is already showing")

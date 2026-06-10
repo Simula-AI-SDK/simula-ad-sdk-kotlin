@@ -126,7 +126,7 @@ class SimulaRewardedAd(val adUnitId: String) {
             // the dedup window; a different key falls through and supersedes it.
             State.Loading, is State.Ready ->
                 if (currentKey == key && now - currentKeyAtMs < DEDUP_WINDOW_MS) {
-                    reportLoadBlocked()
+                    reportLoadBlocked(now)
                     return
                 }
             // Nothing held — proceed.
@@ -408,10 +408,18 @@ class SimulaRewardedAd(val adUnitId: String) {
 
     /**
      * Report a dedup-blocked load without disturbing state — the in-flight or ready ad
-     * that triggered the block must survive (it stays loadable/showable).
+     * that triggered the block must survive (it stays loadable/showable). The error
+     * message reflects whether that ad is ready (with the seconds left in the dedup
+     * window) or still loading.
      */
-    private fun reportLoadBlocked() {
-        listener?.onAdFailedToLoad(this, SimulaAdError.DuplicateRequest)
+    private fun reportLoadBlocked(nowMs: Long) {
+        val error = if (state is State.Ready) {
+            val remainingMs = DEDUP_WINDOW_MS - (nowMs - currentKeyAtMs)
+            SimulaAdError.DuplicateRequest.ready(((remainingMs + 999) / 1000).toInt())
+        } else {
+            SimulaAdError.DuplicateRequest.loading()
+        }
+        listener?.onAdFailedToLoad(this, error)
     }
 
     private fun failShow(error: SimulaAdError) {
