@@ -36,27 +36,8 @@ object SimulaAds {
     internal lateinit var store: SimulaSessionStore
         private set
 
-    // ── Character context ────────────────────────────────────────────────────
-    // Attached to every imperative interstitial (`/ads/load/interstitial`) request.
-    // Seed it via [initialize]; update it on the fly by assigning these directly or
-    // calling [setCharacter]. The next `SimulaInterstitialAd.load()` sends the
-    // current values, so there is no stale per-ad copy to keep in sync.
-
-    /** Character id sent on the imperative `/ads/load/interstitial` request. */
-    @Volatile
-    var charId: String? = null
-
-    /** Character name sent on the imperative `/ads/load/interstitial` request. */
-    @Volatile
-    var charName: String? = null
-
-    /** Character avatar URL sent on the imperative `/ads/load/interstitial` request. */
-    @Volatile
-    var charImage: String? = null
-
-    /** Character description sent on the imperative `/ads/load/interstitial` request. */
-    @Volatile
-    var charDesc: String? = null
+    // Character context is no longer global: pass charId/charName/charImage/charDesc
+    // to each `SimulaInterstitialAd.load()` / `SimulaRewardedAd.load()` call instead.
 
     private var currentActivityRef: WeakReference<Activity>? = null
     internal val currentActivity: Activity? get() = currentActivityRef?.get()
@@ -75,9 +56,6 @@ object SimulaAds {
      *                opt-in). When provided it takes precedence over [hasPrivacyConsent]; when null
      *                the SDK seeds a config from [hasPrivacyConsent] and still auto-reads IAB CMP
      *                keys. Mirrors `SimulaProvider`'s `privacy` parameter.
-     * @param charId/charName/charImage/charDesc Optional initial character context for the
-     *                imperative interstitial. Updatable later via [setCharacter] or by assigning
-     *                the [charId]/[charName]/[charImage]/[charDesc] properties.
      * @param telemetryEnabled Opt out of in-house SDK telemetry (handled-error + performance
      *                metrics sent to Simula). Default true. PII in telemetry is consent-gated
      *                exactly like ad tracking; set false to disable the pipeline entirely.
@@ -89,10 +67,6 @@ object SimulaAds {
         primaryUserID: String? = null,
         hasPrivacyConsent: Boolean = true,
         privacy: SimulaPrivacyConfig? = null,
-        charId: String? = null,
-        charName: String? = null,
-        charImage: String? = null,
-        charDesc: String? = null,
         telemetryEnabled: Boolean = true,
     ) {
         if (initialized) return
@@ -101,11 +75,6 @@ object SimulaAds {
         appContext = context.applicationContext
         this.apiKey = apiKey
         this.devMode = devMode
-        // Seed the character context (changeable later via setCharacter()).
-        this.charId = charId
-        this.charName = charName
-        this.charImage = charImage
-        this.charDesc = charDesc
 
         // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
         // seeds it — identical resolution to SimulaProvider, so the imperative and
@@ -147,25 +116,6 @@ object SimulaAds {
         // without waiting for the next rewarded play. triggerProcessQueue launches its
         // own coroutine, so a slow/failed session create can't delay or skip recovery.
         RewardVerificationManager.triggerProcessQueue(appContext)
-    }
-
-    /**
-     * Replace the character context used for subsequent interstitial loads. Call this
-     * when the active character changes; the next `SimulaInterstitialAd.load()` sends
-     * the new values. Omitted arguments are cleared, so a character switch never
-     * carries a stale field. For a single-field tweak, assign the property directly
-     * (e.g. `SimulaAds.charName = "Luna"`). Safe to call before [initialize].
-     */
-    fun setCharacter(
-        charId: String? = null,
-        charName: String? = null,
-        charImage: String? = null,
-        charDesc: String? = null,
-    ) {
-        this.charId = charId
-        this.charName = charName
-        this.charImage = charImage
-        this.charDesc = charDesc
     }
 
     private fun registerActivityTracking() {

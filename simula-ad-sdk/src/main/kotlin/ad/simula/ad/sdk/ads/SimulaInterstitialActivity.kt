@@ -30,6 +30,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -62,10 +63,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -124,7 +127,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
             ) {
                 // On close, fetch + show a fallback ad before finishing (minigame parity). CLOSED is
                 // reported when the primary creative closes; the Activity finishes after the fallback.
-                FallbackAdHost(adId = p.ad.adId, onFullyClosed = ::finishAd) { onClose ->
+                FallbackAdHost(impressionId = p.ad.impressionId, onFullyClosed = ::finishAd) { onClose ->
                     CreativeInterstitial(
                         presentation = p,
                         onFinish = {
@@ -198,10 +201,6 @@ private fun gateAlreadyElapsed(p: InterstitialPresentation, total: Duration): Bo
     p.gateStartedAtMs != 0L &&
         (SystemClock.elapsedRealtime() - p.gateStartedAtMs).milliseconds >= total
 
-/** Fallback playable length used to time the store prompt's 50% trigger when no playable
- * `midpoint` JS-bridge event is available. */
-private const val NOMINAL_PLAYABLE_DURATION_MS = 30_000L
-
 @Composable
 private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
@@ -272,13 +271,23 @@ private fun CreativeInterstitial(
         }
     }
 
-    // Mid-ad store prompt (`store_prompt`) — revealed at the 50% playable mark via a timer fallback
-    // (a true playable would post a `midpoint` JS-bridge event). Independent of close + skoverlay.
+    // Mid-ad store prompt (`store_prompt`) — an early install affordance shown at the halfway point
+    // to the close button (`closeTime / 2`, where closeTime is the server-driven close delay) and
+    // removed the instant the real close button appears (see `!closeEnabled` at the render site).
+    // Independent of close chrome + skoverlay. When the close is immediately available (no gate)
+    // there is no pre-close window, so it never shows.
     val storePrompt = behavior?.storePrompt
     var storePromptVisible by remember { mutableStateOf(false) }
-    if (storePrompt != null && storePrompt.enabled) {
+    if (storePrompt != null && storePrompt.enabled && gateTotal > Duration.ZERO) {
         LaunchedEffect(Unit) {
-            delay(NOMINAL_PLAYABLE_DURATION_MS / 2)
+            // Anchor to the same wall-clock start as the close gate so a config-change recreation
+            // resumes the half-way reveal rather than restarting it.
+            if (presentation.gateStartedAtMs == 0L) {
+                presentation.gateStartedAtMs = SystemClock.elapsedRealtime()
+            }
+            val elapsed = (SystemClock.elapsedRealtime() - presentation.gateStartedAtMs).milliseconds
+            val remaining = gateTotal / 2 - elapsed
+            if (remaining.isPositive()) delay(remaining)
             storePromptVisible = true
         }
     }
@@ -304,10 +313,10 @@ private fun CreativeInterstitial(
         if (!presentation.displayedReported) {
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
-            // FIX M2: skip impression when there is no ad id.
-            if (ad.adId.isNotBlank()) {
+            // FIX M2: skip impression when there is no impression id.
+            if (ad.impressionId.isNotBlank()) {
                 SimulaScope.launch {
-                    SimulaApiClient.trackImpression(ad.adId, presentation.apiKey, ad.experiment)
+                    SimulaApiClient.trackImpression(ad.impressionId, presentation.apiKey, ad.experiment)
                 }
             }
         }
@@ -352,8 +361,10 @@ private fun CreativeInterstitial(
             onClose = onFinish,
         )
 
-        // Mid-ad store prompt — rendered at the server-resolved position (never recomputed).
-        if (storePrompt != null && storePrompt.enabled && storePromptVisible) {
+        // Mid-ad store prompt — rendered at the server-resolved position (never recomputed) during
+        // the [closeTime/2, closeTime) window. `!closeEnabled` removes it the instant the real close
+        // button appears, so the two affordances never overlap.
+        if (storePrompt != null && storePrompt.enabled && storePromptVisible && !closeEnabled) {
             StorePromptBadge(prompt = storePrompt, onTap = { openDestination(ad) })
         }
 
@@ -368,7 +379,7 @@ private fun CreativeInterstitial(
 
         // Persistent ad-info "i" + report sheet (required disclosure). Last so its sheet overlays.
         AdInfoReportOverlay(
-            adId = ad.adId,
+            adId = ad.impressionId,
             apiKey = presentation.apiKey,
             closeAtBottomLeft = (behavior?.close?.position ?: CloseBehavior().position) == ClosePosition.BOTTOM_LEFT,
         )
@@ -509,7 +520,8 @@ private fun BoxScope.InterstitialCloseButton(
                     Canvas(modifier = Modifier.size(CLOSE_BOX_DP.dp)) {
                         // Stroke in dp (not raw px, which was ~1dp on a 3x screen), inset by half
                         // its width so the ring isn't drawn half-outside the canvas bounds.
-                        val stroke = 3.dp.toPx()
+                        // 2dp matches the Swift SDK's ring stroke.
+                        val stroke = 2.dp.toPx()
                         drawArc(
                             color = tint,
                             startAngle = -90f,
@@ -594,32 +606,69 @@ private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
 // ── Mid-ad store prompt ─────────────────────────────────────────────────────────
 
 /**
- * The mid-ad store prompt (`store_prompt`): a tappable "▶| App Store" / "▶| Google Play" badge
+ * The mid-ad store prompt (`store_prompt`): a tappable skip-next ▶| badge labelled "App Store" / "Google Play"
  * rendered at the server-resolved corner. The SDK never recomputes the position — it trusts the
- * backend's collision resolution (opposite the close button).
+ * backend's collision resolution (opposite the close button). Shared with the rewarded minigame
+ * ([SimulaRewardedActivity]).
  */
 @Composable
-private fun BoxScope.StorePromptBadge(
+internal fun BoxScope.StorePromptBadge(
     prompt: StorePrompt,
     onTap: () -> Unit,
+    // Inset from the safe-area edge. The interstitial uses 16dp (aligns with its close button);
+    // the rewarded minigame passes 8dp so the badge shares the reward pill's baseline.
+    edgePadding: Dp = 16.dp,
 ) {
-    val label = if (prompt.platform == StorePromptPlatform.IOS) "▶| App Store" else "▶| Google Play"
+    val label = if (prompt.platform == StorePromptPlatform.IOS) "App Store" else "Google Play"
     val alignment = when (prompt.position) {
         ClosePosition.TOP_RIGHT -> Alignment.TopEnd
         ClosePosition.TOP_LEFT -> Alignment.TopStart
         ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
     }
-    Box(
+    // Compact AppLovin-style pill: a filled skip-next glyph then the store name, with tight
+    // padding, a fully-rounded (capsule) outline, and a small gap between the two.
+    Row(
         modifier = Modifier
             .align(alignment)
             .windowInsetsPadding(WindowInsets.safeDrawing)
-            .padding(16.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .background(Color(0xA6000000))
+            .padding(edgePadding)
+            .clip(RoundedCornerShape(percent = 50))
+            .background(Color(0x99000000))
             .clickable(onClick = onTap)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        SkipNextIcon(size = 7.dp, color = Color.White)
+        Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * The filled "skip-next" glyph (▶|) — a right-pointing triangle with a trailing vertical bar,
+ * matching the Material `skip_next` icon (and AppLovin's store-prompt badge). Drawn as a vector
+ * path so it renders crisply at any [size] without a Material-icons font dependency.
+ */
+@Composable
+private fun SkipNextIcon(size: Dp, color: Color) {
+    Canvas(modifier = Modifier.size(size)) {
+        // Material skip_next geometry, normalized to a 12×12 content box (the icon's drawn region
+        // inside the standard 24×24 viewport): triangle x0→8.5, gap, bar x10→12, both full-height.
+        val u = this.size.minDimension / 12f
+        drawPath(
+            path = Path().apply {
+                moveTo(0f, 0f)
+                lineTo(8.5f * u, 6f * u)
+                lineTo(0f, 12f * u)
+                close()
+            },
+            color = color,
+        )
+        drawRect(
+            color = color,
+            topLeft = Offset(10f * u, 0f),
+            size = Size(2f * u, 12f * u),
+        )
     }
 }
 

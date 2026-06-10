@@ -27,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -46,17 +47,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Hosts an ad creative and, when it closes, fetches a fallback ad (`/minigames/fallback_ad/{adId}`)
- * and shows it before fully closing — mirroring the declarative minigame's post-game ad flow. Used
- * by [SimulaInterstitialActivity] / [SimulaRewardedActivity].
+ * Hosts an ad creative and, when it closes, fetches the serve's fallback ad screens
+ * (`GET /load/fallbacks/{impressionId}`) and reveals them in order before fully closing —
+ * mirroring the declarative minigame's post-game ad flow. Used by
+ * [SimulaInterstitialActivity] / [SimulaRewardedActivity].
  *
  * [content] renders the primary creative and is given an `onClose` to call when the user dismisses
- * it. If a fallback ad is returned it's shown next; either way [onFullyClosed] fires when everything
- * is done (so the Activity can finish).
+ * it. Each returned screen (campaign creative, then the "Get the App" end screen) is shown next, one
+ * per close tap; either way [onFullyClosed] fires when everything is done (so the Activity can
+ * finish).
  */
 @Composable
 internal fun FallbackAdHost(
-    adId: String,
+    impressionId: String,
     onFullyClosed: () -> Unit,
     content: @Composable (onClose: () -> Unit) -> Unit,
 ) {
@@ -64,20 +67,34 @@ internal fun FallbackAdHost(
 
     when (val p = phase) {
         FallbackPhase.Content -> content {
-            // Primary creative closed → try to fetch a fallback ad before finishing.
+            // Primary creative closed → try to fetch the fallback screens before finishing.
             phase = FallbackPhase.Fetching
             SimulaScope.launch {
-                val url = runCatching {
-                    if (adId.isNotBlank()) SimulaApiClient.fetchAdForMinigame(adId) else null
-                }.getOrNull()
+                val ads = runCatching {
+                    if (impressionId.isNotBlank()) SimulaApiClient.fetchFallbacks(impressionId) else emptyList()
+                }.getOrDefault(emptyList())
                 withContext(Dispatchers.Main) {
-                    phase = if (!url.isNullOrBlank()) FallbackPhase.Showing(url) else FallbackPhase.Done
+                    phase = if (ads.isNotEmpty()) FallbackPhase.Showing(ads, index = 0) else FallbackPhase.Done
                 }
             }
         }
         // Brief, on a black backdrop (the fetch is fast); avoids a flash of the host behind.
         FallbackPhase.Fetching -> Box(Modifier.fillMaxSize().background(Color.Black))
-        is FallbackPhase.Showing -> FallbackAdOverlay(iframeUrl = p.url, adId = adId, onClose = { phase = FallbackPhase.Done })
+        is FallbackPhase.Showing -> {
+            val ad = p.ads[p.index]
+            // key() so each screen gets fresh overlay state (countdown, WebView) — without it the
+            // next screen would inherit the previous one's elapsed countdown and loaded page.
+            key(p.index) {
+                FallbackAdOverlay(
+                    iframeUrl = ad.iframeUrl,
+                    adId = ad.adId,
+                    onClose = {
+                        // Reveal the next screen on each close tap; done after the last one.
+                        phase = if (p.index + 1 < p.ads.size) p.copy(index = p.index + 1) else FallbackPhase.Done
+                    },
+                )
+            }
+        }
         FallbackPhase.Done -> LaunchedEffect(Unit) { onFullyClosed() }
     }
 }
@@ -85,7 +102,7 @@ internal fun FallbackAdHost(
 private sealed interface FallbackPhase {
     data object Content : FallbackPhase
     data object Fetching : FallbackPhase
-    data class Showing(val url: String) : FallbackPhase
+    data class Showing(val ads: List<SimulaApiClient.FallbackAd>, val index: Int) : FallbackPhase
     data object Done : FallbackPhase
 }
 
@@ -96,9 +113,10 @@ private sealed interface FallbackPhase {
 @Composable
 private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Unit) {
     var countdown by remember { mutableStateOf(5) }
-    val ring = remember { Animatable(1f) }
+    // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
+    val ring = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
-        launch { ring.animateTo(0f, tween(5000, easing = LinearEasing)) }
+        launch { ring.animateTo(1f, tween(5000, easing = LinearEasing)) }
         repeat(5) { delay(1000); countdown-- }
     }
     // Back can only close once the countdown elapses (parity with the creative's gated close).
@@ -155,7 +173,7 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
                             .background(Color.Black.copy(alpha = 0.5f)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("✕", color = Color.White, fontSize = 10.sp)
+                        Text("✕", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             } else {

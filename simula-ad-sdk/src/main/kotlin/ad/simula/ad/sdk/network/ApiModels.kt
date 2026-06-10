@@ -60,6 +60,24 @@ internal data class MinigameApiResponse(
 @Serializable
 internal data class AdResponseBody(
     @SerialName("ad_id") val adId: String? = null,
+    // The minigame serve id — the handle for `GET /load/fallbacks/{impression_id}`.
+    @SerialName("serve_id") val serveId: String? = null,
+    @SerialName("iframe_url") val iframeUrl: String? = null,
+)
+
+/** Payload from `GET /load/fallbacks/{impression_id}` — every ad screen linked to the serve
+ * (campaign creative, then the "Get the App" end screen) in reveal order. */
+@Serializable
+internal data class FallbackAdsApiResponse(
+    @SerialName("impression_id") val impressionId: String = "",
+    val ads: List<FallbackAdBody> = emptyList(),
+)
+
+@Serializable
+internal data class FallbackAdBody(
+    // Each screen carries its own ad id (the per-screen impression for report/tracking).
+    @SerialName("ad_id") val adId: String = "",
+    val html: String? = null,
     @SerialName("iframe_url") val iframeUrl: String? = null,
 )
 
@@ -86,7 +104,9 @@ internal data class AdLoadRequestBody(
 
 @Serializable
 internal data class AdLoadApiResponse(
-    @SerialName("ad_id") val adId: String = "",
+    // The impression (minigame serve) id — the SDK's single handle for fallbacks,
+    // tracking and reporting. Nullable: the server sends an explicit null on a no-fill.
+    @SerialName("impression_id") val impressionId: String? = null,
     @SerialName("ad_inserted") val adInserted: Boolean = false,
     @SerialName("ad_unit_id") val adUnitId: String = "",
     val destination: String = "appstore",
@@ -242,10 +262,16 @@ internal data class RewardedInitRequestBody(
 
 @Serializable
 internal data class RewardedInitApiResponse(
-    @SerialName("serve_id") val serveId: String = "",
+    // The impression (minigame serve) id — replaces the old `serve_id`/`ad_id` pair as the
+    // single handle for verify-reward, fallbacks, tracking and reporting.
+    @SerialName("impression_id") val impressionId: String = "",
     @SerialName("iframe_url") val iframeUrl: String = "",
-    @SerialName("ad_id") val adId: String = "",
     @SerialName("duration_seconds") val durationSeconds: Int = 0,
+    // Mirrors the interstitial response: drives the mid-ad store prompt + its tap routing.
+    // Null/absent → no store prompt (today's behavior).
+    val destination: String = "appstore",
+    @SerialName("tracking_url") val trackingUrl: String? = null,
+    @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
 )
 
 @Serializable

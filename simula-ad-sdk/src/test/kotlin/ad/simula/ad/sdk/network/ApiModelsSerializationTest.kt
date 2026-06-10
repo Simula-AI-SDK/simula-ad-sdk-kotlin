@@ -80,9 +80,45 @@ class ApiModelsSerializationTest {
 
     @Test
     fun `ad response body maps snake_case ids`() {
-        val r = json.decodeFromString<AdResponseBody>("""{"ad_id":"a1","iframe_url":"https://z"}""")
+        val r = json.decodeFromString<AdResponseBody>(
+            """{"ad_id":"a1","serve_id":"srv_1","iframe_url":"https://z"}""",
+        )
         assertEquals("a1", r.adId)
+        assertEquals("srv_1", r.serveId)
         assertEquals("https://z", r.iframeUrl)
+    }
+
+    // ── Fallback ads (GET /load/fallbacks/{impression_id}) ──────────────────
+
+    @Test
+    fun `fallbacks response decodes screens in order`() {
+        val payload = """
+            {"impression_id":"imp_1","ads":[
+              {"ad_id":"a1","html":"<html>1</html>","iframe_url":"https://i/1"},
+              {"ad_id":"a2","html":"<html>2</html>","iframe_url":"https://i/2"}
+            ]}
+        """.trimIndent()
+        val r = json.decodeFromString<FallbackAdsApiResponse>(payload)
+        assertEquals("imp_1", r.impressionId)
+        assertEquals(2, r.ads.size)
+        assertEquals("a1", r.ads[0].adId)
+        assertEquals("https://i/1", r.ads[0].iframeUrl)
+        assertEquals("a2", r.ads[1].adId)
+    }
+
+    @Test
+    fun `fallbacks response tolerates empty and partial payloads`() {
+        val empty = json.decodeFromString<FallbackAdsApiResponse>("""{"impression_id":"imp_1","ads":[]}""")
+        assertTrue(empty.ads.isEmpty())
+
+        val bare = json.decodeFromString<FallbackAdsApiResponse>("{}")
+        assertEquals("", bare.impressionId)
+        assertTrue(bare.ads.isEmpty())
+
+        val partial = json.decodeFromString<FallbackAdsApiResponse>("""{"ads":[{"ad_id":"a1"}]}""")
+        assertEquals("a1", partial.ads[0].adId)
+        assertNull(partial.ads[0].iframeUrl)
+        assertNull(partial.ads[0].html)
     }
 
     // ── Menu game click ──────────────────────────────────────────────────────

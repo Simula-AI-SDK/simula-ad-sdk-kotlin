@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.model.AdBehavior
 import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the rewarded Activity back to the [SimulaRewardedAd] instance. */
@@ -17,9 +18,15 @@ internal interface RewardedCallbacks {
 internal class RewardedPresentation(
     val iframeUrl: String,
     val durationSeconds: Int,
-    val adId: String,
+    // The impression id from /load/rewarded — the handle for tracking, reporting and fallbacks.
+    val impressionId: String,
     val apiKey: String,
     val callbacks: RewardedCallbacks,
+    // Mid-ad store prompt config + tap routing (mirrors the interstitial). A null [adBehavior]
+    // (no `store_prompt`) means no badge is shown.
+    val adBehavior: AdBehavior? = null,
+    val trackingUrl: String? = null,
+    val destination: String = "appstore",
 ) {
     /** Guards a duplicate DISPLAYED/impression if the Activity is recreated on a config change. */
     var displayedReported = false

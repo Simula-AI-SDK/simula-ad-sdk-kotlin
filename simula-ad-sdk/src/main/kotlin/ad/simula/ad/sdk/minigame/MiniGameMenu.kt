@@ -42,6 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -130,10 +131,15 @@ fun MiniGameMenu(
     var catalogLoading by remember { mutableStateOf(true) }
     var catalogError by remember { mutableStateOf(false) }
     var adFetched by remember { mutableStateOf(false) }
-    var adIframeUrl by remember { mutableStateOf<String?>(null) }
-    var currentAdId by remember { mutableStateOf<String?>(null) }
+    // Post-game ad screens (`GET /load/fallbacks/{serveId}`), revealed one per close tap.
+    var fallbackAds by remember { mutableStateOf<List<SimulaApiClient.FallbackAd>>(emptyList()) }
+    var fallbackAdIndex by remember { mutableStateOf(0) }
+    var currentServeId by remember { mutableStateOf<String?>(null) }
     var lastGameHeightDp by remember { mutableStateOf<Float?>(null) }
     var lastGameWasBottomSheet by remember { mutableStateOf(false) }
+
+    // The fallback screen currently on display; null when the overlay is closed.
+    val currentFallbackAd = fallbackAds.getOrNull(fallbackAdIndex)
 
     // ── Theme (parsed once per theme identity) ───────────────────────────────
     val resolvedTheme = remember(theme) { theme.resolve() }
@@ -191,30 +197,30 @@ fun MiniGameMenu(
         }
         selectedGameId = gameId
         adFetched = false
-        currentAdId = null
+        fallbackAds = emptyList()
+        fallbackAdIndex = 0
+        currentServeId = null
     }
 
-    fun handleAdIdReceived(adId: String) {
-        currentAdId = adId
+    fun handleServeIdReceived(serveId: String) {
+        currentServeId = serveId
     }
 
     fun handleIframeClose() {
         // Closing the game returns to the catalog menu (isOpen stays true) rather
-        // than dismissing the whole menu. If a post-game ad was fetched, the ad
-        // overlay shows first; otherwise clearing selectedGameId re-reveals the
-        // catalog. The menu is dismissed only by an explicit close/back action.
+        // than dismissing the whole menu. If post-game ad screens were fetched, the
+        // ad overlay shows them first (in reveal order); otherwise clearing
+        // selectedGameId re-reveals the catalog. The menu is dismissed only by an
+        // explicit close/back action.
         if (!adFetched) {
-            val aid = currentAdId
-            if (aid != null) {
+            val sid = currentServeId
+            if (sid != null) {
                 scope.launch {
-                    try {
-                        val url = SimulaApiClient.fetchAdForMinigame(aid)
-                        if (url != null) {
-                            adIframeUrl = url
-                            adFetched = true
-                        }
-                    } catch (_: Exception) {
-                        // Ad fetch failed -- no ad to show
+                    val ads = SimulaApiClient.fetchFallbacks(sid)
+                    if (ads.isNotEmpty()) {
+                        fallbackAds = ads
+                        fallbackAdIndex = 0
+                        adFetched = true
                     }
                     selectedGameId = null
                 }
@@ -227,9 +233,15 @@ fun MiniGameMenu(
     }
 
     fun handleAdIframeClose() {
-        // Returns to the catalog menu (isOpen stays true) instead of dismissing;
+        // Reveal the next fetched ad screen on each close tap; after the last one,
+        // return to the catalog menu (isOpen stays true) instead of dismissing —
         // the menu is dismissed only by an explicit close/back action.
-        adIframeUrl = null
+        if (fallbackAdIndex + 1 < fallbackAds.size) {
+            fallbackAdIndex += 1
+        } else {
+            fallbackAds = emptyList()
+            fallbackAdIndex = 0
+        }
     }
 
     fun getInitials(name: String): String {
@@ -240,21 +252,21 @@ fun MiniGameMenu(
     }
 
     // ── Early return if nothing to show ──────────────────────────────────────
-    if (!isOpen && selectedGameId == null && adIframeUrl == null) return
+    if (!isOpen && selectedGameId == null && currentFallbackAd == null) return
 
     // ── Back handler chain: ad -> game -> menu ───────────────────────────────
-    BackHandler(enabled = adIframeUrl != null) {
+    BackHandler(enabled = currentFallbackAd != null) {
         handleAdIframeClose()
     }
-    BackHandler(enabled = selectedGameId != null && adIframeUrl == null) {
+    BackHandler(enabled = selectedGameId != null && currentFallbackAd == null) {
         handleIframeClose()
     }
-    BackHandler(enabled = isOpen && selectedGameId == null && adIframeUrl == null) {
+    BackHandler(enabled = isOpen && selectedGameId == null && currentFallbackAd == null) {
         handleClose()
     }
 
     // ── Dialog 1: Menu Card ──────────────────────────────────────────────
-        if (isOpen && selectedGameId == null && adIframeUrl == null) {
+        if (isOpen && selectedGameId == null && currentFallbackAd == null) {
             val configuration = LocalConfiguration.current
             val screenWidthDp = configuration.screenWidthDp
             val isMobile = screenWidthDp < 768
@@ -584,7 +596,7 @@ fun MiniGameMenu(
         }
 
         // ── Dialog 2: Ad Overlay ─────────────────────────────────────────────
-        if (adIframeUrl != null) {
+        if (currentFallbackAd != null) {
             Dialog(
                 onDismissRequest = { handleAdIframeClose() },
                 properties = DialogProperties(
@@ -593,13 +605,16 @@ fun MiniGameMenu(
                 ),
             ) {
                 FullscreenDialogWindowConfig()
-                AdIframeOverlay(
-                    url = adIframeUrl!!,
-                    onClose = { handleAdIframeClose() },
-                    playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
-                    playableBorderColor = theme.playableBorderColor ?: "#262626",
-                    adId = currentAdId ?: "",
-                )
+                // key() so each revealed screen gets fresh overlay state (countdown, WebView).
+                key(fallbackAdIndex) {
+                    AdIframeOverlay(
+                        url = currentFallbackAd.iframeUrl,
+                        onClose = { handleAdIframeClose() },
+                        playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
+                        playableBorderColor = theme.playableBorderColor ?: "#262626",
+                        adId = currentFallbackAd.adId,
+                    )
+                }
             }
         }
 
@@ -622,7 +637,7 @@ fun MiniGameMenu(
                     messages = messages,
                     delegateChar = delegateChar,
                     onClose = { handleIframeClose() },
-                    onAdIdReceived = { handleAdIdReceived(it) },
+                    onServeIdReceived = { handleServeIdReceived(it) },
                     menuId = menuId,
                     playableHeight = theme.playableHeight,
                     playableBorderColor = theme.playableBorderColor ?: "#262626",
@@ -674,11 +689,12 @@ private fun AdIframeOverlay(
     val view = LocalView.current
 
     var adCountdown by remember { mutableStateOf(5) }
-    val ringProgress = remember { Animatable(1f) }
+    // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
+    val ringProgress = remember { Animatable(0f) }
     var adPageLoaded by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        launch { ringProgress.animateTo(0f, tween(5000, easing = LinearEasing)) }
+        launch { ringProgress.animateTo(1f, tween(5000, easing = LinearEasing)) }
         repeat(5) { delay(1000); adCountdown-- }
     }
 
@@ -822,7 +838,7 @@ private fun AdIframeOverlay(
                             val arcSize = size.minDimension - strokeWidth
                             drawArc(
                                 color = Color.White,
-                                startAngle = -90f + 360f * (1f - ringProgress.value),
+                                startAngle = -90f,
                                 sweepAngle = 360f * ringProgress.value,
                                 useCenter = false,
                                 topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f),
@@ -834,7 +850,7 @@ private fun AdIframeOverlay(
                             text = "$adCountdown",
                             color = Color.White,
                             fontSize = 9.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             textAlign = TextAlign.Center,
                         )
                     }

@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -91,7 +92,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             ) {
                 // On close, fetch + show a fallback ad before finishing (minigame parity). CLOSE is
                 // reported when the minigame closes; the Activity finishes after the fallback.
-                FallbackAdHost(adId = p.adId, onFullyClosed = ::finishAd) { onClose ->
+                FallbackAdHost(impressionId = p.impressionId, onFullyClosed = ::finishAd) { onClose ->
                     RewardedMinigame(
                         presentation = p,
                         onFinish = { earned ->
@@ -172,6 +173,18 @@ private fun RewardedMinigame(
         mutableStateOf(RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds))
     }
 
+    // Mid-ad store prompt — shown from half the play-to-earn duration until the reward unlocks.
+    // Initialized true on a config-change recreation that resumes past the halfway mark.
+    val storePrompt = presentation.adBehavior?.storePrompt
+    var storePromptVisible by remember {
+        mutableStateOf(
+            storePrompt != null && storePrompt.enabled &&
+                presentation.durationSeconds > 0 &&
+                presentation.accumulatedPlayTimeMs >= presentation.durationSeconds * 1000L / 2,
+        )
+    }
+
+    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
     // DISPLAYED + impression fire once the creative first composes. Guarded so an
@@ -180,8 +193,8 @@ private fun RewardedMinigame(
         if (!presentation.displayedReported) {
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
-            if (presentation.adId.isNotBlank()) {
-                SimulaScope.launch { SimulaApiClient.trackImpression(presentation.adId, presentation.apiKey) }
+            if (presentation.impressionId.isNotBlank()) {
+                SimulaScope.launch { SimulaApiClient.trackImpression(presentation.impressionId, presentation.apiKey) }
             }
         }
     }
@@ -213,6 +226,10 @@ private fun RewardedMinigame(
                 presentation.accumulatedPlayTimeMs += now - lastTickMs
                 lastTickMs = now
                 secondsLeft = RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)
+                // Reveal the store prompt at the halfway point to the reward (mid play-to-earn).
+                if (presentation.accumulatedPlayTimeMs >= presentation.durationSeconds * 1000L / 2) {
+                    storePromptVisible = true
+                }
                 if (RewardGate.isEarned(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)) {
                     presentation.rewardEarned = true
                     rewardEarned = true
@@ -271,8 +288,27 @@ private fun RewardedMinigame(
                 .padding(8.dp),
         )
 
+        // Mid-ad store prompt — appears at half the play-to-earn duration and is removed the instant
+        // the reward unlocks (the reward/close pill takes over). Rendered at the server-resolved
+        // corner (verbatim); a tap routes to the advertised store via the shared CTA router.
+        if (storePrompt != null && storePrompt.enabled && storePromptVisible && !rewardEarned) {
+            StorePromptBadge(
+                prompt = storePrompt,
+                // Match the reward/close pill's 8dp inset so both share the same top baseline.
+                edgePadding = 8.dp,
+                onTap = {
+                    CreativeCtaRouter.open(
+                        context.applicationContext,
+                        presentation.trackingUrl,
+                        presentation.destination,
+                        presentation.adBehavior?.storeOpen,
+                    )
+                },
+            )
+        }
+
         // Persistent ad-info "i" + report sheet (required disclosure). Last so its sheet overlays.
-        AdInfoReportOverlay(adId = presentation.adId, apiKey = presentation.apiKey)
+        AdInfoReportOverlay(adId = presentation.impressionId, apiKey = presentation.apiKey)
     }
 }
 
