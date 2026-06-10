@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.minigame
 
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.annotation.SuppressLint
 import android.content.ComponentCallbacks2
 import android.content.Context
@@ -56,12 +57,20 @@ internal object WebViewPool {
      */
     @MainThread
     fun acquire(context: Context, client: WebViewClient): WebView {
+        val startNanos = System.nanoTime()
         registerTrimCallbacks(context)
-        val webView = idle.removeFirstOrNull() ?: create(context)
+        val pooled = idle.removeFirstOrNull()
+        val webView = pooled ?: create(context)
         (webView.context as? MutableContextWrapper)?.baseContext = context
         webView.webViewClient = client
         val appContext = context.applicationContext
         mainHandler.post { prewarm(appContext) }
+        // Warm (pool hit) vs cold (had to create) — surfaces prewarm effectiveness + cold cost.
+        Telemetry.recordOperation(
+            name = if (pooled != null) "webview_acquire_warm" else "webview_acquire_cold",
+            durationMs = (System.nanoTime() - startNanos) / 1_000_000,
+            success = true,
+        )
         return webView
     }
 

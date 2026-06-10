@@ -14,6 +14,7 @@ import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
 import android.content.Intent
 import android.os.Handler
@@ -72,6 +73,10 @@ class SimulaInterstitialAd(val adUnitId: String) {
     @Volatile
     private var loadGeneration: Int = 0
 
+    // Monotonic stage markers for telemetry latencies (0 = not yet started).
+    private var loadStartNanos = 0L
+    private var showStartNanos = 0L
+
     /**
      * Preload an interstitial for the given character context.
      *
@@ -129,6 +134,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
         val generation = ++loadGeneration
         currentKey = key
         currentKeyAtMs = now
+        loadStartNanos = System.nanoTime()
         state = State.Loading
         SimulaScope.launch {
             try {
@@ -163,12 +169,29 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
+                Telemetry.recordLifecycle(
+                    stage = "load_success",
+                    adFormat = AD_FORMAT,
+                    adUnitId = adUnitId,
+                    adId = ad.impressionId,
+                    serveId = null,
+                    durationMs = elapsedSinceLoad(),
+                    errorCode = null,
+                )
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
                     state = State.Ready(ad, SystemClock.elapsedRealtime())
                     listener?.onAdLoaded(this@SimulaInterstitialAd)
                 }
             } catch (e: Exception) {
+                // Genuine exception (network/decoding) — always-sent, deduped handled error,
+                // in addition to the sampled `load_fail` lifecycle event from failLoad().
+                Telemetry.recordError(
+                    signature = "interstitial:load",
+                    errorCode = e.javaClass.simpleName,
+                    message = e.message,
+                    breadcrumb = "SimulaInterstitialAd.load",
+                )
                 failLoadOnMain(generation, SimulaAdError.Network(e))
             }
         }
@@ -338,12 +361,13 @@ class SimulaInterstitialAd(val adUnitId: String) {
         }
 
         val token = UUID.randomUUID().toString()
+        showStartNanos = System.nanoTime()
         InterstitialHandoff.put(
             token,
             InterstitialPresentation(
                 ad = ad,
                 apiKey = SimulaAds.apiKey,
-                callbacks = bridge(),
+                callbacks = bridge(ad.impressionId),
             ),
         )
 
@@ -355,17 +379,20 @@ class SimulaInterstitialAd(val adUnitId: String) {
         state = State.Showing
     }
 
-    private fun bridge(): InterstitialCallbacks = object : InterstitialCallbacks {
+    private fun bridge(adId: String): InterstitialCallbacks = object : InterstitialCallbacks {
         override fun onDisplayed() {
+            Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, null, elapsedSinceShow(), null)
             listener?.onAdDisplayed(this@SimulaInterstitialAd)
         }
 
         override fun onClicked() {
+            Telemetry.recordLifecycle("click", AD_FORMAT, adUnitId, adId, null, null, null)
             listener?.onAdClicked(this@SimulaInterstitialAd)
         }
 
         override fun onClosed() {
             state = State.Idle
+            Telemetry.recordLifecycle("closed", AD_FORMAT, adUnitId, adId, null, null, null)
             listener?.onAdClosed(this@SimulaInterstitialAd)
             // Auto-preload the next ad (iOS parity), reusing the last character context.
             load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
@@ -385,6 +412,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
 
     private fun failLoad(error: SimulaAdError) {
         state = State.Idle
+        Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, elapsedSinceLoad(), error.telemetryCode())
         listener?.onAdFailedToLoad(this, error)
     }
 
@@ -408,13 +436,24 @@ class SimulaInterstitialAd(val adUnitId: String) {
         } else {
             SimulaAdError.DuplicateRequest.loading()
         }
+        // Observable like any other rejected load() (sampled); no real load ran, so no duration.
+        Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, null, error.telemetryCode())
         listener?.onAdFailedToLoad(this, error)
     }
 
     private fun failShow(error: SimulaAdError) {
         // State is unchanged (stays Ready / Showing) — matches Swift behavior.
+        Telemetry.recordLifecycle("show_fail", AD_FORMAT, adUnitId, null, null, null, error.telemetryCode())
         listener?.onAdFailedToDisplay(this, error)
     }
+
+    /** Monotonic ms since load() began (null if not started). */
+    private fun elapsedSinceLoad(): Long? =
+        if (loadStartNanos == 0L) null else (System.nanoTime() - loadStartNanos) / 1_000_000
+
+    /** Monotonic ms since present() began (null if not started). */
+    private fun elapsedSinceShow(): Long? =
+        if (showStartNanos == 0L) null else (System.nanoTime() - showStartNanos) / 1_000_000
 
     /**
      * Returns true if already on the main thread (caller should proceed); returns
@@ -434,6 +473,9 @@ class SimulaInterstitialAd(val adUnitId: String) {
         const val DEDUP_WINDOW_MS = 5 * 60 * 1000L // 5 minutes
     }
 }
+
+/** Ad-format tag on this class's telemetry events. */
+private const val AD_FORMAT = "interstitial"
 
 /** A self-contained placeholder creative so [SimulaInterstitialAd.showPreview] can render the
  * close-button A/B chrome over a visible surface without fetching a network creative. */

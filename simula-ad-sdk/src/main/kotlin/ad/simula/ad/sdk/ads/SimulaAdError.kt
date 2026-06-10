@@ -65,3 +65,16 @@ sealed class SimulaAdError(message: String, cause: Throwable? = null) : Exceptio
     /** An underlying network/decoding error occurred during load. */
     class Network(cause: Throwable?) : SimulaAdError("Network error", cause)
 }
+
+/** Stable, low-cardinality code for this error, used as the `error_code` on telemetry events. */
+internal fun SimulaAdError.telemetryCode(): String = when (this) {
+    SimulaAdError.NotInitialized -> "not_initialized"
+    SimulaAdError.NoSession -> "no_session"
+    SimulaAdError.NoFill -> "no_fill"
+    SimulaAdError.NotReady -> "not_ready"
+    SimulaAdError.Stale -> "stale"
+    is SimulaAdError.DuplicateRequest -> "duplicate_request"
+    SimulaAdError.AlreadyShowing -> "already_showing"
+    SimulaAdError.NoPresentationContext -> "no_presentation_context"
+    is SimulaAdError.Network -> "network"
+}

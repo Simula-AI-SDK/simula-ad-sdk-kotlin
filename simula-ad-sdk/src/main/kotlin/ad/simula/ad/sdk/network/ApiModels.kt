@@ -21,6 +21,10 @@ import kotlinx.serialization.Serializable
 @Serializable
 internal data class SessionResponse(
     @SerialName("sessionId") val sessionId: String? = null,
+    // Optional server-side telemetry directive: a runtime kill-switch + perf sampling rate,
+    // letting telemetry volume be dialed without an SDK release. Absent → SDK defaults apply.
+    @SerialName("telemetry_enabled") val telemetryEnabled: Boolean? = null,
+    @SerialName("telemetry_sample_rate") val telemetrySampleRate: Double? = null,
 )
 
 @Serializable
