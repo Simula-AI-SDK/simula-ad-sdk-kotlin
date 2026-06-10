@@ -30,6 +30,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -62,6 +63,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
@@ -604,7 +606,7 @@ private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
 // ── Mid-ad store prompt ─────────────────────────────────────────────────────────
 
 /**
- * The mid-ad store prompt (`store_prompt`): a tappable "▶| App Store" / "▶| Google Play" badge
+ * The mid-ad store prompt (`store_prompt`): a tappable skip-next ▶| badge labelled "App Store" / "Google Play"
  * rendered at the server-resolved corner. The SDK never recomputes the position — it trusts the
  * backend's collision resolution (opposite the close button). Shared with the rewarded minigame
  * ([SimulaRewardedActivity]).
@@ -617,24 +619,56 @@ internal fun BoxScope.StorePromptBadge(
     // the rewarded minigame passes 8dp so the badge shares the reward pill's baseline.
     edgePadding: Dp = 16.dp,
 ) {
-    val label = if (prompt.platform == StorePromptPlatform.IOS) "▶| App Store" else "▶| Google Play"
+    val label = if (prompt.platform == StorePromptPlatform.IOS) "App Store" else "Google Play"
     val alignment = when (prompt.position) {
         ClosePosition.TOP_RIGHT -> Alignment.TopEnd
         ClosePosition.TOP_LEFT -> Alignment.TopStart
         ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
     }
-    // Sized to match the rewarded minigame's "Play to earn" status pill (RewardClosePill).
-    Box(
+    // Compact AppLovin-style pill: a filled skip-next glyph then the store name, with tight
+    // padding, a fully-rounded (capsule) outline, and a small gap between the two.
+    Row(
         modifier = Modifier
             .align(alignment)
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(edgePadding)
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(percent = 50))
             .background(Color(0x99000000))
             .clickable(onClick = onTap)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+        SkipNextIcon(size = 7.dp, color = Color.White)
+        Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * The filled "skip-next" glyph (▶|) — a right-pointing triangle with a trailing vertical bar,
+ * matching the Material `skip_next` icon (and AppLovin's store-prompt badge). Drawn as a vector
+ * path so it renders crisply at any [size] without a Material-icons font dependency.
+ */
+@Composable
+private fun SkipNextIcon(size: Dp, color: Color) {
+    Canvas(modifier = Modifier.size(size)) {
+        // Material skip_next geometry, normalized to a 12×12 content box (the icon's drawn region
+        // inside the standard 24×24 viewport): triangle x0→8.5, gap, bar x10→12, both full-height.
+        val u = this.size.minDimension / 12f
+        drawPath(
+            path = Path().apply {
+                moveTo(0f, 0f)
+                lineTo(8.5f * u, 6f * u)
+                lineTo(0f, 12f * u)
+                close()
+            },
+            color = color,
+        )
+        drawRect(
+            color = color,
+            topLeft = Offset(10f * u, 0f),
+            size = Size(2f * u, 12f * u),
+        )
     }
 }
 
