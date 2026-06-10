@@ -10,7 +10,7 @@ import org.junit.Test
 
 /**
  * Contract tests for the rewarded minigame request/response models
- * (`POST /minigames/init/rewarded` and `POST /minigames/verify-reward`). Mirrors the
+ * (`POST /load/rewarded` and `POST /minigames/verify-reward`). Mirrors the
  * production [SimulaApiClient] JSON config so these exercise the same decode/encode
  * behavior the client relies on. Pure kotlinx.serialization on the JVM.
  */
@@ -53,34 +53,32 @@ class RewardedParsingTest {
     fun `init response decodes all fields`() {
         val payload = """
             {
-              "serve_id": "srv_1",
+              "impression_id": "imp_1",
               "iframe_url": "https://cdn/play",
-              "ad_id": "ad_9",
               "duration_seconds": 30
             }
         """.trimIndent()
 
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
-        assertEquals("srv_1", r.serveId)
+        assertEquals("imp_1", r.impressionId)
         assertEquals("https://cdn/play", r.iframeUrl)
-        assertEquals("ad_9", r.adId)
         assertEquals(30, r.durationSeconds)
     }
 
     @Test
     fun `init response empty object decodes to safe defaults`() {
         val r = json.decodeFromString<RewardedInitApiResponse>("{}")
-        assertEquals("", r.serveId)
+        assertEquals("", r.impressionId)
         assertEquals("", r.iframeUrl)
-        assertEquals("", r.adId)
         assertEquals(0, r.durationSeconds)
     }
 
     @Test
     fun `init response ignores unknown keys`() {
-        val payload = """{"serve_id":"s","iframe_url":"u","future_field":42,"nested":{"a":1}}"""
+        // Legacy `serve_id`/`ad_id` keys are unknown now and must be ignored, not remapped.
+        val payload = """{"impression_id":"i","iframe_url":"u","serve_id":"s","ad_id":"a","future_field":42}"""
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
-        assertEquals("s", r.serveId)
+        assertEquals("i", r.impressionId)
         assertEquals("u", r.iframeUrl)
     }
 

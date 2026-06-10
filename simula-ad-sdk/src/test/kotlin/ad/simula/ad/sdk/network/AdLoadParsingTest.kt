@@ -89,7 +89,7 @@ class AdLoadParsingTest {
     fun `full response decodes all fields`() {
         val payload = """
             {
-              "ad_id": "abc-123",
+              "impression_id": "abc-123",
               "ad_inserted": true,
               "ad_unit_id": "unit_1",
               "destination": "web",
@@ -101,7 +101,7 @@ class AdLoadParsingTest {
 
         val r = json.decodeFromString<AdLoadApiResponse>(payload)
 
-        assertEquals("abc-123", r.adId)
+        assertEquals("abc-123", r.impressionId)
         assertTrue(r.adInserted)
         assertEquals("unit_1", r.adUnitId)
         assertEquals("web", r.destination)
@@ -115,7 +115,7 @@ class AdLoadParsingTest {
     @Test
     fun `empty object decodes to safe defaults`() {
         val r = json.decodeFromString<AdLoadApiResponse>("{}")
-        assertEquals("", r.adId)
+        assertNull(r.impressionId)
         assertFalse(r.adInserted)
         assertEquals("", r.adUnitId)
         assertEquals("appstore", r.destination)
@@ -126,7 +126,7 @@ class AdLoadParsingTest {
 
     @Test
     fun `destination defaults to appstore when absent`() {
-        val r = json.decodeFromString<AdLoadApiResponse>("""{"ad_id":"x","ad_inserted":true}""")
+        val r = json.decodeFromString<AdLoadApiResponse>("""{"impression_id":"x","ad_inserted":true}""")
         assertEquals("appstore", r.destination)
     }
 
@@ -140,9 +140,9 @@ class AdLoadParsingTest {
 
     @Test
     fun `unknown keys are ignored`() {
-        val payload = """{"ad_id":"x","ad_inserted":true,"future_field":42,"nested":{"a":1}}"""
+        val payload = """{"impression_id":"x","ad_inserted":true,"future_field":42,"nested":{"a":1}}"""
         val r = json.decodeFromString<AdLoadApiResponse>(payload)
-        assertEquals("x", r.adId)
+        assertEquals("x", r.impressionId)
         assertTrue(r.adInserted)
     }
 
@@ -155,8 +155,17 @@ class AdLoadParsingTest {
     }
 
     @Test
+    fun `explicit null impression_id decodes without throwing`() {
+        // On a no-fill the server sends `impression_id: null` explicitly — the field must
+        // be nullable (the production Json config has no coerceInputValues).
+        val r = json.decodeFromString<AdLoadApiResponse>("""{"impression_id":null,"ad_inserted":false}""")
+        assertNull(r.impressionId)
+        assertFalse(r.adInserted)
+    }
+
+    @Test
     fun `missing optional fields use defaults`() {
-        val payload = """{"ad_id":"x","ad_inserted":true,"ad_unit_id":"u"}"""
+        val payload = """{"impression_id":"x","ad_inserted":true,"ad_unit_id":"u"}"""
         val r = json.decodeFromString<AdLoadApiResponse>(payload)
         assertEquals("appstore", r.destination)
         assertNull(r.renderedFormat)
@@ -170,7 +179,7 @@ class AdLoadParsingTest {
     fun `rendered_html decodes when present`() {
         val payload = """
             {
-              "ad_id": "abc-123",
+              "impression_id": "abc-123",
               "ad_inserted": true,
               "rendered_html": "<html><body>hi</body></html>"
             }
@@ -182,7 +191,7 @@ class AdLoadParsingTest {
     @Test
     fun `rendered_html absent is null`() {
         val r = json.decodeFromString<AdLoadApiResponse>(
-            """{"ad_id":"x","ad_inserted":true}""",
+            """{"impression_id":"x","ad_inserted":true}""",
         )
         assertNull(r.renderedHtml)
     }
@@ -191,7 +200,7 @@ class AdLoadParsingTest {
 
     @Test
     fun `ad_behavior absent maps to null domain`() {
-        val r = json.decodeFromString<AdLoadApiResponse>("""{"ad_id":"x","ad_inserted":true}""")
+        val r = json.decodeFromString<AdLoadApiResponse>("""{"impression_id":"x","ad_inserted":true}""")
         // Absent ad_behavior → null so the renderer falls back to today's literal behavior.
         assertNull(r.adBehavior)
         assertNull(r.adBehavior.toDomain())
@@ -202,7 +211,7 @@ class AdLoadParsingTest {
     @Test
     fun `ad_behavior full config maps to domain`() {
         val payload = """
-            {"ad_id":"x","ad_inserted":true,
+            {"impression_id":"x","ad_inserted":true,
              "creative":{"type":"playable","bundle_url":"https://b","ad_unit_type":"rewarded"},
              "experiment":{"experiment_id":"playable_close_q3","variant_id":"v1","layer":"close_chrome"},
              "ad_behavior":{"close":{"delay_seconds":3,"treatment":"countdown_circle",
@@ -239,7 +248,7 @@ class AdLoadParsingTest {
     @Test
     fun `ad_behavior empty object yields defaults`() {
         val r = json.decodeFromString<AdLoadApiResponse>(
-            """{"ad_id":"x","ad_inserted":true,"ad_behavior":{}}""",
+            """{"impression_id":"x","ad_inserted":true,"ad_behavior":{}}""",
         )
         assertNotNull(r.adBehavior)
         val b = r.adBehavior.toDomain()!!
@@ -368,10 +377,10 @@ class AdLoadParsingTest {
         // No creative node: adUnitType derives from the legacy `rendered_format` (the imperative
         // HTML model dropped the flat `rewarded` flag, so a stray `rewarded` key is ignored).
         val rewardedFormat = json.decodeFromString<AdLoadApiResponse>(
-            """{"ad_id":"x","ad_inserted":true,"rendered_format":"rewarded_video"}""",
+            """{"impression_id":"x","ad_inserted":true,"rendered_format":"rewarded_video"}""",
         )
         val r1 = SimulaApiClient.AdLoadResult(
-            adId = rewardedFormat.adId, adInserted = rewardedFormat.adInserted, adUnitId = rewardedFormat.adUnitId,
+            impressionId = rewardedFormat.impressionId.orEmpty(), adInserted = rewardedFormat.adInserted, adUnitId = rewardedFormat.adUnitId,
             destination = rewardedFormat.destination, renderedFormat = rewardedFormat.renderedFormat,
             trackingUrl = rewardedFormat.trackingUrl, renderedHtml = rewardedFormat.renderedHtml,
             adBehavior = null,
@@ -379,7 +388,7 @@ class AdLoadParsingTest {
         assertEquals(AdUnitType.REWARDED, r1.adUnitType)
 
         val plain = SimulaApiClient.AdLoadResult(
-            adId = "x", adInserted = true, adUnitId = "u", destination = "appstore",
+            impressionId = "x", adInserted = true, adUnitId = "u", destination = "appstore",
             renderedFormat = null, trackingUrl = null, renderedHtml = null, adBehavior = null,
         )
         assertEquals(AdUnitType.INTERSTITIAL, plain.adUnitType)

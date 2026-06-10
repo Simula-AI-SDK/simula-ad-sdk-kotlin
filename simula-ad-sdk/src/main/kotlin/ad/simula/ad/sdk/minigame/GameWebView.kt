@@ -75,7 +75,9 @@ fun GameWebView(
     messages: List<Message> = emptyList(),
     delegateChar: Boolean = true,
     onClose: () -> Unit,
-    onAdIdReceived: ((adId: String) -> Unit)? = null,
+    // The minigame serve id — the menu fetches the post-game ad screens with it
+    // (`GET /load/fallbacks/{serveId}`).
+    onServeIdReceived: ((serveId: String) -> Unit)? = null,
     charDesc: String? = null,
     menuId: String? = null,
     playableHeight: Any? = null,
@@ -126,8 +128,8 @@ fun GameWebView(
                 menuId = menuId,
             )
             iframeUrl = result.iframeUrl
-            if (result.adId.isNotBlank()) {
-                onAdIdReceived?.invoke(result.adId)
+            if (result.serveId.isNotBlank()) {
+                onServeIdReceived?.invoke(result.serveId)
             }
         } catch (e: Exception) {
             error = "Failed to load game. Please try again."

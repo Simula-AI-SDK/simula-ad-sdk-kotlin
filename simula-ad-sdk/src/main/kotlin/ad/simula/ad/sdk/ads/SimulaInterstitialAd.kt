@@ -269,7 +269,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
             } else null,
         )
         val ad = SimulaApiClient.AdLoadResult(
-            adId = "",                  // empty → CreativeInterstitial skips impression tracking
+            impressionId = "",          // empty → CreativeInterstitial skips impression tracking
             adInserted = true,
             adUnitId = adUnitId,
             destination = "appstore",

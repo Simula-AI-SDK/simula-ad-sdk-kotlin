@@ -30,7 +30,7 @@ import java.net.URLEncoder
  */
 internal object SimulaApiClient {
 
-    private const val API_BASE_URL = "https://simula-staging.ngrok.dev"
+    private const val API_BASE_URL = "https://simula-api-701226639755.us-central1.run.app"
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -171,6 +171,8 @@ internal object SimulaApiClient {
 
     data class MinigameResult(
         val adId: String,
+        // The minigame serve id — the handle for the post-game `fetchFallbacks` call.
+        val serveId: String,
         val iframeUrl: String,
     )
 
@@ -222,6 +224,7 @@ internal object SimulaApiClient {
 
         MinigameResult(
             adId = data.adResponse?.adId ?: "",
+            serveId = data.adResponse?.serveId ?: "",
             iframeUrl = data.adResponse?.iframeUrl ?: "",
         )
     }
@@ -229,7 +232,9 @@ internal object SimulaApiClient {
     // ── Native Creative Ad Load ─────────────────────────────────────────────
 
     data class AdLoadResult(
-        val adId: String,
+        // The impression id — the SDK's single handle for fallbacks, tracking and reporting.
+        // Empty on a no-fill.
+        val impressionId: String,
         val adInserted: Boolean,
         val adUnitId: String,
         val destination: String,
@@ -289,7 +294,7 @@ internal object SimulaApiClient {
         val data = json.decodeFromString<AdLoadApiResponse>(response.body)
 
         AdLoadResult(
-            adId = data.adId,
+            impressionId = data.impressionId.orEmpty(),
             adInserted = data.adInserted,
             adUnitId = data.adUnitId,
             destination = data.destination,
@@ -305,15 +310,21 @@ internal object SimulaApiClient {
     // ── Rewarded Minigame ───────────────────────────────────────────────────
 
     data class RewardedInitResult(
-        val serveId: String,
+        // The impression id — replaces the old `serve_id`/`ad_id` pair as the single handle
+        // for verify-reward, fallbacks, tracking and reporting.
+        val impressionId: String,
         val iframeUrl: String,
-        val adId: String,
         val durationSeconds: Int,
+        // Mid-ad store prompt routing + config (mirrors the interstitial). `adBehavior` is
+        // null when the payload omits `ad_behavior` → no store prompt.
+        val destination: String = "appstore",
+        val trackingUrl: String? = null,
+        val adBehavior: AdBehavior? = null,
     )
 
     /**
-     * Initialize a rewarded minigame via `POST /minigames/init/rewarded`. Returns the
-     * iframe URL, the `serve_id` tying this play to its later verification, and the
+     * Initialize a rewarded minigame via `POST /load/rewarded`. Returns the iframe URL,
+     * the `impression_id` tying this play to its later verification, and the
      * `duration_seconds` the SDK must enforce before a reward can be earned.
      */
     suspend fun loadRewarded(
@@ -348,10 +359,12 @@ internal object SimulaApiClient {
         }
         val data = json.decodeFromString<RewardedInitApiResponse>(response.body)
         RewardedInitResult(
-            serveId = data.serveId,
+            impressionId = data.impressionId,
             iframeUrl = data.iframeUrl,
-            adId = data.adId,
             durationSeconds = data.durationSeconds,
+            destination = data.destination,
+            trackingUrl = data.trackingUrl,
+            adBehavior = data.adBehavior.toDomain(),
         )
     }
 
@@ -391,26 +404,37 @@ internal object SimulaApiClient {
         json.decodeFromString<VerifyRewardApiResponse>(response.body)
     }
 
-    // ── Minigame Fallback Ad ────────────────────────────────────────────────
+    // ── Fallback Ads ────────────────────────────────────────────────────────
+
+    /** One post-play ad screen from `GET /load/fallbacks/{impression_id}`. [adId] is the
+     * screen's own impression id (drives its report overlay). */
+    data class FallbackAd(
+        val adId: String,
+        val iframeUrl: String,
+    )
 
     /**
-     * Fetch fallback ad iframe URL for a minigame ad ID.
-     * Returns the iframe URL or null if not available.
+     * Fetch the fallback ad screens for a serve via `GET /load/fallbacks/{impression_id}`,
+     * keyed on the `impression_id` the load call returned. Returns every screen linked to
+     * the serve (campaign creative, then the "Get the App" end screen) in reveal order.
+     * Side-effect-free on the backend; best-effort here — an empty list on any failure.
      */
-    suspend fun fetchAdForMinigame(adId: String): String? = withContext(Dispatchers.IO) {
+    suspend fun fetchFallbacks(impressionId: String): List<FallbackAd> = withContext(Dispatchers.IO) {
         try {
             val response = SimulaHttp.request(
-                url = "$API_BASE_URL/minigames/fallback_ad/$adId",
-                method = "POST",
+                url = "$API_BASE_URL/load/fallbacks/$impressionId",
+                method = "GET",
                 headers = jsonHeaders(),
-                body = "",
             )
-            if (!response.isSuccessful) return@withContext null
+            if (!response.isSuccessful) return@withContext emptyList()
 
-            val data = json.decodeFromString<MinigameApiResponse>(response.body)
-            data.adResponse?.iframeUrl
+            val data = json.decodeFromString<FallbackAdsApiResponse>(response.body)
+            data.ads.mapNotNull { ad ->
+                val url = ad.iframeUrl
+                if (url.isNullOrBlank()) null else FallbackAd(adId = ad.adId, iframeUrl = url)
+            }
         } catch (_: Exception) {
-            null
+            emptyList()
         }
     }
 

@@ -66,6 +66,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -124,7 +125,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
             ) {
                 // On close, fetch + show a fallback ad before finishing (minigame parity). CLOSED is
                 // reported when the primary creative closes; the Activity finishes after the fallback.
-                FallbackAdHost(adId = p.ad.adId, onFullyClosed = ::finishAd) { onClose ->
+                FallbackAdHost(impressionId = p.ad.impressionId, onFullyClosed = ::finishAd) { onClose ->
                     CreativeInterstitial(
                         presentation = p,
                         onFinish = {
@@ -310,10 +311,10 @@ private fun CreativeInterstitial(
         if (!presentation.displayedReported) {
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
-            // FIX M2: skip impression when there is no ad id.
-            if (ad.adId.isNotBlank()) {
+            // FIX M2: skip impression when there is no impression id.
+            if (ad.impressionId.isNotBlank()) {
                 SimulaScope.launch {
-                    SimulaApiClient.trackImpression(ad.adId, presentation.apiKey, ad.experiment)
+                    SimulaApiClient.trackImpression(ad.impressionId, presentation.apiKey, ad.experiment)
                 }
             }
         }
@@ -376,7 +377,7 @@ private fun CreativeInterstitial(
 
         // Persistent ad-info "i" + report sheet (required disclosure). Last so its sheet overlays.
         AdInfoReportOverlay(
-            adId = ad.adId,
+            adId = ad.impressionId,
             apiKey = presentation.apiKey,
             closeAtBottomLeft = (behavior?.close?.position ?: CloseBehavior().position) == ClosePosition.BOTTOM_LEFT,
         )
@@ -604,12 +605,16 @@ private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
 /**
  * The mid-ad store prompt (`store_prompt`): a tappable "▶| App Store" / "▶| Google Play" badge
  * rendered at the server-resolved corner. The SDK never recomputes the position — it trusts the
- * backend's collision resolution (opposite the close button).
+ * backend's collision resolution (opposite the close button). Shared with the rewarded minigame
+ * ([SimulaRewardedActivity]).
  */
 @Composable
-private fun BoxScope.StorePromptBadge(
+internal fun BoxScope.StorePromptBadge(
     prompt: StorePrompt,
     onTap: () -> Unit,
+    // Inset from the safe-area edge. The interstitial uses 16dp (aligns with its close button);
+    // the rewarded minigame passes 8dp so the badge shares the reward pill's baseline.
+    edgePadding: Dp = 16.dp,
 ) {
     val label = if (prompt.platform == StorePromptPlatform.IOS) "▶| App Store" else "▶| Google Play"
     val alignment = when (prompt.position) {
@@ -622,7 +627,7 @@ private fun BoxScope.StorePromptBadge(
         modifier = Modifier
             .align(alignment)
             .windowInsetsPadding(WindowInsets.safeDrawing)
-            .padding(16.dp)
+            .padding(edgePadding)
             .clip(RoundedCornerShape(16.dp))
             .background(Color(0x99000000))
             .clickable(onClick = onTap)

@@ -2,6 +2,10 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.model.AdBehavior
+import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.StorePrompt
+import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.app.Activity
@@ -9,6 +13,7 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -54,8 +59,9 @@ class SimulaRewardedAd(val adUnitId: String) {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     // Captured at load so verification can run after the Ready state is cleared on close.
+    // `impressionId` is the verify-reward handle (the wire body still names it `serve_id`).
     private var sessionId: String? = null
-    private var serveId: String? = null
+    private var impressionId: String? = null
 
     // Dedup: the (ad unit, character, session) key of the load currently in flight or
     // ready, and when that load was initiated. Re-loads of the same key are blocked for
@@ -167,7 +173,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
                     sessionId = session
-                    serveId = ad.serveId
+                    impressionId = ad.impressionId
                     // Warm a WebView so show() doesn't pay cold-start on the critical path.
                     WebViewPool.prewarm(SimulaAds.appContext)
                     state = State.Ready(ad, SystemClock.elapsedRealtime())
@@ -201,6 +207,82 @@ class SimulaRewardedAd(val adUnitId: String) {
     fun show() {
         if (!confineToMain { show() }) return
         present(SimulaAds.currentActivity)
+    }
+
+    // ── Preview (debug / QA) ──────────────────────────────────────────────────
+
+    /**
+     * Present the rewarded minigame with a **hardcoded** placeholder playable and a mid-ad
+     * store prompt — no network call and no impression tracked. Lets a host/sample app preview
+     * the store-prompt badge timing: it appears at half the play-to-earn duration
+     * (`durationSeconds / 2`) and is removed the moment the reward unlocks.
+     *
+     * @param activity foreground Activity to present from.
+     * @param durationSeconds the play-to-earn gate; the badge shows at `durationSeconds / 2`.
+     * @param storePrompt whether to show the mid-ad store-prompt badge.
+     * @param storePromptPlatform `android` (▶| Google Play) / `ios` (▶| App Store).
+     */
+    @JvmOverloads
+    fun showPreview(
+        activity: Activity,
+        durationSeconds: Int = 8,
+        storePrompt: Boolean = true,
+        storePromptPlatform: String = "android",
+    ) {
+        if (!confineToMain { showPreview(activity, durationSeconds, storePrompt, storePromptPlatform) }) return
+        if (!SimulaAds.isInitialized) {
+            failShow(SimulaAdError.NotInitialized)
+            return
+        }
+        if (state == State.Showing) {
+            failShow(SimulaAdError.AlreadyShowing)
+            return
+        }
+        // The reward/close pill always sits top-right, so the badge defaults to the opposite
+        // corner (top-left) — matching the server's collision resolution for a rewarded play.
+        val behavior = if (storePrompt) {
+            AdBehavior(
+                storePrompt = StorePrompt(
+                    enabled = true,
+                    position = ClosePosition.TOP_LEFT,
+                    platform = StorePromptPlatform.from(storePromptPlatform),
+                ),
+            )
+        } else {
+            AdBehavior()
+        }
+
+        val token = UUID.randomUUID().toString()
+        RewardedHandoff.put(
+            token,
+            RewardedPresentation(
+                iframeUrl = PREVIEW_MINIGAME_DATA_URL,
+                durationSeconds = durationSeconds.coerceAtLeast(0),
+                impressionId = "", // empty → no impression tracked
+                apiKey = SimulaAds.apiKey,
+                // Preview is local-only: report lifecycle but do NOT verify a reward or auto-preload.
+                callbacks = object : RewardedCallbacks {
+                    override fun onDisplayed() {
+                        listener?.onAdDisplayed(this@SimulaRewardedAd)
+                    }
+
+                    override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+                        state = State.Idle
+                        if (earned) listener?.onAdEarnedReward(this@SimulaRewardedAd)
+                        listener?.onAdClosed(this@SimulaRewardedAd)
+                    }
+                },
+                adBehavior = behavior,
+                trackingUrl = PREVIEW_TRACKING_URL,
+                destination = "appstore",
+            ),
+        )
+        if (!launchActivity(token, activity)) {
+            RewardedHandoff.remove(token)
+            failShow(SimulaAdError.NoPresentationContext)
+            return
+        }
+        state = State.Showing
     }
 
     // ── Internals ────────────────────────────────────────────────────────────
@@ -237,9 +319,12 @@ class SimulaRewardedAd(val adUnitId: String) {
             RewardedPresentation(
                 iframeUrl = ad.iframeUrl,
                 durationSeconds = ad.durationSeconds,
-                adId = ad.adId,
+                impressionId = ad.impressionId,
                 apiKey = SimulaAds.apiKey,
                 callbacks = bridge(),
+                adBehavior = ad.adBehavior,
+                trackingUrl = ad.trackingUrl,
+                destination = ad.destination,
             ),
         )
 
@@ -260,7 +345,7 @@ class SimulaRewardedAd(val adUnitId: String) {
             state = State.Idle
             if (earned) {
                 listener?.onAdEarnedReward(this@SimulaRewardedAd)
-                val sid = serveId
+                val sid = impressionId
                 val sess = sessionId
                 if (!sid.isNullOrBlank() && !sess.isNullOrBlank()) {
                     // Off-UI, durable, idempotent verification → SSV postback server-side.
@@ -352,3 +437,23 @@ class SimulaRewardedAd(val adUnitId: String) {
         const val DEDUP_WINDOW_MS = 5 * 60 * 1000L // 5 minutes
     }
 }
+
+/** A real Play Store URL used only by [SimulaRewardedAd.showPreview] so a store-prompt tap can
+ * resolve a Play package and route there. */
+private const val PREVIEW_TRACKING_URL =
+    "https://play.google.com/store/apps/details?id=com.google.android.apps.maps"
+
+/** A self-contained placeholder "playable" so [SimulaRewardedAd.showPreview] can render the
+ * play-to-earn gate + store-prompt chrome over a visible surface without loading a network iframe. */
+private const val PREVIEW_MINIGAME_HTML =
+    "<!doctype html><html><head><meta name=\"viewport\" " +
+        "content=\"width=device-width, initial-scale=1, viewport-fit=cover\"></head>" +
+        "<body style=\"margin:0;height:100vh;display:flex;align-items:center;justify-content:center;" +
+        "background:linear-gradient(160deg,#0f766e,#7c3aed);font-family:sans-serif;color:#fff;text-align:center\">" +
+        "<div><div style=\"font-size:22px;font-weight:700\">Rewarded Minigame Preview</div>" +
+        "<div style=\"opacity:.8;margin-top:8px;font-size:15px\">Mid-ad store prompt — no network</div></div>" +
+        "</body></html>"
+
+/** The placeholder playable as a `data:` URL the pooled WebView can `loadUrl(...)` directly. */
+private val PREVIEW_MINIGAME_DATA_URL: String =
+    "data:text/html;base64," + Base64.encodeToString(PREVIEW_MINIGAME_HTML.toByteArray(), Base64.NO_WRAP)
