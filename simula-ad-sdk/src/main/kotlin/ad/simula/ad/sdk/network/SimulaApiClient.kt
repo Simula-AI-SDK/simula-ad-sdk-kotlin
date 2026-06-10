@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
+import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -88,6 +89,13 @@ internal object SimulaApiClient {
             if (!response.isSuccessful) return@withContext null
 
             val data = json.decodeFromString<SessionResponse>(response.body)
+            // Honor a server-side telemetry directive (kill-switch / sampling) if present.
+            if (data.telemetryEnabled != null || data.telemetrySampleRate != null) {
+                Telemetry.applyServerConfig(
+                    enabled = data.telemetryEnabled ?: true,
+                    sampleRate = data.telemetrySampleRate ?: 1.0,
+                )
+            }
             data.sessionId?.takeIf { it.isNotEmpty() }
         } catch (e: IllegalArgumentException) {
             throw e // Re-throw 401 errors
@@ -490,6 +498,28 @@ internal object SimulaApiClient {
             )
         } catch (_: Exception) {
             // Silently fail
+        }
+    }
+
+    // ── Telemetry ───────────────────────────────────────────────────────────
+
+    /**
+     * Deliver a telemetry batch (`POST /v1/telemetry/events`), reusing the auth + consent
+     * headers so it inherits the same privacy posture as tracking. Returns the HTTP status
+     * (or -1 on a connectivity failure) for the caller to map to accept/drop/retry. Passes
+     * `instrument = false` so this request is never itself recorded as a network event.
+     */
+    suspend fun postTelemetry(apiKey: String, body: String): Int = withContext(Dispatchers.IO) {
+        try {
+            SimulaHttp.request(
+                url = "$API_BASE_URL/v1/telemetry/events",
+                method = "POST",
+                headers = authHeaders(apiKey),
+                body = body,
+                instrument = false,
+            ).code
+        } catch (_: Exception) {
+            -1
         }
     }
 }
