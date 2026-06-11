@@ -123,3 +123,38 @@ internal fun MiniGameButtonTheme.resolve(): ResolvedButtonTheme {
         badgeColor = ColorUtil.parseColor(badgeColor ?: Defaults.MiniGameButtonDefaults.BADGE_COLOR),
     )
 }
+
+// ── CharacterPicker ──────────────────────────────────────────────────────────
+
+internal data class ResolvedCharacterPickerTheme(
+    val backgroundColor: Color,
+    val titleColor: Color,
+    val titleFontSize: Int,
+    val cardBackgroundColor: Color,
+    val cardBorderColor: Color,
+    val cardCornerRadius: Int,
+    val selectedColor: Color,
+    val nameColor: Color,
+    val launchTextColor: Color,
+    val launchDisabledColor: Color,
+    val launchCornerRadius: Int,
+    val fontFamily: FontFamily,
+)
+
+internal fun CharacterPickerTheme.resolve(): ResolvedCharacterPickerTheme {
+    val d = Defaults.CharacterPickerDefaults
+    return ResolvedCharacterPickerTheme(
+        backgroundColor = ColorUtil.parseColor(backgroundColor ?: d.BACKGROUND_COLOR),
+        titleColor = ColorUtil.parseColor(titleColor ?: d.TITLE_COLOR),
+        titleFontSize = titleFontSize ?: d.TITLE_FONT_SIZE,
+        cardBackgroundColor = ColorUtil.parseColor(cardBackgroundColor ?: d.CARD_BACKGROUND_COLOR),
+        cardBorderColor = ColorUtil.parseColor(cardBorderColor ?: d.CARD_BORDER_COLOR),
+        cardCornerRadius = cardCornerRadius ?: d.CARD_CORNER_RADIUS,
+        selectedColor = ColorUtil.parseColor(selectedColor ?: d.SELECTED_COLOR),
+        nameColor = ColorUtil.parseColor(nameColor ?: d.NAME_COLOR),
+        launchTextColor = ColorUtil.parseColor(launchTextColor ?: d.LAUNCH_TEXT_COLOR),
+        launchDisabledColor = ColorUtil.parseColor(launchDisabledColor ?: d.LAUNCH_DISABLED_COLOR),
+        launchCornerRadius = launchCornerRadius ?: d.LAUNCH_CORNER_RADIUS,
+        fontFamily = FontUtil.parseFont(fontFamily ?: d.FONT_FAMILY),
+    )
+}
