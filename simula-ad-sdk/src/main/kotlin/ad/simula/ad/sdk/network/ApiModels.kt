@@ -15,7 +15,6 @@ import ad.simula.ad.sdk.model.StoreOpen
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
-import ad.simula.ad.sdk.om.OmVerification
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -64,8 +63,6 @@ internal data class AdResponseBody(
     // The minigame serve id — the handle for `GET /load/fallbacks/{impression_id}`.
     @SerialName("serve_id") val serveId: String? = null,
     @SerialName("iframe_url") val iframeUrl: String? = null,
-    // Optional OMID verification resources (forward-compatible; absent today).
-    @SerialName("ad_verifications") val adVerifications: List<ApiAdVerification>? = null,
 )
 
 /** Payload from `GET /load/fallbacks/{impression_id}` — every ad screen linked to the serve
@@ -82,8 +79,6 @@ internal data class FallbackAdBody(
     @SerialName("ad_id") val adId: String = "",
     val html: String? = null,
     @SerialName("iframe_url") val iframeUrl: String? = null,
-    // Optional OMID verification resources (forward-compatible; absent today).
-    @SerialName("ad_verifications") val adVerifications: List<ApiAdVerification>? = null,
 )
 
 @Serializable
@@ -124,8 +119,6 @@ internal data class AdLoadApiResponse(
     @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
     val creative: ApiCreative? = null,
     val experiment: ApiExperiment? = null,
-    // Optional OMID verification resources (forward-compatible; absent today).
-    @SerialName("ad_verifications") val adVerifications: List<ApiAdVerification>? = null,
 )
 
 // ── Capability handshake ──────────────────────────────────────────────────────
@@ -179,28 +172,6 @@ internal data class ApiExperiment(
     @SerialName("variant_id") val variantId: String? = null,
     val layer: String? = null,
 )
-
-// ── Open Measurement (OMID) verification resources ────────────────────────────
-
-/** One verification vendor entry from a response `ad_verifications` array. All fields
- * are optional so an unexpected/partial shape is tolerated rather than failing the parse. */
-@Serializable
-internal data class ApiAdVerification(
-    @SerialName("vendor_key") val vendorKey: String? = null,
-    @SerialName("javascript_resource_url") val javascriptResourceUrl: String? = null,
-    @SerialName("verification_parameters") val verificationParameters: String? = null,
-)
-
-/** Maps wire verification DTOs to domain [OmVerification]s, dropping entries without a
- * usable JS resource URL. A null/absent array → empty list (no measurement). */
-internal fun List<ApiAdVerification>?.toOmVerifications(): List<OmVerification> {
-    if (this.isNullOrEmpty()) return emptyList()
-    return mapNotNull { v ->
-        val url = v.javascriptResourceUrl
-        if (url.isNullOrBlank()) null
-        else OmVerification(vendorKey = v.vendorKey, url = url, parameters = v.verificationParameters)
-    }
-}
 
 @Serializable
 internal data class ApiStorePrompt(
@@ -301,8 +272,6 @@ internal data class RewardedInitApiResponse(
     val destination: String = "appstore",
     @SerialName("tracking_url") val trackingUrl: String? = null,
     @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
-    // Optional OMID verification resources (forward-compatible; absent today).
-    @SerialName("ad_verifications") val adVerifications: List<ApiAdVerification>? = null,
 )
 
 @Serializable

@@ -5,6 +5,7 @@ import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.telemetry.SIMULA_SDK_VERSION
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
+import android.webkit.WebView
 import androidx.annotation.MainThread
 import com.iab.omid.library.simulaad.Omid
 import com.iab.omid.library.simulaad.ScriptInjector
@@ -65,9 +66,6 @@ internal object OpenMeasurement {
     /** The cached OMID partner; null until [initialize] succeeds. */
     internal fun partnerOrNull(): Partner? = cachedPartner
 
-    /** The OM JS service script (for native ad-session contexts). Null until cached. */
-    internal fun omidJsOrNull(): String? = omidJs
-
     /**
      * Splice the OMID service script into [html] so a verification script referenced
      * by the creative can run. Callable from any thread (intended for the load
@@ -82,6 +80,24 @@ internal object OpenMeasurement {
         } catch (t: Throwable) {
             Telemetry.recordError(signature = "om:inject", message = t.message)
             html
+        }
+    }
+
+    /**
+     * Inject the OMID service script into a live [webView] whose page we don't author —
+     * the remote-URL surfaces (rewarded game / minigame / fallback). An HTML ad session
+     * needs the service running in the page, so [onInjected] (which starts the session)
+     * runs on the UI thread only once the script has evaluated. No-op when OM is inactive,
+     * the service script can't be read, or evaluation throws — the ad renders unmeasured.
+     */
+    @MainThread
+    fun injectIntoLiveWebView(webView: WebView, onInjected: () -> Unit) {
+        if (!isActive) return
+        val js = omidJs ?: appContext?.let { readOmidJs(it) } ?: return
+        try {
+            webView.evaluateJavascript(js) { onInjected() }
+        } catch (t: Throwable) {
+            Telemetry.recordError(signature = "om:inject_live", message = t.message)
         }
     }
 

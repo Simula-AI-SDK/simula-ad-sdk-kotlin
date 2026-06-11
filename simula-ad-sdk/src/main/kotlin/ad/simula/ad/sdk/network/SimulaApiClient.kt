@@ -6,7 +6,6 @@ import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.Message
-import ad.simula.ad.sdk.om.OmVerification
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.coroutines.Dispatchers
@@ -183,8 +182,6 @@ internal object SimulaApiClient {
         // The minigame serve id — the handle for the post-game `fetchFallbacks` call.
         val serveId: String,
         val iframeUrl: String,
-        // OMID verification resources for the game iframe (empty unless the backend sends them).
-        val verifications: List<OmVerification> = emptyList(),
     )
 
     /**
@@ -237,7 +234,6 @@ internal object SimulaApiClient {
             adId = data.adResponse?.adId ?: "",
             serveId = data.adResponse?.serveId ?: "",
             iframeUrl = data.adResponse?.iframeUrl ?: "",
-            verifications = data.adResponse?.adVerifications.toOmVerifications(),
         )
     }
 
@@ -258,8 +254,6 @@ internal object SimulaApiClient {
         // Creative descriptor (`creative` node) and experiment metadata; null when omitted.
         val creative: Creative? = null,
         val experiment: Experiment? = null,
-        // OMID verification resources (empty unless the backend sends `ad_verifications`).
-        val verifications: List<OmVerification> = emptyList(),
     ) {
         /** The ad format. Prefers the nested `creative.ad_unit_type`; falls back to the legacy
          * `rendered_format` (the imperative HTML model dropped the flat `rewarded` flag). Drives
@@ -318,7 +312,6 @@ internal object SimulaApiClient {
             adBehavior = data.adBehavior.toDomain(),
             creative = data.creative.toDomain(),
             experiment = data.experiment.toDomain(),
-            verifications = data.adVerifications.toOmVerifications(),
         )
     }
 
@@ -335,8 +328,6 @@ internal object SimulaApiClient {
         val destination: String = "appstore",
         val trackingUrl: String? = null,
         val adBehavior: AdBehavior? = null,
-        // OMID verification resources for the rewarded game iframe (empty unless sent).
-        val verifications: List<OmVerification> = emptyList(),
     )
 
     /**
@@ -382,7 +373,6 @@ internal object SimulaApiClient {
             destination = data.destination,
             trackingUrl = data.trackingUrl,
             adBehavior = data.adBehavior.toDomain(),
-            verifications = data.adVerifications.toOmVerifications(),
         )
     }
 
@@ -429,8 +419,6 @@ internal object SimulaApiClient {
     data class FallbackAd(
         val adId: String,
         val iframeUrl: String,
-        // OMID verification resources for this fallback screen (empty unless sent).
-        val verifications: List<OmVerification> = emptyList(),
     )
 
     /**
@@ -455,7 +443,6 @@ internal object SimulaApiClient {
                 else FallbackAd(
                     adId = ad.adId,
                     iframeUrl = url,
-                    verifications = ad.adVerifications.toOmVerifications(),
                 )
             }
         } catch (_: Exception) {

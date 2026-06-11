@@ -11,15 +11,6 @@ import com.iab.omid.library.simulaad.adsession.AdSessionContext
 import com.iab.omid.library.simulaad.adsession.CreativeType
 import com.iab.omid.library.simulaad.adsession.ImpressionType
 import com.iab.omid.library.simulaad.adsession.Owner
-import com.iab.omid.library.simulaad.adsession.VerificationScriptResource
-import java.net.URL
-
-/** A verification vendor entry parsed from the `ad_verifications` response array. */
-internal data class OmVerification(
-    val vendorKey: String?,
-    val url: String,
-    val parameters: String?,
-)
 
 /**
  * Per-WebView holder for an [OmAdSession]. Plain mutable object (not Compose state):
@@ -45,10 +36,9 @@ internal interface OmEventsSink {
 /**
  * Wraps a single OMID [AdSession] with idempotent, fully-guarded lifecycle calls.
  *
- * Construct via the companion factories ([startHtml] / [startNative]); each performs
- * the OMID sequence (create → registerAdView → start → createAdEvents) and returns
- * null if OM is inactive or anything throws, so a measurement failure never blocks
- * the ad. [fireLoaded]/[fireImpression] fire at most once; [finish] runs at most
+ * Construct via the companion factory ([startHtml]); it performs the OMID sequence
+ * (create → registerAdView → start → createAdEvents) and returns null if OM is
+ * inactive or anything throws, so a measurement failure never blocks the ad. [fireLoaded]/[fireImpression] fire at most once; [finish] runs at most
  * once and supersedes the others. All methods are main-thread only (OMID + WebView).
  */
 internal class OmAdSession internal constructor(
@@ -84,10 +74,13 @@ internal class OmAdSession internal constructor(
 
     companion object {
         /**
-         * HTML ad session for a server-rendered creative (OM JS already spliced into the
-         * HTML via [OpenMeasurement.injectIntoHtml]). Our creatives do not emit OMID
-         * events, so impression ownership is NATIVE and we fire loaded/impression
-         * ourselves at first paint. Null when OM is inactive or session creation throws.
+         * HTML ad session for any WebView surface — the interstitial (OM JS spliced into
+         * the HTML string via [OpenMeasurement.injectIntoHtml]) as well as the remote-URL
+         * surfaces (rewarded game / minigame / fallback), whose live WebView has the OM
+         * service injected via [OpenMeasurement.injectIntoLiveWebView] before this is
+         * called. Our creatives do not emit OMID events, so impression ownership is NATIVE
+         * and we fire loaded/impression ourselves at first paint. Null when OM is inactive
+         * or session creation throws.
          */
         @MainThread
         fun startHtml(webView: WebView, impressionId: String?): OmAdSession? {
@@ -111,42 +104,6 @@ internal class OmAdSession internal constructor(
             }
         }
 
-        /**
-         * Native-display session for a remote-URL surface (rewarded game / minigame /
-         * fallback) whose page we cannot inject. Created only when [verifications] is
-         * non-empty — the session exists solely to run vendor scripts against the
-         * registered WebView. Null when OM is inactive, no service script is cached, no
-         * usable verification resource survives, or creation throws.
-         */
-        @MainThread
-        fun startNative(
-            adView: View,
-            verifications: List<OmVerification>,
-            impressionId: String?,
-        ): OmAdSession? {
-            if (!OpenMeasurement.isActive || verifications.isEmpty()) return null
-            val partner = OpenMeasurement.partnerOrNull() ?: return null
-            val omidJs = OpenMeasurement.omidJsOrNull() ?: return null
-            val resources = verifications.mapNotNull { it.toResource() }
-            if (resources.isEmpty()) return null
-            return try {
-                val config = AdSessionConfiguration.createAdSessionConfiguration(
-                    CreativeType.NATIVE_DISPLAY,
-                    ImpressionType.BEGIN_TO_RENDER,
-                    Owner.NATIVE,
-                    Owner.NONE,
-                    /* isolateVerificationScripts = */ false,
-                )
-                val context = AdSessionContext.createNativeAdSessionContext(
-                    partner, omidJs, resources, /* contentUrl = */ null, /* customReferenceData = */ impressionId,
-                )
-                begin(config, context, adView)
-            } catch (t: Throwable) {
-                Telemetry.recordError(signature = "om:native_session", message = t.message)
-                null
-            }
-        }
-
         /** Create the session, register the ad view, start, and build AdEvents — OMID's
          * required order — then wrap it for idempotent event firing. */
         private fun begin(
@@ -159,19 +116,6 @@ internal class OmAdSession internal constructor(
             session.start()
             val adEvents = AdEvents.createAdEvents(session)
             return OmAdSession(RealOmEventsSink(session, adEvents))
-        }
-
-        private fun OmVerification.toResource(): VerificationScriptResource? = try {
-            val resourceUrl = URL(url)
-            if (vendorKey.isNullOrBlank() || parameters == null) {
-                VerificationScriptResource.createVerificationScriptResourceWithoutParameters(resourceUrl)
-            } else {
-                VerificationScriptResource.createVerificationScriptResourceWithParameters(
-                    vendorKey, resourceUrl, parameters,
-                )
-            }
-        } catch (_: Throwable) {
-            null
         }
     }
 

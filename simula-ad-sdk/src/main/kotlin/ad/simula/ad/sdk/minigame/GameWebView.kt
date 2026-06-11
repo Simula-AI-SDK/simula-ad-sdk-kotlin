@@ -57,7 +57,7 @@ import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.om.OmAdSession
 import ad.simula.ad.sdk.om.OmSessionRef
-import ad.simula.ad.sdk.om.OmVerification
+import ad.simula.ad.sdk.om.OpenMeasurement
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
 import kotlinx.coroutines.launch
@@ -100,9 +100,7 @@ fun GameWebView(
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var pageLoaded by remember { mutableStateOf(false) }
-    // OMID verification resources + serve id for the game iframe (empty/blank unless the
-    // backend sends `ad_verifications`). Drives an optional native-display OMID session.
-    var omVerifications by remember { mutableStateOf<List<OmVerification>>(emptyList()) }
+    // Serve id for the game iframe — passed to the OMID HTML session as its custom reference.
     var omServeId by remember { mutableStateOf("") }
 
     // Warm a spare WebView for the post-game ad iframe while the game loads.
@@ -135,7 +133,6 @@ fun GameWebView(
                 menuId = menuId,
             )
             iframeUrl = result.iframeUrl
-            omVerifications = result.verifications
             omServeId = result.serveId
             if (result.serveId.isNotBlank()) {
                 onServeIdReceived?.invoke(result.serveId)
@@ -292,7 +289,6 @@ fun GameWebView(
                         // WebView loads in background
                         GameWebViewContent(
                             url = iframeUrl!!,
-                            verifications = omVerifications,
                             impressionId = omServeId,
                             onPageFinished = { pageLoaded = true },
                         )
@@ -358,13 +354,12 @@ fun GameWebView(
 @Composable
 private fun GameWebViewContent(
     url: String,
-    verifications: List<OmVerification> = emptyList(),
     impressionId: String = "",
     onPageFinished: () -> Unit = {},
 ) {
     val context = LocalContext.current
-    // OMID native-display session for the game iframe — created only when the response
-    // carried `ad_verifications` (no-op otherwise). Remote page, registered as the ad view.
+    // OMID HTML session for the game iframe — the OM service is injected into the live
+    // remote page, then the WebView is registered as the ad view.
     val om = remember { OmSessionRef() }
 
     AndroidView(
@@ -375,13 +370,15 @@ private fun GameWebViewContent(
                     override fun onPageCommitVisible(view: WebView?, committedUrl: String?) {
                         if (committedUrl == "about:blank") return
                         onPageFinished()
-                        // Start the native OMID session on first real paint (one attempt per
-                        // WebView; no-op when OM is inactive or no verifications).
+                        // Inject the OM service into the live page, then start an HTML session
+                        // on first real paint (one attempt per WebView; no-op when OM inactive).
                         if (view != null && !om.attempted) {
                             om.attempted = true
-                            om.session = OmAdSession.startNative(view, verifications, impressionId)?.also {
-                                it.fireLoaded()
-                                it.fireImpression()
+                            OpenMeasurement.injectIntoLiveWebView(view) {
+                                om.session = OmAdSession.startHtml(view, impressionId)?.also {
+                                    it.fireLoaded()
+                                    it.fireImpression()
+                                }
                             }
                         }
                     }

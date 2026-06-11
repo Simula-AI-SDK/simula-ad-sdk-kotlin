@@ -5,7 +5,7 @@ import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.om.OmAdSession
 import ad.simula.ad.sdk.om.OmSessionRef
-import ad.simula.ad.sdk.om.OmVerification
+import ad.simula.ad.sdk.om.OpenMeasurement
 import android.content.Intent
 import android.net.Uri
 import android.webkit.WebResourceRequest
@@ -91,7 +91,6 @@ internal fun FallbackAdHost(
                 FallbackAdOverlay(
                     iframeUrl = ad.iframeUrl,
                     adId = ad.adId,
-                    verifications = ad.verifications,
                     onClose = {
                         // Reveal the next screen on each close tap; done after the last one.
                         phase = if (p.index + 1 < p.ads.size) p.copy(index = p.index + 1) else FallbackPhase.Done
@@ -118,13 +117,12 @@ private sealed interface FallbackPhase {
 private fun FallbackAdOverlay(
     iframeUrl: String,
     adId: String,
-    verifications: List<OmVerification>,
     onClose: () -> Unit,
 ) {
     var countdown by remember { mutableStateOf(5) }
-    // OMID native-display session for this fallback screen — created only when the
-    // response carried `ad_verifications` (no-op otherwise). Remote page, registered
-    // as the ad view. Plain holder (no recompose).
+    // OMID HTML session for this fallback screen — the OM service is injected into the
+    // live remote page, then the WebView is registered as the ad view. Plain holder
+    // (no recompose).
     val om = remember { OmSessionRef() }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ring = remember { Animatable(0f) }
@@ -160,9 +158,11 @@ private fun FallbackAdOverlay(
                         override fun onPageFinished(view: WebView?, url: String?) {
                             if (view == null || url == "about:blank" || om.attempted) return
                             om.attempted = true
-                            om.session = OmAdSession.startNative(view, verifications, adId)?.also {
-                                it.fireLoaded()
-                                it.fireImpression()
+                            OpenMeasurement.injectIntoLiveWebView(view) {
+                                om.session = OmAdSession.startHtml(view, adId)?.also {
+                                    it.fireLoaded()
+                                    it.fireImpression()
+                                }
                             }
                         }
                     },
