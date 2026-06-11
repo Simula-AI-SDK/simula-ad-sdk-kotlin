@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -30,6 +31,7 @@ internal fun CachedAsyncImage(
     contentDescription: String?,
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Fit,
+    colorFilter: ColorFilter? = null,
     onError: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current.applicationContext
@@ -58,6 +60,7 @@ internal fun CachedAsyncImage(
             contentDescription = contentDescription,
             modifier = modifier,
             contentScale = contentScale,
+            colorFilter = colorFilter,
         )
     }
 }
