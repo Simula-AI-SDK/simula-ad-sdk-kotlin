@@ -131,6 +131,43 @@ data class MiniGameInterstitialTheme(
     val fontFamily: String? = null,
 )
 
+// ── Character Picker Types ──────────────────────────────────────────────────
+
+/**
+ * A selectable character in [ad.simula.ad.sdk.character.CharacterPicker].
+ * [image] is a 1:1 portrait URL. Maps to the backend `PublicCharacter`
+ * (`character_id`→id, `character_name`→name, `images_1_1[0]`/`avatar_url`→image,
+ * `description`→description).
+ */
+data class CharacterData(
+    val id: String,
+    val name: String,
+    val image: String,
+    val description: String? = null,
+)
+
+/**
+ * Theme for [ad.simula.ad.sdk.character.CharacterPicker]. All colors are CSS strings
+ * (hex/rgba); a null field falls back to [Defaults.CharacterPickerDefaults], which
+ * mirror the reference HTML exactly. Sizes are in dp/sp.
+ */
+data class CharacterPickerTheme(
+    val backgroundColor: String? = null,
+    val titleColor: String? = null,
+    val titleFontSize: Int? = null,
+    val cardBackgroundColor: String? = null,
+    val cardBorderColor: String? = null,
+    val cardCornerRadius: Int? = null,
+    /** Selected-card border / active launch-button color. Default `#3d9a66`. */
+    val selectedColor: String? = null,
+    val nameColor: String? = null,
+    val launchTextColor: String? = null,
+    /** Disabled launch-button background. Default `#3a3a3a`. */
+    val launchDisabledColor: String? = null,
+    val launchCornerRadius: Int? = null,
+    val fontFamily: String? = null,
+)
+
 // ── Ad Behavior (server-driven A/B config) ──────────────────────────────────
 
 /** Lowercases and normalizes hyphens to underscores so the tolerant enum factories accept

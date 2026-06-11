@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.CharacterData
 import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.GameData
@@ -14,7 +15,9 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -172,6 +175,79 @@ internal object SimulaApiClient {
         append("$API_BASE_URL/minigames/catalog")
         if (!sessionId.isNullOrBlank()) {
             append("?session_id=${URLEncoder.encode(sessionId, "UTF-8")}")
+        }
+    }
+
+    // ── Character Picker ──────────────────────────────────────────────────────
+
+    /**
+     * Fetch the selectable characters for the Character Picker. Best-effort and
+     * **never throws**: returns an empty list on any failure so the caller falls
+     * back to its bundled placeholder characters.
+     *
+     * NOTE: the public `/minigames/companions` endpoint is not built yet — this
+     * call will currently 404 and resolve to the fallback. Once the endpoint ships,
+     * no SDK change is needed; the parse below already tolerates its expected shape.
+     */
+    suspend fun fetchCharacters(sessionId: String? = null): List<CharacterData> = withContext(Dispatchers.IO) {
+        try {
+            val response = SimulaHttp.request(
+                url = companionsUrl(sessionId),
+                method = "GET",
+                headers = jsonHeaders(),
+            )
+            if (!response.isSuccessful || response.body.isBlank()) return@withContext emptyList()
+            parseCharacters(response.body)
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /** Builds the companions request URL, adding `session_id` when available. Pure/testable. */
+    internal fun companionsUrl(sessionId: String?): String = buildString {
+        append("$API_BASE_URL/minigames/companions")
+        if (!sessionId.isNullOrBlank()) {
+            append("?session_id=${URLEncoder.encode(sessionId, "UTF-8")}")
+        }
+    }
+
+    /**
+     * Tolerant parse of the companions payload into [CharacterData]. Accepts the
+     * list under `characters`, `data`, `characters.data`, or as a bare top-level
+     * array. Per-character mapping: `character_id`/`id` → id, `character_name`/`name`
+     * → name, `images_1_1[0]`/`avatar_url`/`image` → image. Entries missing an id or
+     * name are dropped (one bad entry can't sink the rest). Pure/testable.
+     */
+    internal fun parseCharacters(body: String): List<CharacterData> {
+        val root = json.parseToJsonElement(body)
+        val arr: JsonArray = when {
+            root is JsonArray -> root
+            root is JsonObject -> when (val node = root["characters"] ?: root["data"]) {
+                is JsonArray -> node
+                is JsonObject -> node["data"]?.jsonArray ?: JsonArray(emptyList())
+                else -> JsonArray(emptyList())
+            }
+            else -> JsonArray(emptyList())
+        }
+
+        fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
+
+        return arr.mapNotNull { element ->
+            val obj = element.jsonObject
+            val id = obj.str("character_id") ?: obj.str("id")
+            val name = obj.str("character_name") ?: obj.str("name")
+            if (id.isNullOrBlank() || name.isNullOrBlank()) return@mapNotNull null
+            val image = (obj["images_1_1"] as? JsonArray)
+                ?.firstOrNull()
+                ?.let { (it as? JsonPrimitive)?.contentOrNull }
+                ?: obj.str("avatar_url")
+                ?: obj.str("image")
+            CharacterData(
+                id = id,
+                name = name,
+                image = image ?: "",
+                description = obj.str("description"),
+            )
         }
     }
 
