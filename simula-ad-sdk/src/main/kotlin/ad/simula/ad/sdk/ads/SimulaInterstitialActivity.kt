@@ -1,5 +1,8 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.bridge.CreativeBridge
+import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdUnitType
@@ -14,6 +17,8 @@ import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import ad.simula.ad.sdk.util.ColorUtil
+import android.app.Activity
+import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -234,6 +239,17 @@ private fun CreativeInterstitial(
     }
     val closeProgress = remember { Animatable(0f) }
 
+    // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE unlocks the close button immediately,
+    // bypassing the close-delay gate.
+    val context = LocalContext.current
+    val bridge = remember {
+        androidCreativeBridge(
+            appContext = context.applicationContext,
+            activityProvider = { context as? Activity },
+            onEarlyComplete = { closeEnabled = true },
+        )
+    }
+
     if (gateTotal > Duration.ZERO) {
         LaunchedEffect(Unit) {
             // Anchor the dwell to wall-clock on first run so a config-change recreation resumes the
@@ -332,6 +348,7 @@ private fun CreativeInterstitial(
             CreativeHtml(
                 html = html,
                 destination = ad.destination,
+                bridge = bridge,
                 onAdClick = {
                     presentation.callbacks.onClicked()
                     // Play install banner timed to the click (independent of the store the CTA opens).
@@ -398,6 +415,7 @@ private fun CreativeInterstitial(
 private fun CreativeHtml(
     html: String,
     destination: String,
+    bridge: CreativeBridge,
     onAdClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -409,6 +427,13 @@ private fun CreativeHtml(
             WebViewPool.acquire(
                 context = ctx,
                 client = object : WebViewClient() {
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                        // Bridge relay fallback when document-start injection is unavailable.
+                        if (!BridgeWebViewInstaller.documentStartSupported() && url != "about:blank") {
+                            view?.evaluateJavascript(BridgeWebViewInstaller.relayScript, null)
+                        }
+                    }
+
                     override fun shouldOverrideUrlLoading(
                         view: WebView?,
                         request: WebResourceRequest?,
@@ -423,12 +448,16 @@ private fun CreativeHtml(
                     }
                 },
             ).apply {
+                BridgeWebViewInstaller.install(this, bridge)
                 // Self-contained creative: asset URLs are absolute (baseURL = null).
                 loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
             }
         },
         modifier = modifier,
-        onRelease = { webView -> WebViewPool.release(webView) },
+        onRelease = { webView ->
+            BridgeWebViewInstaller.uninstall(webView)
+            WebViewPool.release(webView)
+        },
     )
 }
 

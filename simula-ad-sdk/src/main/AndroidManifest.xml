@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- SDK bridge TRIGGER_HAPTIC (PRD §3): lets a creative buzz the device via Vibrator. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <!--
       Advertising ID (GAID) is OPT-IN and OFF by default, so the AD_ID permission
       is intentionally NOT declared here — declaring it would force every host into

@@ -1,10 +1,14 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
+import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -187,6 +191,19 @@ private fun RewardedMinigame(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE (e.g. survey finished) grants the reward and
+    // reveals the close button immediately, bypassing the play timer.
+    val bridge = remember {
+        androidCreativeBridge(
+            appContext = context.applicationContext,
+            activityProvider = { context as? Activity },
+            onEarlyComplete = {
+                presentation.rewardEarned = true
+                rewardEarned = true
+            },
+        )
+    }
+
     // DISPLAYED + impression fire once the creative first composes. Guarded so an
     // Activity recreation doesn't double-report either.
     LaunchedEffect(Unit) {
@@ -253,6 +270,13 @@ private fun RewardedMinigame(
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : WebViewClient() {
+                        override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
+                            // Bridge relay fallback when document-start injection is unavailable.
+                            if (!BridgeWebViewInstaller.documentStartSupported() && pageUrl != "about:blank") {
+                                view?.evaluateJavascript(BridgeWebViewInstaller.relayScript, null)
+                            }
+                        }
+
                         override fun shouldOverrideUrlLoading(
                             view: WebView?,
                             request: WebResourceRequest?,
@@ -269,11 +293,17 @@ private fun RewardedMinigame(
                             }
                         }
                     },
-                ).apply { loadUrl(url) }
+                ).apply {
+                    BridgeWebViewInstaller.install(this, bridge)
+                    loadUrl(url)
+                }
             },
             // Sits below the safe area (the black Box fills the cutout / nav-bar region).
             modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
-            onRelease = { webView -> WebViewPool.release(webView) },
+            onRelease = { webView ->
+                BridgeWebViewInstaller.uninstall(webView)
+                WebViewPool.release(webView)
+            },
         )
 
         // Top-right reward/close pill: a "Play to earn" countdown while earning (display-only —
