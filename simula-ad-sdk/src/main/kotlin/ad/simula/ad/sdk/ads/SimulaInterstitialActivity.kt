@@ -382,7 +382,12 @@ private fun CreativeInterstitial(
         // the [closeTime/2, closeTime) window. `!closeEnabled` removes it the instant the real close
         // button appears, so the two affordances never overlap.
         if (storePrompt != null && storePrompt.enabled && storePromptVisible && !closeEnabled) {
-            StorePromptBadge(prompt = storePrompt, onTap = { openDestination(ad) })
+            // Center the badge in the same touch-target band as the close button so the two line up.
+            StorePromptBadge(
+                prompt = storePrompt,
+                onTap = { openDestination(ad) },
+                rowHeight = MIN_TOUCH_TARGET_DP.dp,
+            )
         }
 
         // Play Install Prompt banner — independent install affordance, pinned to the bottom.
@@ -528,38 +533,42 @@ private fun BoxScope.InterstitialCloseButton(
             .padding(start = if (position == ClosePosition.BOTTOM_LEFT) 2.dp else 0.dp)
             .padding(8.dp),
     ) {
-        when {
-            // The resolved tap target: a labelled pill for reward_or_close_label, the circular X otherwise.
-            enabled -> if (treatment == CloseTreatment.REWARD_OR_CLOSE_LABEL) {
-                LabelPill(text = "Close", onClick = onClose)
-            } else {
-                CloseCircle(onClick = onClose) { CloseGlyph() }
-            }
-            // Nothing in the corner during the delay (the bar shows progress separately).
-            treatment == CloseTreatment.HIDDEN || treatment == CloseTreatment.PROGRESS_BAR -> Unit
-            treatment == CloseTreatment.REWARD_OR_CLOSE_LABEL ->
-                LabelPill(text = "${if (isRewardCopy) "Reward" else "Close"} in ${remaining.coerceAtLeast(0)}")
-            treatment == CloseTreatment.COUNTDOWN_CIRCLE -> {
-                // Same footprint as the unlocked button so the glyph doesn't jump when it activates.
-                Box(
-                    modifier = Modifier.size(maxOf(MIN_TOUCH_TARGET_DP, CLOSE_BOX_DP).dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CloseCircle(alpha = 0.5f) { CloseGlyph() }
-                    Canvas(modifier = Modifier.size(CLOSE_BOX_DP.dp)) {
-                        // Stroke in dp (not raw px, which was ~1dp on a 3x screen), inset by half
-                        // its width so the ring isn't drawn half-outside the canvas bounds.
-                        // 2dp matches the Swift SDK's ring stroke.
-                        val stroke = 2.dp.toPx()
-                        drawArc(
-                            color = tint,
-                            startAngle = -90f,
-                            sweepAngle = 360f * progress.coerceIn(0f, 1f),
-                            useCenter = false,
-                            topLeft = Offset(stroke / 2f, stroke / 2f),
-                            size = Size(size.width - stroke, size.height - stroke),
-                            style = Stroke(width = stroke, cap = StrokeCap.Round),
-                        )
+        // All close states share one centerline: center within the touch-target height so the gated
+        // "… in N" pill / countdown ring and the unlocked ✕ line up with the store badge (opposite
+        // corner) and the glyph doesn't jump when the close unlocks.
+        Box(
+            modifier = Modifier.height(MIN_TOUCH_TARGET_DP.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            when {
+                // Unlocked: the compact ✕ for every treatment (matches all other close buttons).
+                enabled -> CloseCircle(onClick = onClose) { CloseGlyph() }
+                // Nothing in the corner during the delay (the bar shows progress separately).
+                treatment == CloseTreatment.HIDDEN || treatment == CloseTreatment.PROGRESS_BAR -> Unit
+                treatment == CloseTreatment.REWARD_OR_CLOSE_LABEL ->
+                    LabelPill(text = "${if (isRewardCopy) "Reward" else "Close"} in ${remaining.coerceAtLeast(0)}")
+                treatment == CloseTreatment.COUNTDOWN_CIRCLE -> {
+                    // Same footprint as the unlocked button so the glyph doesn't jump when it activates.
+                    Box(
+                        modifier = Modifier.size(maxOf(MIN_TOUCH_TARGET_DP, CLOSE_BOX_DP).dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CloseCircle(alpha = 0.5f) { CloseGlyph() }
+                        Canvas(modifier = Modifier.size(CLOSE_BOX_DP.dp)) {
+                            // Stroke in dp (not raw px, which was ~1dp on a 3x screen), inset by half
+                            // its width so the ring isn't drawn half-outside the canvas bounds.
+                            // 2dp matches the Swift SDK's ring stroke.
+                            val stroke = 2.dp.toPx()
+                            drawArc(
+                                color = tint,
+                                startAngle = -90f,
+                                sweepAngle = 360f * progress.coerceIn(0f, 1f),
+                                useCenter = false,
+                                topLeft = Offset(stroke / 2f, stroke / 2f),
+                                size = Size(size.width - stroke, size.height - stroke),
+                                style = Stroke(width = stroke, cap = StrokeCap.Round),
+                            )
+                        }
                     }
                 }
             }
@@ -644,9 +653,12 @@ private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
 internal fun BoxScope.StorePromptBadge(
     prompt: StorePrompt,
     onTap: () -> Unit,
-    // Inset from the safe-area edge. The interstitial uses 16dp (aligns with its close button);
-    // the rewarded minigame passes 8dp so the badge shares the reward pill's baseline.
-    edgePadding: Dp = 16.dp,
+    // Inset from the safe-area edge. Both the interstitial and the rewarded minigame use 8dp so the
+    // badge shares its close affordance's baseline.
+    edgePadding: Dp = 8.dp,
+    // When set, the pill is vertically centered within this height so it lines up with a close button
+    // whose glyph sits in a touch-target band (the interstitial). null → bare pill (rewarded).
+    rowHeight: Dp? = null,
 ) {
     val label = if (prompt.platform == StorePromptPlatform.IOS) "App Store" else "Google Play"
     val alignment = when (prompt.position) {
@@ -654,22 +666,28 @@ internal fun BoxScope.StorePromptBadge(
         ClosePosition.TOP_LEFT -> Alignment.TopStart
         ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
     }
-    // Compact AppLovin-style pill: a filled skip-next glyph then the store name, with tight
-    // padding, a fully-rounded (capsule) outline, and a small gap between the two.
-    Row(
+    Box(
         modifier = Modifier
             .align(alignment)
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(edgePadding)
-            .clip(RoundedCornerShape(percent = 50))
-            .background(Color(0x99000000))
-            .clickable(onClick = onTap)
-            .padding(horizontal = 6.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .then(if (rowHeight != null) Modifier.height(rowHeight) else Modifier),
+        contentAlignment = Alignment.Center,
     ) {
-        SkipNextIcon(size = 7.dp, color = Color.White)
-        Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        // Compact AppLovin-style pill: a filled skip-next glyph then the store name, with tight
+        // padding, a fully-rounded (capsule) outline, and a small gap between the two.
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(percent = 50))
+                .background(Color(0x99000000))
+                .clickable(onClick = onTap)
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            SkipNextIcon(size = 7.dp, color = Color.White)
+            Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
