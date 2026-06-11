@@ -15,6 +15,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaContextValue
+import ad.simula.ad.sdk.om.OpenMeasurement
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import kotlinx.coroutines.FlowPreview
@@ -91,6 +92,9 @@ fun SimulaProvider(
     LaunchedEffect(context, resolvedConfig) {
         SimulaPrivacy.attach(context)
         SimulaPrivacy.refreshAdvertisingId()
+        // Activate OMID so minigame surfaces used via the declarative provider (without
+        // SimulaAds.initialize) are still measurable. Idempotent + guarded.
+        OpenMeasurement.initialize(context.applicationContext, enabled = true)
     }
 
     // Re-read the GAID on foreground: ad-tracking permission or the GAID itself

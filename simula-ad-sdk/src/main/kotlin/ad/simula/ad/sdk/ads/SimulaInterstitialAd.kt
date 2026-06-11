@@ -14,6 +14,7 @@ import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.om.OpenMeasurement
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
 import android.content.Intent
@@ -169,6 +170,11 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
+                // Splice the OMID service script into the creative here, off the critical
+                // path (still on IO). No-op + original html when OM is inactive or injection
+                // fails — the ad always renders. The HTML ad session is created later, once
+                // the WebView finishes loading (SimulaInterstitialActivity).
+                val measuredAd = ad.copy(renderedHtml = OpenMeasurement.injectIntoHtml(html))
                 Telemetry.recordLifecycle(
                     stage = "load_success",
                     adFormat = AD_FORMAT,
@@ -180,7 +186,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 )
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
-                    state = State.Ready(ad, SystemClock.elapsedRealtime())
+                    state = State.Ready(measuredAd, SystemClock.elapsedRealtime())
                     listener?.onAdLoaded(this@SimulaInterstitialAd)
                 }
             } catch (e: Exception) {

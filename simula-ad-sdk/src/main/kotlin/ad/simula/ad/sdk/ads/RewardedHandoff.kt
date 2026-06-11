@@ -31,6 +31,9 @@ internal class RewardedPresentation(
     /** Guards a duplicate DISPLAYED/impression if the Activity is recreated on a config change. */
     var displayedReported = false
 
+    /** Guards a duplicate OMID impression if the Activity is recreated (mirrors [displayedReported]). */
+    var omImpressionReported = false
+
     /** Set true once the required play duration elapses; gates the reward. */
     var rewardEarned = false
 

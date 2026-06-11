@@ -3,6 +3,9 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.om.OmAdSession
+import ad.simula.ad.sdk.om.OmSessionRef
+import ad.simula.ad.sdk.om.OpenMeasurement
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.content.Intent
 import android.net.Uri
@@ -242,6 +245,10 @@ private fun RewardedMinigame(
     // No early exit: Back does nothing until the reward is earned, then it closes (earned).
     BackHandler(enabled = true) { if (rewardEarned) onFinish(true) }
 
+    // OMID HTML session for the game iframe — the OM service is injected into the live
+    // remote page, then the WebView is registered as the ad view. Plain holder (no recompose).
+    val om = remember { OmSessionRef() }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -268,12 +275,37 @@ private fun RewardedMinigame(
                                 false
                             }
                         }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            // Inject the OM service into the live game page, then start an HTML
+                            // session once it loads (one attempt per WebView; no-op when OM is
+                            // inactive). Guard the OMID impression against Activity recreation,
+                            // like displayedReported.
+                            if (view == null || url == "about:blank" || om.attempted) return
+                            om.attempted = true
+                            if (presentation.omImpressionReported) return
+                            OpenMeasurement.injectIntoLiveWebView(view) {
+                                om.session = OmAdSession.startHtml(view, presentation.impressionId)?.also {
+                                    presentation.omImpressionReported = true
+                                    it.fireLoaded()
+                                    it.fireImpression()
+                                }
+                            }
+                        }
                     },
                 ).apply { loadUrl(url) }
             },
             // Sits below the safe area (the black Box fills the cutout / nav-bar region).
             modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
-            onRelease = { webView -> WebViewPool.release(webView) },
+            onRelease = { webView ->
+                val session = om.session
+                if (session != null) {
+                    session.finish()
+                    WebViewPool.releaseAfterOmFlush(webView)
+                } else {
+                    WebViewPool.release(webView)
+                }
+            },
         )
 
         // Top-right reward/close pill: a "Play to earn" countdown while earning (display-only —

@@ -55,6 +55,9 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.om.OmAdSession
+import ad.simula.ad.sdk.om.OmSessionRef
+import ad.simula.ad.sdk.om.OpenMeasurement
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
 import kotlinx.coroutines.launch
@@ -97,6 +100,8 @@ fun GameWebView(
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var pageLoaded by remember { mutableStateOf(false) }
+    // Serve id for the game iframe — passed to the OMID HTML session as its custom reference.
+    var omServeId by remember { mutableStateOf("") }
 
     // Warm a spare WebView for the post-game ad iframe while the game loads.
     LaunchedEffect(Unit) {
@@ -128,6 +133,7 @@ fun GameWebView(
                 menuId = menuId,
             )
             iframeUrl = result.iframeUrl
+            omServeId = result.serveId
             if (result.serveId.isNotBlank()) {
                 onServeIdReceived?.invoke(result.serveId)
             }
@@ -283,6 +289,7 @@ fun GameWebView(
                         // WebView loads in background
                         GameWebViewContent(
                             url = iframeUrl!!,
+                            impressionId = omServeId,
                             onPageFinished = { pageLoaded = true },
                         )
                         // Loading overlay stays visible until page finishes painting
@@ -345,8 +352,15 @@ fun GameWebView(
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
+private fun GameWebViewContent(
+    url: String,
+    impressionId: String = "",
+    onPageFinished: () -> Unit = {},
+) {
     val context = LocalContext.current
+    // OMID HTML session for the game iframe — the OM service is injected into the live
+    // remote page, then the WebView is registered as the ad view.
+    val om = remember { OmSessionRef() }
 
     AndroidView(
         factory = { ctx ->
@@ -356,6 +370,17 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
                     override fun onPageCommitVisible(view: WebView?, committedUrl: String?) {
                         if (committedUrl == "about:blank") return
                         onPageFinished()
+                        // Inject the OM service into the live page, then start an HTML session
+                        // on first real paint (one attempt per WebView; no-op when OM inactive).
+                        if (view != null && !om.attempted) {
+                            om.attempted = true
+                            OpenMeasurement.injectIntoLiveWebView(view) {
+                                om.session = OmAdSession.startHtml(view, impressionId)?.also {
+                                    it.fireLoaded()
+                                    it.fireImpression()
+                                }
+                            }
+                        }
                     }
                     override fun shouldOverrideUrlLoading(
                         view: WebView?,
@@ -377,7 +402,15 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
             ).apply { loadUrl(url) }
         },
         modifier = Modifier.fillMaxSize(),
-        onRelease = { webView -> WebViewPool.release(webView) },
+        onRelease = { webView ->
+            val session = om.session
+            if (session != null) {
+                session.finish()
+                WebViewPool.releaseAfterOmFlush(webView)
+            } else {
+                WebViewPool.release(webView)
+            }
+        },
     )
 }
 

@@ -3,6 +3,9 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.om.OmAdSession
+import ad.simula.ad.sdk.om.OmSessionRef
+import ad.simula.ad.sdk.om.OpenMeasurement
 import android.content.Intent
 import android.net.Uri
 import android.webkit.WebResourceRequest
@@ -111,8 +114,16 @@ private sealed interface FallbackPhase {
  * a top-right close button (the same shape as the minigame menu's post-game overlay).
  */
 @Composable
-private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Unit) {
+private fun FallbackAdOverlay(
+    iframeUrl: String,
+    adId: String,
+    onClose: () -> Unit,
+) {
     var countdown by remember { mutableStateOf(5) }
+    // OMID HTML session for this fallback screen — the OM service is injected into the
+    // live remote page, then the WebView is registered as the ad view. Plain holder
+    // (no recompose).
+    val om = remember { OmSessionRef() }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ring = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
@@ -143,11 +154,30 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
                                 false
                             }
                         }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            if (view == null || url == "about:blank" || om.attempted) return
+                            om.attempted = true
+                            OpenMeasurement.injectIntoLiveWebView(view) {
+                                om.session = OmAdSession.startHtml(view, adId)?.also {
+                                    it.fireLoaded()
+                                    it.fireImpression()
+                                }
+                            }
+                        }
                     },
                 ).apply { loadUrl(iframeUrl) }
             },
             modifier = Modifier.fillMaxSize(),
-            onRelease = { webView -> WebViewPool.release(webView) },
+            onRelease = { webView ->
+                val session = om.session
+                if (session != null) {
+                    session.finish()
+                    WebViewPool.releaseAfterOmFlush(webView)
+                } else {
+                    WebViewPool.release(webView)
+                }
+            },
         )
 
         Box(

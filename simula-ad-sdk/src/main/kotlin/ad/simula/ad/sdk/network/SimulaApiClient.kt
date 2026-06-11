@@ -439,7 +439,11 @@ internal object SimulaApiClient {
             val data = json.decodeFromString<FallbackAdsApiResponse>(response.body)
             data.ads.mapNotNull { ad ->
                 val url = ad.iframeUrl
-                if (url.isNullOrBlank()) null else FallbackAd(adId = ad.adId, iframeUrl = url)
+                if (url.isNullOrBlank()) null
+                else FallbackAd(
+                    adId = ad.adId,
+                    iframeUrl = url,
+                )
             }
         } catch (_: Exception) {
             emptyList()
