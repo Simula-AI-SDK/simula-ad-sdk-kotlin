@@ -45,6 +45,12 @@ internal data class InitMinigameRequestBody(
 )
 
 @Serializable
+internal data class CharacterSelectorRequestBody(
+    @SerialName("session_id") val sessionId: String,
+    val fill: Int,
+)
+
+@Serializable
 internal data class MessageBody(
     val role: String,
     val content: String,

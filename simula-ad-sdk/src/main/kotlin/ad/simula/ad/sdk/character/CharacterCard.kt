@@ -1,7 +1,12 @@
 package ad.simula.ad.sdk.character
 
 import android.graphics.BlurMaskFilter
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -13,6 +18,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -213,5 +219,80 @@ private fun Modifier.cardGlow(
         size = Size(size.width + inset * 2, size.height + inset * 2),
         cornerRadius = CornerRadius(r + inset),
         style = Stroke(width = 1.dp.toPx()),
+    )
+}
+
+/**
+ * Loading skeleton for a grid slot whose character is still being fetched — same
+ * footprint as [CharacterCard] (1:1 image area + name bar) with a horizontal shimmer,
+ * so swapping in the real card doesn't shift the layout. Not selectable.
+ */
+@Composable
+internal fun CharacterSkeletonCard(
+    theme: ResolvedCharacterPickerTheme,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(theme.cardCornerRadius.dp)
+    val transition = rememberInfiniteTransition(label = "charSkeleton")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Restart),
+        label = "charSkeletonPhase",
+    )
+
+    Box(
+        modifier = modifier
+            .clip(shape)
+            .background(theme.cardBackgroundColor)
+            .border(2.dp, theme.cardBorderColor, shape),
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .shimmer(phase),
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0x66000000)) // rgba(0,0,0,0.4), matches the real name bar
+                    .drawBehind {
+                        drawLine(
+                            color = theme.cardBorderColor,
+                            start = Offset(0f, 0f),
+                            end = Offset(size.width, 0f),
+                            strokeWidth = 1.dp.toPx(),
+                        )
+                    }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                // A short name-placeholder bar.
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.55f)
+                        .height(12.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .shimmer(phase),
+                )
+            }
+        }
+    }
+}
+
+/** A left-to-right shimmer sweep keyed on a 0..1 [phase] from the caller's clock. */
+private fun Modifier.shimmer(phase: Float): Modifier = drawBehind {
+    val base = Color(0xFF2A2A2F)
+    val highlight = Color(0xFF3C3C46)
+    val sweep = size.width * 1.5f
+    val start = -sweep + (size.width + sweep) * phase
+    drawRect(
+        brush = Brush.linearGradient(
+            colors = listOf(base, highlight, base),
+            start = Offset(start, 0f),
+            end = Offset(start + sweep, 0f),
+        ),
     )
 }
