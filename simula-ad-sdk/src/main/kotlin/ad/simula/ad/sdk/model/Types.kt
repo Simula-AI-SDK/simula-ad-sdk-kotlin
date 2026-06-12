@@ -346,9 +346,30 @@ internal data class SkOverlayConfig(
     val dismissible: Boolean = true,
 )
 
+/**
+ * Custom-scheme markers a playable creative navigates to when an end card renders, so the SDK can
+ * fire an end-screen `auto_store_redirect` by intercepting the navigation — no JS bridge. The SDK
+ * consumes the navigation and never actually loads the URL. Contract shared with the creative:
+ *
+ * ```js
+ * window.location.href = "simula://end-screen-1"; // when END SCREEN 1 renders
+ * window.location.href = "simula://end-screen-2"; // when END SCREEN 2 renders
+ * ```
+ *
+ * Returns the end-screen trigger the [url] signals, or null when it isn't a marker. (PLAYABLE_END is
+ * SDK-native — fired when the close button appears — and has no marker.)
+ */
+internal fun endScreenTriggerForMarker(url: String?): AutoStoreRedirectTrigger? =
+    when ((url ?: "").trim().trimEnd('/').lowercase()) {
+        "simula://end-screen-1" -> AutoStoreRedirectTrigger.END_SCREEN_1_OPEN
+        "simula://end-screen-2" -> AutoStoreRedirectTrigger.END_SCREEN_2_OPEN
+        else -> null
+    }
+
 /** Auto store redirect (`auto_store_redirect` node): when [enabled], the SDK opens the advertiser
- * store once per impression the first time the creative reports the [trigger] moment — no user tap.
- * Disabled by default (a missing block / `enabled:false` is a no-op). */
+ * store once per impression at the [trigger] moment — no user tap. PLAYABLE_END fires when the close
+ * button appears; END_SCREEN_1/2_OPEN fire when the creative navigates to the matching end-screen
+ * marker (see [endScreenTriggerForMarker]). Disabled by default (a missing block / `enabled:false`). */
 internal data class AutoStoreRedirect(
     val enabled: Boolean = false,
     val trigger: AutoStoreRedirectTrigger = AutoStoreRedirectTrigger.PLAYABLE_END,

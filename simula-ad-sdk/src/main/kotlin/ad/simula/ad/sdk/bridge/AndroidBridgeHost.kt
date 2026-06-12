@@ -22,17 +22,14 @@ import kotlinx.serialization.json.put
  *
  * @param onEarlyComplete invoked (on the main thread) for `AD_EARLY_COMPLETE`; the caller flips its
  *   close state (`rewardEarned` / `closeEnabled`).
- * @param onCreativeMoment invoked (on the main thread) for `CREATIVE_MOMENT` with the raw moment
- *   token; the caller fires an `auto_store_redirect` when it matches the configured trigger.
  */
 internal fun androidCreativeBridge(
     appContext: Context,
     activityProvider: () -> Activity?,
     onEarlyComplete: () -> Unit,
-    onCreativeMoment: (String) -> Unit = {},
 ): CreativeBridge {
     val main = Handler(Looper.getMainLooper())
-    val host = AndroidBridgeHost(appContext.applicationContext, activityProvider, onEarlyComplete, onCreativeMoment)
+    val host = AndroidBridgeHost(appContext.applicationContext, activityProvider, onEarlyComplete)
     return CreativeBridge(host) { block ->
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post { block() }
     }
@@ -43,12 +40,9 @@ internal class AndroidBridgeHost(
     private val appContext: Context,
     private val activityProvider: () -> Activity?,
     private val onEarlyComplete: () -> Unit,
-    private val onCreativeMoment: (String) -> Unit = {},
 ) : BridgeHost {
 
     override fun earlyComplete() = onEarlyComplete()
-
-    override fun creativeMoment(moment: String) = onCreativeMoment(moment)
 
     override fun haptic(style: String) = Haptics.trigger(appContext, style)
 

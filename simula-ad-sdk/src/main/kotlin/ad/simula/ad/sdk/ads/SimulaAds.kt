@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.network.RewardVerificationManager
+import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
@@ -54,6 +55,13 @@ object SimulaAds {
     val userAgent: String? get() = SimulaUserAgent.value
 
     /**
+     * The device identifier the SDK sends as the `X-Device-Id` header on its native HTTP requests
+     * (`Settings.Secure.ANDROID_ID`). Null until the SDK is initialized (or if the platform supplies
+     * none). Exposed so a React Native bridge can retrieve the native value.
+     */
+    val deviceId: String? get() = SimulaDeviceId.value
+
+    /**
      * Initialize the SDK. Idempotent — the first valid call wins; later calls are
      * ignored.
      *
@@ -84,8 +92,9 @@ object SimulaAds {
         this.apiKey = apiKey
         this.devMode = devMode
 
-        // Build the custom User-Agent once (PRD); SimulaHttp stamps it on every request.
+        // Build the custom User-Agent + device id once; SimulaHttp stamps them on every request.
         SimulaUserAgent.build(appContext)
+        SimulaDeviceId.build(appContext)
 
         // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
         // seeds it — identical resolution to SimulaProvider, so the imperative and

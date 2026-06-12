@@ -4,6 +4,8 @@ import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
 import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
+import ad.simula.ad.sdk.model.endScreenTriggerForMarker
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
@@ -192,10 +194,21 @@ private fun RewardedMinigame(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE (e.g. survey finished) grants the reward and
-    // reveals the close button immediately, bypassing the play timer. CREATIVE_MOMENT drives
-    // auto_store_redirect.
+    // reveals the close button immediately, bypassing the play timer.
     val autoRedirect = presentation.adBehavior?.autoStoreRedirect
     var autoRedirectFired by remember { mutableStateOf(false) }
+    // auto_store_redirect: open the advertiser store once (no user tap). A disabled/missing config no-ops.
+    fun fireAutoStoreRedirect() {
+        if (!autoRedirectFired) {
+            autoRedirectFired = true
+            CreativeCtaRouter.open(
+                context.applicationContext,
+                presentation.trackingUrl,
+                presentation.destination,
+                presentation.adBehavior?.storeOpen,
+            )
+        }
+    }
     val bridge = remember {
         androidCreativeBridge(
             appContext = context.applicationContext,
@@ -204,22 +217,15 @@ private fun RewardedMinigame(
                 presentation.rewardEarned = true
                 rewardEarned = true
             },
-            onCreativeMoment = { moment ->
-                // Open the advertiser store once, the first time the creative reports the configured
-                // moment (no user tap). A missing block / disabled config is a no-op.
-                if (autoRedirect != null && autoRedirect.enabled && !autoRedirectFired &&
-                    moment == autoRedirect.trigger.wire
-                ) {
-                    autoRedirectFired = true
-                    CreativeCtaRouter.open(
-                        context.applicationContext,
-                        presentation.trackingUrl,
-                        presentation.destination,
-                        presentation.adBehavior?.storeOpen,
-                    )
-                }
-            },
         )
+    }
+
+    // PLAYABLE_END — open the store the moment the close button appears (here, when the reward is
+    // earned and the reward/close pill becomes a close button). SDK-native, no bridge.
+    if (autoRedirect?.enabled == true && autoRedirect.trigger == AutoStoreRedirectTrigger.PLAYABLE_END) {
+        LaunchedEffect(rewardEarned) {
+            if (rewardEarned) fireAutoStoreRedirect()
+        }
     }
 
     // DISPLAYED + impression fire once the creative first composes. Guarded so an
@@ -300,6 +306,14 @@ private fun RewardedMinigame(
                             request: WebResourceRequest?,
                         ): Boolean {
                             val requestUrl = request?.url?.toString() ?: return false
+                            // auto_store_redirect end-screen marker (simula://end-screen-1/2): consume
+                            // the custom-scheme navigation and fire the redirect if the trigger matches.
+                            endScreenTriggerForMarker(requestUrl)?.let { trigger ->
+                                if (autoRedirect?.enabled == true && autoRedirect.trigger == trigger) {
+                                    fireAutoStoreRedirect()
+                                }
+                                return true
+                            }
                             if (requestUrl == url) return false
                             // Allow same-origin navigation; open external links externally.
                             if (Uri.parse(url).host == Uri.parse(requestUrl).host) return false

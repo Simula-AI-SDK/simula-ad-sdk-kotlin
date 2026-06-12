@@ -15,6 +15,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaContextValue
+import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
@@ -74,9 +75,13 @@ fun SimulaProvider(
 
     val context = LocalContext.current
 
-    // Build the custom User-Agent synchronously during composition (PRD) so it's set before the
-    // first /session/create. The imperative SimulaAds.initialize() path builds it too; first wins.
-    remember(context) { SimulaUserAgent.build(context.applicationContext) }
+    // Build the custom User-Agent + device id synchronously during composition so they're set
+    // before the first /session/create. The imperative SimulaAds.initialize() path builds them
+    // too; first wins.
+    remember(context) {
+        SimulaUserAgent.build(context.applicationContext)
+        SimulaDeviceId.build(context.applicationContext)
+    }
 
     // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
     // seeds it so existing call sites behave exactly as before.

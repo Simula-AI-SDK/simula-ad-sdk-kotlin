@@ -8,6 +8,7 @@ import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.OverlayTiming
 import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.endScreenTriggerForMarker
 import ad.simula.ad.sdk.model.validatedHexColor
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -472,5 +473,18 @@ class AdLoadParsingTest {
             """{"ad_behavior":{"auto_store_redirect":{"enabled":true,"trigger":"warp_drive"}}}""",
         ).adBehavior.toDomain()!!
         assertEquals(AutoStoreRedirectTrigger.PLAYABLE_END, b.autoStoreRedirect!!.trigger)
+    }
+
+    @Test
+    fun `end-screen marker url maps to the matching trigger`() {
+        // END_SCREEN_1/2_OPEN are detected by the creative navigating to a simula:// marker (no bridge).
+        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_1_OPEN, endScreenTriggerForMarker("simula://end-screen-1"))
+        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_2_OPEN, endScreenTriggerForMarker("simula://end-screen-2"))
+        // Case-insensitive + tolerant of a trailing slash.
+        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_1_OPEN, endScreenTriggerForMarker("SIMULA://END-SCREEN-1/"))
+        // Non-markers (real URLs, PLAYABLE_END which is native, null) map to null.
+        assertNull(endScreenTriggerForMarker("https://play.google.com/store/apps/details?id=x"))
+        assertNull(endScreenTriggerForMarker("simula://playable-end"))
+        assertNull(endScreenTriggerForMarker(null))
     }
 }

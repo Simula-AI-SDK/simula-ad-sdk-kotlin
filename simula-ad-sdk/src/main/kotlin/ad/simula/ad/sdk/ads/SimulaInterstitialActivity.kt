@@ -6,8 +6,10 @@ import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.endScreenTriggerForMarker
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.OverlayTiming
@@ -240,26 +242,34 @@ private fun CreativeInterstitial(
     val closeProgress = remember { Animatable(0f) }
 
     // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE unlocks the close button immediately,
-    // bypassing the close-delay gate. CREATIVE_MOMENT drives auto_store_redirect.
+    // bypassing the close-delay gate.
     val context = LocalContext.current
-    // auto_store_redirect: open the advertiser store once, the first time the creative reports the
-    // configured moment (no user tap). A missing block / disabled config is a no-op.
+    // auto_store_redirect: open the advertiser store once (no user tap). PLAYABLE_END fires when the
+    // close button appears (below); END_SCREEN_1/2_OPEN fire when the creative navigates to the
+    // matching end-screen marker (handled in the WebView client). A disabled/missing config no-ops.
     val autoRedirect = behavior?.autoStoreRedirect
     var autoRedirectFired by remember { mutableStateOf(false) }
+    fun fireAutoStoreRedirect() {
+        if (!autoRedirectFired) {
+            autoRedirectFired = true
+            openDestination(ad)
+        }
+    }
     val bridge = remember {
         androidCreativeBridge(
             appContext = context.applicationContext,
             activityProvider = { context as? Activity },
             onEarlyComplete = { closeEnabled = true },
-            onCreativeMoment = { moment ->
-                if (autoRedirect != null && autoRedirect.enabled && !autoRedirectFired &&
-                    moment == autoRedirect.trigger.wire
-                ) {
-                    autoRedirectFired = true
-                    openDestination(ad)
-                }
-            },
         )
+    }
+
+    // PLAYABLE_END — open the store the moment the close button becomes available (SDK-native, no
+    // bridge). The keyed effect runs on first composition (covers a delay-0 immediate close) and on
+    // every flip of `closeEnabled`; the one-shot guard makes repeats a no-op.
+    if (autoRedirect?.enabled == true && autoRedirect.trigger == AutoStoreRedirectTrigger.PLAYABLE_END) {
+        LaunchedEffect(closeEnabled) {
+            if (closeEnabled) fireAutoStoreRedirect()
+        }
     }
 
     if (gateTotal > Duration.ZERO) {
@@ -370,6 +380,12 @@ private fun CreativeInterstitial(
                         installBannerVisible = true
                     }
                 },
+                onEndScreenMarker = { trigger ->
+                    // END_SCREEN_1/2_OPEN — fire when the matching end card renders.
+                    if (autoRedirect?.enabled == true && autoRedirect.trigger == trigger) {
+                        fireAutoStoreRedirect()
+                    }
+                },
                 // Sits below the safe area (the black Box fills the cutout / nav-bar region).
                 modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
             )
@@ -434,6 +450,7 @@ private fun CreativeHtml(
     destination: String,
     bridge: CreativeBridge,
     onAdClick: () -> Unit,
+    onEndScreenMarker: (AutoStoreRedirectTrigger) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // applicationContext so the store/browser open survives if the interstitial is
@@ -456,6 +473,13 @@ private fun CreativeHtml(
                         request: WebResourceRequest?,
                     ): Boolean {
                         val url = request?.url?.toString() ?: return false
+                        // auto_store_redirect end-screen marker (e.g. simula://end-screen-1): the
+                        // creative signals an end card by navigating here. Consume it (never load the
+                        // custom-scheme URL) and let the caller fire the redirect if it matches.
+                        endScreenTriggerForMarker(url)?.let { trigger ->
+                            onEndScreenMarker(trigger)
+                            return true
+                        }
                         // Only a user gesture counts as the ad click-through; pixels
                         // and auto-redirects (no gesture) navigate normally.
                         if (!request.hasGesture()) return false
