@@ -240,13 +240,25 @@ private fun CreativeInterstitial(
     val closeProgress = remember { Animatable(0f) }
 
     // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE unlocks the close button immediately,
-    // bypassing the close-delay gate.
+    // bypassing the close-delay gate. CREATIVE_MOMENT drives auto_store_redirect.
     val context = LocalContext.current
+    // auto_store_redirect: open the advertiser store once, the first time the creative reports the
+    // configured moment (no user tap). A missing block / disabled config is a no-op.
+    val autoRedirect = behavior?.autoStoreRedirect
+    var autoRedirectFired by remember { mutableStateOf(false) }
     val bridge = remember {
         androidCreativeBridge(
             appContext = context.applicationContext,
             activityProvider = { context as? Activity },
             onEarlyComplete = { closeEnabled = true },
+            onCreativeMoment = { moment ->
+                if (autoRedirect != null && autoRedirect.enabled && !autoRedirectFired &&
+                    moment == autoRedirect.trigger.wire
+                ) {
+                    autoRedirectFired = true
+                    openDestination(ad)
+                }
+            },
         )
     }
 

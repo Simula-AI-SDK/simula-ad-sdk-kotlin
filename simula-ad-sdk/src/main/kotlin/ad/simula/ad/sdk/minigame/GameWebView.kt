@@ -17,13 +17,16 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -263,7 +266,18 @@ fun GameWebView(
             }
 
             // Main content
-            Box(modifier = Modifier.fillMaxSize().weight(1f)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f)
+                    // Full-screen games inset the game + close button below the top safe area
+                    // (status bar / notch). The bottom-sheet variant is anchored within its own
+                    // sheet bounds, so it manages its own insets and isn't padded here.
+                    .then(
+                        if (isBottomSheet) Modifier
+                        else Modifier.windowInsetsPadding(WindowInsets.safeDrawing)
+                    ),
+            ) {
                 when {
                     error != null -> {
                         // Error state

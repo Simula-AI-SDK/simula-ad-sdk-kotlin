@@ -146,7 +146,10 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
                     },
                 ).apply { loadUrl(iframeUrl) }
             },
-            modifier = Modifier.fillMaxSize(),
+            // Inset the creative below the top safe area (status bar / notch), matching the
+            // interstitial / rewarded creatives. safeDrawing accounts for the display cutout even
+            // with system bars hidden, so it's full-bleed on devices without one.
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
             onRelease = { webView -> WebViewPool.release(webView) },
         )
 

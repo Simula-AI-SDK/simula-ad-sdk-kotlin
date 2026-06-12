@@ -23,6 +23,10 @@ internal interface BridgeHost {
     fun deviceContext(): JsonObject
     fun audioState(): JsonObject
     fun currentOrientation(): JsonObject
+
+    /** A creative-lifecycle moment (`playable_end` / `end_screen_1_open` / `end_screen_2_open`),
+     * used to drive `auto_store_redirect`. Default no-op so hosts/tests that don't care can ignore it. */
+    fun creativeMoment(moment: String) {}
 }
 
 /**
@@ -56,6 +60,7 @@ internal class CreativeBridge(
         when (type) {
             // Events (no reply)
             "AD_EARLY_COMPLETE" -> host.earlyComplete()
+            "CREATIVE_MOMENT" -> payload?.str("moment")?.let(host::creativeMoment)
 
             // Commands (no reply)
             "TRIGGER_HAPTIC" -> payload?.str("style")?.let(host::haptic)

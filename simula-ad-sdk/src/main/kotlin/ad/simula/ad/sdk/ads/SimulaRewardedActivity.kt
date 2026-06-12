@@ -192,7 +192,10 @@ private fun RewardedMinigame(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE (e.g. survey finished) grants the reward and
-    // reveals the close button immediately, bypassing the play timer.
+    // reveals the close button immediately, bypassing the play timer. CREATIVE_MOMENT drives
+    // auto_store_redirect.
+    val autoRedirect = presentation.adBehavior?.autoStoreRedirect
+    var autoRedirectFired by remember { mutableStateOf(false) }
     val bridge = remember {
         androidCreativeBridge(
             appContext = context.applicationContext,
@@ -200,6 +203,21 @@ private fun RewardedMinigame(
             onEarlyComplete = {
                 presentation.rewardEarned = true
                 rewardEarned = true
+            },
+            onCreativeMoment = { moment ->
+                // Open the advertiser store once, the first time the creative reports the configured
+                // moment (no user tap). A missing block / disabled config is a no-op.
+                if (autoRedirect != null && autoRedirect.enabled && !autoRedirectFired &&
+                    moment == autoRedirect.trigger.wire
+                ) {
+                    autoRedirectFired = true
+                    CreativeCtaRouter.open(
+                        context.applicationContext,
+                        presentation.trackingUrl,
+                        presentation.destination,
+                        presentation.adBehavior?.storeOpen,
+                    )
+                }
             },
         )
     }

@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.network.RewardVerificationManager
+import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.provider.SimulaSessionStore
@@ -46,6 +47,13 @@ object SimulaAds {
     val isInitialized: Boolean get() = initialized
 
     /**
+     * The custom User-Agent the SDK sets on its native HTTP requests (PRD). Null until the SDK is
+     * initialized. Exposed so a React Native bridge can retrieve the native string rather than
+     * reconstructing it in JS.
+     */
+    val userAgent: String? get() = SimulaUserAgent.value
+
+    /**
      * Initialize the SDK. Idempotent — the first valid call wins; later calls are
      * ignored.
      *
@@ -75,6 +83,9 @@ object SimulaAds {
         appContext = context.applicationContext
         this.apiKey = apiKey
         this.devMode = devMode
+
+        // Build the custom User-Agent once (PRD); SimulaHttp stamps it on every request.
+        SimulaUserAgent.build(appContext)
 
         // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
         // seeds it — identical resolution to SimulaProvider, so the imperative and
