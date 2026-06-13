@@ -1,6 +1,9 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.model.SimulaAdContext
+import ad.simula.ad.sdk.nativead.NativeAdContextStore
+import ad.simula.ad.sdk.nativead.NativeAdPreloadCache
 import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaUserAgent
@@ -84,6 +87,7 @@ object SimulaAds {
         hasPrivacyConsent: Boolean = true,
         privacy: SimulaPrivacyConfig? = null,
         telemetryEnabled: Boolean = true,
+        adContext: SimulaAdContext? = null,
     ) {
         if (initialized) return
         require(apiKey.isNotBlank()) { "SimulaAds.initialize requires a non-blank apiKey" }
@@ -91,6 +95,9 @@ object SimulaAds {
         appContext = context.applicationContext
         this.apiKey = apiKey
         this.devMode = devMode
+
+        // Seed the process-wide native-ad targeting context so every POST /load/native carries it.
+        NativeAdContextStore.set(adContext)
 
         // Build the custom User-Agent + device id once; SimulaHttp stamps them on every request.
         SimulaUserAgent.build(appContext)
@@ -136,6 +143,35 @@ object SimulaAds {
         // without waiting for the next rewarded play. triggerProcessQueue launches its
         // own coroutine, so a slow/failed session create can't delay or skip recovery.
         RewardVerificationManager.triggerProcessQueue(appContext)
+    }
+
+    // ── Native ad targeting context + preloading ──────────────────────────────
+
+    /**
+     * Replace the native-ad targeting [SimulaAdContext] at runtime (e.g. when the feed category
+     * changes). This is a full replacement, not a merge (PRD). All subsequent `POST /load/native`
+     * calls use the new context; ads already preloaded under the old context are unaffected.
+     */
+    fun updateContext(adContext: SimulaAdContext?) {
+        NativeAdContextStore.set(adContext)
+    }
+
+    /**
+     * Imperatively preload one native ad before its slot scrolls into view. Fires a single
+     * `POST /load/native` using the current provider context, caches the full response, and returns
+     * a `preloadedAdId` to pass into a [ad.simula.ad.sdk.nativead.NativeAdSlot] — which then renders
+     * from cache with no live network call. The entry is evicted once consumed; release any
+     * unconsumed id with [destroyPreloadedAd]. At most 5 ads are kept (excess is dropped with an
+     * internal warning). Returns null before [initialize].
+     */
+    fun preloadNativeAd(adUnitId: String? = null, position: Int = 0): String? {
+        if (!initialized) return null
+        return NativeAdPreloadCache.preload(adUnitId = adUnitId, position = position)
+    }
+
+    /** Release a preloaded native ad that was never consumed, cancelling its request if in flight. */
+    fun destroyPreloadedAd(preloadedAdId: String) {
+        NativeAdPreloadCache.destroy(preloadedAdId)
     }
 
     private fun registerActivityTracking() {
