@@ -392,8 +392,12 @@ private fun CreativeInterstitial(
                         installBannerVisible = true
                     }
                 },
-                // Sits below the safe area (the black Box fills the cutout / nav-bar region).
-                modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
+                // The creative fills edge-to-edge: inset only vertically (status / nav / top
+                // notch) and draw under any horizontal display-cutout, so the transparent
+                // WebView's black backing never shows as left/right bars in landscape.
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
             )
         }
 

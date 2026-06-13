@@ -5,6 +5,7 @@ import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
+import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
@@ -204,6 +205,18 @@ private fun RewardedMinigame(
         )
     }
 
+    // Keep the play-to-earn / close pill clear of the store-prompt badge: default top-right, but
+    // flip to top-left when the store prompt occupies the top-right (its only colliding corner) so
+    // the two never overlap. Stable for the session (the store-prompt config doesn't change), so
+    // the pill doesn't jump corners when the prompt appears at midpoint or is removed on reward.
+    val pillAlignment = if (
+        storePrompt != null && storePrompt.enabled && storePrompt.position == ClosePosition.TOP_RIGHT
+    ) {
+        Alignment.TopStart
+    } else {
+        Alignment.TopEnd
+    }
+
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -357,7 +370,7 @@ private fun RewardedMinigame(
             secondsLeft = secondsLeft,
             onClose = { onFinish(true) },
             modifier = Modifier
-                .align(Alignment.TopEnd)
+                .align(pillAlignment)
                 .windowInsetsPadding(WindowInsets.safeDrawing)
                 .padding(8.dp),
         )

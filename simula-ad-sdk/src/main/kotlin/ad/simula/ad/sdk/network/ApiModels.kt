@@ -303,6 +303,9 @@ internal data class VerifyRewardRequestBody(
     @SerialName("serve_id") val serveId: String,
     @SerialName("session_id") val sessionId: String,
     @SerialName("elapsed_play_time") val elapsedPlayTime: Double,
+    // Sent alongside serve_id so the SSV reward callback can resolve/validate the ad unit off the
+    // body. Default "" keeps existing callers + already-persisted queue entries decoding cleanly.
+    @SerialName("ad_unit_id") val adUnitId: String = "",
 )
 
 @Serializable

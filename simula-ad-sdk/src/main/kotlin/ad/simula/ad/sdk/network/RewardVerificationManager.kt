@@ -26,6 +26,9 @@ internal data class PendingVerification(
     val elapsedPlayTime: Double,
     var retryCount: Int,
     var lastAttemptTimestamp: Long,
+    // Sent to verify-reward so the SSV callback resolves the ad unit. Defaulted + last so queue
+    // entries persisted before this field existed still decode (with adUnitId = "").
+    val adUnitId: String = "",
 )
 
 /** Persists the pending-verification queue. Abstracted so the queue engine can be unit-tested. */
@@ -36,7 +39,7 @@ internal interface VerificationStore {
 
 /** Performs one `verify-reward` call; returns the reward token (may be null) or throws. */
 internal interface RewardVerifier {
-    suspend fun verify(serveId: String, sessionId: String, elapsedPlayTime: Double): String?
+    suspend fun verify(serveId: String, sessionId: String, elapsedPlayTime: Double, adUnitId: String): String?
 }
 
 /** Exponential backoff: first attempt immediate, then 5s, 10s, 20s, 40s, 60s cap. */
@@ -98,6 +101,7 @@ internal class RewardVerificationQueue(
         serveId: String,
         sessionId: String,
         elapsedPlayTime: Double,
+        adUnitId: String = "",
         onResult: ((Result<String?>) -> Unit)? = null,
     ) {
         // Register before enqueueing so a drain already in flight (which reloads the
@@ -116,6 +120,7 @@ internal class RewardVerificationQueue(
                             elapsedPlayTime = elapsedPlayTime,
                             retryCount = 0,
                             lastAttemptTimestamp = 0L,
+                            adUnitId = adUnitId,
                         ),
                     )
                     store.save(list)
@@ -151,7 +156,7 @@ internal class RewardVerificationQueue(
                 // the verify try/catch means a listener that throws can't be misread as a
                 // verification error (and can't derail the drain).
                 val outcome: Result<String?> = try {
-                    val token = verifier.verify(task.serveId, task.sessionId, task.elapsedPlayTime)
+                    val token = verifier.verify(task.serveId, task.sessionId, task.elapsedPlayTime, task.adUnitId)
                     removeTask(task.serveId)
                     Result.success(token)
                 } catch (e: Exception) {
@@ -241,8 +246,9 @@ internal object RewardVerificationManager {
         serveId: String,
         sessionId: String,
         elapsedPlayTime: Double,
+        adUnitId: String = "",
         onResult: ((Result<String?>) -> Unit)? = null,
-    ) = engine(context).queue(serveId, sessionId, elapsedPlayTime, onResult)
+    ) = engine(context).queue(serveId, sessionId, elapsedPlayTime, adUnitId, onResult)
 
     /**
      * Drains any persisted verifications eligible under their backoff. Call at app
@@ -253,8 +259,8 @@ internal object RewardVerificationManager {
 
 /** Real verifier: the SSV-firing `verify-reward` call (HTTP 409 → success token=null). */
 private object ApiRewardVerifier : RewardVerifier {
-    override suspend fun verify(serveId: String, sessionId: String, elapsedPlayTime: Double): String? =
-        SimulaApiClient.verifyReward(serveId, sessionId, elapsedPlayTime).token
+    override suspend fun verify(serveId: String, sessionId: String, elapsedPlayTime: Double, adUnitId: String): String? =
+        SimulaApiClient.verifyReward(serveId, sessionId, elapsedPlayTime, adUnitId).token
 }
 
 /** Real store: a single `SharedPreferences` entry holding the JSON-encoded queue. */

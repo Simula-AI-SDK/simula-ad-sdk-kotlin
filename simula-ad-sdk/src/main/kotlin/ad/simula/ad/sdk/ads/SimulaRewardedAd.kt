@@ -388,6 +388,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                         serveId = sid,
                         sessionId = sess,
                         elapsedPlayTime = elapsedPlayTimeSeconds,
+                        adUnitId = adUnitId,
                     ) { result ->
                         val verifyMs = (System.nanoTime() - verifyStartNanos) / 1_000_000
                         Telemetry.recordOperation("reward_verification", verifyMs, success = result.isSuccess)

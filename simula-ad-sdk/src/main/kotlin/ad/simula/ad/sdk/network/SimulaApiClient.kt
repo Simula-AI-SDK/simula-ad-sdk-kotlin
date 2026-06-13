@@ -536,11 +536,13 @@ internal object SimulaApiClient {
         serveId: String,
         sessionId: String,
         elapsedPlayTime: Double,
+        adUnitId: String = "",
     ): VerifyRewardApiResponse = withContext(Dispatchers.IO) {
         val requestBody = VerifyRewardRequestBody(
             serveId = serveId,
             sessionId = sessionId,
             elapsedPlayTime = elapsedPlayTime,
+            adUnitId = adUnitId,
         )
         val response = SimulaHttp.request(
             url = "$API_BASE_URL/minigames/verify-reward",
@@ -635,7 +637,7 @@ internal object SimulaApiClient {
                 experiment?.layer?.let { put("layer", it) }
             }
             SimulaHttp.request(
-                url = "$API_BASE_URL/track/engagement/impression/$adId",
+                url = "$API_BASE_URL/track/impression/$adId",
                 method = "POST",
                 headers = authHeaders(apiKey),
                 body = json.encodeToString(body),
