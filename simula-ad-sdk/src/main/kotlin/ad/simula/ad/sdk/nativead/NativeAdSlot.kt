@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.nativead
 
+import ad.simula.ad.sdk.ads.NativeAdInfoOverlay
 import ad.simula.ad.sdk.ads.SimulaAdError
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.model.NativeAdData
@@ -74,18 +75,20 @@ fun NativeAdSlot(
     val currentOnImpression by rememberUpdatedState(onImpression)
     val currentOnError by rememberUpdatedState(onError)
 
-    // Re-keyed on the slot identity so a recycled list row loads its own ad afresh.
+    // Initial state from the per-slot cache so a recycled row renders the SAME ad instantly (no
+    // shimmer, no refetch). A preload id must be consumed asynchronously, so it starts Loading.
+    val cachedFill = NativeAdCache.get(adUnitId, position) as? NativeAdCache.Value.Fill
     var state by remember(adUnitId, position, preloadedAdId, previewHtml) {
-        mutableStateOf<NativeAdSlotState>(NativeAdSlotState.Loading)
+        mutableStateOf(initialNativeAdState(adUnitId, position, preloadedAdId, previewHtml))
     }
-    var heightDp by remember(adUnitId, position, preloadedAdId, previewHtml) { mutableFloatStateOf(0f) }
-    var impressionFired by remember(adUnitId, position, preloadedAdId, previewHtml) { mutableStateOf(false) }
+    var heightDp by remember(adUnitId, position, preloadedAdId, previewHtml) {
+        mutableFloatStateOf(cachedFill?.heightDp ?: 0f)
+    }
+    var impressionFired by remember(adUnitId, position, preloadedAdId, previewHtml) {
+        mutableStateOf(cachedFill?.impressionFired ?: false)
+    }
 
     LaunchedEffect(adUnitId, position, preloadedAdId, previewHtml) {
-        state = NativeAdSlotState.Loading
-        heightDp = 0f
-        impressionFired = false
-
         // Preview/QA: render the supplied HTML with no network (mirrors imperative showPreview).
         if (previewHtml != null) {
             state = NativeAdSlotState.Filled(
@@ -100,58 +103,103 @@ fun NativeAdSlot(
             return@LaunchedEffect
         }
 
-        val result: SimulaApiClient.NativeAdResult? = try {
-            // Preloaded id → render from cache; expired/unknown falls back to a live request.
-            preloadedAdId?.let { NativeAdPreloadCache.consume(it) }
-                ?: NativeAdController.load(ctx.ensureSession, adUnitId, position)
+        // Caches the outcome so the next remount of this slot reuses it (no duplicate serve).
+        fun apply(result: SimulaApiClient.NativeAdResult) {
+            val hasCreative = result.adInserted &&
+                (!result.iframeUrl.isNullOrBlank() || !result.renderedHtml.isNullOrBlank())
+            if (hasCreative) {
+                NativeAdCache.putFill(adUnitId, position, result)
+                heightDp = 0f
+                impressionFired = false
+                state = NativeAdSlotState.Filled(result)
+            } else {
+                // No-fill collapses silently (no onError). PRD.
+                NativeAdCache.putNoFill(adUnitId, position)
+                state = NativeAdSlotState.Empty
+            }
+        }
+
+        // 1. Honor a fresh preload first (a new id the publisher just preloaded).
+        preloadedAdId?.let { NativeAdPreloadCache.consume(it) }?.let { apply(it); return@LaunchedEffect }
+
+        // 2. Per-slot cache hit → render without a network call (no duplicate serve / impression).
+        when (val cached = NativeAdCache.get(adUnitId, position)) {
+            is NativeAdCache.Value.Fill -> {
+                heightDp = cached.heightDp
+                impressionFired = cached.impressionFired
+                state = NativeAdSlotState.Filled(cached.result)
+                return@LaunchedEffect
+            }
+            NativeAdCache.Value.NoFill -> { state = NativeAdSlotState.Empty; return@LaunchedEffect }
+            null -> Unit // fall through to a live request
+        }
+
+        // 3. Live request.
+        state = NativeAdSlotState.Loading
+        try {
+            apply(NativeAdController.load(ctx.ensureSession, adUnitId, position))
         } catch (e: SimulaAdError) {
-            state = NativeAdSlotState.Empty
+            state = NativeAdSlotState.Empty // error → hide; not cached so it can retry next time
             currentOnError(e)
-            null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             state = NativeAdSlotState.Empty
             currentOnError(SimulaAdError.Network(e))
-            null
-        }
-
-        if (result != null) {
-            val hasCreative = result.adInserted &&
-                (!result.iframeUrl.isNullOrBlank() || !result.renderedHtml.isNullOrBlank())
-            // No-fill collapses silently (no onError). PRD.
-            state = if (hasCreative) NativeAdSlotState.Filled(result) else NativeAdSlotState.Empty
         }
     }
 
     when (val s = state) {
         is NativeAdSlotState.Filled -> {
             val result = s.result
-            NativeAdWebView(
-                iframeUrl = result.iframeUrl,
-                renderedHtml = result.renderedHtml,
-                apiKey = ctx.apiKey,
-                impressionId = result.impressionId,
-                heightDp = heightDp,
-                onHeightPx = { px -> heightDp = px },
-                onAdClick = { /* CLICKED — reserved for a future click callback / telemetry hook. */ },
-                modifier = modifier.trackNativeAdViewability(
-                    // Only measure once the creative has a real, laid-out height.
-                    enabled = heightDp > 0f,
-                ) {
-                    if (!impressionFired) {
-                        impressionFired = true
-                        // Co-fire the callback and the server impression off the one viewability event.
-                        currentOnImpression(NativeAdData(result.impressionId, result.adFormat, adUnitId))
-                        // No server impression for a preview (blank id).
-                        if (result.impressionId.isNotBlank()) {
-                            SimulaScope.launch {
-                                SimulaApiClient.trackImpression(result.impressionId, ctx.apiKey)
+            Box(modifier.fillMaxWidth()) {
+                NativeAdWebView(
+                    iframeUrl = result.iframeUrl,
+                    renderedHtml = result.renderedHtml,
+                    apiKey = ctx.apiKey,
+                    impressionId = result.impressionId,
+                    heightDp = heightDp,
+                    onHeightPx = { px ->
+                        // Threshold sub-dp churn so a measuring creative can't thrash the feed below.
+                        if (kotlin.math.abs(px - heightDp) >= 1f) {
+                            heightDp = px
+                            // Persist so a recycled row sizes correctly on its first frame.
+                            (NativeAdCache.get(adUnitId, position) as? NativeAdCache.Value.Fill)?.heightDp = px
+                        }
+                    },
+                    onAdClick = { /* CLICKED — reserved for a future click callback / telemetry hook. */ },
+                    modifier = Modifier.trackNativeAdViewability(
+                        // Only measure once the creative has a real, laid-out height.
+                        enabled = heightDp > 0f,
+                    ) {
+                        if (!impressionFired) {
+                            impressionFired = true
+                            // Remember it on the cache entry so a remount of the same serve never re-fires.
+                            (NativeAdCache.get(adUnitId, position) as? NativeAdCache.Value.Fill)?.impressionFired = true
+                            // Co-fire the callback and the server impression off the one viewability event.
+                            currentOnImpression(NativeAdData(result.impressionId, result.adFormat, adUnitId))
+                            // No server impression for a preview (blank id).
+                            if (result.impressionId.isNotBlank()) {
+                                SimulaScope.launch {
+                                    SimulaApiClient.trackImpression(result.impressionId, ctx.apiKey)
+                                }
                             }
                         }
-                    }
-                },
-            )
+                    },
+                )
+                // Keep the shimmer over the slot until the creative reports its height. Without this
+                // the slot would collapse to ~1dp between "filled" and "measured", jolting the feed
+                // below up and then back down (it "looks broken"). One smooth grow instead.
+                if (heightDp <= 0f) {
+                    NativeAdShimmer(Modifier.matchParentSize())
+                }
+
+                // Tap-to-open AdChoices over the creative's top-left "AD" badge (Interested /
+                // Not interested / Report / About) — the SDK's standard dialog, once the ad is shown.
+                if (heightDp > 0f) {
+                    NativeAdInfoOverlay(adId = result.impressionId, apiKey = ctx.apiKey)
+                }
+            }
         }
 
         NativeAdSlotState.Loading -> {
@@ -163,6 +211,26 @@ fun NativeAdSlot(
             // No-fill / error → hide the card (zero height, no placeholder).
             Spacer(Modifier.fillMaxWidth().height(0.dp))
         }
+    }
+}
+
+/** Provisional height the slot holds while the creative is measuring, so it never collapses to a
+ * sliver between "filled" and "first height reported" (which would jolt the surrounding feed). */
+internal const val NATIVE_AD_PROVISIONAL_HEIGHT_DP = 160f
+
+/** Initial slot state derived synchronously from [NativeAdCache] so a recycled row paints the cached
+ * ad on its first frame (no shimmer flash). A preview / preload resolves in the effect, so starts Loading. */
+private fun initialNativeAdState(
+    adUnitId: String?,
+    position: Int,
+    preloadedAdId: String?,
+    previewHtml: String?,
+): NativeAdSlotState {
+    if (previewHtml != null || preloadedAdId != null) return NativeAdSlotState.Loading
+    return when (val cached = NativeAdCache.get(adUnitId, position)) {
+        is NativeAdCache.Value.Fill -> NativeAdSlotState.Filled(cached.result)
+        NativeAdCache.Value.NoFill -> NativeAdSlotState.Empty
+        null -> NativeAdSlotState.Loading
     }
 }
 
@@ -185,7 +253,7 @@ private fun NativeAdShimmer(modifier: Modifier = Modifier) {
     Box(
         modifier
             .fillMaxWidth()
-            .height(160.dp)
+            .height(NATIVE_AD_PROVISIONAL_HEIGHT_DP.dp)
             .clip(RoundedCornerShape(16.dp))
             .drawBehind {
                 val sweep = size.width

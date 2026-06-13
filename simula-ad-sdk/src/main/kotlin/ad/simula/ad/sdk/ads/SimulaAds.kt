@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.model.SimulaAdContext
+import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.nativead.NativeAdPreloadCache
 import ad.simula.ad.sdk.network.RewardVerificationManager
@@ -172,6 +173,21 @@ object SimulaAds {
     /** Release a preloaded native ad that was never consumed, cancelling its request if in flight. */
     fun destroyPreloadedAd(preloadedAdId: String) {
         NativeAdPreloadCache.destroy(preloadedAdId)
+    }
+
+    /**
+     * Drop the cached ad for a native slot so its next appearance fetches a fresh one. A
+     * [ad.simula.ad.sdk.nativead.NativeAdSlot] caches its resolved ad per `(adUnitId, position)` so
+     * scrolling it out and back reuses the same serve (no duplicate request or impression); call this
+     * to force a refresh for that slot. Pass no args + [invalidateNativeAds] to clear them all.
+     */
+    fun invalidateNativeAd(adUnitId: String? = null, position: Int = 0) {
+        NativeAdCache.invalidate(adUnitId, position)
+    }
+
+    /** Clear every cached native ad (all slots). */
+    fun invalidateNativeAds() {
+        NativeAdCache.invalidateAll()
     }
 
     private fun registerActivityTracking() {

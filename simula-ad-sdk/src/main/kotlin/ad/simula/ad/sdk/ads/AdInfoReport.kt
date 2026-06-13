@@ -99,13 +99,55 @@ internal fun BoxScope.AdInfoReportOverlay(
 }
 
 /**
- * AppLovin-style ad-feedback menu: Interested / Not interested / Report (which expands to reason
- * codes), plus a separate "About Simula Ads" link to simula.ad. [onReport] posts the chosen flag.
+ * Native-ad info affordance: a transparent hit area over the creative's top-left "AD" badge that
+ * opens the same [AdReportSheet] (Interested / Not interested / Report / About) the full-screen ads
+ * use. The creative draws the visible "AD" badge; this just makes it tap-to-open the SDK's standard
+ * AdChoices menu. The sheet is anchored top-left (below the badge) and confined to the ad card.
+ *
+ * Call inside the native ad's `Box` (last, so the sheet covers the creative).
  */
 @Composable
-private fun AdReportSheet(
+internal fun BoxScope.NativeAdInfoOverlay(
+    adId: String,
+    apiKey: String? = null,
+) {
+    var sheetVisible by remember { mutableStateOf(false) }
+
+    // Transparent hit area over the creative's "AD" badge (top:12 / left:12, ~40x24 → 52dp covers it).
+    Box(
+        modifier = Modifier
+            .align(Alignment.TopStart)
+            .size(52.dp)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) { sheetVisible = true },
+    )
+
+    if (sheetVisible) {
+        AdReportSheet(
+            onReport = { flag ->
+                val key = apiKey ?: SimulaAds.apiKey
+                SimulaScope.launch { SimulaApiClient.reportAd(adId, flag, null, key) }
+            },
+            onClose = { sheetVisible = false },
+            alignment = Alignment.TopStart,
+        )
+    }
+}
+
+/**
+ * AppLovin-style ad-feedback menu: Interested / Not interested / Report (which expands to reason
+ * codes), plus a separate "About Simula Ads" link to simula.ad. [onReport] posts the chosen flag.
+ *
+ * [alignment] places the menu: `BottomStart` (default, for full-screen ads — slides up from the
+ * bottom over the safe area) or `TopStart` (for the inline native card — drops below the AD badge).
+ */
+@Composable
+internal fun AdReportSheet(
     onReport: (String) -> Unit,
     onClose: () -> Unit,
+    alignment: Alignment = Alignment.BottomStart,
 ) {
     val context = LocalContext.current
     // 0 = menu, 1 = reasons, 2 = done
@@ -122,13 +164,19 @@ private fun AdReportSheet(
                 indication = null,
                 onClick = onClose,
             ),
-        contentAlignment = Alignment.BottomStart,
+        contentAlignment = alignment,
     ) {
         Column(
             modifier = Modifier
                 .padding(horizontal = 12.dp)
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(bottom = 12.dp)
+                .then(
+                    // Inline card: drop below the badge. Full-screen: rise above the safe area.
+                    if (alignment == Alignment.TopStart) {
+                        Modifier.padding(top = 52.dp)
+                    } else {
+                        Modifier.windowInsetsPadding(WindowInsets.safeDrawing).padding(bottom = 12.dp)
+                    },
+                )
                 // Size the menu to its widest row (+ padding), left-aligned, not the full width.
                 .width(IntrinsicSize.Max),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -223,7 +271,9 @@ private fun AdReportSheet(
                             indication = null,
                         ) {
                             runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://simula.ad")))
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse("https://www.simula.ad/privacy-policy")),
+                                )
                             }
                             onClose()
                         }

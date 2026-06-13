@@ -70,9 +70,9 @@ internal fun NativeAdWebView(
     AndroidView(
         modifier = modifier
             .fillMaxWidth()
-            // 1.dp (not 0) while the height is unknown so the WebView lays out and can measure its
-            // content; it jumps to the reported height within a frame or two.
-            .height(if (heightDp > 0f) heightDp.dp else 1.dp),
+            // Hold a provisional height (not ~0) while the creative measures, so the slot never
+            // collapses to a sliver — the slot keeps a shimmer over this until the height arrives.
+            .height(if (heightDp > 0f) heightDp.dp else NATIVE_AD_PROVISIONAL_HEIGHT_DP.dp),
         factory = {
             val docStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
             val webView = WebViewPool.acquire(context, NativeAdWebViewClient(wiring, docStart))
@@ -128,7 +128,7 @@ private class NativeAdWiring(
 
     private fun handleFeedback(value: String) {
         when (value) {
-            "about" -> CreativeCtaRouter.open(appContext, "https://simula.ad", destination = "web")
+            "about" -> CreativeCtaRouter.open(appContext, "https://www.simula.ad/privacy-policy", destination = "web")
             "interested", "not_interested", "report" ->
                 SimulaScope.launch { SimulaApiClient.reportAd(adId = impressionId, flag = value, apiKey = apiKey) }
             else -> Unit
@@ -206,19 +206,41 @@ private val BRIDGE_SCRIPT = """
         } catch (err) {}
       });
 
-      // Report content height (top frame only) so the SDK resizes the slot to fit.
+      // Report content height (top frame only) so the SDK resizes the slot to fit. Debounced so a
+      // creative that animates / settles its layout posts a stable height instead of streaming
+      // intermediate values that would thrash the host feed's layout.
       if (window.top === window.self) {
-        var post = function () {
+        var lastH = 0, timer = null;
+        var measure = function () {
+          var b = document.body;
+          if (!b) { var de = document.documentElement; return de ? de.scrollHeight : 0; }
+          // The bottom of the lowest in-flow child = the creative's content height, independent of the
+          // height the SDK gave the WebView. A full-height creative (html,body{height:100%}) otherwise
+          // reports back the size we set (Android WebView returns it even via scrollHeight/height:auto),
+          // which feeds back and grows the slot on every resize. The card's content is top-packed in a
+          // flex column, so the lowest child's bottom is the true height and never tracks our resize.
+          var max = 0, kids = b.children;
+          for (var i = 0; i < kids.length; i++) {
+            var bottom = kids[i].getBoundingClientRect().bottom;
+            if (bottom > max) max = bottom;
+          }
+          max += (window.scrollY || window.pageYOffset || 0);
+          return Math.ceil(max) || b.scrollHeight;
+        };
+        var send = function () {
           try {
-            var de = document.documentElement, b = document.body;
-            var h = Math.max(
-              de ? de.scrollHeight : 0, b ? b.scrollHeight : 0,
-              de ? de.offsetHeight : 0, b ? b.offsetHeight : 0
-            );
-            if (h > 0 && bridge()) bridge().postMessage(JSON.stringify({ type: 'SIMULA_AD_HEIGHT', height: h }));
+            var h = measure();
+            if (h > 0 && Math.abs(h - lastH) >= 1 && bridge()) {
+              lastH = h;
+              bridge().postMessage(JSON.stringify({ type: 'SIMULA_AD_HEIGHT', height: h }));
+            }
           } catch (err) {}
         };
-        post();
+        var post = function () {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(send, 80);
+        };
+        send();                                  // size as soon as possible
         window.addEventListener('load', post);
         window.addEventListener('resize', post);
         try {
