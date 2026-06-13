@@ -74,9 +74,10 @@ private const val MAX_CHARACTERS = 4
  * Full-screen "Select Your Game Partner" character picker.
  *
  * Renders a 2-column grid of selectable character cards over a black backdrop and a
- * "Launch Game" button that activates once a character is chosen. On launch it fires
- * [onLaunch] with the selected character — the picker does not launch a game itself;
- * the host wires the character into the minigame flow.
+ * "Launch Game" button that activates once a character is chosen. On confirm it fires
+ * [onCharacterSelected] with the selected character — the selector does not launch a
+ * game itself; the host wires the character into the minigame flow. [onCharacterPreview]
+ * fires earlier, the moment a card is previewed (selected in the grid).
  *
  * Characters come from the `/character-selector` endpoint, with an instant fallback
  * to bundled placeholders so the grid never shows a spinner or empty state. Pass
@@ -87,21 +88,24 @@ private const val MAX_CHARACTERS = 4
  *
  * Pixel-mapped from the reference HTML; presentation mirrors [ad.simula.ad.sdk.minigame.MiniGameInterstitial].
  *
- * @param isOpen      Whether the picker is shown.
- * @param onClose     Invoked when dismissed (close button / system Back).
- * @param onLaunch    Invoked with the chosen character when "Launch Game" is tapped.
- * @param title       Header text. Default "Select Your Game Partner".
- * @param launchText  Launch button label. Default "🚀 Launch Game".
- * @param characters  Optional explicit character list; null ⇒ fetch + fallback.
- * @param theme       Visual overrides; defaults match the reference HTML.
+ * @param isOpen               Whether the selector is shown.
+ * @param onClose              Invoked when dismissed (close button / system Back).
+ * @param onCharacterSelected  Invoked with the chosen character when the CTA is tapped.
+ * @param onCharacterPreview   Invoked with a character the moment it is previewed (selected
+ *                             in the grid), before the CTA is confirmed. Optional.
+ * @param title                Header text. Default "Select Your Game Partner".
+ * @param ctaText              CTA button label. Default "🚀 Launch Game".
+ * @param characters           Optional explicit character list; null ⇒ fetch + fallback.
+ * @param theme                Visual overrides; defaults match the reference HTML.
  */
 @Composable
-fun CharacterPicker(
+fun CharacterSelector(
     isOpen: Boolean,
     onClose: () -> Unit,
-    onLaunch: (CharacterData) -> Unit,
+    onCharacterSelected: (CharacterData) -> Unit,
+    onCharacterPreview: ((CharacterData) -> Unit)? = null,
     title: String = "Select Your Game Partner",
-    launchText: String = "🚀 Launch Game",
+    ctaText: String = "🚀 Launch Game",
     characters: List<CharacterData>? = null,
     theme: CharacterPickerTheme = CharacterPickerTheme(),
 ) {
@@ -240,18 +244,25 @@ fun CharacterPicker(
                     selectedId = selectedId,
                     pulse = pulse,
                     theme = resolved,
-                    onSelect = { id -> if (selectedId != id) selectedId = id },
+                    onSelect = { id ->
+                        if (selectedId != id) {
+                            selectedId = id
+                            // Preview fires the moment a card is selected, before the CTA confirm.
+                            entries.firstOrNull { it.data.id == id }
+                                ?.let { onCharacterPreview?.invoke(it.data) }
+                        }
+                    },
                 )
 
                 LaunchButton(
-                    text = launchText,
+                    text = ctaText,
                     active = selectedId != null,
                     theme = resolved,
                     onClick = {
                         val chosen = entries.firstOrNull { it.data.id == selectedId }?.data
                         if (chosen != null) {
                             closedInternally = true
-                            onLaunch(chosen)
+                            onCharacterSelected(chosen)
                         }
                     },
                 )
@@ -441,16 +452,20 @@ internal data class CharacterPickerEntry(
  */
 internal fun loadingEntries(count: Int): List<CharacterPickerEntry> =
     List(count.coerceAtLeast(0)) {
-        CharacterPickerEntry(CharacterData("loading-$it", "", ""), loading = true)
+        CharacterPickerEntry(CharacterData("loading-$it", "", "", ""), loading = true)
     }
 
 /**
  * Bundled placeholder characters shown until the companions endpoint returns data.
- * Images ship in `res/drawable-nodpi`.
+ * Images ship in `res/drawable-nodpi` (used for instant render via [CharacterPickerEntry.localRes]);
+ * [CharacterData.imageUrl] carries the hosted URL handed back by [onCharacterSelected].
+ *
+ * TODO(A4): populate `imageUrl` with the canonical hosted URLs so a selected default
+ * hands back a usable URL downstream (pending the 4 URLs from the publisher).
  */
 internal fun fallbackCharacterEntries(): List<CharacterPickerEntry> = listOf(
-    CharacterPickerEntry(CharacterData("superman", "Superman", ""), R.drawable.char_superman),
-    CharacterPickerEntry(CharacterData("hammy", "Hammy", ""), R.drawable.char_hammy),
-    CharacterPickerEntry(CharacterData("maya", "Maya", ""), R.drawable.char_maya),
-    CharacterPickerEntry(CharacterData("charles", "Charles", ""), R.drawable.char_charles),
+    CharacterPickerEntry(CharacterData(id = "superman", name = "Superman", imageUrl = "", description = "Faster than a speeding bullet."), R.drawable.char_superman),
+    CharacterPickerEntry(CharacterData(id = "hammy", name = "Hammy", imageUrl = "", description = "Small but mighty."), R.drawable.char_hammy),
+    CharacterPickerEntry(CharacterData(id = "maya", name = "Maya", imageUrl = "", description = "Clever and quick-witted."), R.drawable.char_maya),
+    CharacterPickerEntry(CharacterData(id = "charles", name = "Charles", imageUrl = "", description = "A calm and steady strategist."), R.drawable.char_charles),
 )

@@ -250,7 +250,7 @@ internal object SimulaApiClient {
             CharacterData(
                 id = obj.str("character_id") ?: obj.str("id") ?: "",
                 name = name,
-                image = image,
+                imageUrl = image,
                 description = description,
             )
         }
