@@ -363,8 +363,8 @@ private fun RewardedMinigame(
             },
         )
 
-        // Top-right reward/close pill: a "Play to earn" countdown while earning (display-only —
-        // no early exit), which becomes the close button ("✕ Reward unlocked") once earned.
+        // Reward/close pill: a "Play to earn: Xs" countdown while earning (display-only — no early
+        // exit), which becomes the ✕ close button once the reward is earned.
         RewardClosePill(
             rewardEarned = rewardEarned,
             secondsLeft = secondsLeft,
@@ -425,7 +425,7 @@ private fun RewardClosePill(
             }
         }
     } else {
-        // Still earning: a small display-only status — no close affordance yet.
+        // Still earning: a "Play to earn: Xs" countdown label (display-only — no early exit).
         Box(
             modifier = modifier
                 .clip(RoundedCornerShape(16.dp))
