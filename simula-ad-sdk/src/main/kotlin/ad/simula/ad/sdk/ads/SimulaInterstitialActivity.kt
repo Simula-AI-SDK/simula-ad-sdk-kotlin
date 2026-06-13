@@ -9,7 +9,6 @@ import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
-import ad.simula.ad.sdk.model.endScreenTriggerForMarker
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.OverlayTiming
@@ -134,7 +133,20 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
             ) {
                 // On close, fetch + show a fallback ad before finishing (minigame parity). CLOSED is
                 // reported when the primary creative closes; the Activity finishes after the fallback.
-                FallbackAdHost(impressionId = p.ad.impressionId, onFullyClosed = ::finishAd) { onClose ->
+                FallbackAdHost(
+                    impressionId = p.ad.impressionId,
+                    onFullyClosed = ::finishAd,
+                    autoStoreRedirect = p.ad.adBehavior?.autoStoreRedirect,
+                    // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
+                    onAutoStoreRedirect = {
+                        CreativeCtaRouter.open(
+                            applicationContext,
+                            p.ad.trackingUrl,
+                            p.ad.destination,
+                            p.ad.adBehavior?.storeOpen,
+                        )
+                    },
+                ) { onClose ->
                     CreativeInterstitial(
                         presentation = p,
                         onFinish = {
@@ -380,12 +392,6 @@ private fun CreativeInterstitial(
                         installBannerVisible = true
                     }
                 },
-                onEndScreenMarker = { trigger ->
-                    // END_SCREEN_1/2_OPEN — fire when the matching end card renders.
-                    if (autoRedirect?.enabled == true && autoRedirect.trigger == trigger) {
-                        fireAutoStoreRedirect()
-                    }
-                },
                 // Sits below the safe area (the black Box fills the cutout / nav-bar region).
                 modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
             )
@@ -450,7 +456,6 @@ private fun CreativeHtml(
     destination: String,
     bridge: CreativeBridge,
     onAdClick: () -> Unit,
-    onEndScreenMarker: (AutoStoreRedirectTrigger) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // applicationContext so the store/browser open survives if the interstitial is
@@ -473,13 +478,6 @@ private fun CreativeHtml(
                         request: WebResourceRequest?,
                     ): Boolean {
                         val url = request?.url?.toString() ?: return false
-                        // auto_store_redirect end-screen marker (e.g. simula://end-screen-1): the
-                        // creative signals an end card by navigating here. Consume it (never load the
-                        // custom-scheme URL) and let the caller fire the redirect if it matches.
-                        endScreenTriggerForMarker(url)?.let { trigger ->
-                            onEndScreenMarker(trigger)
-                            return true
-                        }
                         // Only a user gesture counts as the ad click-through; pixels
                         // and auto-redirects (no gesture) navigate normally.
                         if (!request.hasGesture()) return false

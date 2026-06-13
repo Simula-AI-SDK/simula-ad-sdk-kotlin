@@ -8,7 +8,7 @@ import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.OverlayTiming
 import ad.simula.ad.sdk.model.StorePromptPlatform
-import ad.simula.ad.sdk.model.endScreenTriggerForMarker
+import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.model.validatedHexColor
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -476,15 +476,13 @@ class AdLoadParsingTest {
     }
 
     @Test
-    fun `end-screen marker url maps to the matching trigger`() {
-        // END_SCREEN_1/2_OPEN are detected by the creative navigating to a simula:// marker (no bridge).
-        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_1_OPEN, endScreenTriggerForMarker("simula://end-screen-1"))
-        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_2_OPEN, endScreenTriggerForMarker("simula://end-screen-2"))
-        // Case-insensitive + tolerant of a trailing slash.
-        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_1_OPEN, endScreenTriggerForMarker("SIMULA://END-SCREEN-1/"))
-        // Non-markers (real URLs, PLAYABLE_END which is native, null) map to null.
-        assertNull(endScreenTriggerForMarker("https://play.google.com/store/apps/details?id=x"))
-        assertNull(endScreenTriggerForMarker("simula://playable-end"))
-        assertNull(endScreenTriggerForMarker(null))
+    fun `fallback index maps to the matching end-screen trigger`() {
+        // END_SCREEN_1/2_OPEN fire when the matching post-close fallback ad screen is presented:
+        // index 0 = END SCREEN 1, index 1 = END SCREEN 2 (no signal from the webview).
+        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_1_OPEN, endScreenTriggerForIndex(0))
+        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_2_OPEN, endScreenTriggerForIndex(1))
+        // No end-screen trigger for further indices (PLAYABLE_END is native, has no fallback index).
+        assertNull(endScreenTriggerForIndex(2))
+        assertNull(endScreenTriggerForIndex(-1))
     }
 }

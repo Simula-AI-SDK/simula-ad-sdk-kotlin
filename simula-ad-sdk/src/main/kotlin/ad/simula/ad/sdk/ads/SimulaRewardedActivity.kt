@@ -5,7 +5,6 @@ import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
-import ad.simula.ad.sdk.model.endScreenTriggerForMarker
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
@@ -98,7 +97,20 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             ) {
                 // On close, fetch + show a fallback ad before finishing (minigame parity). CLOSE is
                 // reported when the minigame closes; the Activity finishes after the fallback.
-                FallbackAdHost(impressionId = p.impressionId, onFullyClosed = ::finishAd) { onClose ->
+                FallbackAdHost(
+                    impressionId = p.impressionId,
+                    onFullyClosed = ::finishAd,
+                    autoStoreRedirect = p.adBehavior?.autoStoreRedirect,
+                    // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
+                    onAutoStoreRedirect = {
+                        CreativeCtaRouter.open(
+                            applicationContext,
+                            p.trackingUrl,
+                            p.destination,
+                            p.adBehavior?.storeOpen,
+                        )
+                    },
+                ) { onClose ->
                     RewardedMinigame(
                         presentation = p,
                         onFinish = { earned ->
@@ -306,14 +318,6 @@ private fun RewardedMinigame(
                             request: WebResourceRequest?,
                         ): Boolean {
                             val requestUrl = request?.url?.toString() ?: return false
-                            // auto_store_redirect end-screen marker (simula://end-screen-1/2): consume
-                            // the custom-scheme navigation and fire the redirect if the trigger matches.
-                            endScreenTriggerForMarker(requestUrl)?.let { trigger ->
-                                if (autoRedirect?.enabled == true && autoRedirect.trigger == trigger) {
-                                    fireAutoStoreRedirect()
-                                }
-                                return true
-                            }
                             if (requestUrl == url) return false
                             // Allow same-origin navigation; open external links externally.
                             if (Uri.parse(url).host == Uri.parse(requestUrl).host) return false
