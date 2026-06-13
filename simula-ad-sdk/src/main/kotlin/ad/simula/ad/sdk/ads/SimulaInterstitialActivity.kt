@@ -405,7 +405,7 @@ private fun CreativeInterstitial(
         // `ad_behavior.close` when present; otherwise a default (top-right, always available) so ads
         // with no `ad_behavior` still get the small close, not a big one.
         val close = behavior?.close ?: CloseBehavior()
-        InterstitialCloseButton(
+        AdCloseButton(
             treatment = close.treatment,
             position = close.position,
             progressBarColor = close.progressBarColor,
@@ -520,7 +520,7 @@ private const val MIN_TOUCH_TARGET_DP = 48
  * ring/bar fill. The label copy is reward- vs interstitial-aware via [isRewardCopy].
  */
 @Composable
-private fun BoxScope.InterstitialCloseButton(
+internal fun BoxScope.AdCloseButton(
     treatment: CloseTreatment,
     position: ClosePosition,
     progressBarColor: String,

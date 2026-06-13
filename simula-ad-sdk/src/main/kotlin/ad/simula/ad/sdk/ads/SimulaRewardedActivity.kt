@@ -5,7 +5,7 @@ import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
-import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
@@ -33,8 +33,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -193,6 +191,10 @@ private fun RewardedMinigame(
         // Resume from already-accrued play time (config-change recovery), not full duration.
         mutableStateOf(RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds))
     }
+    // 0→1 fill for the close treatment (progress bar / countdown ring), from play-to-earn progress.
+    var closeProgress by remember {
+        mutableStateOf(rewardCloseProgress(presentation.accumulatedPlayTimeMs, presentation.durationSeconds))
+    }
 
     // Mid-ad store prompt — shown from half the play-to-earn duration until the reward unlocks.
     // Initialized true on a config-change recreation that resumes past the halfway mark.
@@ -203,18 +205,6 @@ private fun RewardedMinigame(
                 presentation.durationSeconds > 0 &&
                 presentation.accumulatedPlayTimeMs >= presentation.durationSeconds * 1000L / 2,
         )
-    }
-
-    // Keep the play-to-earn / close pill clear of the store-prompt badge: default top-right, but
-    // flip to top-left when the store prompt occupies the top-right (its only colliding corner) so
-    // the two never overlap. Stable for the session (the store-prompt config doesn't change), so
-    // the pill doesn't jump corners when the prompt appears at midpoint or is removed on reward.
-    val pillAlignment = if (
-        storePrompt != null && storePrompt.enabled && storePrompt.position == ClosePosition.TOP_RIGHT
-    ) {
-        Alignment.TopStart
-    } else {
-        Alignment.TopEnd
     }
 
     val context = LocalContext.current
@@ -294,6 +284,7 @@ private fun RewardedMinigame(
                 presentation.accumulatedPlayTimeMs += now - lastTickMs
                 lastTickMs = now
                 secondsLeft = RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)
+                closeProgress = rewardCloseProgress(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)
                 // Reveal the store prompt at the halfway point to the reward (mid play-to-earn).
                 if (presentation.accumulatedPlayTimeMs >= presentation.durationSeconds * 1000L / 2) {
                     storePromptVisible = true
@@ -363,16 +354,19 @@ private fun RewardedMinigame(
             },
         )
 
-        // Reward/close pill: a "Play to earn: Xs" countdown while earning (display-only — no early
-        // exit), which becomes the ✕ close button once the reward is earned.
-        RewardClosePill(
-            rewardEarned = rewardEarned,
-            secondsLeft = secondsLeft,
+        // Close button — honors the server `ad_behavior.close` treatment (hidden / countdown ring /
+        // progress bar / reward-or-close label) exactly like the interstitial, but gated on the
+        // play-to-earn progress: the ✕ unlocks only once the reward is earned.
+        val close = presentation.adBehavior?.close ?: CloseBehavior()
+        AdCloseButton(
+            treatment = close.treatment,
+            position = close.position,
+            progressBarColor = close.progressBarColor,
+            isRewardCopy = true,
+            enabled = rewardEarned,
+            remaining = secondsLeft,
+            progress = closeProgress,
             onClose = { onFinish(true) },
-            modifier = Modifier
-                .align(pillAlignment)
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(8.dp),
         )
 
         // Mid-ad store prompt — appears at half the play-to-earn duration and is removed the instant
@@ -399,45 +393,6 @@ private fun RewardedMinigame(
     }
 }
 
-@Composable
-private fun RewardClosePill(
-    rewardEarned: Boolean,
-    secondsLeft: Int,
-    onClose: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    if (rewardEarned) {
-        // Earned: a compact circular X close button (AppLovin-style); tapping it dismisses.
-        Box(
-            modifier = modifier
-                .size(44.dp)
-                .clickable(onClick = onClose),
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(16.dp)
-                    .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.5f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("✕", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-    } else {
-        // Still earning: a "Play to earn: Xs" countdown label (display-only — no early exit).
-        Box(
-            modifier = modifier
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color(0x99000000))
-                .padding(horizontal = 10.dp, vertical = 5.dp),
-        ) {
-            Text(
-                text = "Play to earn: ${secondsLeft}s",
-                color = Color.White,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-            )
-        }
-    }
-}
+/** 0→1 close-treatment fill from play-to-earn progress (foreground play time / required duration). */
+private fun rewardCloseProgress(playMs: Long, durationSeconds: Int): Float =
+    if (durationSeconds > 0) (playMs.toFloat() / (durationSeconds * 1000f)).coerceIn(0f, 1f) else 1f
