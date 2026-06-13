@@ -14,7 +14,9 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.model.AdData
+import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.model.SimulaContextValue
+import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
@@ -58,6 +60,9 @@ private fun getCacheKey(slot: String, position: Int): String = "$slot:$position"
  *                      opt-in). When provided it takes precedence over [hasPrivacyConsent];
  *                      when null the SDK seeds a config from [hasPrivacyConsent] and still
  *                      auto-reads IAB-standard CMP keys. See [SimulaPrivacy].
+ * @param adContext     Native-ad targeting context auto-attached to every `POST /load/native`
+ *                      (search term, tags, category, …). Updating it replaces the value in full;
+ *                      can also be set at runtime via [ad.simula.ad.sdk.ads.SimulaAds.updateContext].
  * @param content       Child composable tree.
  */
 @OptIn(FlowPreview::class) // Flow.debounce — stable in practice, contained to this module.
@@ -68,10 +73,15 @@ fun SimulaProvider(
     primaryUserID: String? = null,
     hasPrivacyConsent: Boolean = true,
     privacy: SimulaPrivacyConfig? = null,
+    adContext: SimulaAdContext? = null,
     content: @Composable () -> Unit,
 ) {
     // Validate props early (matches React's validateSimulaProviderProps)
     require(apiKey.isNotBlank()) { "SimulaProvider requires a valid \"apiKey\" (non-blank string)" }
+
+    // Seed the process-wide native-ad context so NativeAdSlot requests carry it. A full replace on
+    // change (mirrors the privacy seed below); preloaded ads keep the value current at preload time.
+    remember(adContext) { NativeAdContextStore.set(adContext); adContext }
 
     val context = LocalContext.current
 

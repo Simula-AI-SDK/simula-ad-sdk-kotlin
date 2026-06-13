@@ -25,7 +25,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -334,8 +336,14 @@ private fun RewardedMinigame(
                     loadUrl(url)
                 }
             },
-            // Sits below the safe area (the black Box fills the cutout / nav-bar region).
-            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
+            // The game canvas fills edge-to-edge: inset only vertically (status / nav / top
+            // notch) and let it draw under any horizontal display-cutout. In landscape on a
+            // device with a side cutout, padding the cutout in would expose the transparent
+            // WebView's black backing as left/right "black bars" around the game. The overlay
+            // controls below keep the full safeDrawing inset so they never sit under a cutout.
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
             onRelease = { webView ->
                 BridgeWebViewInstaller.uninstall(webView)
                 WebViewPool.release(webView)

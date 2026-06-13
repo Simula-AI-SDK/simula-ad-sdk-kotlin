@@ -147,7 +147,7 @@ internal fun CharacterCard(
                     )
                 } else {
                     CachedAsyncImage(
-                        model = entry.data.image,
+                        model = entry.data.imageUrl,
                         contentDescription = entry.data.name,
                         contentScale = ContentScale.Crop,
                         colorFilter = imageFilter,
