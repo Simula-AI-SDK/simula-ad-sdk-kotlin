@@ -151,6 +151,10 @@ internal object SimulaHttp {
             // Advertise gzip explicitly. Setting the header ourselves disables
             // HttpURLConnection's transparent decompression, so we gunzip in decode().
             setRequestProperty("Accept-Encoding", "gzip")
+            // Custom UA + device id on every native request. Set before caller headers so a
+            // caller could still override them; null (pre-init / unavailable) is simply omitted.
+            SimulaUserAgent.value?.let { setRequestProperty("User-Agent", it) }
+            SimulaDeviceId.value?.let { setRequestProperty("X-Device-Id", it) }
             headers.forEach { (k, v) -> setRequestProperty(k, v) }
         }
 

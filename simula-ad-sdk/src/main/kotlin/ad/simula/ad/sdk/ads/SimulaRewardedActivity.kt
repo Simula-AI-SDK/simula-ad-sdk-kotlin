@@ -1,10 +1,15 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
+import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -92,7 +97,20 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             ) {
                 // On close, fetch + show a fallback ad before finishing (minigame parity). CLOSE is
                 // reported when the minigame closes; the Activity finishes after the fallback.
-                FallbackAdHost(impressionId = p.impressionId, onFullyClosed = ::finishAd) { onClose ->
+                FallbackAdHost(
+                    impressionId = p.impressionId,
+                    onFullyClosed = ::finishAd,
+                    autoStoreRedirect = p.adBehavior?.autoStoreRedirect,
+                    // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
+                    onAutoStoreRedirect = {
+                        CreativeCtaRouter.open(
+                            applicationContext,
+                            p.trackingUrl,
+                            p.destination,
+                            p.adBehavior?.storeOpen,
+                        )
+                    },
+                ) { onClose ->
                     RewardedMinigame(
                         presentation = p,
                         onFinish = { earned ->
@@ -187,6 +205,41 @@ private fun RewardedMinigame(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE (e.g. survey finished) grants the reward and
+    // reveals the close button immediately, bypassing the play timer.
+    val autoRedirect = presentation.adBehavior?.autoStoreRedirect
+    var autoRedirectFired by remember { mutableStateOf(false) }
+    // auto_store_redirect: open the advertiser store once (no user tap). A disabled/missing config no-ops.
+    fun fireAutoStoreRedirect() {
+        if (!autoRedirectFired) {
+            autoRedirectFired = true
+            CreativeCtaRouter.open(
+                context.applicationContext,
+                presentation.trackingUrl,
+                presentation.destination,
+                presentation.adBehavior?.storeOpen,
+            )
+        }
+    }
+    val bridge = remember {
+        androidCreativeBridge(
+            appContext = context.applicationContext,
+            activityProvider = { context as? Activity },
+            onEarlyComplete = {
+                presentation.rewardEarned = true
+                rewardEarned = true
+            },
+        )
+    }
+
+    // PLAYABLE_END — open the store the moment the close button appears (here, when the reward is
+    // earned and the reward/close pill becomes a close button). SDK-native, no bridge.
+    if (autoRedirect?.enabled == true && autoRedirect.trigger == AutoStoreRedirectTrigger.PLAYABLE_END) {
+        LaunchedEffect(rewardEarned) {
+            if (rewardEarned) fireAutoStoreRedirect()
+        }
+    }
+
     // DISPLAYED + impression fire once the creative first composes. Guarded so an
     // Activity recreation doesn't double-report either.
     LaunchedEffect(Unit) {
@@ -253,6 +306,13 @@ private fun RewardedMinigame(
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : WebViewClient() {
+                        override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
+                            // Bridge relay fallback when document-start injection is unavailable.
+                            if (!BridgeWebViewInstaller.documentStartSupported() && pageUrl != "about:blank") {
+                                view?.evaluateJavascript(BridgeWebViewInstaller.relayScript, null)
+                            }
+                        }
+
                         override fun shouldOverrideUrlLoading(
                             view: WebView?,
                             request: WebResourceRequest?,
@@ -269,11 +329,17 @@ private fun RewardedMinigame(
                             }
                         }
                     },
-                ).apply { loadUrl(url) }
+                ).apply {
+                    BridgeWebViewInstaller.install(this, bridge)
+                    loadUrl(url)
+                }
             },
             // Sits below the safe area (the black Box fills the cutout / nav-bar region).
             modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
-            onRelease = { webView -> WebViewPool.release(webView) },
+            onRelease = { webView ->
+                BridgeWebViewInstaller.uninstall(webView)
+                WebViewPool.release(webView)
+            },
         )
 
         // Top-right reward/close pill: a "Play to earn" countdown while earning (display-only —

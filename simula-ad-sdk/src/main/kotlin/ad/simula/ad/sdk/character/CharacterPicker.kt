@@ -65,6 +65,10 @@ import ad.simula.ad.sdk.model.CharacterPickerTheme
 import ad.simula.ad.sdk.model.ResolvedCharacterPickerTheme
 import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.provider.useSimula
+
+/** The character grid maxes out at 4 cards (2×2). */
+private const val MAX_CHARACTERS = 4
 
 /**
  * Full-screen "Select Your Game Partner" character picker.
@@ -74,9 +78,12 @@ import ad.simula.ad.sdk.network.SimulaApiClient
  * [onLaunch] with the selected character — the picker does not launch a game itself;
  * the host wires the character into the minigame flow.
  *
- * Characters come from the (not-yet-built) companions endpoint, with an instant
- * fallback to bundled placeholders so the grid never shows a spinner or empty state.
- * Pass [characters] to supply them directly and skip the fetch.
+ * Characters come from the `/character-selector` endpoint, with an instant fallback
+ * to bundled placeholders so the grid never shows a spinner or empty state. Pass
+ * [characters] to supply them directly and skip the fetch.
+ *
+ * Must be hosted within a [ad.simula.ad.sdk.provider.SimulaProvider] — the fetch uses
+ * the provider's apiKey + session.
  *
  * Pixel-mapped from the reference HTML; presentation mirrors [ad.simula.ad.sdk.minigame.MiniGameInterstitial].
  *
@@ -101,11 +108,21 @@ fun CharacterPicker(
     var closedInternally by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(null) }
     val resolved = remember(theme) { theme.resolve() }
+    val simula = useSimula()
 
-    // Seed instantly so the grid is never empty (perf goal): host list > fallback.
+    // Host roster is the source of truth, capped at the 4 grid slots; the backend
+    // backfills only the gap (fill = 4 - host).
     val fallback = remember { fallbackCharacterEntries() }
+    val host = remember(characters) {
+        characters.orEmpty().take(MAX_CHARACTERS).map { CharacterPickerEntry(it) }
+    }
+    val fill = MAX_CHARACTERS - host.size
+
+    // Seed instantly so the grid is never empty: host cards render for real, the gap
+    // shows loading skeletons (swapped for backend results, or bundled placeholders if
+    // the fetch comes back empty) — never the placeholder characters mid-load.
     var entries by remember(characters) {
-        mutableStateOf(characters?.map { CharacterPickerEntry(it) } ?: fallback)
+        mutableStateOf(host + loadingEntries(fill))
     }
 
     val isVisible = isOpen && !closedInternally
@@ -114,11 +131,17 @@ fun CharacterPicker(
         if (isOpen) {
             closedInternally = false
             selectedId = null
-            if (characters == null) {
-                // Best-effort: swap in network results when the companions endpoint is
-                // live. Until then this resolves empty and the fallback stays on screen.
-                val fetched = SimulaApiClient.fetchCharacters(sessionId = null)
-                if (fetched.isNotEmpty()) entries = fetched.map { CharacterPickerEntry(it) }
+            entries = host + loadingEntries(fill) // back to the loading state on reopen
+            if (fill > 0) {
+                // Backfill the gap from /character-selector (needs the publisher apiKey
+                // + a session). Resolve the loading state either way: real results when
+                // we got any, else bundled placeholders.
+                val sessionId = simula.ensureSession()
+                val fetched = if (sessionId.isNullOrBlank()) emptyList()
+                    else SimulaApiClient
+                        .fetchCharacters(simula.apiKey, sessionId, fill)
+                        .map { CharacterPickerEntry(it) }
+                entries = mergeRoster(host, fetched, fallback)
             }
         }
     }
@@ -278,15 +301,19 @@ private fun CharacterGrid(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 row.forEach { entry ->
-                    CharacterCard(
-                        entry = entry,
-                        selected = entry.data.id == selectedId,
-                        selectionMade = selectedId != null,
-                        pulse = pulse,
-                        theme = theme,
-                        onClick = { onSelect(entry.data.id) },
-                        modifier = Modifier.weight(1f),
-                    )
+                    if (entry.loading) {
+                        CharacterSkeletonCard(theme = theme, modifier = Modifier.weight(1f))
+                    } else {
+                        CharacterCard(
+                            entry = entry,
+                            selected = entry.data.id == selectedId,
+                            selectionMade = selectedId != null,
+                            pulse = pulse,
+                            theme = theme,
+                            onClick = { onSelect(entry.data.id) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
                 if (row.size == 1) Spacer(Modifier.weight(1f))
             }
@@ -368,13 +395,54 @@ private fun LaunchButton(
 }
 
 /**
+ * Builds the grid (≤ [MAX_CHARACTERS] cards) from the host roster and the backend
+ * backfill: host cards lead, the backend fills the gap, and any slot the backend
+ * didn't fill keeps its bundled placeholder so the grid is never short. Pure/testable.
+ *
+ * Backend items whose id already appears in the host roster are dropped (and the
+ * backend list is kept distinct), so a character never shows up twice — a dropped
+ * duplicate is topped up by a placeholder.
+ *
+ * Used for both the instant seed (`fetched` empty → host + placeholders) and the
+ * post-fetch swap (`fetched` non-empty → host + results + leftover placeholders).
+ *
+ * @param host     host-supplied entries (capped here as a safety net).
+ * @param fetched  backend results (≤ fill); empty on a no-fill or failure.
+ * @param fallback bundled placeholder entries used to pad unfilled slots.
+ */
+internal fun mergeRoster(
+    host: List<CharacterPickerEntry>,
+    fetched: List<CharacterPickerEntry>,
+    fallback: List<CharacterPickerEntry>,
+): List<CharacterPickerEntry> {
+    val capped = host.take(MAX_CHARACTERS)
+    val fill = MAX_CHARACTERS - capped.size
+    val seen = capped.mapTo(mutableSetOf()) { it.data.id }
+    val deduped = fetched.filter { seen.add(it.data.id) }
+    val filled = deduped.take(fill)
+    val padding = fallback.take(fill).drop(filled.size)
+    return capped + filled + padding
+}
+
+/**
  * A picker row item: the public [CharacterData] plus an optional bundled drawable used
- * by the fallback placeholders (so they render with no network).
+ * by the fallback placeholders (so they render with no network). [loading] marks a
+ * skeleton slot shown while the backend roster is in flight.
  */
 internal data class CharacterPickerEntry(
     val data: CharacterData,
     @DrawableRes val localRes: Int? = null,
+    val loading: Boolean = false,
 )
+
+/**
+ * Placeholder skeleton slots for the gap while the backend roster is fetched. Synthetic
+ * ids keep them distinct in the grid; they are never selectable.
+ */
+internal fun loadingEntries(count: Int): List<CharacterPickerEntry> =
+    List(count.coerceAtLeast(0)) {
+        CharacterPickerEntry(CharacterData("loading-$it", "", ""), loading = true)
+    }
 
 /**
  * Bundled placeholder characters shown until the companions endpoint returns data.

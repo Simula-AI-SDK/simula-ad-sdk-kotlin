@@ -2,6 +2,8 @@ package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.AutoStoreRedirect
+import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
@@ -42,6 +44,12 @@ internal data class InitMinigameRequestBody(
     val messages: List<MessageBody>? = null,
     @SerialName("delegate_char") val delegateChar: Boolean = true,
     @SerialName("menu_id") val menuId: String? = null,
+)
+
+@Serializable
+internal data class CharacterSelectorRequestBody(
+    @SerialName("session_id") val sessionId: String,
+    val fill: Int,
 )
 
 @Serializable
@@ -149,6 +157,7 @@ internal data class ApiAdBehavior(
     @SerialName("store_open") val storeOpen: String? = null,
     @SerialName("store_prompt") val storePrompt: ApiStorePrompt? = null,
     val skoverlay: ApiSkOverlay? = null,
+    @SerialName("auto_store_redirect") val autoStoreRedirect: ApiAutoStoreRedirect? = null,
 )
 
 @Serializable
@@ -190,6 +199,12 @@ internal data class ApiSkOverlay(
     val dismissible: Boolean = true,
 )
 
+@Serializable
+internal data class ApiAutoStoreRedirect(
+    val enabled: Boolean = false,
+    val trigger: String? = null,
+)
+
 /** Maps the wire DTO to the domain model, normalizing enum strings. A null DTO (absent
  * `ad_behavior`) stays null so callers can preserve today's literal behavior. */
 internal fun ApiAdBehavior?.toDomain(): AdBehavior? {
@@ -199,6 +214,7 @@ internal fun ApiAdBehavior?.toDomain(): AdBehavior? {
         storeOpen = StoreOpen.from(storeOpen),
         storePrompt = storePrompt.toDomain(),
         skoverlay = skoverlay.toDomain(),
+        autoStoreRedirect = autoStoreRedirect.toDomain(),
     )
 }
 
@@ -243,6 +259,14 @@ internal fun ApiSkOverlay?.toDomain(): SkOverlayConfig? {
         delaySeconds = delaySeconds.coerceAtLeast(0),
         position = OverlayPosition.from(position),
         dismissible = dismissible,
+    )
+}
+
+internal fun ApiAutoStoreRedirect?.toDomain(): AutoStoreRedirect? {
+    if (this == null) return null
+    return AutoStoreRedirect(
+        enabled = enabled,
+        trigger = AutoStoreRedirectTrigger.from(trigger),
     )
 }
 

@@ -15,6 +15,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaContextValue
+import ad.simula.ad.sdk.network.SimulaDeviceId
+import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import kotlinx.coroutines.FlowPreview
@@ -72,6 +74,14 @@ fun SimulaProvider(
     require(apiKey.isNotBlank()) { "SimulaProvider requires a valid \"apiKey\" (non-blank string)" }
 
     val context = LocalContext.current
+
+    // Build the custom User-Agent + device id synchronously during composition so they're set
+    // before the first /session/create. The imperative SimulaAds.initialize() path builds them
+    // too; first wins.
+    remember(context) {
+        SimulaUserAgent.build(context.applicationContext)
+        SimulaDeviceId.build(context.applicationContext)
+    }
 
     // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
     // seeds it so existing call sites behave exactly as before.

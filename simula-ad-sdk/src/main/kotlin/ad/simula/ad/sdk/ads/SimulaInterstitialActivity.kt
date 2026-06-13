@@ -1,8 +1,12 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.bridge.CreativeBridge
+import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
@@ -14,6 +18,8 @@ import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import ad.simula.ad.sdk.util.ColorUtil
+import android.app.Activity
+import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -127,7 +133,20 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
             ) {
                 // On close, fetch + show a fallback ad before finishing (minigame parity). CLOSED is
                 // reported when the primary creative closes; the Activity finishes after the fallback.
-                FallbackAdHost(impressionId = p.ad.impressionId, onFullyClosed = ::finishAd) { onClose ->
+                FallbackAdHost(
+                    impressionId = p.ad.impressionId,
+                    onFullyClosed = ::finishAd,
+                    autoStoreRedirect = p.ad.adBehavior?.autoStoreRedirect,
+                    // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
+                    onAutoStoreRedirect = {
+                        CreativeCtaRouter.open(
+                            applicationContext,
+                            p.ad.trackingUrl,
+                            p.ad.destination,
+                            p.ad.adBehavior?.storeOpen,
+                        )
+                    },
+                ) { onClose ->
                     CreativeInterstitial(
                         presentation = p,
                         onFinish = {
@@ -234,6 +253,37 @@ private fun CreativeInterstitial(
     }
     val closeProgress = remember { Animatable(0f) }
 
+    // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE unlocks the close button immediately,
+    // bypassing the close-delay gate.
+    val context = LocalContext.current
+    // auto_store_redirect: open the advertiser store once (no user tap). PLAYABLE_END fires when the
+    // close button appears (below); END_SCREEN_1/2_OPEN fire when the creative navigates to the
+    // matching end-screen marker (handled in the WebView client). A disabled/missing config no-ops.
+    val autoRedirect = behavior?.autoStoreRedirect
+    var autoRedirectFired by remember { mutableStateOf(false) }
+    fun fireAutoStoreRedirect() {
+        if (!autoRedirectFired) {
+            autoRedirectFired = true
+            openDestination(ad)
+        }
+    }
+    val bridge = remember {
+        androidCreativeBridge(
+            appContext = context.applicationContext,
+            activityProvider = { context as? Activity },
+            onEarlyComplete = { closeEnabled = true },
+        )
+    }
+
+    // PLAYABLE_END — open the store the moment the close button becomes available (SDK-native, no
+    // bridge). The keyed effect runs on first composition (covers a delay-0 immediate close) and on
+    // every flip of `closeEnabled`; the one-shot guard makes repeats a no-op.
+    if (autoRedirect?.enabled == true && autoRedirect.trigger == AutoStoreRedirectTrigger.PLAYABLE_END) {
+        LaunchedEffect(closeEnabled) {
+            if (closeEnabled) fireAutoStoreRedirect()
+        }
+    }
+
     if (gateTotal > Duration.ZERO) {
         LaunchedEffect(Unit) {
             // Anchor the dwell to wall-clock on first run so a config-change recreation resumes the
@@ -332,6 +382,7 @@ private fun CreativeInterstitial(
             CreativeHtml(
                 html = html,
                 destination = ad.destination,
+                bridge = bridge,
                 onAdClick = {
                     presentation.callbacks.onClicked()
                     // Play install banner timed to the click (independent of the store the CTA opens).
@@ -365,7 +416,12 @@ private fun CreativeInterstitial(
         // the [closeTime/2, closeTime) window. `!closeEnabled` removes it the instant the real close
         // button appears, so the two affordances never overlap.
         if (storePrompt != null && storePrompt.enabled && storePromptVisible && !closeEnabled) {
-            StorePromptBadge(prompt = storePrompt, onTap = { openDestination(ad) })
+            // Center the badge in the same touch-target band as the close button so the two line up.
+            StorePromptBadge(
+                prompt = storePrompt,
+                onTap = { openDestination(ad) },
+                rowHeight = MIN_TOUCH_TARGET_DP.dp,
+            )
         }
 
         // Play Install Prompt banner — independent install affordance, pinned to the bottom.
@@ -398,6 +454,7 @@ private fun CreativeInterstitial(
 private fun CreativeHtml(
     html: String,
     destination: String,
+    bridge: CreativeBridge,
     onAdClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -409,6 +466,13 @@ private fun CreativeHtml(
             WebViewPool.acquire(
                 context = ctx,
                 client = object : WebViewClient() {
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                        // Bridge relay fallback when document-start injection is unavailable.
+                        if (!BridgeWebViewInstaller.documentStartSupported() && url != "about:blank") {
+                            view?.evaluateJavascript(BridgeWebViewInstaller.relayScript, null)
+                        }
+                    }
+
                     override fun shouldOverrideUrlLoading(
                         view: WebView?,
                         request: WebResourceRequest?,
@@ -423,12 +487,16 @@ private fun CreativeHtml(
                     }
                 },
             ).apply {
+                BridgeWebViewInstaller.install(this, bridge)
                 // Self-contained creative: asset URLs are absolute (baseURL = null).
                 loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
             }
         },
         modifier = modifier,
-        onRelease = { webView -> WebViewPool.release(webView) },
+        onRelease = { webView ->
+            BridgeWebViewInstaller.uninstall(webView)
+            WebViewPool.release(webView)
+        },
     )
 }
 
@@ -499,38 +567,42 @@ private fun BoxScope.InterstitialCloseButton(
             .padding(start = if (position == ClosePosition.BOTTOM_LEFT) 2.dp else 0.dp)
             .padding(8.dp),
     ) {
-        when {
-            // The resolved tap target: a labelled pill for reward_or_close_label, the circular X otherwise.
-            enabled -> if (treatment == CloseTreatment.REWARD_OR_CLOSE_LABEL) {
-                LabelPill(text = "Close", onClick = onClose)
-            } else {
-                CloseCircle(onClick = onClose) { CloseGlyph() }
-            }
-            // Nothing in the corner during the delay (the bar shows progress separately).
-            treatment == CloseTreatment.HIDDEN || treatment == CloseTreatment.PROGRESS_BAR -> Unit
-            treatment == CloseTreatment.REWARD_OR_CLOSE_LABEL ->
-                LabelPill(text = "${if (isRewardCopy) "Reward" else "Close"} in ${remaining.coerceAtLeast(0)}")
-            treatment == CloseTreatment.COUNTDOWN_CIRCLE -> {
-                // Same footprint as the unlocked button so the glyph doesn't jump when it activates.
-                Box(
-                    modifier = Modifier.size(maxOf(MIN_TOUCH_TARGET_DP, CLOSE_BOX_DP).dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CloseCircle(alpha = 0.5f) { CloseGlyph() }
-                    Canvas(modifier = Modifier.size(CLOSE_BOX_DP.dp)) {
-                        // Stroke in dp (not raw px, which was ~1dp on a 3x screen), inset by half
-                        // its width so the ring isn't drawn half-outside the canvas bounds.
-                        // 2dp matches the Swift SDK's ring stroke.
-                        val stroke = 2.dp.toPx()
-                        drawArc(
-                            color = tint,
-                            startAngle = -90f,
-                            sweepAngle = 360f * progress.coerceIn(0f, 1f),
-                            useCenter = false,
-                            topLeft = Offset(stroke / 2f, stroke / 2f),
-                            size = Size(size.width - stroke, size.height - stroke),
-                            style = Stroke(width = stroke, cap = StrokeCap.Round),
-                        )
+        // All close states share one centerline: center within the touch-target height so the gated
+        // "… in N" pill / countdown ring and the unlocked ✕ line up with the store badge (opposite
+        // corner) and the glyph doesn't jump when the close unlocks.
+        Box(
+            modifier = Modifier.height(MIN_TOUCH_TARGET_DP.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            when {
+                // Unlocked: the compact ✕ for every treatment (matches all other close buttons).
+                enabled -> CloseCircle(onClick = onClose) { CloseGlyph() }
+                // Nothing in the corner during the delay (the bar shows progress separately).
+                treatment == CloseTreatment.HIDDEN || treatment == CloseTreatment.PROGRESS_BAR -> Unit
+                treatment == CloseTreatment.REWARD_OR_CLOSE_LABEL ->
+                    LabelPill(text = "${if (isRewardCopy) "Reward" else "Close"} in ${remaining.coerceAtLeast(0)}")
+                treatment == CloseTreatment.COUNTDOWN_CIRCLE -> {
+                    // Same footprint as the unlocked button so the glyph doesn't jump when it activates.
+                    Box(
+                        modifier = Modifier.size(maxOf(MIN_TOUCH_TARGET_DP, CLOSE_BOX_DP).dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CloseCircle(alpha = 0.5f) { CloseGlyph() }
+                        Canvas(modifier = Modifier.size(CLOSE_BOX_DP.dp)) {
+                            // Stroke in dp (not raw px, which was ~1dp on a 3x screen), inset by half
+                            // its width so the ring isn't drawn half-outside the canvas bounds.
+                            // 2dp matches the Swift SDK's ring stroke.
+                            val stroke = 2.dp.toPx()
+                            drawArc(
+                                color = tint,
+                                startAngle = -90f,
+                                sweepAngle = 360f * progress.coerceIn(0f, 1f),
+                                useCenter = false,
+                                topLeft = Offset(stroke / 2f, stroke / 2f),
+                                size = Size(size.width - stroke, size.height - stroke),
+                                style = Stroke(width = stroke, cap = StrokeCap.Round),
+                            )
+                        }
                     }
                 }
             }
@@ -615,9 +687,12 @@ private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
 internal fun BoxScope.StorePromptBadge(
     prompt: StorePrompt,
     onTap: () -> Unit,
-    // Inset from the safe-area edge. The interstitial uses 16dp (aligns with its close button);
-    // the rewarded minigame passes 8dp so the badge shares the reward pill's baseline.
-    edgePadding: Dp = 16.dp,
+    // Inset from the safe-area edge. Both the interstitial and the rewarded minigame use 8dp so the
+    // badge shares its close affordance's baseline.
+    edgePadding: Dp = 8.dp,
+    // When set, the pill is vertically centered within this height so it lines up with a close button
+    // whose glyph sits in a touch-target band (the interstitial). null → bare pill (rewarded).
+    rowHeight: Dp? = null,
 ) {
     val label = if (prompt.platform == StorePromptPlatform.IOS) "App Store" else "Google Play"
     val alignment = when (prompt.position) {
@@ -625,22 +700,28 @@ internal fun BoxScope.StorePromptBadge(
         ClosePosition.TOP_LEFT -> Alignment.TopStart
         ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
     }
-    // Compact AppLovin-style pill: a filled skip-next glyph then the store name, with tight
-    // padding, a fully-rounded (capsule) outline, and a small gap between the two.
-    Row(
+    Box(
         modifier = Modifier
             .align(alignment)
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(edgePadding)
-            .clip(RoundedCornerShape(percent = 50))
-            .background(Color(0x99000000))
-            .clickable(onClick = onTap)
-            .padding(horizontal = 6.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .then(if (rowHeight != null) Modifier.height(rowHeight) else Modifier),
+        contentAlignment = Alignment.Center,
     ) {
-        SkipNextIcon(size = 7.dp, color = Color.White)
-        Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        // Compact AppLovin-style pill: a filled skip-next glyph then the store name, with tight
+        // padding, a fully-rounded (capsule) outline, and a small gap between the two.
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(percent = 50))
+                .background(Color(0x99000000))
+                .clickable(onClick = onTap)
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            SkipNextIcon(size = 7.dp, color = Color.White)
+            Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 

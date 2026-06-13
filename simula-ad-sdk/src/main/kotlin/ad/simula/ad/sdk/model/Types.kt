@@ -177,8 +177,10 @@ private fun normalizeBehaviorToken(raw: String?): String =
 
 /** Hard cap on the server-driven close delay. The close button — and the system Back button,
  * which is blocked while the gate is active — stays locked until the delay elapses, so an
- * out-of-range value would otherwise trap the user. PRD arms are 0/3/5s; 15s leaves headroom. */
-internal const val MAX_CLOSE_DELAY_SECONDS = 15
+ * out-of-range value would otherwise trap the user. The `close_chrome` experiment arms are
+ * 20/30/45s (default 30), so the cap is 45 to honor the largest authored value while still
+ * bounding a malformed/oversized one. */
+internal const val MAX_CLOSE_DELAY_SECONDS = 45
 
 /**
  * Validates a server-supplied progress-bar color. Accepts an optional leading `#` followed by
@@ -286,6 +288,23 @@ internal enum class OverlayPosition {
     }
 }
 
+/** The creative-lifecycle moment at which an enabled `auto_store_redirect` fires. [wire] is the
+ * token the server sends and the creative emits via the `CREATIVE_MOMENT` bridge event; the two are
+ * matched verbatim. Unknown/missing → PLAYABLE_END (the server's own default). */
+internal enum class AutoStoreRedirectTrigger(val wire: String) {
+    PLAYABLE_END("playable_end"),
+    END_SCREEN_1_OPEN("end_screen_1_open"),
+    END_SCREEN_2_OPEN("end_screen_2_open");
+
+    companion object {
+        fun from(raw: String?): AutoStoreRedirectTrigger = when (normalizeBehaviorToken(raw)) {
+            "end_screen_1_open" -> END_SCREEN_1_OPEN
+            "end_screen_2_open" -> END_SCREEN_2_OPEN
+            else -> PLAYABLE_END
+        }
+    }
+}
+
 internal data class CloseBehavior(
     val delaySeconds: Int = 0,
     val treatment: CloseTreatment = CloseTreatment.HIDDEN,
@@ -327,11 +346,35 @@ internal data class SkOverlayConfig(
     val dismissible: Boolean = true,
 )
 
+/**
+ * Maps the index of a post-close fallback ad (`GET /load/fallbacks`, presented one per close in
+ * reveal order) to the end-screen `auto_store_redirect` trigger it represents: index 0 is END SCREEN
+ * 1, index 1 is END SCREEN 2. Returns null for any further index. The SDK fires the redirect when the
+ * matching fallback screen is presented — there is no signal from the webview. (PLAYABLE_END is
+ * SDK-native — fired when the close button appears — and has no fallback index.)
+ */
+internal fun endScreenTriggerForIndex(index: Int): AutoStoreRedirectTrigger? = when (index) {
+    0 -> AutoStoreRedirectTrigger.END_SCREEN_1_OPEN
+    1 -> AutoStoreRedirectTrigger.END_SCREEN_2_OPEN
+    else -> null
+}
+
+/** Auto store redirect (`auto_store_redirect` node): when [enabled], the SDK opens the advertiser
+ * store once per impression at the [trigger] moment — no user tap. PLAYABLE_END fires when the close
+ * button appears; END_SCREEN_1/2_OPEN fire when the matching post-close fallback ad screen is
+ * presented (see [endScreenTriggerForIndex]). The store opened is always the primary ad's
+ * (fallback ads carry no store link). Disabled by default (a missing block / `enabled:false`). */
+internal data class AutoStoreRedirect(
+    val enabled: Boolean = false,
+    val trigger: AutoStoreRedirectTrigger = AutoStoreRedirectTrigger.PLAYABLE_END,
+)
+
 internal data class AdBehavior(
     val close: CloseBehavior = CloseBehavior(),
     val storeOpen: StoreOpen = StoreOpen.EXTERNAL,
     val storePrompt: StorePrompt? = null,
     val skoverlay: SkOverlayConfig? = null,
+    val autoStoreRedirect: AutoStoreRedirect? = null,
 )
 
 /** User-selectable reasons for the in-ad report flow (the "i" → report sheet). [flag] is the wire

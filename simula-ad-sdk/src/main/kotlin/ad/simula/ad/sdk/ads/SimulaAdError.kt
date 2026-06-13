@@ -9,16 +9,16 @@ package ad.simula.ad.sdk.ads
  */
 sealed class SimulaAdError(message: String, cause: Throwable? = null) : Exception(message, cause) {
     /** [SimulaAds.initialize] was never called. */
-    object NotInitialized : SimulaAdError("SimulaAds.initialize() was not called")
+    object NotInitialized : SimulaAdError("SimulaAds is not initialized — call SimulaAds.initialize() first.")
 
     /** A server session could not be created (e.g. network failure). */
-    object NoSession : SimulaAdError("Session could not be created")
+    object NoSession : SimulaAdError("Could not create a session. Check the API key and network connection.")
 
     /** The server returned no creative to display. */
-    object NoFill : SimulaAdError("No ad available (no fill)")
+    object NoFill : SimulaAdError("No ad available to show right now (no fill).")
 
     /** `show()` was called before `load()` completed. */
-    object NotReady : SimulaAdError("Ad not ready — call load() first")
+    object NotReady : SimulaAdError("Ad not ready — call load() first and wait for the loaded callback before show().")
 
     /**
      * `show()` was called on an ad that loaded more than an hour ago. A loaded ad
@@ -57,13 +57,15 @@ sealed class SimulaAdError(message: String, cause: Throwable? = null) : Exceptio
     }
 
     /** `show()` was called while an interstitial is already showing. */
-    object AlreadyShowing : SimulaAdError("An interstitial is already showing")
+    object AlreadyShowing : SimulaAdError("An interstitial is already showing.")
 
     /** No Activity/context was available to present the interstitial from. */
-    object NoPresentationContext : SimulaAdError("No Activity available to present from")
+    object NoPresentationContext : SimulaAdError("No Activity available to present the ad.")
 
-    /** An underlying network/decoding error occurred during load. */
-    class Network(cause: Throwable?) : SimulaAdError("Network error", cause)
+    /** An underlying network/decoding error occurred during load. The [cause] carries the
+     * platform-specific detail; the message is the shared, descriptive copy (matches the Swift SDK). */
+    class Network(cause: Throwable?) :
+        SimulaAdError("Network error while loading the ad — check the connection and call load() again.", cause)
 }
 
 /** Stable, low-cardinality code for this error, used as the `error_code` on telemetry events. */

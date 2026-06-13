@@ -1,12 +1,14 @@
 package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.OverlayTiming
 import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.model.validatedHexColor
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -422,5 +424,65 @@ class AdLoadParsingTest {
             """{"ad_behavior":{"close":{"delay_seconds":600}}}""",
         ).adBehavior.toDomain()!!
         assertEquals(MAX_CLOSE_DELAY_SECONDS, b.close.delaySeconds)
+    }
+
+    @Test
+    fun `ad_behavior honors close_chrome delay arms without clamping`() {
+        // The close_chrome experiment authors 20/30/45; the cap (45) must let all three through.
+        for (d in listOf(20, 30, 45)) {
+            val b = json.decodeFromString<AdLoadApiResponse>(
+                """{"ad_behavior":{"close":{"delay_seconds":$d}}}""",
+            ).adBehavior.toDomain()!!
+            assertEquals(d, b.close.delaySeconds)
+        }
+    }
+
+    // ── Response: ad_behavior.auto_store_redirect ───────────────────────────────
+
+    @Test
+    fun `auto_store_redirect absent maps to null`() {
+        val b = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{}}""",
+        ).adBehavior.toDomain()!!
+        assertNull(b.autoStoreRedirect)
+    }
+
+    @Test
+    fun `auto_store_redirect full config maps to domain`() {
+        val b = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"auto_store_redirect":{"enabled":true,"trigger":"end_screen_1_open"}}}""",
+        ).adBehavior.toDomain()!!
+        val r = b.autoStoreRedirect!!
+        assertTrue(r.enabled)
+        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_1_OPEN, r.trigger)
+    }
+
+    @Test
+    fun `auto_store_redirect empty object defaults to disabled playable_end`() {
+        val b = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"auto_store_redirect":{}}}""",
+        ).adBehavior.toDomain()!!
+        val r = b.autoStoreRedirect!!
+        assertFalse(r.enabled)
+        assertEquals(AutoStoreRedirectTrigger.PLAYABLE_END, r.trigger)
+    }
+
+    @Test
+    fun `auto_store_redirect unknown trigger falls back to playable_end`() {
+        val b = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"auto_store_redirect":{"enabled":true,"trigger":"warp_drive"}}}""",
+        ).adBehavior.toDomain()!!
+        assertEquals(AutoStoreRedirectTrigger.PLAYABLE_END, b.autoStoreRedirect!!.trigger)
+    }
+
+    @Test
+    fun `fallback index maps to the matching end-screen trigger`() {
+        // END_SCREEN_1/2_OPEN fire when the matching post-close fallback ad screen is presented:
+        // index 0 = END SCREEN 1, index 1 = END SCREEN 2 (no signal from the webview).
+        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_1_OPEN, endScreenTriggerForIndex(0))
+        assertEquals(AutoStoreRedirectTrigger.END_SCREEN_2_OPEN, endScreenTriggerForIndex(1))
+        // No end-screen trigger for further indices (PLAYABLE_END is native, has no fallback index).
+        assertNull(endScreenTriggerForIndex(2))
+        assertNull(endScreenTriggerForIndex(-1))
     }
 }

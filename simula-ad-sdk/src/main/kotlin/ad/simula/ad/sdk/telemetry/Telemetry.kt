@@ -10,7 +10,7 @@ import kotlinx.serialization.json.Json
  * SDK version stamped on every telemetry batch. Keep in sync with the `coordinates(...)`
  * version in `simula-ad-sdk/build.gradle.kts`.
  */
-internal const val SIMULA_SDK_VERSION = "1.0.3"
+internal const val SIMULA_SDK_VERSION = "1.1.0"
 
 /** logcat tag for the dev-mode telemetry mirror. */
 private const val LOG_TAG = "SimulaTelemetry"

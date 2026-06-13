@@ -181,20 +181,27 @@ internal object SimulaApiClient {
     // ── Character Picker ──────────────────────────────────────────────────────
 
     /**
-     * Fetch the selectable characters for the Character Picker. Best-effort and
-     * **never throws**: returns an empty list on any failure so the caller falls
-     * back to its bundled placeholder characters.
+     * Fetch characters for the Character Picker from `POST /character-selector`.
+     * Best-effort and **never throws**: returns an empty list on any failure so the
+     * caller falls back to its bundled placeholder characters.
      *
-     * NOTE: the public `/minigames/companions` endpoint is not built yet — this
-     * call will currently 404 and resolve to the fallback. Once the endpoint ships,
-     * no SDK change is needed; the parse below already tolerates its expected shape.
+     * The endpoint backfills [fill] (1–4) random characters from Simula's roster. It
+     * requires the publisher Bearer [apiKey] and a [sessionId] that belongs to that
+     * publisher — the same auth contract as `/session`.
      */
-    suspend fun fetchCharacters(sessionId: String? = null): List<CharacterData> = withContext(Dispatchers.IO) {
+    suspend fun fetchCharacters(
+        apiKey: String,
+        sessionId: String,
+        fill: Int = 4,
+    ): List<CharacterData> = withContext(Dispatchers.IO) {
         try {
             val response = SimulaHttp.request(
-                url = companionsUrl(sessionId),
-                method = "GET",
-                headers = jsonHeaders(),
+                url = "$API_BASE_URL/character-selector",
+                method = "POST",
+                headers = authHeaders(apiKey),
+                body = json.encodeToString(
+                    CharacterSelectorRequestBody(sessionId = sessionId, fill = fill),
+                ),
             )
             if (!response.isSuccessful || response.body.isBlank()) return@withContext emptyList()
             parseCharacters(response.body)
@@ -203,20 +210,14 @@ internal object SimulaApiClient {
         }
     }
 
-    /** Builds the companions request URL, adding `session_id` when available. Pure/testable. */
-    internal fun companionsUrl(sessionId: String?): String = buildString {
-        append("$API_BASE_URL/minigames/companions")
-        if (!sessionId.isNullOrBlank()) {
-            append("?session_id=${URLEncoder.encode(sessionId, "UTF-8")}")
-        }
-    }
-
     /**
-     * Tolerant parse of the companions payload into [CharacterData]. Accepts the
-     * list under `characters`, `data`, `characters.data`, or as a bare top-level
-     * array. Per-character mapping: `character_id`/`id` → id, `character_name`/`name`
-     * → name, `images_1_1[0]`/`avatar_url`/`image` → image. Entries missing an id or
-     * name are dropped (one bad entry can't sink the rest). Pure/testable.
+     * Tolerant parse of the `/character-selector` payload into [CharacterData].
+     * Accepts the roster as a bare top-level array (what the endpoint returns) or
+     * under `characters`, `data`, or `characters.data`. Per-character mapping:
+     * `character_id`/`id` → id, `character_name`/`name` → name,
+     * `imageUrl`/`images_1_1[0]`/`avatar_url`/`image` → image. Entries missing a name,
+     * description, or image are dropped (a card needs all three to render); a blank id
+     * is tolerated. One bad entry can't sink the rest. Pure/testable.
      */
     internal fun parseCharacters(body: String): List<CharacterData> {
         val root = json.parseToJsonElement(body)
@@ -234,19 +235,23 @@ internal object SimulaApiClient {
 
         return arr.mapNotNull { element ->
             val obj = element.jsonObject
-            val id = obj.str("character_id") ?: obj.str("id")
             val name = obj.str("character_name") ?: obj.str("name")
-            if (id.isNullOrBlank() || name.isNullOrBlank()) return@mapNotNull null
-            val image = (obj["images_1_1"] as? JsonArray)
-                ?.firstOrNull()
-                ?.let { (it as? JsonPrimitive)?.contentOrNull }
+            val description = obj.str("description")
+            val image = obj.str("imageUrl")
+                ?: (obj["images_1_1"] as? JsonArray)
+                    ?.firstOrNull()
+                    ?.let { (it as? JsonPrimitive)?.contentOrNull }
                 ?: obj.str("avatar_url")
                 ?: obj.str("image")
+            // A card needs all three display fields; a blank id is tolerated.
+            if (name.isNullOrBlank() || description.isNullOrBlank() || image.isNullOrBlank()) {
+                return@mapNotNull null
+            }
             CharacterData(
-                id = id,
+                id = obj.str("character_id") ?: obj.str("id") ?: "",
                 name = name,
-                image = image ?: "",
-                description = obj.str("description"),
+                image = image,
+                description = description,
             )
         }
     }
@@ -612,7 +617,7 @@ internal object SimulaApiClient {
     suspend fun postTelemetry(apiKey: String, body: String): Int = withContext(Dispatchers.IO) {
         try {
             SimulaHttp.request(
-                url = "$API_BASE_URL/v1/telemetry/events",
+                url = "$API_BASE_URL/telemetry/events",
                 method = "POST",
                 headers = authHeaders(apiKey),
                 body = body,

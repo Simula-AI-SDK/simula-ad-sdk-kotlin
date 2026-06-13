@@ -2,6 +2,8 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.model.AutoStoreRedirect
+import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.content.Intent
 import android.net.Uri
@@ -61,9 +63,14 @@ import kotlinx.coroutines.withContext
 internal fun FallbackAdHost(
     impressionId: String,
     onFullyClosed: () -> Unit,
+    autoStoreRedirect: AutoStoreRedirect? = null,
+    onAutoStoreRedirect: () -> Unit = {},
     content: @Composable (onClose: () -> Unit) -> Unit,
 ) {
     var phase by remember { mutableStateOf<FallbackPhase>(FallbackPhase.Content) }
+    // auto_store_redirect END_SCREEN_N: open the primary ad's store once, when the fallback screen
+    // whose index matches the configured trigger is presented (index 0 = END SCREEN 1, index 1 = 2).
+    var autoRedirectFired by remember { mutableStateOf(false) }
 
     when (val p = phase) {
         FallbackPhase.Content -> content {
@@ -82,6 +89,15 @@ internal fun FallbackAdHost(
         FallbackPhase.Fetching -> Box(Modifier.fillMaxSize().background(Color.Black))
         is FallbackPhase.Showing -> {
             val ad = p.ads[p.index]
+            // Fire the auto store redirect when the END_SCREEN_N fallback screen is presented.
+            LaunchedEffect(p.index) {
+                if (!autoRedirectFired && autoStoreRedirect?.enabled == true &&
+                    autoStoreRedirect.trigger == endScreenTriggerForIndex(p.index)
+                ) {
+                    autoRedirectFired = true
+                    onAutoStoreRedirect()
+                }
+            }
             // key() so each screen gets fresh overlay state (countdown, WebView) — without it the
             // next screen would inherit the previous one's elapsed countdown and loaded page.
             key(p.index) {
@@ -146,7 +162,10 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
                     },
                 ).apply { loadUrl(iframeUrl) }
             },
-            modifier = Modifier.fillMaxSize(),
+            // Inset the creative below the top safe area (status bar / notch), matching the
+            // interstitial / rewarded creatives. safeDrawing accounts for the display cutout even
+            // with system bars hidden, so it's full-bleed on devices without one.
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
             onRelease = { webView -> WebViewPool.release(webView) },
         )
 
