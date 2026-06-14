@@ -35,7 +35,7 @@ import java.net.URLEncoder
  */
 internal object SimulaApiClient {
 
-    private const val API_BASE_URL = "https://simula-staging.ngrok.dev"
+    private const val API_BASE_URL = "https://simula-api-701226639755.us-central1.run.app"
 
     private val json = Json {
         ignoreUnknownKeys = true
