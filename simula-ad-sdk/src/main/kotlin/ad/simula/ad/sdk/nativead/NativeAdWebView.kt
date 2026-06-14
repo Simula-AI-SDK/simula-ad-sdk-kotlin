@@ -10,7 +10,9 @@ import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -57,6 +59,7 @@ internal fun NativeAdWebView(
     heightDp: Float,
     onHeightPx: (Float) -> Unit,
     onAdClick: () -> Unit,
+    onLoadError: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -66,6 +69,7 @@ internal fun NativeAdWebView(
     // Point the wiring at the latest callbacks on each recomposition (cheap; @Volatile fields).
     wiring.onHeightPx = onHeightPx
     wiring.onAdClick = onAdClick
+    wiring.onLoadError = onLoadError
 
     AndroidView(
         modifier = modifier
@@ -106,6 +110,7 @@ private class NativeAdWiring(
 ) {
     @Volatile var onHeightPx: (Float) -> Unit = {}
     @Volatile var onAdClick: () -> Unit = {}
+    @Volatile var onLoadError: () -> Unit = {}
 
     private val main = Handler(Looper.getMainLooper())
     private val json = Json { ignoreUnknownKeys = true }
@@ -158,6 +163,24 @@ private class NativeAdWebViewClient(
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
         // Fallback for older WebViews without document-start injection: wire the relay at page start.
         if (!documentStartSupported) view.evaluateJavascript(BRIDGE_SCRIPT, null)
+    }
+
+    // The creative's own (main-frame) load failing means there's nothing to show — e.g. no
+    // connectivity when the slot scrolls into view. The creative never reports a height, so the
+    // slot must collapse instead of holding the shimmer forever. Subresource failures (an image
+    // inside the creative) are ignored so they can't hide an otherwise-rendered card.
+    override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+        if (!request.isForMainFrame) return
+        // Pre-empt the WebView's built-in "Webpage not available" page so it can't flash on screen
+        // before the slot collapses.
+        view.loadUrl("about:blank")
+        wiring.onLoadError()
+    }
+
+    override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+        if (!request.isForMainFrame) return
+        view.loadUrl("about:blank")
+        wiring.onLoadError()
     }
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {

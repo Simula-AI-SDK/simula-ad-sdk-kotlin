@@ -191,6 +191,18 @@ fun NativeAdSlot(
                         }
                     },
                     onAdClick = { /* CLICKED — reserved for a future click callback / telemetry hook. */ },
+                    onLoadError = {
+                        // The creative's WebView failed to load (e.g. no connectivity when this row
+                        // scrolled into view — including a recycled row whose height was restored from
+                        // cache, so we must NOT gate on height here). Collapse the slot instead of
+                        // showing the WebView's built-in "Webpage not available" page. The fill stays
+                        // cached (not invalidated), so a remount retries once connectivity returns.
+                        if (state is NativeAdSlotState.Filled) {
+                            heightDp = 0f
+                            state = NativeAdSlotState.Empty
+                            currentOnError(SimulaAdError.Network(null))
+                        }
+                    },
                     modifier = Modifier.trackNativeAdViewability(
                         // Only measure once the creative has a real, laid-out height.
                         enabled = heightDp > 0f,
