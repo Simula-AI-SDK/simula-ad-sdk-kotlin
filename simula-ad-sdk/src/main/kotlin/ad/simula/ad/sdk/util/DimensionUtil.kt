@@ -47,11 +47,25 @@ fun parseDimension(input: Any?): ParsedDimension {
             }
         }
 
+        // String with "px" suffix (e.g. "320px")
+        if (trimmed.endsWith("px", ignoreCase = true)) {
+            val pxValue = trimmed.removeSuffix("px").removeSuffix("PX").trim().toFloatOrNull()
+            if (pxValue != null && pxValue > 0f) {
+                return ParsedDimension.Pixels(pxValue.dp)
+            }
+        }
+
         // String with number (pixels)
         val pixelValue = trimmed.toFloatOrNull()
         if (pixelValue != null && pixelValue > 0f) {
             return ParsedDimension.Pixels(pixelValue.dp)
         }
+    }
+
+    // Handle Dp directly (e.g. 300.dp)
+    if (input is Dp) {
+        val value = input.value
+        if (value > 0f) return ParsedDimension.Pixels(input)
     }
 
     // Handle Number
@@ -68,6 +82,20 @@ fun parseDimension(input: Any?): ParsedDimension {
     }
 
     return ParsedDimension.Fill
+}
+
+/**
+ * Enforce a minimum width on a parsed dimension.
+ *
+ * - [ParsedDimension.Pixels] values below [minWidth] are clamped up.
+ * - [ParsedDimension.Fill] passes through (always full parent).
+ * - [ParsedDimension.Percentage] passes through — the caller must enforce
+ *   the minimum at layout time (e.g. `Modifier.widthIn(min = minWidth)`
+ *   before `fillMaxWidth(fraction)`).
+ */
+fun ParsedDimension.clampMinWidth(minWidth: Dp): ParsedDimension = when (this) {
+    is ParsedDimension.Pixels -> if (dp < minWidth) ParsedDimension.Pixels(minWidth) else this
+    else -> this
 }
 
 /**

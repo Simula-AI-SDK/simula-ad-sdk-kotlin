@@ -124,37 +124,31 @@ internal fun MiniGameButtonTheme.resolve(): ResolvedButtonTheme {
     )
 }
 
-// ── CharacterPicker ──────────────────────────────────────────────────────────
+// ── CharacterSelector ──────────────────────────────────────────────────────────
 
-internal data class ResolvedCharacterPickerTheme(
+internal data class ResolvedCharacterSelectorTheme(
     val backgroundColor: Color,
-    val titleColor: Color,
-    val titleFontSize: Int,
+    val titleFontColor: Color,
+    val secondaryFontColor: Color,
+    val accentColor: Color,
+    val ctaFontColor: Color,
     val cardBackgroundColor: Color,
     val cardBorderColor: Color,
     val cardCornerRadius: Int,
-    val selectedColor: Color,
-    val nameColor: Color,
-    val launchTextColor: Color,
-    val launchDisabledColor: Color,
-    val launchCornerRadius: Int,
     val fontFamily: FontFamily,
 )
 
-internal fun CharacterPickerTheme.resolve(): ResolvedCharacterPickerTheme {
-    val d = Defaults.CharacterPickerDefaults
-    return ResolvedCharacterPickerTheme(
+internal fun CharacterSelectorTheme.resolve(): ResolvedCharacterSelectorTheme {
+    val d = Defaults.CharacterSelectorDefaults
+    return ResolvedCharacterSelectorTheme(
         backgroundColor = ColorUtil.parseColor(backgroundColor ?: d.BACKGROUND_COLOR),
-        titleColor = ColorUtil.parseColor(titleColor ?: d.TITLE_COLOR),
-        titleFontSize = titleFontSize ?: d.TITLE_FONT_SIZE,
+        titleFontColor = ColorUtil.parseColor(titleFontColor ?: d.TITLE_FONT_COLOR),
+        secondaryFontColor = ColorUtil.parseColor(secondaryFontColor ?: d.SECONDARY_FONT_COLOR),
+        accentColor = ColorUtil.parseColor(accentColor ?: d.ACCENT_COLOR),
+        ctaFontColor = ColorUtil.parseColor(ctaFontColor ?: d.CTA_FONT_COLOR),
         cardBackgroundColor = ColorUtil.parseColor(cardBackgroundColor ?: d.CARD_BACKGROUND_COLOR),
         cardBorderColor = ColorUtil.parseColor(cardBorderColor ?: d.CARD_BORDER_COLOR),
         cardCornerRadius = cardCornerRadius ?: d.CARD_CORNER_RADIUS,
-        selectedColor = ColorUtil.parseColor(selectedColor ?: d.SELECTED_COLOR),
-        nameColor = ColorUtil.parseColor(nameColor ?: d.NAME_COLOR),
-        launchTextColor = ColorUtil.parseColor(launchTextColor ?: d.LAUNCH_TEXT_COLOR),
-        launchDisabledColor = ColorUtil.parseColor(launchDisabledColor ?: d.LAUNCH_DISABLED_COLOR),
-        launchCornerRadius = launchCornerRadius ?: d.LAUNCH_CORNER_RADIUS,
         fontFamily = FontUtil.parseFont(fontFamily ?: d.FONT_FAMILY),
     )
 }

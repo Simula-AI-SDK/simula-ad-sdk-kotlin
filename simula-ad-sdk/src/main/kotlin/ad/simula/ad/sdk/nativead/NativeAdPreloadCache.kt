@@ -38,7 +38,7 @@ internal object NativeAdPreloadCache {
     private val entries = ConcurrentHashMap<String, Entry>()
 
     /** Fire one preload and return its id, or null if the [MAX] cap is already reached. */
-    fun preload(adUnitId: String?, position: Int): String? {
+    fun preload(adUnitId: String?, position: Int, theme: String? = null): String? {
         if (entries.size >= MAX) {
             Log.w(TAG, "preloadNativeAd ignored — at most $MAX preloaded ads are kept at once.")
             Telemetry.recordOperation("native_preload_capped", 0L, false)
@@ -52,6 +52,7 @@ internal object NativeAdPreloadCache {
                 ensureSession = { SimulaAds.store.ensureSession() },
                 adUnitId = adUnitId,
                 position = position,
+                theme = theme,
             )
         }
         entries[id] = Entry(deferred, adUnitId, position)

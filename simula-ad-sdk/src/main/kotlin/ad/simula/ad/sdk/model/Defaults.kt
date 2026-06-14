@@ -65,21 +65,18 @@ object Defaults {
         const val FONT_FAMILY = "Inter, system-ui, sans-serif"
     }
 
-    // ── CharacterPicker Defaults ────────────────────────────────────────────
+    // ── CharacterSelector Defaults ────────────────────────────────────────────
     // Values mirror the reference "Select Your Game Partner" HTML verbatim.
 
-    object CharacterPickerDefaults {
+    object CharacterSelectorDefaults {
         const val BACKGROUND_COLOR = "#000000"
-        const val TITLE_COLOR = "#ffffff"
-        const val TITLE_FONT_SIZE = 26
+        const val TITLE_FONT_COLOR = "#ffffff"
+        const val SECONDARY_FONT_COLOR = "#ffffff"
+        const val ACCENT_COLOR = "#3d9a66"
+        const val CTA_FONT_COLOR = "#ffffff"
         const val CARD_BACKGROUND_COLOR = "#14161a"
         const val CARD_BORDER_COLOR = "#343a42"
         const val CARD_CORNER_RADIUS = 18
-        const val SELECTED_COLOR = "#3d9a66"
-        const val NAME_COLOR = "#ffffff"
-        const val LAUNCH_TEXT_COLOR = "#ffffff"
-        const val LAUNCH_DISABLED_COLOR = "#3a3a3a"
-        const val LAUNCH_CORNER_RADIUS = 14
-        const val FONT_FAMILY = "-apple-system, system-ui, Roboto, sans-serif"
+        const val FONT_FAMILY = "-apple-system, SF Pro Text, system-ui, Roboto, Arial, sans-serif"
     }
 }

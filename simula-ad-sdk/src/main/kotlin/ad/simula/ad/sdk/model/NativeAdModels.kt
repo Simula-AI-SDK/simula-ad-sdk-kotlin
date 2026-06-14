@@ -26,8 +26,8 @@ data class SimulaAdContext(
     val userProfile: String? = null,
     /** User email, if available. */
     val userEmail: String? = null,
-    /** Arbitrary string key-values (the backend keeps at most 10 entries). */
-    val customContext: Map<String, String>? = null,
+    /** Arbitrary context key-values — any JSON-compatible type (the backend keeps at most 10 entries). */
+    val customContext: Map<String, Any>? = null,
     /** Whether the surrounding content is NSFW. Defaults to false. */
     val nsfw: Boolean = false,
 )

@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -151,11 +152,11 @@ fun MiniGameInterstitial(
     ) {
         val view = LocalView.current
         val interstitialWindow = (view.parent as? DialogWindowProvider)?.window
-        LaunchedEffect(interstitialWindow) {
+        SideEffect {
             interstitialWindow?.let { window ->
                 window.setDimAmount(0f)
                 window.setBackgroundDrawableResource(android.R.color.transparent)
-                window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+                WindowCompat.setDecorFitsSystemWindows(window, false)
                 window.setLayout(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.MATCH_PARENT,

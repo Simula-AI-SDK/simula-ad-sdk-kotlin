@@ -63,7 +63,7 @@ internal object Telemetry {
             sessionIdProvider = sessionIdProvider,
             // Re-gate on every flush: ppid only with consent (& not under COPPA); the
             // advertising id is already nulled by the snapshot when not collectible.
-            primaryUserIdProvider = { if (SimulaPrivacy.current.allowsPrimaryUserID) primaryUserId else null },
+            primaryUserIdProvider = { primaryUserId },
             advertisingIdProvider = { SimulaPrivacy.current.advertisingId },
             // In dev mode, mirror every (redacted) event to logcat for local verification.
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,

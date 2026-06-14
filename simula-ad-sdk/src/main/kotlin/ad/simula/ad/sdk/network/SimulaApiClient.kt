@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.network
 
+import android.util.Log
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.CharacterData
@@ -54,7 +55,7 @@ internal object SimulaApiClient {
 
     /**
      * Create a server session and return its id.
-     * Returns null on network failure (but throws on 401 invalid API key).
+     * Returns null on network failure or an invalid API key (401).
      */
     suspend fun createSession(
         apiKey: String,
@@ -85,9 +86,8 @@ internal object SimulaApiClient {
             )
 
             if (response.code == 401) {
-                throw IllegalArgumentException(
-                    "Invalid API key (please check dashboard or contact Simula team for a valid API key)"
-                )
+                Log.e("SimulaAdSDK", "Invalid API key (please check dashboard or contact Simula team for a valid API key)")
+                return@withContext null
             }
             if (!response.isSuccessful) return@withContext null
 
@@ -100,8 +100,6 @@ internal object SimulaApiClient {
                 )
             }
             data.sessionId?.takeIf { it.isNotEmpty() }
-        } catch (e: IllegalArgumentException) {
-            throw e // Re-throw 401 errors
         } catch (_: Exception) {
             null
         }
@@ -413,8 +411,8 @@ internal object SimulaApiClient {
      * Load a native sponsored-character card via `POST /load/native`.
      *
      * `ad_inserted == false` is a valid no-fill (NOT an error) — the slot collapses to zero height.
-     * A 401 means a bad/unknown session; it surfaces as an [IllegalArgumentException] (same contract
-     * as [createSession]) so the caller can map it to a non-retryable error per the PRD. Any other
+     * A 401 means a bad/unknown session; it surfaces as an [IllegalArgumentException]
+     * so the caller can map it to a non-retryable error per the PRD. Any other
      * non-2xx / network failure throws a generic [Exception] the caller maps to a network error.
      */
     suspend fun loadNative(
@@ -423,6 +421,7 @@ internal object SimulaApiClient {
         adUnitId: String? = null,
         context: ad.simula.ad.sdk.model.SimulaAdContext? = null,
         width: String? = null,
+        theme: String? = null,
         charId: String? = null,
         charName: String? = null,
         charDesc: String? = null,
@@ -433,6 +432,7 @@ internal object SimulaApiClient {
             adUnitId = adUnitId,
             context = context?.toBody(),
             width = width,
+            theme = theme,
             charId = charId,
             charName = charName,
             charDesc = charDesc,

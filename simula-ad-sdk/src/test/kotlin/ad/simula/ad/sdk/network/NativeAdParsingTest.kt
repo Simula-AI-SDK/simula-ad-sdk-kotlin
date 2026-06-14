@@ -3,6 +3,9 @@ package ad.simula.ad.sdk.network
 import ad.simula.ad.sdk.model.SimulaAdContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -44,13 +47,46 @@ class NativeAdParsingTest {
     }
 
     @Test
+    fun `request encodes theme when set`() {
+        val body = NativeAdRequestBody(position = 0, sessionId = "s", theme = "dark")
+        val encoded = json.encodeToString(body)
+
+        assertTrue(encoded.contains("\"theme\":\"dark\""))
+        val decoded = json.decodeFromString<NativeAdRequestBody>(encoded)
+        assertEquals("dark", decoded.theme)
+    }
+
+    @Test
+    fun `request omits theme when null`() {
+        val body = NativeAdRequestBody(position = 0, sessionId = "s")
+        val encoded = json.encodeToString(body)
+
+        // encodeDefaults is true, but theme defaults to null → should be null in output
+        val decoded = json.decodeFromString<NativeAdRequestBody>(encoded)
+        assertNull(decoded.theme)
+    }
+
+    @Test
+    fun `request round-trips light theme`() {
+        val body = NativeAdRequestBody(position = 1, sessionId = "s", theme = "light")
+        val decoded = json.decodeFromString<NativeAdRequestBody>(json.encodeToString(body))
+        assertEquals("light", decoded.theme)
+    }
+
+    @Test
     fun `context maps SimulaAdContext to camelCase wire keys`() {
         val ctx = SimulaAdContext(
             searchTerm = "fantasy rpg",
             tags = listOf("adventure", "magic"),
             category = "roleplay",
             userEmail = "a@b.com",
-            customContext = mapOf("recent" to "Frieren"),
+            customContext = mapOf(
+                "recent" to "Frieren",
+                "recentCharactersViewed" to listOf("Frieren", "Anya"),
+                "level" to 42,
+                "premium" to true,
+                "meta" to mapOf("source" to "search", "scores" to listOf(1, 2, 3)),
+            ),
             nsfw = false,
         )
         val encoded = json.encodeToString(ctx.toBody())
@@ -69,7 +105,18 @@ class NativeAdParsingTest {
         assertEquals(listOf("adventure", "magic"), decoded.tags)
         assertEquals("roleplay", decoded.category)
         assertEquals("a@b.com", decoded.userEmail)
-        assertEquals("Frieren", decoded.customContext?.get("recent"))
+        val ctx2 = decoded.customContext!!
+        assertEquals(JsonPrimitive("Frieren"), ctx2["recent"])
+        assertEquals(JsonArray(listOf(JsonPrimitive("Frieren"), JsonPrimitive("Anya"))), ctx2["recentCharactersViewed"])
+        assertEquals(JsonPrimitive(42), ctx2["level"])
+        assertEquals(JsonPrimitive(true), ctx2["premium"])
+        assertEquals(
+            JsonObject(mapOf(
+                "source" to JsonPrimitive("search"),
+                "scores" to JsonArray(listOf(JsonPrimitive(1), JsonPrimitive(2), JsonPrimitive(3))),
+            )),
+            ctx2["meta"],
+        )
         assertFalse(decoded.nsfw)
     }
 

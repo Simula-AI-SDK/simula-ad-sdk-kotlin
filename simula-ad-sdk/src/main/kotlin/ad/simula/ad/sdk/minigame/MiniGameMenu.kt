@@ -41,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -656,18 +657,13 @@ fun MiniGameMenu(
 private fun FullscreenDialogWindowConfig() {
     val view = LocalView.current
     val dialogWindow = (view.parent as? DialogWindowProvider)?.window
-    LaunchedEffect(dialogWindow) {
+    SideEffect {
         dialogWindow?.let { window ->
             window.setDimAmount(0f)
             window.setBackgroundDrawableResource(android.R.color.transparent)
-            // Draw edge-to-edge behind the system bars, make them transparent, and hide them — the
-            // same immersive setup the interstitial / rewarded Activities use. Without this the
-            // dialog window stopped at the navigation bar, leaving that region (and the cutout)
-            // transparent so the host app showed through at the bottom of the whole minigame flow.
             WindowCompat.setDecorFitsSystemWindows(window, false)
             window.statusBarColor = android.graphics.Color.TRANSPARENT
             window.navigationBarColor = android.graphics.Color.TRANSPARENT
-            window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
             window.setLayout(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,

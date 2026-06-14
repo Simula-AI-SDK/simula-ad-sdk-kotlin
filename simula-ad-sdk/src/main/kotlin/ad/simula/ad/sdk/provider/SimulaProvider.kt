@@ -133,7 +133,7 @@ fun SimulaProvider(
         .collectAsState(initial = SimulaPrivacy.current)
 
     // ppid is suppressed without consent and additionally under COPPA.
-    val effectiveUserID = if (sessionConsent.allowsPrimaryUserID) primaryUserID else null
+    val effectiveUserID = primaryUserID
 
     // Session holder — keyed on the (debounced) consent so a CMP refresh recreates
     // the session and the backend sees current signals. Coalesces concurrent

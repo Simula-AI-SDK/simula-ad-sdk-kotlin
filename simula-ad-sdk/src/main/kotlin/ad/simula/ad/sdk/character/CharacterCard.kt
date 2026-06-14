@@ -49,7 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import ad.simula.ad.sdk.image.CachedAsyncImage
-import ad.simula.ad.sdk.model.ResolvedCharacterPickerTheme
+import ad.simula.ad.sdk.model.ResolvedCharacterSelectorTheme
 
 // The idle glow colors from the reference HTML's box-shadows.
 private val RingBluish = Color(145, 165, 185) // rgb(145,165,185)
@@ -66,11 +66,11 @@ private val GlowBluish = Color(130, 150, 170) // rgb(130,150,170)
  */
 @Composable
 internal fun CharacterCard(
-    entry: CharacterPickerEntry,
+    entry: CharacterSelectorEntry,
     selected: Boolean,
     selectionMade: Boolean,
     pulse: Float,
-    theme: ResolvedCharacterPickerTheme,
+    theme: ResolvedCharacterSelectorTheme,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -97,8 +97,8 @@ internal fun CharacterCard(
     val glowRadiusDp: Float
     when {
         selected -> {
-            ringColor = theme.selectedColor.copy(alpha = 0.55f)
-            glowColor = theme.selectedColor.copy(alpha = 0.32f)
+            ringColor = theme.accentColor.copy(alpha = 0.55f)
+            glowColor = theme.accentColor.copy(alpha = 0.32f)
             glowRadiusDp = 16f
         }
         selectionMade -> { // non-selected, pulse stopped → static base shadow
@@ -120,7 +120,7 @@ internal fun CharacterCard(
             .cardGlow(cornerDp, ringColor, glowColor, glowRadiusDp)
             .clip(shape)
             .background(theme.cardBackgroundColor)
-            .border(2.dp, if (selected) theme.selectedColor else theme.cardBorderColor, shape)
+            .border(2.dp, if (selected) theme.accentColor else theme.cardBorderColor, shape)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -174,7 +174,7 @@ internal fun CharacterCard(
             ) {
                 Text(
                     text = entry.data.name,
-                    color = theme.nameColor,
+                    color = theme.secondaryFontColor,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = theme.fontFamily,
@@ -229,7 +229,7 @@ private fun Modifier.cardGlow(
  */
 @Composable
 internal fun CharacterSkeletonCard(
-    theme: ResolvedCharacterPickerTheme,
+    theme: ResolvedCharacterSelectorTheme,
     modifier: Modifier = Modifier,
 ) {
     val shape = RoundedCornerShape(theme.cardCornerRadius.dp)

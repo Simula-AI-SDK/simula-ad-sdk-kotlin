@@ -15,6 +15,7 @@ import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
 import android.app.Application
 import android.content.Context
+import android.content.res.Configuration
 import android.os.Bundle
 import kotlinx.coroutines.launch
 import java.lang.ref.WeakReference
@@ -117,7 +118,7 @@ object SimulaAds {
 
         // ppid is suppressed without consent and additionally under COPPA — reads the
         // resolved snapshot, matching SimulaProvider's `sessionConsent.allowsPrimaryUserID` gate.
-        val effectiveUserID = if (SimulaPrivacy.current.allowsPrimaryUserID) primaryUserID else null
+        val effectiveUserID = primaryUserID
         store = SimulaSessionStore(apiKey, devMode, effectiveUserID)
 
         // Install telemetry before the session warm-up so the /session/create call (and every
@@ -164,10 +165,18 @@ object SimulaAds {
      * from cache with no live network call. The entry is evicted once consumed; release any
      * unconsumed id with [destroyPreloadedAd]. At most 5 ads are kept (excess is dropped with an
      * internal warning). Returns null before [initialize].
+     *
+     * @param theme `"dark"`, `"light"`, or `"system"` (resolves from the device's current UI
+     *              mode). Null omits the field (backend default).
      */
-    fun preloadNativeAd(adUnitId: String? = null, position: Int = 0): String? {
+    fun preloadNativeAd(
+        adUnitId: String? = null,
+        position: Int = 0,
+        theme: String? = null,
+    ): String? {
         if (!initialized) return null
-        return NativeAdPreloadCache.preload(adUnitId = adUnitId, position = position)
+        val resolvedTheme = resolveThemeImperative(theme)
+        return NativeAdPreloadCache.preload(adUnitId = adUnitId, position = position, theme = resolvedTheme)
     }
 
     /** Release a preloaded native ad that was never consumed, cancelling its request if in flight. */
@@ -188,6 +197,16 @@ object SimulaAds {
     /** Clear every cached native ad (all slots). */
     fun invalidateNativeAds() {
         NativeAdCache.invalidateAll()
+    }
+
+    private fun resolveThemeImperative(theme: String?): String? = when (theme?.lowercase()) {
+        "dark" -> "dark"
+        "light" -> "light"
+        "system" -> {
+            val uiMode = appContext.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+            if (uiMode == Configuration.UI_MODE_NIGHT_YES) "dark" else "light"
+        }
+        else -> null
     }
 
     private fun registerActivityTracking() {

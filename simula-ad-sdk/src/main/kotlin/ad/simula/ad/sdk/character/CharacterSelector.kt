@@ -35,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,8 +62,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.R
 import ad.simula.ad.sdk.model.CharacterData
-import ad.simula.ad.sdk.model.CharacterPickerTheme
-import ad.simula.ad.sdk.model.ResolvedCharacterPickerTheme
+import ad.simula.ad.sdk.model.CharacterSelectorTheme
+import ad.simula.ad.sdk.model.ResolvedCharacterSelectorTheme
 import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.useSimula
@@ -107,7 +108,7 @@ fun CharacterSelector(
     title: String = "Select Your Game Partner",
     ctaText: String = "🚀 Launch Game",
     characters: List<CharacterData>? = null,
-    theme: CharacterPickerTheme = CharacterPickerTheme(),
+    theme: CharacterSelectorTheme = CharacterSelectorTheme(),
 ) {
     var closedInternally by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(null) }
@@ -118,7 +119,7 @@ fun CharacterSelector(
     // backfills only the gap (fill = 4 - host).
     val fallback = remember { fallbackCharacterEntries() }
     val host = remember(characters) {
-        characters.orEmpty().take(MAX_CHARACTERS).map { CharacterPickerEntry(it) }
+        characters.orEmpty().take(MAX_CHARACTERS).map { CharacterSelectorEntry(it) }
     }
     val fill = MAX_CHARACTERS - host.size
 
@@ -144,7 +145,7 @@ fun CharacterSelector(
                 val fetched = if (sessionId.isNullOrBlank()) emptyList()
                     else SimulaApiClient
                         .fetchCharacters(simula.apiKey, sessionId, fill)
-                        .map { CharacterPickerEntry(it) }
+                        .map { CharacterSelectorEntry(it) }
                 entries = mergeRoster(host, fetched, fallback)
             }
         }
@@ -197,11 +198,11 @@ fun CharacterSelector(
     ) {
         val view = LocalView.current
         val dialogWindow = (view.parent as? DialogWindowProvider)?.window
-        LaunchedEffect(dialogWindow) {
+        SideEffect {
             dialogWindow?.let { window ->
                 window.setDimAmount(0f)
                 window.setBackgroundDrawableResource(android.R.color.transparent)
-                window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+                WindowCompat.setDecorFitsSystemWindows(window, false)
                 window.setLayout(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.MATCH_PARENT,
@@ -230,13 +231,13 @@ fun CharacterSelector(
             ) {
                 Text(
                     text = title,
-                    color = resolved.titleColor,
-                    fontSize = resolved.titleFontSize.sp,
+                    color = resolved.titleFontColor,
+                    fontSize = 26.sp,
                     fontWeight = FontWeight.ExtraBold,
                     fontFamily = resolved.fontFamily,
                     textAlign = TextAlign.Center,
-                    lineHeight = (resolved.titleFontSize * 1.2f).sp,
-                    letterSpacing = (resolved.titleFontSize * 0.01f).sp,
+                    lineHeight = (26 * 1.2f).sp,
+                    letterSpacing = (26 * 0.01f).sp,
                 )
 
                 CharacterGrid(
@@ -286,7 +287,7 @@ fun CharacterSelector(
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                Text(text = "✕", color = resolved.titleColor, fontSize = 16.sp)
+                Text(text = "✕", color = resolved.titleFontColor, fontSize = 16.sp)
             }
         }
     }
@@ -295,10 +296,10 @@ fun CharacterSelector(
 /** Two-column grid; the odd trailing card stays half-width (matches the HTML grid). */
 @Composable
 private fun CharacterGrid(
-    entries: List<CharacterPickerEntry>,
+    entries: List<CharacterSelectorEntry>,
     selectedId: String?,
     pulse: Float,
-    theme: ResolvedCharacterPickerTheme,
+    theme: ResolvedCharacterSelectorTheme,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -337,21 +338,21 @@ private fun CharacterGrid(
 private fun LaunchButton(
     text: String,
     active: Boolean,
-    theme: ResolvedCharacterPickerTheme,
+    theme: ResolvedCharacterSelectorTheme,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val shape = RoundedCornerShape(theme.launchCornerRadius.dp)
+    val shape = RoundedCornerShape(14.dp)
     val bg by animateColorAsState(
-        if (active) theme.selectedColor else theme.launchDisabledColor,
+        if (active) theme.accentColor else Color(0xFF3A3A3A),
         tween(250), label = "launchBg",
     )
     val borderColor by animateColorAsState(
-        if (active) theme.selectedColor else Color(0xFF4B4B4B),
+        if (active) theme.accentColor else Color(0xFF4B4B4B),
         tween(250), label = "launchBorder",
     )
     val textColor by animateColorAsState(
-        if (active) theme.launchTextColor else Color(0x8CFFFFFF), // rgba(255,255,255,0.55)
+        if (active) theme.ctaFontColor else Color(0x8CFFFFFF), // rgba(255,255,255,0.55)
         tween(250), label = "launchText",
     )
 
@@ -371,9 +372,9 @@ private fun LaunchButton(
                     Modifier.drawBehind {
                         // Green glow: box-shadow 0 0 18px rgba(61,154,102,0.32).
                         drawIntoCanvas { canvas ->
-                            val r = theme.launchCornerRadius.dp.toPx()
+                            val r = 14.dp.toPx()
                             val paint = Paint().apply {
-                                color = theme.selectedColor.copy(alpha = 0.32f)
+                                color = theme.accentColor.copy(alpha = 0.32f)
                                 asFrameworkPaint().maskFilter =
                                     BlurMaskFilter(18.dp.toPx(), BlurMaskFilter.Blur.NORMAL)
                             }
@@ -422,10 +423,10 @@ private fun LaunchButton(
  * @param fallback bundled placeholder entries used to pad unfilled slots.
  */
 internal fun mergeRoster(
-    host: List<CharacterPickerEntry>,
-    fetched: List<CharacterPickerEntry>,
-    fallback: List<CharacterPickerEntry>,
-): List<CharacterPickerEntry> {
+    host: List<CharacterSelectorEntry>,
+    fetched: List<CharacterSelectorEntry>,
+    fallback: List<CharacterSelectorEntry>,
+): List<CharacterSelectorEntry> {
     val capped = host.take(MAX_CHARACTERS)
     val fill = MAX_CHARACTERS - capped.size
     val seen = capped.mapTo(mutableSetOf()) { it.data.id }
@@ -440,7 +441,7 @@ internal fun mergeRoster(
  * by the fallback placeholders (so they render with no network). [loading] marks a
  * skeleton slot shown while the backend roster is in flight.
  */
-internal data class CharacterPickerEntry(
+internal data class CharacterSelectorEntry(
     val data: CharacterData,
     @DrawableRes val localRes: Int? = null,
     val loading: Boolean = false,
@@ -450,22 +451,18 @@ internal data class CharacterPickerEntry(
  * Placeholder skeleton slots for the gap while the backend roster is fetched. Synthetic
  * ids keep them distinct in the grid; they are never selectable.
  */
-internal fun loadingEntries(count: Int): List<CharacterPickerEntry> =
+internal fun loadingEntries(count: Int): List<CharacterSelectorEntry> =
     List(count.coerceAtLeast(0)) {
-        CharacterPickerEntry(CharacterData("loading-$it", "", "", ""), loading = true)
+        CharacterSelectorEntry(CharacterData("loading-$it", "", "", ""), loading = true)
     }
 
 /**
- * Bundled placeholder characters shown until the companions endpoint returns data.
- * Images ship in `res/drawable-nodpi` (used for instant render via [CharacterPickerEntry.localRes]);
- * [CharacterData.imageUrl] carries the hosted URL handed back by [onCharacterSelected].
- *
- * TODO(A4): populate `imageUrl` with the canonical hosted URLs so a selected default
- * hands back a usable URL downstream (pending the 4 URLs from the publisher).
+ * Fallback characters shown when the companions endpoint fails or returns nothing.
+ * Images are hosted on GCS and loaded via [CachedAsyncImage].
  */
-internal fun fallbackCharacterEntries(): List<CharacterPickerEntry> = listOf(
-    CharacterPickerEntry(CharacterData(id = "superman", name = "Superman", imageUrl = "", description = "Faster than a speeding bullet."), R.drawable.char_superman),
-    CharacterPickerEntry(CharacterData(id = "hammy", name = "Hammy", imageUrl = "", description = "Small but mighty."), R.drawable.char_hammy),
-    CharacterPickerEntry(CharacterData(id = "maya", name = "Maya", imageUrl = "", description = "Clever and quick-witted."), R.drawable.char_maya),
-    CharacterPickerEntry(CharacterData(id = "charles", name = "Charles", imageUrl = "", description = "A calm and steady strategist."), R.drawable.char_charles),
+internal fun fallbackCharacterEntries(): List<CharacterSelectorEntry> = listOf(
+    CharacterSelectorEntry(CharacterData(id = "mr-simula", name = "Mr. Simula", imageUrl = "https://storage.googleapis.com/simula-public/assets/imgs/Default%20Character%20Selector/MrSimula.webp", description = "\"Stand back, I've got this.\" Mr. Simula is the superhero dad who treats every crisis like a Tuesday and every dad-joke like a mission. Broad-shouldered, blue-suited, and impossibly calm, he's the guy who catches the falling bus AND remembers to pack your lunch. He leads with his chest out and his heart wide open, convinced that the strongest thing a hero can do is show up.\n\nTalk to him and you'll get equal parts pep talk, life advice, and slightly embarrassing 'back in my day' stories. He'll cheer you on like you're his own kid, challenge you to be braver than you think you are, and absolutely will not stop until you believe in yourself. Ready to train with the best dad in the multiverse?")),
+    CharacterSelectorEntry(CharacterData(id = "simulady", name = "Simulady", imageUrl = "https://storage.googleapis.com/simula-public/assets/imgs/Default%20Character%20Selector/Simulady.webp", description = "\"Let's think this through — then we save everyone.\" Simulady is the superhero mom whose mind moves faster than her cape. Cool, clever, and three steps ahead of any villain, she solves the problem before most heroes have finished panicking. But don't mistake brilliance for coldness: behind that razor focus is someone who notices when you're hurting and refuses to let you face it alone.\n\nChat with her and she'll read you instantly, call out the excuse you didn't even know you were making, and then hand you a plan to actually fix it. Equal parts strategist and comfort, she's the voice in your corner that's gentle but never lets you settle. Come tell her what's on your mind — she's already listening.")),
+    CharacterSelectorEntry(CharacterData(id = "simulad", name = "Simulad", imageUrl = "https://storage.googleapis.com/simula-public/assets/imgs/Default%20Character%20Selector/Simulad.webp", description = "\"Whoa, did I just do that?!\" Simulad is the superhero kid who's basically powers-first, plan-never. He's got energy for days, a head full of wild ideas, and abilities that keep surprising even him mid-fight. Is he ready for the big leagues? Absolutely not. Is he going to try anyway? Every single time — because backing down was never an option.\n\nTalk to him and you've got an instant hype-buddy: he'll geek out over your ideas, drag you into some half-baked adventure, and somehow make you braver just by being so fearlessly himself. He stumbles, he laughs it off, he gets back up. Wanna go cause some heroic chaos together?")),
+    CharacterSelectorEntry(CharacterData(id = "simulabrador", name = "Simulabrador", imageUrl = "https://storage.googleapis.com/simula-public/assets/imgs/Default%20Character%20Selector/Simulabrador.webp", description = "*ears perk up* *tail going a hundred miles an hour* Simulabrador is the super-dog of the family and the most loyal hero you'll ever meet — four paws, a heart the size of a city, and a nose that smells trouble before it even happens. He can't talk like the others, but trust me, he says everything with a head tilt, a happy bark, and a body-slam hug at full superspeed.\n\nHang out with him and you'll get pure, unconditional good-boy energy: he senses when you're down, plops his head in your lap, and refuses to leave your side. Throw the ball, share the snack, go on the patrol — he's in, no questions asked. Ready to meet your new best friend and bodyguard?")),
 )
