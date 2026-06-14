@@ -473,9 +473,9 @@ internal object SimulaApiClient {
         val iframeUrl: String,
         // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty.
         val renderedHtml: String = "",
-        val durationSeconds: Int,
-        // Mid-ad store prompt routing + config (mirrors the interstitial). `adBehavior` is
-        // null when the payload omits `ad_behavior` → no store prompt.
+        // Play-to-earn gate + mid-ad store prompt routing (mirrors the interstitial). The gate
+        // duration is `adBehavior.close.delaySeconds`; `adBehavior` is null when the payload omits
+        // `ad_behavior` → no gate (instantly earned) and no store prompt.
         val destination: String = "appstore",
         val trackingUrl: String? = null,
         val adBehavior: AdBehavior? = null,
@@ -483,8 +483,8 @@ internal object SimulaApiClient {
 
     /**
      * Initialize a rewarded minigame via `POST /load/rewarded`. Returns the iframe URL,
-     * the `impression_id` tying this play to its later verification, and the
-     * `duration_seconds` the SDK must enforce before a reward can be earned.
+     * the `impression_id` tying this play to its later verification, and the `ad_behavior`
+     * whose `close.delay_seconds` is the play-to-earn gate the SDK enforces before a reward.
      */
     suspend fun loadRewarded(
         adUnitId: String,
@@ -521,7 +521,6 @@ internal object SimulaApiClient {
             impressionId = data.impressionId,
             iframeUrl = data.iframeUrl,
             renderedHtml = data.renderedHtml,
-            durationSeconds = data.durationSeconds,
             destination = data.destination,
             trackingUrl = data.trackingUrl,
             adBehavior = data.adBehavior.toDomain(),

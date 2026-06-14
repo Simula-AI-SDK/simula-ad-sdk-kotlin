@@ -293,11 +293,10 @@ internal data class RewardedInitApiResponse(
     // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty (parity with the
     // interstitial), so the playable fills the surface the same way.
     @SerialName("rendered_html") val renderedHtml: String = "",
-    @SerialName("duration_seconds") val durationSeconds: Int = 0,
-    // Mirrors the interstitial response: drives the mid-ad store prompt + its tap routing.
-    // Null/absent → no store prompt (today's behavior).
     val destination: String = "appstore",
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    // Mirrors the interstitial response: the play-to-earn gate (`close.delay_seconds`) plus the
+    // mid-ad store prompt + its tap routing. Null/absent → no gate / no store prompt.
     @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
 )
 

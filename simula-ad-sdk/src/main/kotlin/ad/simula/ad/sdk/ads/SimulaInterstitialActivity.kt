@@ -415,13 +415,14 @@ private fun CreativeInterstitial(
             onClose = onFinish,
         )
 
-        // Mid-ad store prompt — rendered at the server-resolved position (never recomputed) during
-        // the [closeTime/2, closeTime) window. `!closeEnabled` removes it the instant the real close
-        // button appears, so the two affordances never overlap.
+        // Mid-ad store prompt — pinned to the corner opposite the close button (the SDK mirrors the
+        // close position horizontally) during the [closeTime/2, closeTime) window. `!closeEnabled`
+        // removes it the instant the real close button appears, so the two affordances never overlap.
         if (storePrompt != null && storePrompt.enabled && storePromptVisible && !closeEnabled) {
             // Center the badge in the same touch-target band as the close button so the two line up.
             StorePromptBadge(
                 prompt = storePrompt,
+                closePosition = close.position,
                 onTap = { openDestination(ad) },
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
             )
@@ -510,7 +511,8 @@ private fun CreativeHtml(
 // region. The visible graphic and the touch target are deliberately decoupled.
 private const val CLOSE_GLYPH_SP = 10
 private const val CLOSE_BOX_DP = 16
-private const val MIN_TOUCH_TARGET_DP = 48
+// Shared with the rewarded minigame so its store prompt centers in the same touch-target band.
+internal const val MIN_TOUCH_TARGET_DP = 48
 
 /**
  * The `ad_behavior`-driven close button. Renders the assigned [treatment] at the configured corner:
@@ -689,6 +691,9 @@ private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
 @Composable
 internal fun BoxScope.StorePromptBadge(
     prompt: StorePrompt,
+    // The close button's corner. The badge renders in its horizontal mirror (the opposite side) so
+    // the two never share an edge; the server's `store_prompt.position` is not used for layout.
+    closePosition: ClosePosition,
     onTap: () -> Unit,
     // Inset from the safe-area edge. Both the interstitial and the rewarded minigame use 8dp so the
     // badge shares its close affordance's baseline.
@@ -698,10 +703,11 @@ internal fun BoxScope.StorePromptBadge(
     rowHeight: Dp? = null,
 ) {
     val label = if (prompt.platform == StorePromptPlatform.IOS) "App Store" else "Google Play"
-    val alignment = when (prompt.position) {
-        ClosePosition.TOP_RIGHT -> Alignment.TopEnd
-        ClosePosition.TOP_LEFT -> Alignment.TopStart
-        ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
+    // Horizontal mirror of the close corner: top-right ↔ top-left, bottom-left → bottom-right.
+    val alignment = when (closePosition) {
+        ClosePosition.TOP_RIGHT -> Alignment.TopStart
+        ClosePosition.TOP_LEFT -> Alignment.TopEnd
+        ClosePosition.BOTTOM_LEFT -> Alignment.BottomEnd
     }
     Box(
         modifier = Modifier

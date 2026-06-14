@@ -177,33 +177,37 @@ private fun RewardedMinigame(
     presentation: RewardedPresentation,
     onFinish: (earned: Boolean) -> Unit,
 ) {
+    // Play-to-earn gate length, in seconds — sourced from `ad_behavior.close.delay_seconds` (the
+    // same value that ungates the close button). No `ad_behavior` → 0 → instantly earned.
+    val gateSeconds = presentation.adBehavior?.close?.delaySeconds ?: 0
+
     // Earned immediately when there is no gate; otherwise resolved by the timer below.
     // A gate that already elapsed in a prior Activity instance (config-change recreation)
     // also starts earned — accumulated play time survives on the presentation.
     var rewardEarned by remember {
         mutableStateOf(
-            presentation.durationSeconds <= 0 ||
+            gateSeconds <= 0 ||
                 presentation.rewardEarned ||
-                RewardGate.isEarned(presentation.accumulatedPlayTimeMs, presentation.durationSeconds),
+                RewardGate.isEarned(presentation.accumulatedPlayTimeMs, gateSeconds),
         )
     }
     var secondsLeft by remember {
-        // Resume from already-accrued play time (config-change recovery), not full duration.
-        mutableStateOf(RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds))
+        // Resume from already-accrued play time (config-change recovery), not the full gate.
+        mutableStateOf(RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, gateSeconds))
     }
     // 0→1 fill for the close treatment (progress bar / countdown ring), from play-to-earn progress.
     var closeProgress by remember {
-        mutableStateOf(rewardCloseProgress(presentation.accumulatedPlayTimeMs, presentation.durationSeconds))
+        mutableStateOf(rewardCloseProgress(presentation.accumulatedPlayTimeMs, gateSeconds))
     }
 
-    // Mid-ad store prompt — shown from half the play-to-earn duration until the reward unlocks.
+    // Mid-ad store prompt — shown from half the play-to-earn gate until the reward unlocks.
     // Initialized true on a config-change recreation that resumes past the halfway mark.
     val storePrompt = presentation.adBehavior?.storePrompt
     var storePromptVisible by remember {
         mutableStateOf(
             storePrompt != null && storePrompt.enabled &&
-                presentation.durationSeconds > 0 &&
-                presentation.accumulatedPlayTimeMs >= presentation.durationSeconds * 1000L / 2,
+                gateSeconds > 0 &&
+                presentation.accumulatedPlayTimeMs >= gateSeconds * 1000L / 2,
         )
     }
 
@@ -263,7 +267,7 @@ private fun RewardedMinigame(
     // app for the required duration. The accumulated time lives on the presentation, so
     // a config change (rotation) resumes the remaining time instead of restarting it.
     LaunchedEffect(Unit) {
-        if (presentation.durationSeconds <= 0) {
+        if (gateSeconds <= 0) {
             presentation.rewardEarned = true
             rewardEarned = true
             return@LaunchedEffect
@@ -283,13 +287,13 @@ private fun RewardedMinigame(
                 val now = SystemClock.elapsedRealtime()
                 presentation.accumulatedPlayTimeMs += now - lastTickMs
                 lastTickMs = now
-                secondsLeft = RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)
-                closeProgress = rewardCloseProgress(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)
+                secondsLeft = RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, gateSeconds)
+                closeProgress = rewardCloseProgress(presentation.accumulatedPlayTimeMs, gateSeconds)
                 // Reveal the store prompt at the halfway point to the reward (mid play-to-earn).
-                if (presentation.accumulatedPlayTimeMs >= presentation.durationSeconds * 1000L / 2) {
+                if (presentation.accumulatedPlayTimeMs >= gateSeconds * 1000L / 2) {
                     storePromptVisible = true
                 }
-                if (RewardGate.isEarned(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)) {
+                if (RewardGate.isEarned(presentation.accumulatedPlayTimeMs, gateSeconds)) {
                     presentation.rewardEarned = true
                     rewardEarned = true
                     break
@@ -376,14 +380,17 @@ private fun RewardedMinigame(
             onClose = { onFinish(true) },
         )
 
-        // Mid-ad store prompt — appears at half the play-to-earn duration and is removed the instant
-        // the reward unlocks (the reward/close pill takes over). Rendered at the server-resolved
-        // corner (verbatim); a tap routes to the advertised store via the shared CTA router.
+        // Mid-ad store prompt — appears at half the play-to-earn gate and is removed the instant the
+        // reward unlocks (the reward/close pill takes over). Pinned to the corner opposite the
+        // reward/close pill (the SDK mirrors the close position); a tap routes to the advertised store.
         if (storePrompt != null && storePrompt.enabled && storePromptVisible && !rewardEarned) {
             StorePromptBadge(
                 prompt = storePrompt,
-                // Match the reward/close pill's 8dp inset so both share the same top baseline.
+                closePosition = close.position,
+                // Match the reward/close pill's 8dp inset and center the badge in the same 48dp
+                // touch-target band so the two share one centerline (parity with the interstitial).
                 edgePadding = 8.dp,
+                rowHeight = MIN_TOUCH_TARGET_DP.dp,
                 onTap = {
                     CreativeCtaRouter.open(
                         context.applicationContext,

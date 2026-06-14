@@ -3,6 +3,7 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdBehavior
+import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
@@ -26,8 +27,8 @@ import java.util.UUID
  *
  * Lifecycle: `load()` calls `POST /minigames/init/rewarded` and prepares the playable
  * iframe; `show(...)` presents it full-screen. The reward is earned by playing for at
- * least the server-returned `duration_seconds`; the close button is available
- * throughout, and an exit confirmation appears if the user leaves early. On a
+ * least the server-returned `ad_behavior.close.delay_seconds` (the same gate that ungates
+ * the close button); an exit confirmation appears if the user leaves early. On a
  * qualifying dismiss the play is verified server-side (`/minigames/verify-reward`,
  * which fires the publisher's SSV postback) off the UI path via a durable, idempotent
  * retry queue. Callbacks are delivered on the main thread via [listener]. After the ad
@@ -42,8 +43,8 @@ class SimulaRewardedAd(val adUnitId: String) {
 
     /**
      * Optional minimum play time (seconds) requested from the server. When `> 0` it is
-     * sent as `min_play_threshold`; the server's returned `duration_seconds` is what
-     * the SDK actually enforces.
+     * sent as `min_play_threshold`; the server's returned `ad_behavior.close.delay_seconds`
+     * is what the SDK actually enforces.
      */
     var minPlayThreshold: Int = 0
 
@@ -259,10 +260,13 @@ class SimulaRewardedAd(val adUnitId: String) {
             failShow(SimulaAdError.AlreadyShowing)
             return
         }
-        // The reward/close pill always sits top-right, so the badge defaults to the opposite
-        // corner (top-left) — matching the server's collision resolution for a rewarded play.
+        // The play-to-earn gate now lives on `ad_behavior.close.delaySeconds` (preview drives it
+        // directly). The reward/close pill always sits top-right, so the badge defaults to the
+        // opposite corner (top-left) — matching the server's collision resolution for a rewarded play.
+        val close = CloseBehavior(delaySeconds = durationSeconds.coerceAtLeast(0))
         val behavior = if (storePrompt) {
             AdBehavior(
+                close = close,
                 storePrompt = StorePrompt(
                     enabled = true,
                     position = ClosePosition.TOP_LEFT,
@@ -270,7 +274,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                 ),
             )
         } else {
-            AdBehavior()
+            AdBehavior(close = close)
         }
 
         val token = UUID.randomUUID().toString()
@@ -278,7 +282,6 @@ class SimulaRewardedAd(val adUnitId: String) {
             token,
             RewardedPresentation(
                 iframeUrl = PREVIEW_MINIGAME_DATA_URL,
-                durationSeconds = durationSeconds.coerceAtLeast(0),
                 impressionId = "", // empty → no impression tracked
                 apiKey = SimulaAds.apiKey,
                 // Preview is local-only: report lifecycle but do NOT verify a reward or auto-preload.
@@ -341,7 +344,6 @@ class SimulaRewardedAd(val adUnitId: String) {
             RewardedPresentation(
                 iframeUrl = ad.iframeUrl,
                 renderedHtml = ad.renderedHtml,
-                durationSeconds = ad.durationSeconds,
                 impressionId = ad.impressionId,
                 apiKey = SimulaAds.apiKey,
                 callbacks = bridge(ad.impressionId),

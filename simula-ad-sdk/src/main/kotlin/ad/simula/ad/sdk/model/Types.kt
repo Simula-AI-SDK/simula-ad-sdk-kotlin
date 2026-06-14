@@ -327,8 +327,9 @@ internal data class Experiment(
     val layer: String? = null,
 )
 
-/** Mid-ad store prompt (`store_prompt` node). `position` is resolved server-side (opposite the
- * close button) and rendered verbatim — the SDK never recomputes collisions. */
+/** Mid-ad store prompt (`store_prompt` node). `position` is still decoded from the wire but no
+ * longer drives layout: the SDK renders the badge in the horizontal mirror of the close button's
+ * corner (the opposite side), so the two affordances never share an edge. */
 internal data class StorePrompt(
     val enabled: Boolean = false,
     val trigger: String = "midpoint",

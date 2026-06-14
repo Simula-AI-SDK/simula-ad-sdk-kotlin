@@ -55,14 +55,15 @@ class RewardedParsingTest {
             {
               "impression_id": "imp_1",
               "iframe_url": "https://cdn/play",
-              "duration_seconds": 30
+              "ad_behavior": { "close": { "delay_seconds": 30 } }
             }
         """.trimIndent()
 
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
         assertEquals("imp_1", r.impressionId)
         assertEquals("https://cdn/play", r.iframeUrl)
-        assertEquals(30, r.durationSeconds)
+        // The play-to-earn gate now rides on `ad_behavior.close.delay_seconds` (no top-level field).
+        assertEquals(30, r.adBehavior?.close?.delaySeconds)
     }
 
     @Test
@@ -70,7 +71,8 @@ class RewardedParsingTest {
         val r = json.decodeFromString<RewardedInitApiResponse>("{}")
         assertEquals("", r.impressionId)
         assertEquals("", r.iframeUrl)
-        assertEquals(0, r.durationSeconds)
+        // Absent `ad_behavior` → null → no gate (instantly earned) and no store prompt.
+        assertNull(r.adBehavior)
     }
 
     @Test
