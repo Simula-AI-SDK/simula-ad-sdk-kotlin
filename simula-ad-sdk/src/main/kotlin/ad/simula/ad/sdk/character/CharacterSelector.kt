@@ -35,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -197,11 +198,11 @@ fun CharacterSelector(
     ) {
         val view = LocalView.current
         val dialogWindow = (view.parent as? DialogWindowProvider)?.window
-        LaunchedEffect(dialogWindow) {
+        SideEffect {
             dialogWindow?.let { window ->
                 window.setDimAmount(0f)
                 window.setBackgroundDrawableResource(android.R.color.transparent)
-                window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+                WindowCompat.setDecorFitsSystemWindows(window, false)
                 window.setLayout(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.MATCH_PARENT,
