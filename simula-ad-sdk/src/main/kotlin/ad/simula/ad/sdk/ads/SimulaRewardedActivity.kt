@@ -309,6 +309,7 @@ private fun RewardedMinigame(
         AndroidView(
             factory = { ctx ->
                 val url = presentation.iframeUrl
+                val html = presentation.renderedHtml
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : WebViewClient() {
@@ -337,7 +338,13 @@ private fun RewardedMinigame(
                     },
                 ).apply {
                     BridgeWebViewInstaller.install(this, bridge)
-                    loadUrl(url)
+                    // Prefer the server-rendered HTML when present (parity with the interstitial,
+                    // which fills the surface); fall back to the iframe URL.
+                    if (html.isNotBlank()) {
+                        loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+                    } else {
+                        loadUrl(url)
+                    }
                 }
             },
             // The game canvas fills edge-to-edge: inset only vertically (status / nav / top

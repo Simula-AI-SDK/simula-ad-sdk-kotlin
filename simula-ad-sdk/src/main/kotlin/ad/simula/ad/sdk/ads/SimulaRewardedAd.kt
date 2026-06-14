@@ -340,6 +340,7 @@ class SimulaRewardedAd(val adUnitId: String) {
             token,
             RewardedPresentation(
                 iframeUrl = ad.iframeUrl,
+                renderedHtml = ad.renderedHtml,
                 durationSeconds = ad.durationSeconds,
                 impressionId = ad.impressionId,
                 apiKey = SimulaAds.apiKey,

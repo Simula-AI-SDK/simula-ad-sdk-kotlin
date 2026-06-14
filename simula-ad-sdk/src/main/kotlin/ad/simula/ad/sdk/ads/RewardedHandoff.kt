@@ -17,6 +17,8 @@ internal interface RewardedCallbacks {
 /** Everything [SimulaRewardedActivity] needs to render one rewarded presentation. */
 internal class RewardedPresentation(
     val iframeUrl: String,
+    // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty.
+    val renderedHtml: String = "",
     val durationSeconds: Int,
     // The impression id from /load/rewarded — the handle for tracking, reporting and fallbacks.
     val impressionId: String,

@@ -34,7 +34,7 @@ import java.net.URLEncoder
  */
 internal object SimulaApiClient {
 
-    private const val API_BASE_URL = "https://simula-staging.ngrok.dev"
+    private const val API_BASE_URL = "https://simula-api-701226639755.us-central1.run.app"
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -471,6 +471,8 @@ internal object SimulaApiClient {
         // for verify-reward, fallbacks, tracking and reporting.
         val impressionId: String,
         val iframeUrl: String,
+        // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty.
+        val renderedHtml: String = "",
         val durationSeconds: Int,
         // Mid-ad store prompt routing + config (mirrors the interstitial). `adBehavior` is
         // null when the payload omits `ad_behavior` → no store prompt.
@@ -518,6 +520,7 @@ internal object SimulaApiClient {
         RewardedInitResult(
             impressionId = data.impressionId,
             iframeUrl = data.iframeUrl,
+            renderedHtml = data.renderedHtml,
             durationSeconds = data.durationSeconds,
             destination = data.destination,
             trackingUrl = data.trackingUrl,

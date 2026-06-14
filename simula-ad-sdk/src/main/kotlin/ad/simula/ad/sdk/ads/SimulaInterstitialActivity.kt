@@ -392,9 +392,8 @@ private fun CreativeInterstitial(
                         installBannerVisible = true
                     }
                 },
-                // The creative fills edge-to-edge: inset only vertically (status / nav / top
-                // notch) and draw under any horizontal display-cutout, so the transparent
-                // WebView's black backing never shows as left/right bars in landscape.
+                // Same config as the rewarded minigame WebView: fill the screen, inset only
+                // vertically (top notch / status, bottom nav) and draw under any horizontal cutout.
                 modifier = Modifier
                     .fillMaxSize()
                     .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
