@@ -334,6 +334,8 @@ internal data class NativeAdRequestBody(
     val context: NativeContextBody? = null,
     // Sent as a string (the backend accepts float | str); reserved — sizing is client-side.
     val width: String? = null,
+    // "light" or "dark"; null omits the key (backend defaults to light).
+    val theme: String? = null,
     @SerialName("char_id") val charId: String? = null,
     @SerialName("char_name") val charName: String? = null,
     @SerialName("char_desc") val charDesc: String? = null,

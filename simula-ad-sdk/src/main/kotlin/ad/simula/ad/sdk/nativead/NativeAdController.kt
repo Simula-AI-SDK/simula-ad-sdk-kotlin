@@ -23,6 +23,7 @@ internal object NativeAdController {
         ensureSession: suspend () -> String?,
         adUnitId: String?,
         position: Int,
+        theme: String? = null,
     ): SimulaApiClient.NativeAdResult {
         val sessionId = ensureSession()
         if (sessionId.isNullOrBlank()) throw SimulaAdError.NoSession
@@ -33,6 +34,7 @@ internal object NativeAdController {
                 sessionId = sessionId,
                 adUnitId = adUnitId,
                 context = NativeAdContextStore.current,
+                theme = theme,
             )
         } catch (e: CancellationException) {
             throw e

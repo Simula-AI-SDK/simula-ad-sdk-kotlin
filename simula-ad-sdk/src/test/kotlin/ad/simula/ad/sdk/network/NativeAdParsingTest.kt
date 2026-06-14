@@ -47,6 +47,33 @@ class NativeAdParsingTest {
     }
 
     @Test
+    fun `request encodes theme when set`() {
+        val body = NativeAdRequestBody(position = 0, sessionId = "s", theme = "dark")
+        val encoded = json.encodeToString(body)
+
+        assertTrue(encoded.contains("\"theme\":\"dark\""))
+        val decoded = json.decodeFromString<NativeAdRequestBody>(encoded)
+        assertEquals("dark", decoded.theme)
+    }
+
+    @Test
+    fun `request omits theme when null`() {
+        val body = NativeAdRequestBody(position = 0, sessionId = "s")
+        val encoded = json.encodeToString(body)
+
+        // encodeDefaults is true, but theme defaults to null → should be null in output
+        val decoded = json.decodeFromString<NativeAdRequestBody>(encoded)
+        assertNull(decoded.theme)
+    }
+
+    @Test
+    fun `request round-trips light theme`() {
+        val body = NativeAdRequestBody(position = 1, sessionId = "s", theme = "light")
+        val decoded = json.decodeFromString<NativeAdRequestBody>(json.encodeToString(body))
+        assertEquals("light", decoded.theme)
+    }
+
+    @Test
     fun `context maps SimulaAdContext to camelCase wire keys`() {
         val ctx = SimulaAdContext(
             searchTerm = "fantasy rpg",

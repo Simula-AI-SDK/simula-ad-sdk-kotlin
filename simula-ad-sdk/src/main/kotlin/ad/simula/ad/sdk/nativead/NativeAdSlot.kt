@@ -9,6 +9,7 @@ import ad.simula.ad.sdk.provider.LocalSimulaContext
 import ad.simula.ad.sdk.util.ParsedDimension
 import ad.simula.ad.sdk.util.clampMinWidth
 import ad.simula.ad.sdk.util.parseDimension
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -59,6 +60,9 @@ import kotlinx.coroutines.launch
  * @param width         Slot width. Accepts `300`, `"300"`, `"320px"`, `"80%"`, or a float
  *                      0.0–1.0 (e.g. `0.8` = 80% of parent). Defaults to 100% of the parent.
  *                      A 300 dp minimum is enforced after normalization; height fits content.
+ * @param theme         Ad creative theme: `"dark"`, `"light"`, or `"system"` (resolves to
+ *                      dark/light based on the device's current UI mode). Defaults to `null`
+ *                      (backend default, currently light).
  * @param preloadedAdId An id from [ad.simula.ad.sdk.ads.SimulaAds.preloadNativeAd]; renders that
  *                      cached ad instead of a live request. An expired/unknown id falls back to a
  *                      live call with no error surfaced.
@@ -74,6 +78,7 @@ fun NativeAdSlot(
     adUnitId: String? = null,
     position: Int = 0,
     width: Any? = null,
+    theme: String? = null,
     modifier: Modifier = Modifier,
     preloadedAdId: String? = null,
     onImpression: (NativeAdData) -> Unit = {},
@@ -83,6 +88,7 @@ fun NativeAdSlot(
     val ctx = LocalSimulaContext.current
     val currentOnImpression by rememberUpdatedState(onImpression)
     val currentOnError by rememberUpdatedState(onError)
+    val resolvedTheme = resolveAdTheme(theme)
     val parsedWidth = remember(width) { parseDimension(width).clampMinWidth(MIN_SLOT_WIDTH) }
     val slotModifier = when (parsedWidth) {
         ParsedDimension.Fill -> modifier.fillMaxWidth()
@@ -154,7 +160,7 @@ fun NativeAdSlot(
         // 3. Live request.
         state = NativeAdSlotState.Loading
         try {
-            apply(NativeAdController.load(ctx.ensureSession, adUnitId, position))
+            apply(NativeAdController.load(ctx.ensureSession, adUnitId, position, resolvedTheme))
         } catch (e: SimulaAdError) {
             state = NativeAdSlotState.Empty // error → hide; not cached so it can retry next time
             currentOnError(e)
@@ -236,6 +242,16 @@ fun NativeAdSlot(
 internal val MIN_SLOT_WIDTH = 300.dp
 
 internal const val NATIVE_AD_PROVISIONAL_HEIGHT_DP = 160f
+
+/** Resolve the publisher-facing theme string to the wire value the backend expects.
+ * `"system"` reads the device's current UI mode; anything unrecognized is dropped (null). */
+@Composable
+internal fun resolveAdTheme(theme: String?): String? = when (theme?.lowercase()) {
+    "dark" -> "dark"
+    "light" -> "light"
+    "system" -> if (isSystemInDarkTheme()) "dark" else "light"
+    else -> null
+}
 
 /** Initial slot state derived synchronously from [NativeAdCache] so a recycled row paints the cached
  * ad on its first frame (no shimmer flash). A preview / preload resolves in the effect, so starts Loading. */
