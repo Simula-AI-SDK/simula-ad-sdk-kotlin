@@ -645,6 +645,28 @@ internal object SimulaApiClient {
     }
 
     /**
+     * Track a user-initiated click on the impression (`POST /impressions/{impressionId}/click`).
+     * Increments the click counter; the endpoint takes no body. Fired when the mid-store prompt is
+     * tapped. [impressionId] is the serve handle for rewarded/interstitial and the ad id for native;
+     * the backend resolves either. Best-effort, silently fails — tracking must never disrupt the ad.
+     */
+    suspend fun trackClick(
+        impressionId: String,
+        apiKey: String,
+    ): Unit = withContext(Dispatchers.IO) {
+        if (impressionId.isBlank()) return@withContext
+        try {
+            SimulaHttp.request(
+                url = "$API_BASE_URL/impressions/$impressionId/click",
+                method = "POST",
+                headers = authHeaders(apiKey),
+            )
+        } catch (_: Exception) {
+            // Silently fail
+        }
+    }
+
+    /**
      * Submit a user-initiated ad report against the impression (`POST /impressions/{adId}/report`).
      * [flag] is one of the `AdReportReason` wire values; [note] is optional free text. The backend
      * stores flag + note against the ad serve (no moderation on receipt). Best-effort, silently

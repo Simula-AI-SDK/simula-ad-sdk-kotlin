@@ -393,6 +393,10 @@ private fun RewardedMinigame(
                 edgePadding = 8.dp,
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
                 onTap = {
+                    // Mid-store-prompt click beacon — only on a real user tap (not auto_store_redirect).
+                    if (presentation.impressionId.isNotBlank()) {
+                        SimulaScope.launch { SimulaApiClient.trackClick(presentation.impressionId, presentation.apiKey) }
+                    }
                     CreativeCtaRouter.open(
                         context.applicationContext,
                         presentation.trackingUrl,
