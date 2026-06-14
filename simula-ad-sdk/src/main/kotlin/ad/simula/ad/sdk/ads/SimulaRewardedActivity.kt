@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
+import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
@@ -403,7 +404,13 @@ private fun RewardedMinigame(
         }
 
         // Persistent ad-info "i" + report sheet (required disclosure). Last so its sheet overlays.
-        AdInfoReportOverlay(adId = presentation.impressionId, apiKey = presentation.apiKey)
+        AdInfoReportOverlay(
+            adId = presentation.impressionId,
+            apiKey = presentation.apiKey,
+            // A genuine bottom-left ✕ shares the bottom-left corner with the "i" (shrink its hit area);
+            // a progress_bar bottom ✕ relocates to top-right, leaving the "i" its full hit area.
+            closeAtBottomLeft = close.position == ClosePosition.BOTTOM_LEFT && !closeBarAtBottom(close.treatment, close.position),
+        )
     }
 }
 
