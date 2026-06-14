@@ -93,6 +93,10 @@ internal fun BoxScope.AdInfoReportOverlay(
                 val key = apiKey ?: SimulaAds.apiKey
                 SimulaScope.launch { SimulaApiClient.reportAd(adId, flag, null, key) }
             },
+            onInterest = { value ->
+                val key = apiKey ?: SimulaAds.apiKey
+                SimulaScope.launch { SimulaApiClient.recordInterest(adId, value, key) }
+            },
             onClose = { sheetVisible = false },
         )
     }
@@ -130,6 +134,10 @@ internal fun BoxScope.NativeAdInfoOverlay(
                 val key = apiKey ?: SimulaAds.apiKey
                 SimulaScope.launch { SimulaApiClient.reportAd(adId, flag, null, key) }
             },
+            onInterest = { value ->
+                val key = apiKey ?: SimulaAds.apiKey
+                SimulaScope.launch { SimulaApiClient.recordInterest(adId, value, key) }
+            },
             onClose = { sheetVisible = false },
             alignment = Alignment.TopStart,
         )
@@ -138,7 +146,8 @@ internal fun BoxScope.NativeAdInfoOverlay(
 
 /**
  * AppLovin-style ad-feedback menu: Interested / Not interested / Report (which expands to reason
- * codes), plus a separate "About Simula Ads" link to simula.ad. [onReport] posts the chosen flag.
+ * codes), plus a separate "About Simula Ads" link to simula.ad. [onInterest] records the interest
+ * signal (`+1` interested / `-1` not interested); [onReport] posts a Report-flow flag.
  *
  * [alignment] places the menu: `BottomStart` (default, for full-screen ads — slides up from the
  * bottom over the safe area) or `TopStart` (for the inline native card — drops below the AD badge).
@@ -146,6 +155,7 @@ internal fun BoxScope.NativeAdInfoOverlay(
 @Composable
 internal fun AdReportSheet(
     onReport: (String) -> Unit,
+    onInterest: (Int) -> Unit,
     onClose: () -> Unit,
     alignment: Alignment = Alignment.BottomStart,
 ) {
@@ -192,10 +202,9 @@ internal fun AdReportSheet(
             ) {
                 when (phase) {
                     0 -> {
-                        MenuRow(glyph = "✓", text = "Interested") { onReport("interested"); phase = 2 }
+                        MenuRow(glyph = "✓", text = "Interested") { onInterest(1); phase = 2 }
                         MenuDivider()
-                        // "Not interested" maps to the existing `dislike` flag (BE adds `interested` later).
-                        MenuRow(glyph = "✕", text = "Not interested") { onReport("dislike"); phase = 2 }
+                        MenuRow(glyph = "✕", text = "Not interested") { onInterest(-1); phase = 2 }
                         MenuDivider()
                         MenuRow(glyph = "⚑", text = "Report", tint = Color(0xFFFF453A)) { phase = 1 }
                     }

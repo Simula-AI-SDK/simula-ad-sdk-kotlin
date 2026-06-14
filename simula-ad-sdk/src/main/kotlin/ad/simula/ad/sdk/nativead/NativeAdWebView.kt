@@ -129,7 +129,11 @@ private class NativeAdWiring(
     private fun handleFeedback(value: String) {
         when (value) {
             "about" -> CreativeCtaRouter.open(appContext, "https://www.simula.ad/privacy-policy", destination = "web")
-            "interested", "not_interested", "report" ->
+            "interested" ->
+                SimulaScope.launch { SimulaApiClient.recordInterest(impressionId = impressionId, interest = 1, apiKey = apiKey) }
+            "not_interested" ->
+                SimulaScope.launch { SimulaApiClient.recordInterest(impressionId = impressionId, interest = -1, apiKey = apiKey) }
+            "report" ->
                 SimulaScope.launch { SimulaApiClient.reportAd(adId = impressionId, flag = value, apiKey = apiKey) }
             else -> Unit
         }

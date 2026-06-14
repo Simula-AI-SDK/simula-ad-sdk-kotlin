@@ -366,7 +366,7 @@ private fun CreativeInterstitial(
             // FIX M2: skip impression when there is no impression id.
             if (ad.impressionId.isNotBlank()) {
                 SimulaScope.launch {
-                    SimulaApiClient.trackImpression(ad.impressionId, presentation.apiKey, ad.experiment)
+                    SimulaApiClient.trackImpression(ad.impressionId, presentation.apiKey)
                 }
             }
         }
