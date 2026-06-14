@@ -48,7 +48,9 @@ private val globalAdCache = ConcurrentHashMap<String, AdData>()
 private val globalHeightCache = ConcurrentHashMap<String, Float>()
 private val globalNoFillSet = ConcurrentHashMap.newKeySet<String>()
 
-@Volatile
+// Built once and reused. Only ever touched on the main thread (the
+// staticCompositionLocalOf default factory runs during composition), so no
+// synchronization is needed.
 private var cachedGlobalContext: SimulaContextValue? = null
 
 /**

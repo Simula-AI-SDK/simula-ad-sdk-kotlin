@@ -211,12 +211,16 @@ fun NativeAdSlot(
                             impressionFired = true
                             // Remember it on the cache entry so a remount of the same serve never re-fires.
                             (NativeAdCache.get(adUnitId, position) as? NativeAdCache.Value.Fill)?.impressionFired = true
-                            // Co-fire the callback and the server impression off the one viewability event.
-                            currentOnImpression(NativeAdData(result.impressionId, result.adFormat, adUnitId))
-                            // No server impression for a preview (blank id).
-                            if (result.impressionId.isNotBlank()) {
-                                SimulaScope.launch {
-                                    SimulaApiClient.trackImpression(result.impressionId, ctx.apiKey)
+                            // Dedup by impression id too, so the same served ad fires at most one
+                            // impression process-wide (e.g. shown in two slots, or re-composed). The
+                            // callback + server beacon co-fire together. A preview (blank id) always fires
+                            // the callback but never a beacon.
+                            if (result.impressionId.isBlank() || NativeAdCache.markImpressionFired(result.impressionId)) {
+                                currentOnImpression(NativeAdData(result.impressionId, result.adFormat, adUnitId))
+                                if (result.impressionId.isNotBlank()) {
+                                    SimulaScope.launch {
+                                        SimulaApiClient.trackImpression(result.impressionId, ctx.apiKey)
+                                    }
                                 }
                             }
                         }
