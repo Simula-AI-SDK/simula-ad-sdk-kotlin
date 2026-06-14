@@ -292,8 +292,13 @@ class SimulaRewardedAd(val adUnitId: String) {
 
                     override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
                         state = State.Idle
-                        if (earned) listener?.onAdEarnedReward(this@SimulaRewardedAd)
                         listener?.onAdClosed(this@SimulaRewardedAd)
+                    }
+
+                    // Preview is local-only: no verification — just signal the earned reward once the
+                    // whole (screen-less) unit completes, mirroring the live onRewardCompleted timing.
+                    override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+                        if (earned) listener?.onAdEarnedReward(this@SimulaRewardedAd)
                     }
                 },
                 adBehavior = behavior,
@@ -369,61 +374,68 @@ class SimulaRewardedAd(val adUnitId: String) {
 
         override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
             state = State.Idle
-            if (earned) {
-                Telemetry.recordLifecycle("reward_earned", AD_FORMAT, adUnitId, adId, null, null, null)
-                listener?.onAdEarnedReward(this@SimulaRewardedAd)
-                val sid = impressionId
-                val sess = sessionId
-                if (!sid.isNullOrBlank() && !sess.isNullOrBlank()) {
-                    // Off-UI, durable, idempotent verification → SSV postback server-side.
-                    // Capture the ad weakly (and `mainHandler` as a local, so the lambda
-                    // doesn't capture `this`): a verification still pending in the durable
-                    // queue — e.g. retrying after an outage — must not pin the ad, and its
-                    // listener (often an Activity), in memory until the next drain. If the
-                    // ad has been collected by the time verification lands, the server-side
-                    // SSV postback still fires; only the client callback is skipped.
-                    val weakAd = WeakReference(this@SimulaRewardedAd)
-                    val handler = mainHandler
-                    // End-to-end verification latency, including durable-queue backoff/retries.
-                    val verifyStartNanos = System.nanoTime()
-                    RewardVerificationManager.queueVerification(
-                        context = SimulaAds.appContext,
-                        serveId = sid,
-                        sessionId = sess,
-                        elapsedPlayTime = elapsedPlayTimeSeconds,
-                        adUnitId = adUnitId,
-                    ) { result ->
-                        val verifyMs = (System.nanoTime() - verifyStartNanos) / 1_000_000
-                        Telemetry.recordOperation("reward_verification", verifyMs, success = result.isSuccess)
-                        if (result.isSuccess) {
-                            Telemetry.recordLifecycle("reward_verified", AD_FORMAT, adUnitId, adId, null, verifyMs, null)
-                        } else {
-                            Telemetry.recordLifecycle("reward_verification_failed", AD_FORMAT, adUnitId, adId, null, verifyMs, "verify_failed")
-                            Telemetry.recordError(
-                                signature = "rewarded:verify",
-                                errorCode = result.exceptionOrNull()?.javaClass?.simpleName,
-                                message = result.exceptionOrNull()?.message,
-                                breadcrumb = "RewardVerificationManager.queueVerification",
-                            )
-                        }
-                        handler.post {
-                            val ad = weakAd.get() ?: return@post
-                            result.fold(
-                                onSuccess = { token ->
-                                    ad.listener?.onAdRewardVerified(ad, token)
-                                },
-                                onFailure = { err ->
-                                    ad.listener?.onAdRewardVerificationFailed(ad, err)
-                                },
-                            )
-                        }
-                    }
-                }
-            }
+            // CLOSE = the playable was dismissed. The reward is NOT verified here — that's deferred to
+            // onRewardCompleted (after every post-game fallback ad screen), so verifying is contingent
+            // on completing the whole unit. Closed bookkeeping + auto-preload still happen now.
             Telemetry.recordLifecycle("closed", AD_FORMAT, adUnitId, adId, null, null, null)
             listener?.onAdClosed(this@SimulaRewardedAd)
             // Auto-preload the next ad (iOS parity), reusing the last character context.
             load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
+        }
+
+        override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+            // Fired once the user has completed the whole unit (playable + every fallback ad screen).
+            // A non-earned completion grants nothing.
+            if (!earned) return
+            Telemetry.recordLifecycle("reward_earned", AD_FORMAT, adUnitId, adId, null, null, null)
+            listener?.onAdEarnedReward(this@SimulaRewardedAd)
+            val sid = impressionId
+            val sess = sessionId
+            if (!sid.isNullOrBlank() && !sess.isNullOrBlank()) {
+                // Off-UI, durable, idempotent verification → SSV postback server-side.
+                // Capture the ad weakly (and `mainHandler` as a local, so the lambda
+                // doesn't capture `this`): a verification still pending in the durable
+                // queue — e.g. retrying after an outage — must not pin the ad, and its
+                // listener (often an Activity), in memory until the next drain. If the
+                // ad has been collected by the time verification lands, the server-side
+                // SSV postback still fires; only the client callback is skipped.
+                val weakAd = WeakReference(this@SimulaRewardedAd)
+                val handler = mainHandler
+                // End-to-end verification latency, including durable-queue backoff/retries.
+                val verifyStartNanos = System.nanoTime()
+                RewardVerificationManager.queueVerification(
+                    context = SimulaAds.appContext,
+                    serveId = sid,
+                    sessionId = sess,
+                    elapsedPlayTime = elapsedPlayTimeSeconds,
+                    adUnitId = adUnitId,
+                ) { result ->
+                    val verifyMs = (System.nanoTime() - verifyStartNanos) / 1_000_000
+                    Telemetry.recordOperation("reward_verification", verifyMs, success = result.isSuccess)
+                    if (result.isSuccess) {
+                        Telemetry.recordLifecycle("reward_verified", AD_FORMAT, adUnitId, adId, null, verifyMs, null)
+                    } else {
+                        Telemetry.recordLifecycle("reward_verification_failed", AD_FORMAT, adUnitId, adId, null, verifyMs, "verify_failed")
+                        Telemetry.recordError(
+                            signature = "rewarded:verify",
+                            errorCode = result.exceptionOrNull()?.javaClass?.simpleName,
+                            message = result.exceptionOrNull()?.message,
+                            breadcrumb = "RewardVerificationManager.queueVerification",
+                        )
+                    }
+                    handler.post {
+                        val ad = weakAd.get() ?: return@post
+                        result.fold(
+                            onSuccess = { token ->
+                                ad.listener?.onAdRewardVerified(ad, token)
+                            },
+                            onFailure = { err ->
+                                ad.listener?.onAdRewardVerificationFailed(ad, err)
+                            },
+                        )
+                    }
+                }
+            }
         }
     }
 

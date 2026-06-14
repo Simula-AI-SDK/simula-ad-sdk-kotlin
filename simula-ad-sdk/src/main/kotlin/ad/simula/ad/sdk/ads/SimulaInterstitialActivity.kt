@@ -30,6 +30,7 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -554,6 +555,15 @@ internal fun BoxScope.AdCloseButton(
     onClose: () -> Unit,
 ) {
     val tint = remember(progressBarColor) { ColorUtil.parseColor(progressBarColor) }
+    // Glide the bar/ring fill between the gate loop's coarse (250 ms) progress updates instead of
+    // snapping to each one, so the indicator animates smoothly rather than stepping/looking laggy.
+    // Linear + matched to the tick cadence → continuous fill. (The countdown *number* still steps per
+    // second — it can't show fractions — only the bar/ring is interpolated.)
+    val animatedProgress by animateFloatAsState(
+        targetValue = progress.coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 250, easing = LinearEasing),
+        label = "closeProgress",
+    )
     // The ✕ honors its configured corner, EXCEPT progress_bar at bottom_left: the gate bar takes the
     // bottom edge there, so the ✕ moves up to the top-right. (The mid-ad store prompt sits top-right
     // for any bottom_left close — diagonally opposite a bottom-left ✕, or sharing the top-right with
@@ -587,7 +597,7 @@ internal fun BoxScope.AdCloseButton(
         ) {
             Box(
                 modifier = Modifier
-                    .fillMaxWidth(progress.coerceIn(0f, 1f))
+                    .fillMaxWidth(animatedProgress)
                     .height(CLOSE_PROGRESS_BAR_HEIGHT_DP.dp)
                     .background(tint),
             )
@@ -636,7 +646,7 @@ internal fun BoxScope.AdCloseButton(
                             drawArc(
                                 color = tint,
                                 startAngle = -90f,
-                                sweepAngle = 360f * progress.coerceIn(0f, 1f),
+                                sweepAngle = 360f * animatedProgress,
                                 useCenter = false,
                                 topLeft = Offset(stroke / 2f, stroke / 2f),
                                 size = Size(size.width - stroke, size.height - stroke),

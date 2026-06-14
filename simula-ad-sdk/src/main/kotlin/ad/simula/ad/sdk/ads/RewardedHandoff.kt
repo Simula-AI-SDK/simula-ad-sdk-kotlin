@@ -8,10 +8,19 @@ internal interface RewardedCallbacks {
     fun onDisplayed()
 
     /**
-     * The surface was dismissed. [earned] is whether the play reached the required
-     * duration; [elapsedPlayTimeSeconds] is the measured play time to verify with.
+     * The minigame (playable) surface was dismissed. [earned] is whether the play reached the
+     * required duration; [elapsedPlayTimeSeconds] is the measured play time. The post-game fallback
+     * ad screens may still follow, so the reward is NOT verified here — see [onRewardCompleted].
      */
     fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double)
+
+    /**
+     * The whole rewarded unit has been completed — the user dismissed the playable AND every
+     * post-game fallback ad screen (fires immediately on close when there are none). The reward is
+     * contingent on reaching this point, so the earned-reward signal and server-side verification
+     * happen here rather than at [onClose].
+     */
+    fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double)
 }
 
 /** Everything [SimulaRewardedActivity] needs to render one rewarded presentation. */
