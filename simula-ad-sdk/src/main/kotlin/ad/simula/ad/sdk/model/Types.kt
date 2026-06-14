@@ -148,23 +148,18 @@ data class CharacterData(
 
 /**
  * Theme for [ad.simula.ad.sdk.character.CharacterSelector]. All colors are CSS strings
- * (hex/rgba); a null field falls back to [Defaults.CharacterPickerDefaults], which
+ * (hex/rgba); a null field falls back to [Defaults.CharacterSelectorDefaults], which
  * mirror the reference HTML exactly. Sizes are in dp/sp.
  */
-data class CharacterPickerTheme(
+data class CharacterSelectorTheme(
     val backgroundColor: String? = null,
-    val titleColor: String? = null,
-    val titleFontSize: Int? = null,
+    val titleFontColor: String? = null,
+    val secondaryFontColor: String? = null,
+    val accentColor: String? = null,
+    val ctaFontColor: String? = null,
     val cardBackgroundColor: String? = null,
     val cardBorderColor: String? = null,
     val cardCornerRadius: Int? = null,
-    /** Selected-card border / active launch-button color. Default `#3d9a66`. */
-    val selectedColor: String? = null,
-    val nameColor: String? = null,
-    val launchTextColor: String? = null,
-    /** Disabled launch-button background. Default `#3a3a3a`. */
-    val launchDisabledColor: String? = null,
-    val launchCornerRadius: Int? = null,
     val fontFamily: String? = null,
 )
 

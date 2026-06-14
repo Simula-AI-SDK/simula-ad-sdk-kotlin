@@ -9,9 +9,9 @@ import org.junit.Test
  * Verifies the host + backend-backfill merge that fills the 4-slot grid. Pure — no
  * Compose, no network.
  */
-class CharacterPickerMergeTest {
+class CharacterSelectorMergeTest {
 
-    private fun entry(id: String) = CharacterPickerEntry(CharacterData(id, id, "", ""))
+    private fun entry(id: String) = CharacterSelectorEntry(CharacterData(id, id, "", ""))
     private val fallback = listOf(entry("f1"), entry("f2"), entry("f3"), entry("f4"))
 
     @Test
