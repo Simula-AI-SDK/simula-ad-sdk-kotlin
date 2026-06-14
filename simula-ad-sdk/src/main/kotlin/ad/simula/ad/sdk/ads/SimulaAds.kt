@@ -117,7 +117,7 @@ object SimulaAds {
 
         // ppid is suppressed without consent and additionally under COPPA — reads the
         // resolved snapshot, matching SimulaProvider's `sessionConsent.allowsPrimaryUserID` gate.
-        val effectiveUserID = if (SimulaPrivacy.current.allowsPrimaryUserID) primaryUserID else null
+        val effectiveUserID = primaryUserID
         store = SimulaSessionStore(apiKey, devMode, effectiveUserID)
 
         // Install telemetry before the session warm-up so the /session/create call (and every
