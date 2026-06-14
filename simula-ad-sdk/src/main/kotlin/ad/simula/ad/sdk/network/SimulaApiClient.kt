@@ -143,7 +143,7 @@ internal object SimulaApiClient {
                 when {
                     catalog is JsonArray -> catalog
                     catalog is JsonObject && catalog.containsKey("data") ->
-                        catalog["data"]!!.jsonArray
+                        catalog["data"] as? JsonArray ?: JsonArray(emptyList())
                     else ->
                         responseJson["data"]?.jsonArray ?: JsonArray(emptyList())
                 }

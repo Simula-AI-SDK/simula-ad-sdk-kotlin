@@ -88,6 +88,9 @@ private object Haptics {
     fun trigger(context: Context, style: String) {
         val vibrator = resolve(context) ?: return
         if (!vibrator.hasVibrator()) return
+        // The platform call is guarded: VIBRATE is declared in the SDK manifest, but a host that
+        // strips it via manifest merging — or an OEM quirk — would otherwise throw SecurityException
+        // and crash the creative's bridge thread.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val effect = when (style) {
                 "light" -> VibrationEffect.createOneShot(10, VibrationEffect.DEFAULT_AMPLITUDE)
@@ -98,10 +101,10 @@ private object Haptics {
                 "error" -> VibrationEffect.createWaveform(longArrayOf(0, 45, 45, 45), -1)
                 else -> return
             }
-            vibrator.vibrate(effect)
+            runCatching { vibrator.vibrate(effect) }
         } else {
             @Suppress("DEPRECATION")
-            vibrator.vibrate(if (style == "heavy" || style == "error") 35L else 15L)
+            runCatching { vibrator.vibrate(if (style == "heavy" || style == "error") 35L else 15L) }
         }
     }
 
