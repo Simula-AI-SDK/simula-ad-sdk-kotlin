@@ -250,7 +250,7 @@ internal object SimulaApiClient {
             CharacterData(
                 id = obj.str("character_id") ?: obj.str("id") ?: "",
                 name = name,
-                image = image,
+                imageUrl = image,
                 description = description,
             )
         }
@@ -396,6 +396,74 @@ internal object SimulaApiClient {
         )
     }
 
+    // ── Native sponsored-character ad ─────────────────────────────────────────
+
+    data class NativeAdResult(
+        // The serve id — the SDK's handle for impression/click reporting. Empty on a no-fill.
+        val impressionId: String,
+        val adInserted: Boolean,
+        // "character_ad" on a fill, "" on a no-fill.
+        val adFormat: String,
+        // The mountable creative on a fill; both null on a no-fill.
+        val iframeUrl: String?,
+        val renderedHtml: String?,
+    )
+
+    /**
+     * Load a native sponsored-character card via `POST /load/native`.
+     *
+     * `ad_inserted == false` is a valid no-fill (NOT an error) — the slot collapses to zero height.
+     * A 401 means a bad/unknown session; it surfaces as an [IllegalArgumentException] (same contract
+     * as [createSession]) so the caller can map it to a non-retryable error per the PRD. Any other
+     * non-2xx / network failure throws a generic [Exception] the caller maps to a network error.
+     */
+    suspend fun loadNative(
+        position: Int,
+        sessionId: String,
+        adUnitId: String? = null,
+        context: ad.simula.ad.sdk.model.SimulaAdContext? = null,
+        width: String? = null,
+        charId: String? = null,
+        charName: String? = null,
+        charDesc: String? = null,
+    ): NativeAdResult = withContext(Dispatchers.IO) {
+        val requestBody = NativeAdRequestBody(
+            position = position,
+            sessionId = sessionId,
+            adUnitId = adUnitId,
+            context = context?.toBody(),
+            width = width,
+            charId = charId,
+            charName = charName,
+            charDesc = charDesc,
+        )
+
+        val response = SimulaHttp.request(
+            url = "$API_BASE_URL/load/native",
+            method = "POST",
+            headers = jsonHeaders(),
+            body = json.encodeToString(requestBody),
+        )
+        if (response.code == 401) {
+            // Bad/unknown session — non-retryable (PRD). Distinct from a generic network error.
+            throw IllegalArgumentException("Invalid or unknown session for native ad (HTTP 401).")
+        }
+        if (!response.isSuccessful) {
+            throw Exception("HTTP error! status: ${response.code}")
+        }
+        if (response.body.isBlank()) {
+            throw Exception("Empty response body")
+        }
+        val data = json.decodeFromString<NativeAdApiResponse>(response.body)
+        NativeAdResult(
+            impressionId = data.impressionId.orEmpty(),
+            adInserted = data.adInserted,
+            adFormat = data.adFormat,
+            iframeUrl = data.adResponse.iframeUrl,
+            renderedHtml = data.adResponse.renderedHtml,
+        )
+    }
+
     // ── Rewarded Minigame ───────────────────────────────────────────────────
 
     data class RewardedInitResult(
@@ -403,9 +471,11 @@ internal object SimulaApiClient {
         // for verify-reward, fallbacks, tracking and reporting.
         val impressionId: String,
         val iframeUrl: String,
-        val durationSeconds: Int,
-        // Mid-ad store prompt routing + config (mirrors the interstitial). `adBehavior` is
-        // null when the payload omits `ad_behavior` → no store prompt.
+        // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty.
+        val renderedHtml: String = "",
+        // Play-to-earn gate + mid-ad store prompt routing (mirrors the interstitial). The gate
+        // duration is `adBehavior.close.delaySeconds`; `adBehavior` is null when the payload omits
+        // `ad_behavior` → no gate (instantly earned) and no store prompt.
         val destination: String = "appstore",
         val trackingUrl: String? = null,
         val adBehavior: AdBehavior? = null,
@@ -413,8 +483,8 @@ internal object SimulaApiClient {
 
     /**
      * Initialize a rewarded minigame via `POST /load/rewarded`. Returns the iframe URL,
-     * the `impression_id` tying this play to its later verification, and the
-     * `duration_seconds` the SDK must enforce before a reward can be earned.
+     * the `impression_id` tying this play to its later verification, and the `ad_behavior`
+     * whose `close.delay_seconds` is the play-to-earn gate the SDK enforces before a reward.
      */
     suspend fun loadRewarded(
         adUnitId: String,
@@ -450,7 +520,7 @@ internal object SimulaApiClient {
         RewardedInitResult(
             impressionId = data.impressionId,
             iframeUrl = data.iframeUrl,
-            durationSeconds = data.durationSeconds,
+            renderedHtml = data.renderedHtml,
             destination = data.destination,
             trackingUrl = data.trackingUrl,
             adBehavior = data.adBehavior.toDomain(),
@@ -468,11 +538,13 @@ internal object SimulaApiClient {
         serveId: String,
         sessionId: String,
         elapsedPlayTime: Double,
+        adUnitId: String = "",
     ): VerifyRewardApiResponse = withContext(Dispatchers.IO) {
         val requestBody = VerifyRewardRequestBody(
             serveId = serveId,
             sessionId = sessionId,
             elapsedPlayTime = elapsedPlayTime,
+            adUnitId = adUnitId,
         )
         val response = SimulaHttp.request(
             url = "$API_BASE_URL/minigames/verify-reward",
@@ -567,7 +639,7 @@ internal object SimulaApiClient {
                 experiment?.layer?.let { put("layer", it) }
             }
             SimulaHttp.request(
-                url = "$API_BASE_URL/track/engagement/impression/$adId",
+                url = "$API_BASE_URL/track/impression/$adId",
                 method = "POST",
                 headers = authHeaders(apiKey),
                 body = json.encodeToString(body),

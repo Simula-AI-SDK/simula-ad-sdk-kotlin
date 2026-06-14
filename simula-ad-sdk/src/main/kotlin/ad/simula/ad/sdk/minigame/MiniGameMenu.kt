@@ -654,11 +654,19 @@ fun MiniGameMenu(
 
 @Composable
 private fun FullscreenDialogWindowConfig() {
-    val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+    val view = LocalView.current
+    val dialogWindow = (view.parent as? DialogWindowProvider)?.window
     LaunchedEffect(dialogWindow) {
         dialogWindow?.let { window ->
             window.setDimAmount(0f)
             window.setBackgroundDrawableResource(android.R.color.transparent)
+            // Draw edge-to-edge behind the system bars, make them transparent, and hide them — the
+            // same immersive setup the interstitial / rewarded Activities use. Without this the
+            // dialog window stopped at the navigation bar, leaving that region (and the cutout)
+            // transparent so the host app showed through at the bottom of the whole minigame flow.
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            window.statusBarColor = android.graphics.Color.TRANSPARENT
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
             window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
             window.setLayout(
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -670,6 +678,10 @@ private fun FullscreenDialogWindowConfig() {
                         WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
                 }
             }
+            val controller = WindowCompat.getInsetsController(window, view)
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
         }
     }
 }

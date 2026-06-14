@@ -290,11 +290,13 @@ internal data class RewardedInitApiResponse(
     // single handle for verify-reward, fallbacks, tracking and reporting.
     @SerialName("impression_id") val impressionId: String = "",
     @SerialName("iframe_url") val iframeUrl: String = "",
-    @SerialName("duration_seconds") val durationSeconds: Int = 0,
-    // Mirrors the interstitial response: drives the mid-ad store prompt + its tap routing.
-    // Null/absent → no store prompt (today's behavior).
+    // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty (parity with the
+    // interstitial), so the playable fills the surface the same way.
+    @SerialName("rendered_html") val renderedHtml: String = "",
     val destination: String = "appstore",
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    // Mirrors the interstitial response: the play-to-earn gate (`close.delay_seconds`) plus the
+    // mid-ad store prompt + its tap routing. Null/absent → no gate / no store prompt.
     @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
 )
 
@@ -303,10 +305,75 @@ internal data class VerifyRewardRequestBody(
     @SerialName("serve_id") val serveId: String,
     @SerialName("session_id") val sessionId: String,
     @SerialName("elapsed_play_time") val elapsedPlayTime: Double,
+    // Sent alongside serve_id so the SSV reward callback can resolve/validate the ad unit off the
+    // body. Default "" keeps existing callers + already-persisted queue entries decoding cleanly.
+    @SerialName("ad_unit_id") val adUnitId: String = "",
 )
 
 @Serializable
 internal data class VerifyRewardApiResponse(
     val verified: Boolean = false,
     val token: String? = null,
+)
+
+// ── Native sponsored-character ad (POST /load/native) ──────────────────────────
+
+/** Body for `POST /load/native` (backend `CaiNativeRequest`). `position` + `session_id` are
+ * required; everything else is optional. The native surface has no `char_image` (unlike the
+ * interstitial). `width` is accepted but ignored by the API — the card always renders at 100%. */
+@Serializable
+internal data class NativeAdRequestBody(
+    val position: Int,
+    @SerialName("session_id") val sessionId: String,
+    @SerialName("ad_unit_id") val adUnitId: String? = null,
+    val context: NativeContextBody? = null,
+    // Sent as a string (the backend accepts float | str); reserved — sizing is client-side.
+    val width: String? = null,
+    @SerialName("char_id") val charId: String? = null,
+    @SerialName("char_name") val charName: String? = null,
+    @SerialName("char_desc") val charDesc: String? = null,
+)
+
+/** The wire `NativeContext` object — camelCase keys (unlike the rest of the snake_case API). */
+@Serializable
+internal data class NativeContextBody(
+    val searchTerm: String? = null,
+    val tags: List<String>? = null,
+    val category: String? = null,
+    val title: String? = null,
+    val description: String? = null,
+    val userProfile: String? = null,
+    val userEmail: String? = null,
+    val customContext: Map<String, String>? = null,
+    val nsfw: Boolean = false,
+)
+
+/** Response for `POST /load/native` (backend `CaiNativeResponse`). Note `adResponse` is camelCase
+ * (a single deliberate exception in the snake_case envelope); it's `{}` on a no-fill. */
+@Serializable
+internal data class NativeAdApiResponse(
+    @SerialName("impression_id") val impressionId: String? = null,
+    @SerialName("ad_inserted") val adInserted: Boolean = false,
+    @SerialName("ad_format") val adFormat: String = "",
+    val adResponse: NativeAdCreativeBody = NativeAdCreativeBody(),
+)
+
+@Serializable
+internal data class NativeAdCreativeBody(
+    @SerialName("iframe_url") val iframeUrl: String? = null,
+    @SerialName("rendered_html") val renderedHtml: String? = null,
+)
+
+/** Maps the public [ad.simula.ad.sdk.model.SimulaAdContext] onto the camelCase wire object.
+ * `nsfw` defaults to false on both sides, so it's always emitted. */
+internal fun ad.simula.ad.sdk.model.SimulaAdContext.toBody(): NativeContextBody = NativeContextBody(
+    searchTerm = searchTerm,
+    tags = tags,
+    category = category,
+    title = title,
+    description = description,
+    userProfile = userProfile,
+    userEmail = userEmail,
+    customContext = customContext,
+    nsfw = nsfw,
 )

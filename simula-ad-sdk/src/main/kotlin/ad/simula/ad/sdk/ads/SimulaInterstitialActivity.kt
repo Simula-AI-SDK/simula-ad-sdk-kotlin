@@ -392,8 +392,11 @@ private fun CreativeInterstitial(
                         installBannerVisible = true
                     }
                 },
-                // Sits below the safe area (the black Box fills the cutout / nav-bar region).
-                modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
+                // Same config as the rewarded minigame WebView: fill the screen, inset only
+                // vertically (top notch / status, bottom nav) and draw under any horizontal cutout.
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
             )
         }
 
@@ -401,7 +404,8 @@ private fun CreativeInterstitial(
         // `ad_behavior.close` when present; otherwise a default (top-right, always available) so ads
         // with no `ad_behavior` still get the small close, not a big one.
         val close = behavior?.close ?: CloseBehavior()
-        InterstitialCloseButton(
+        val barAtBottom = closeBarAtBottom(close.treatment, close.position)
+        AdCloseButton(
             treatment = close.treatment,
             position = close.position,
             progressBarColor = close.progressBarColor,
@@ -412,13 +416,14 @@ private fun CreativeInterstitial(
             onClose = onFinish,
         )
 
-        // Mid-ad store prompt — rendered at the server-resolved position (never recomputed) during
-        // the [closeTime/2, closeTime) window. `!closeEnabled` removes it the instant the real close
-        // button appears, so the two affordances never overlap.
+        // Mid-ad store prompt — pinned to the corner opposite the close button (the SDK mirrors the
+        // close position horizontally) during the [closeTime/2, closeTime) window. `!closeEnabled`
+        // removes it the instant the real close button appears, so the two affordances never overlap.
         if (storePrompt != null && storePrompt.enabled && storePromptVisible && !closeEnabled) {
             // Center the badge in the same touch-target band as the close button so the two line up.
             StorePromptBadge(
                 prompt = storePrompt,
+                closePosition = close.position,
                 onTap = { openDestination(ad) },
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
             )
@@ -437,7 +442,9 @@ private fun CreativeInterstitial(
         AdInfoReportOverlay(
             adId = ad.impressionId,
             apiKey = presentation.apiKey,
-            closeAtBottomLeft = (behavior?.close?.position ?: CloseBehavior().position) == ClosePosition.BOTTOM_LEFT,
+            // A genuine bottom-left ✕ shares the bottom-left corner with the "i" (shrink its hit area);
+            // a progress_bar bottom ✕ relocates to top-right, leaving the "i" its full hit area.
+            closeAtBottomLeft = close.position == ClosePosition.BOTTOM_LEFT && !barAtBottom,
         )
     }
 }
@@ -507,7 +514,22 @@ private fun CreativeHtml(
 // region. The visible graphic and the touch target are deliberately decoupled.
 private const val CLOSE_GLYPH_SP = 10
 private const val CLOSE_BOX_DP = 16
-private const val MIN_TOUCH_TARGET_DP = 48
+// Shared with the rewarded minigame so its store prompt centers in the same touch-target band.
+internal const val MIN_TOUCH_TARGET_DP = 48
+// Height of the `progress_bar` gate bar.
+private const val CLOSE_PROGRESS_BAR_HEIGHT_DP = 4
+// When the gate bar sits at the bottom (progress_bar at bottom_left), raise it this far above the safe
+// edge so it clears the bottom-left info "i" (a 16dp circle inset 6dp from the corner ≈ 22dp tall).
+private const val CLOSE_BOTTOM_BAR_LIFT_DP = 26
+
+/**
+ * True for the `progress_bar` treatment pinned to `bottom_left`: the gate bar then spans the bottom,
+ * so the ✕ moves up to the top-right (it can't sit on the bar) and the bar itself is raised to sit
+ * just above the info "i" (which keeps its corner spot). For every OTHER bottom_left close the ✕ stays
+ * bottom-left. (The store prompt sits top-right for any bottom_left close — see [StorePromptBadge].)
+ */
+internal fun closeBarAtBottom(treatment: CloseTreatment, position: ClosePosition): Boolean =
+    treatment == CloseTreatment.PROGRESS_BAR && position == ClosePosition.BOTTOM_LEFT
 
 /**
  * The `ad_behavior`-driven close button. Renders the assigned [treatment] at the configured corner:
@@ -516,7 +538,7 @@ private const val MIN_TOUCH_TARGET_DP = 48
  * ring/bar fill. The label copy is reward- vs interstitial-aware via [isRewardCopy].
  */
 @Composable
-private fun BoxScope.InterstitialCloseButton(
+internal fun BoxScope.AdCloseButton(
     treatment: CloseTreatment,
     position: ClosePosition,
     progressBarColor: String,
@@ -527,27 +549,41 @@ private fun BoxScope.InterstitialCloseButton(
     onClose: () -> Unit,
 ) {
     val tint = remember(progressBarColor) { ColorUtil.parseColor(progressBarColor) }
-    val alignment = when (position) {
-        ClosePosition.TOP_RIGHT -> Alignment.TopEnd
-        ClosePosition.TOP_LEFT -> Alignment.TopStart
-        ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
+    // The ✕ honors its configured corner, EXCEPT progress_bar at bottom_left: the gate bar takes the
+    // bottom edge there, so the ✕ moves up to the top-right. (The mid-ad store prompt sits top-right
+    // for any bottom_left close — diagonally opposite a bottom-left ✕, or sharing the top-right with
+    // the relocated one.)
+    val barAtBottom = closeBarAtBottom(treatment, position)
+    val alignment = when {
+        barAtBottom -> Alignment.TopEnd
+        else -> when (position) {
+            ClosePosition.TOP_RIGHT -> Alignment.TopEnd
+            ClosePosition.TOP_LEFT -> Alignment.TopStart
+            ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
+        }
     }
 
-    // `progress_bar`: a full-width bar pinned just below the top safe-area inset (so it clears the
-    // notch / status-bar region), shown during the delay and tinted by color. Edge-to-edge.
+    // `progress_bar`: a full-width bar tinted by color, shown during the delay. Pinned just inside the
+    // top safe-area inset by default (clearing the notch); at bottom_left it sits near the bottom,
+    // raised just above the info "i" so the two don't overlap (the "i" keeps its corner spot).
     if (!enabled && treatment == CloseTreatment.PROGRESS_BAR) {
         Box(
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
+                .align(if (barAtBottom) Alignment.BottomCenter else Alignment.TopCenter)
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(
+                        if (barAtBottom) WindowInsetsSides.Bottom else WindowInsetsSides.Top,
+                    ),
+                )
+                .padding(bottom = if (barAtBottom) CLOSE_BOTTOM_BAR_LIFT_DP.dp else 0.dp)
                 .fillMaxWidth()
-                .height(4.dp)
+                .height(CLOSE_PROGRESS_BAR_HEIGHT_DP.dp)
                 .background(Color(0x40FFFFFF)),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(progress.coerceIn(0f, 1f))
-                    .height(4.dp)
+                    .height(CLOSE_PROGRESS_BAR_HEIGHT_DP.dp)
                     .background(tint),
             )
         }
@@ -561,10 +597,9 @@ private fun BoxScope.InterstitialCloseButton(
             // safeDrawing merges system bars + display cutout so a top-corner button never
             // lands under a notch (system bars are hidden, so navigationBars alone gave 0 at top).
             .windowInsetsPadding(WindowInsets.safeDrawing)
-            // When pinned bottom-left, nudge right just enough to clear the always-present info "i"
-            // that sits tight in that corner (the "i" stays closest to the edge), so the two sit
-            // snug side by side. (Tuned for the 16dp circles inside the 48dp touch frame.)
-            .padding(start = if (position == ClosePosition.BOTTOM_LEFT) 2.dp else 0.dp)
+            // A genuine bottom-left ✕ nudges right to clear the always-present info "i" beside it; the
+            // relocated (top-right) ✕ of the progress_bar bottom layout doesn't need it.
+            .padding(start = if (position == ClosePosition.BOTTOM_LEFT && !barAtBottom) 2.dp else 0.dp)
             .padding(8.dp),
     ) {
         // All close states share one centerline: center within the touch-target height so the gated
@@ -686,6 +721,11 @@ private fun LabelPill(text: String, onClick: (() -> Unit)? = null) {
 @Composable
 internal fun BoxScope.StorePromptBadge(
     prompt: StorePrompt,
+    // The close button's CONFIG corner. The badge sits top-right for a bottom_left close (diagonally
+    // opposite a bottom-left ✕, or sharing the corner with a progress_bar bottom ✕ that relocated
+    // there), and in the horizontal mirror of the close corner otherwise (top-right ↔ top-left). The
+    // server's `store_prompt.position` is not used for layout.
+    closePosition: ClosePosition,
     onTap: () -> Unit,
     // Inset from the safe-area edge. Both the interstitial and the rewarded minigame use 8dp so the
     // badge shares its close affordance's baseline.
@@ -695,10 +735,11 @@ internal fun BoxScope.StorePromptBadge(
     rowHeight: Dp? = null,
 ) {
     val label = if (prompt.platform == StorePromptPlatform.IOS) "App Store" else "Google Play"
-    val alignment = when (prompt.position) {
-        ClosePosition.TOP_RIGHT -> Alignment.TopEnd
-        ClosePosition.TOP_LEFT -> Alignment.TopStart
-        ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
+    val alignment = when (closePosition) {
+        // Mirror of a top-right close.
+        ClosePosition.TOP_RIGHT -> Alignment.TopStart
+        // top_left mirrors to top-right; bottom_left relocates to top-right (same corner as the ✕).
+        else -> Alignment.TopEnd
     }
     Box(
         modifier = Modifier

@@ -346,7 +346,7 @@ class AdLoadParsingTest {
         ).adBehavior.toDomain()!!
         val prompt = b.storePrompt!!
         assertTrue(prompt.enabled)
-        assertEquals(ClosePosition.BOTTOM_LEFT, prompt.position) // rendered verbatim — never recomputed
+        assertEquals(ClosePosition.BOTTOM_LEFT, prompt.position) // parsed verbatim (layout mirrors the close button)
         assertEquals(StorePromptPlatform.IOS, prompt.platform)
         assertEquals("midpoint", prompt.trigger)
     }

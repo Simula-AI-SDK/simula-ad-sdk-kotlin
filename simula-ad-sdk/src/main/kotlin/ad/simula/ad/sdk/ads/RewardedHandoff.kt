@@ -17,13 +17,14 @@ internal interface RewardedCallbacks {
 /** Everything [SimulaRewardedActivity] needs to render one rewarded presentation. */
 internal class RewardedPresentation(
     val iframeUrl: String,
-    val durationSeconds: Int,
+    // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty.
+    val renderedHtml: String = "",
     // The impression id from /load/rewarded — the handle for tracking, reporting and fallbacks.
     val impressionId: String,
     val apiKey: String,
     val callbacks: RewardedCallbacks,
-    // Mid-ad store prompt config + tap routing (mirrors the interstitial). A null [adBehavior]
-    // (no `store_prompt`) means no badge is shown.
+    // Play-to-earn gate (`close.delaySeconds`) + mid-ad store prompt config + tap routing (mirrors
+    // the interstitial). A null [adBehavior] means no gate (instantly earned) and no store prompt.
     val adBehavior: AdBehavior? = null,
     val trackingUrl: String? = null,
     val destination: String = "appstore",

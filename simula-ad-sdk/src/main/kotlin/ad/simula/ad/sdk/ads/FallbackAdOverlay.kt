@@ -1,6 +1,5 @@
 package ad.simula.ad.sdk.ads
 
-import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
@@ -19,7 +18,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -43,10 +44,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Hosts an ad creative and, when it closes, fetches the serve's fallback ad screens
@@ -72,21 +71,38 @@ internal fun FallbackAdHost(
     // whose index matches the configured trigger is presented (index 0 = END SCREEN 1, index 1 = 2).
     var autoRedirectFired by remember { mutableStateOf(false) }
 
+    // Prefetch the fallback screens in the background while the primary creative is on screen, so
+    // they present instantly on close instead of fetching then (which flashed the host behind).
+    // `GET /load/fallbacks` is side-effect-free, so prefetching reports nothing prematurely.
+    // null = still in flight; empty = none returned.
+    var prefetched by remember { mutableStateOf<List<SimulaApiClient.FallbackAd>?>(null) }
+    LaunchedEffect(impressionId) {
+        prefetched = runCatching {
+            if (impressionId.isNotBlank()) SimulaApiClient.fetchFallbacks(impressionId) else emptyList()
+        }.getOrDefault(emptyList())
+    }
+
+    // Primary creative closed → present the prefetched screens immediately. If the prefetch is
+    // somehow still in flight (user closed very fast), wait briefly in [FallbackPhase.Fetching].
+    fun onPrimaryClosed() {
+        val ads = prefetched
+        phase = when {
+            ads == null -> FallbackPhase.Fetching
+            ads.isNotEmpty() -> FallbackPhase.Showing(ads, index = 0)
+            else -> FallbackPhase.Done
+        }
+    }
+
     when (val p = phase) {
-        FallbackPhase.Content -> content {
-            // Primary creative closed → try to fetch the fallback screens before finishing.
-            phase = FallbackPhase.Fetching
-            SimulaScope.launch {
-                val ads = runCatching {
-                    if (impressionId.isNotBlank()) SimulaApiClient.fetchFallbacks(impressionId) else emptyList()
-                }.getOrDefault(emptyList())
-                withContext(Dispatchers.Main) {
-                    phase = if (ads.isNotEmpty()) FallbackPhase.Showing(ads, index = 0) else FallbackPhase.Done
-                }
+        FallbackPhase.Content -> content { onPrimaryClosed() }
+        // Prefetch wasn't ready at close — hold on a black backdrop and advance the instant it lands.
+        FallbackPhase.Fetching -> {
+            Box(Modifier.fillMaxSize().background(Color.Black))
+            LaunchedEffect(prefetched) {
+                val ads = prefetched ?: return@LaunchedEffect
+                phase = if (ads.isNotEmpty()) FallbackPhase.Showing(ads, index = 0) else FallbackPhase.Done
             }
         }
-        // Brief, on a black backdrop (the fetch is fast); avoids a flash of the host behind.
-        FallbackPhase.Fetching -> Box(Modifier.fillMaxSize().background(Color.Black))
         is FallbackPhase.Showing -> {
             val ad = p.ads[p.index]
             // Fire the auto store redirect when the END_SCREEN_N fallback screen is presented.
@@ -162,10 +178,13 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
                     },
                 ).apply { loadUrl(iframeUrl) }
             },
-            // Inset the creative below the top safe area (status bar / notch), matching the
-            // interstitial / rewarded creatives. safeDrawing accounts for the display cutout even
-            // with system bars hidden, so it's full-bleed on devices without one.
-            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
+            // The creative fills edge-to-edge: inset only vertically (status / nav / top notch),
+            // matching the interstitial / rewarded creatives, and draw under any horizontal
+            // display-cutout so the transparent WebView's black backing never shows as left/right
+            // bars in landscape on a cutout device.
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
             onRelease = { webView -> WebViewPool.release(webView) },
         )
 

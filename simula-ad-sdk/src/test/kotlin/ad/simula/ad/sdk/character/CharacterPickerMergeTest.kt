@@ -11,7 +11,7 @@ import org.junit.Test
  */
 class CharacterPickerMergeTest {
 
-    private fun entry(id: String) = CharacterPickerEntry(CharacterData(id, id, ""))
+    private fun entry(id: String) = CharacterPickerEntry(CharacterData(id, id, "", ""))
     private val fallback = listOf(entry("f1"), entry("f2"), entry("f3"), entry("f4"))
 
     @Test

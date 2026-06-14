@@ -5,6 +5,8 @@ import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
+import ad.simula.ad.sdk.model.CloseBehavior
+import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
@@ -25,13 +27,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -176,29 +178,37 @@ private fun RewardedMinigame(
     presentation: RewardedPresentation,
     onFinish: (earned: Boolean) -> Unit,
 ) {
+    // Play-to-earn gate length, in seconds — sourced from `ad_behavior.close.delay_seconds` (the
+    // same value that ungates the close button). No `ad_behavior` → 0 → instantly earned.
+    val gateSeconds = presentation.adBehavior?.close?.delaySeconds ?: 0
+
     // Earned immediately when there is no gate; otherwise resolved by the timer below.
     // A gate that already elapsed in a prior Activity instance (config-change recreation)
     // also starts earned — accumulated play time survives on the presentation.
     var rewardEarned by remember {
         mutableStateOf(
-            presentation.durationSeconds <= 0 ||
+            gateSeconds <= 0 ||
                 presentation.rewardEarned ||
-                RewardGate.isEarned(presentation.accumulatedPlayTimeMs, presentation.durationSeconds),
+                RewardGate.isEarned(presentation.accumulatedPlayTimeMs, gateSeconds),
         )
     }
     var secondsLeft by remember {
-        // Resume from already-accrued play time (config-change recovery), not full duration.
-        mutableStateOf(RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds))
+        // Resume from already-accrued play time (config-change recovery), not the full gate.
+        mutableStateOf(RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, gateSeconds))
+    }
+    // 0→1 fill for the close treatment (progress bar / countdown ring), from play-to-earn progress.
+    var closeProgress by remember {
+        mutableStateOf(rewardCloseProgress(presentation.accumulatedPlayTimeMs, gateSeconds))
     }
 
-    // Mid-ad store prompt — shown from half the play-to-earn duration until the reward unlocks.
+    // Mid-ad store prompt — shown from half the play-to-earn gate until the reward unlocks.
     // Initialized true on a config-change recreation that resumes past the halfway mark.
     val storePrompt = presentation.adBehavior?.storePrompt
     var storePromptVisible by remember {
         mutableStateOf(
             storePrompt != null && storePrompt.enabled &&
-                presentation.durationSeconds > 0 &&
-                presentation.accumulatedPlayTimeMs >= presentation.durationSeconds * 1000L / 2,
+                gateSeconds > 0 &&
+                presentation.accumulatedPlayTimeMs >= gateSeconds * 1000L / 2,
         )
     }
 
@@ -258,7 +268,7 @@ private fun RewardedMinigame(
     // app for the required duration. The accumulated time lives on the presentation, so
     // a config change (rotation) resumes the remaining time instead of restarting it.
     LaunchedEffect(Unit) {
-        if (presentation.durationSeconds <= 0) {
+        if (gateSeconds <= 0) {
             presentation.rewardEarned = true
             rewardEarned = true
             return@LaunchedEffect
@@ -278,12 +288,13 @@ private fun RewardedMinigame(
                 val now = SystemClock.elapsedRealtime()
                 presentation.accumulatedPlayTimeMs += now - lastTickMs
                 lastTickMs = now
-                secondsLeft = RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)
+                secondsLeft = RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, gateSeconds)
+                closeProgress = rewardCloseProgress(presentation.accumulatedPlayTimeMs, gateSeconds)
                 // Reveal the store prompt at the halfway point to the reward (mid play-to-earn).
-                if (presentation.accumulatedPlayTimeMs >= presentation.durationSeconds * 1000L / 2) {
+                if (presentation.accumulatedPlayTimeMs >= gateSeconds * 1000L / 2) {
                     storePromptVisible = true
                 }
-                if (RewardGate.isEarned(presentation.accumulatedPlayTimeMs, presentation.durationSeconds)) {
+                if (RewardGate.isEarned(presentation.accumulatedPlayTimeMs, gateSeconds)) {
                     presentation.rewardEarned = true
                     rewardEarned = true
                     break
@@ -303,6 +314,7 @@ private fun RewardedMinigame(
         AndroidView(
             factory = { ctx ->
                 val url = presentation.iframeUrl
+                val html = presentation.renderedHtml
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : WebViewClient() {
@@ -331,37 +343,55 @@ private fun RewardedMinigame(
                     },
                 ).apply {
                     BridgeWebViewInstaller.install(this, bridge)
-                    loadUrl(url)
+                    // Prefer the server-rendered HTML when present (parity with the interstitial,
+                    // which fills the surface); fall back to the iframe URL.
+                    if (html.isNotBlank()) {
+                        loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+                    } else {
+                        loadUrl(url)
+                    }
                 }
             },
-            // Sits below the safe area (the black Box fills the cutout / nav-bar region).
-            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
+            // The game canvas fills edge-to-edge: inset only vertically (status / nav / top
+            // notch) and let it draw under any horizontal display-cutout. In landscape on a
+            // device with a side cutout, padding the cutout in would expose the transparent
+            // WebView's black backing as left/right "black bars" around the game. The overlay
+            // controls below keep the full safeDrawing inset so they never sit under a cutout.
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
             onRelease = { webView ->
                 BridgeWebViewInstaller.uninstall(webView)
                 WebViewPool.release(webView)
             },
         )
 
-        // Top-right reward/close pill: a "Play to earn" countdown while earning (display-only —
-        // no early exit), which becomes the close button ("✕ Reward unlocked") once earned.
-        RewardClosePill(
-            rewardEarned = rewardEarned,
-            secondsLeft = secondsLeft,
+        // Close button — honors the server `ad_behavior.close` treatment (hidden / countdown ring /
+        // progress bar / reward-or-close label) exactly like the interstitial, but gated on the
+        // play-to-earn progress: the ✕ unlocks only once the reward is earned.
+        val close = presentation.adBehavior?.close ?: CloseBehavior()
+        AdCloseButton(
+            treatment = close.treatment,
+            position = close.position,
+            progressBarColor = close.progressBarColor,
+            isRewardCopy = true,
+            enabled = rewardEarned,
+            remaining = secondsLeft,
+            progress = closeProgress,
             onClose = { onFinish(true) },
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(8.dp),
         )
 
-        // Mid-ad store prompt — appears at half the play-to-earn duration and is removed the instant
-        // the reward unlocks (the reward/close pill takes over). Rendered at the server-resolved
-        // corner (verbatim); a tap routes to the advertised store via the shared CTA router.
+        // Mid-ad store prompt — appears at half the play-to-earn gate and is removed the instant the
+        // reward unlocks (the reward/close pill takes over). Pinned to the corner opposite the
+        // reward/close pill (the SDK mirrors the close position); a tap routes to the advertised store.
         if (storePrompt != null && storePrompt.enabled && storePromptVisible && !rewardEarned) {
             StorePromptBadge(
                 prompt = storePrompt,
-                // Match the reward/close pill's 8dp inset so both share the same top baseline.
+                closePosition = close.position,
+                // Match the reward/close pill's 8dp inset and center the badge in the same 48dp
+                // touch-target band so the two share one centerline (parity with the interstitial).
                 edgePadding = 8.dp,
+                rowHeight = MIN_TOUCH_TARGET_DP.dp,
                 onTap = {
                     CreativeCtaRouter.open(
                         context.applicationContext,
@@ -374,49 +404,16 @@ private fun RewardedMinigame(
         }
 
         // Persistent ad-info "i" + report sheet (required disclosure). Last so its sheet overlays.
-        AdInfoReportOverlay(adId = presentation.impressionId, apiKey = presentation.apiKey)
+        AdInfoReportOverlay(
+            adId = presentation.impressionId,
+            apiKey = presentation.apiKey,
+            // A genuine bottom-left ✕ shares the bottom-left corner with the "i" (shrink its hit area);
+            // a progress_bar bottom ✕ relocates to top-right, leaving the "i" its full hit area.
+            closeAtBottomLeft = close.position == ClosePosition.BOTTOM_LEFT && !closeBarAtBottom(close.treatment, close.position),
+        )
     }
 }
 
-@Composable
-private fun RewardClosePill(
-    rewardEarned: Boolean,
-    secondsLeft: Int,
-    onClose: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    if (rewardEarned) {
-        // Earned: a compact circular X close button (AppLovin-style); tapping it dismisses.
-        Box(
-            modifier = modifier
-                .size(44.dp)
-                .clickable(onClick = onClose),
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(16.dp)
-                    .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.5f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("✕", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-    } else {
-        // Still earning: a small display-only status — no close affordance yet.
-        Box(
-            modifier = modifier
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color(0x99000000))
-                .padding(horizontal = 10.dp, vertical = 5.dp),
-        ) {
-            Text(
-                text = "Play to earn: ${secondsLeft}s",
-                color = Color.White,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-            )
-        }
-    }
-}
+/** 0→1 close-treatment fill from play-to-earn progress (foreground play time / required duration). */
+private fun rewardCloseProgress(playMs: Long, durationSeconds: Int): Float =
+    if (durationSeconds > 0) (playMs.toFloat() / (durationSeconds * 1000f)).coerceIn(0f, 1f) else 1f

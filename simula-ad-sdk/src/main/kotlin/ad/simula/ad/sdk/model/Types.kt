@@ -134,20 +134,20 @@ data class MiniGameInterstitialTheme(
 // ── Character Picker Types ──────────────────────────────────────────────────
 
 /**
- * A selectable character in [ad.simula.ad.sdk.character.CharacterPicker].
- * [image] is a 1:1 portrait URL. Maps to the backend `PublicCharacter`
- * (`character_id`→id, `character_name`→name, `images_1_1[0]`/`avatar_url`→image,
+ * A selectable character in [ad.simula.ad.sdk.character.CharacterSelector].
+ * [imageUrl] is a 1:1 portrait URL. Maps to the backend `PublicCharacter`
+ * (`character_id`→id, `character_name`→name, `images_1_1[0]`/`avatar_url`→imageUrl,
  * `description`→description).
  */
 data class CharacterData(
     val id: String,
     val name: String,
-    val image: String,
-    val description: String? = null,
+    val imageUrl: String,
+    val description: String,
 )
 
 /**
- * Theme for [ad.simula.ad.sdk.character.CharacterPicker]. All colors are CSS strings
+ * Theme for [ad.simula.ad.sdk.character.CharacterSelector]. All colors are CSS strings
  * (hex/rgba); a null field falls back to [Defaults.CharacterPickerDefaults], which
  * mirror the reference HTML exactly. Sizes are in dp/sp.
  */
@@ -327,8 +327,9 @@ internal data class Experiment(
     val layer: String? = null,
 )
 
-/** Mid-ad store prompt (`store_prompt` node). `position` is resolved server-side (opposite the
- * close button) and rendered verbatim — the SDK never recomputes collisions. */
+/** Mid-ad store prompt (`store_prompt` node). `position` is still decoded from the wire but no
+ * longer drives layout: the SDK renders the badge in the horizontal mirror of the close button's
+ * corner (the opposite side), so the two affordances never share an edge. */
 internal data class StorePrompt(
     val enabled: Boolean = false,
     val trigger: String = "midpoint",

@@ -49,7 +49,7 @@ class RewardVerificationQueueTest {
             release[serveId]?.complete(Unit)
         }
 
-        override suspend fun verify(serveId: String, sessionId: String, elapsedPlayTime: Double): String? {
+        override suspend fun verify(serveId: String, sessionId: String, elapsedPlayTime: Double, adUnitId: String): String? {
             callCounts[serveId] = (callCounts[serveId] ?: 0) + 1
             entered[serveId]?.complete(Unit)
             release[serveId]?.await()

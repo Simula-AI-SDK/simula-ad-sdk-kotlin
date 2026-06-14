@@ -37,9 +37,9 @@ class CharacterRequestTest {
         assertEquals(2, chars.size)
         assertEquals("superman", chars[0].id)
         assertEquals("Superman", chars[0].name)
-        assertEquals("https://x/c1.png", chars[0].image) // imageUrl
+        assertEquals("https://x/c1.png", chars[0].imageUrl) // imageUrl
         assertEquals("hero", chars[0].description)
-        assertEquals("https://x/c3.png", chars[1].image)
+        assertEquals("https://x/c3.png", chars[1].imageUrl)
     }
 
     @Test
@@ -69,14 +69,14 @@ class CharacterRequestTest {
         """.trimIndent()
         val chars = SimulaApiClient.parseCharacters(legacy)
         assertEquals(2, chars.size)
-        assertEquals("u1", chars[0].image) // images_1_1[0]
-        assertEquals("u2", chars[1].image) // avatar_url fallback
+        assertEquals("u1", chars[0].imageUrl) // images_1_1[0]
+        assertEquals("u2", chars[1].imageUrl) // avatar_url fallback
 
         val wrapped = SimulaApiClient.parseCharacters(
             """{"data":{"data":[{"id":"c","name":"C","image":"u3","description":"dc"}]}}""",
         )
         assertEquals(1, wrapped.size)
-        assertEquals("u3", wrapped[0].image)
+        assertEquals("u3", wrapped[0].imageUrl)
     }
 
     @Test
