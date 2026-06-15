@@ -489,7 +489,6 @@ internal object SimulaApiClient {
     suspend fun loadRewarded(
         adUnitId: String,
         sessionId: String = "",
-        minPlayThreshold: Int? = null,
         charId: String? = null,
         charName: String? = null,
         charImage: String? = null,
@@ -498,7 +497,6 @@ internal object SimulaApiClient {
         val requestBody = RewardedInitRequestBody(
             adUnitId = adUnitId,
             sessionId = sessionId,
-            minPlayThreshold = minPlayThreshold,
             charId = charId,
             charName = charName,
             charImage = charImage,

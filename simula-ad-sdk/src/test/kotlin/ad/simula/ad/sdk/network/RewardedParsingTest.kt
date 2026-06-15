@@ -26,25 +26,22 @@ class RewardedParsingTest {
 
     @Test
     fun `init request encodes snake_case keys`() {
-        val body = RewardedInitRequestBody(adUnitId = "unit_1", sessionId = "sess_9", minPlayThreshold = 15)
+        val body = RewardedInitRequestBody(adUnitId = "unit_1", sessionId = "sess_9")
         val encoded = json.encodeToString(body)
 
         assertTrue(encoded.contains("\"ad_unit_id\""))
         assertTrue(encoded.contains("\"session_id\""))
-        assertTrue(encoded.contains("\"min_play_threshold\""))
 
         val decoded = json.decodeFromString<RewardedInitRequestBody>(encoded)
         assertEquals("unit_1", decoded.adUnitId)
         assertEquals("sess_9", decoded.sessionId)
-        assertEquals(15, decoded.minPlayThreshold)
     }
 
     @Test
-    fun `init request round-trips with null threshold`() {
+    fun `init request round-trips with defaults`() {
         val body = RewardedInitRequestBody(adUnitId = "unit_1")
         val decoded = json.decodeFromString<RewardedInitRequestBody>(json.encodeToString(body))
         assertEquals("", decoded.sessionId)
-        assertNull(decoded.minPlayThreshold)
     }
 
     // ── Init response ───────────────────────────────────────────────────────────
