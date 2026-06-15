@@ -241,7 +241,7 @@ fun NativeAdSlot(
                 // the slot would collapse to ~1dp between "filled" and "measured", jolting the feed
                 // below up and then back down (it "looks broken"). One smooth grow instead.
                 if (heightDp <= 0f) {
-                    NativeAdShimmer(Modifier.matchParentSize(), isDark = resolvedTheme == "dark")
+                    NativeAdShimmer(Modifier.matchParentSize(), isDark = resolvedTheme != "light")
                 }
 
                 // Tap-to-open AdChoices over the creative's top-left "AD" badge (Interested /
@@ -254,7 +254,7 @@ fun NativeAdSlot(
 
         NativeAdSlotState.Loading -> {
             // While the request is in flight, show a shimmer placeholder.
-            NativeAdShimmer(slotModifier, isDark = resolvedTheme == "dark")
+            NativeAdShimmer(slotModifier, isDark = resolvedTheme != "light")
         }
 
         NativeAdSlotState.Empty -> {
@@ -299,10 +299,11 @@ private fun initialNativeAdState(
 /** Animated shimmer shown while a native ad request is in flight. Collapses to nothing once the
  * slot resolves to a fill (the creative replaces it) or a no-fill/error (zero height).
  *
- * [isDark] matches the shimmer to the creative that's about to render (the resolved ad theme), so a
- * light-themed ad in a light app shows a light skeleton rather than a dark block that then flips. */
+ * [isDark] matches the shimmer to the creative that's about to render. Defaults to dark; the skeleton
+ * is light only for an explicitly light (or system-light) creative, so an unspecified theme shows a
+ * dark block rather than a light one that then flips. */
 @Composable
-private fun NativeAdShimmer(modifier: Modifier = Modifier, isDark: Boolean) {
+private fun NativeAdShimmer(modifier: Modifier = Modifier, isDark: Boolean = true) {
     val transition = rememberInfiniteTransition(label = "native-ad-shimmer")
     val progress by transition.animateFloat(
         initialValue = 0f,
