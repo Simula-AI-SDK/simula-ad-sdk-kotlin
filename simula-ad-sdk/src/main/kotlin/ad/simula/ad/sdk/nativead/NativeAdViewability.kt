@@ -1,6 +1,8 @@
 package ad.simula.ad.sdk.nativead
 
+import android.graphics.Rect as AndroidRect
 import android.os.SystemClock
+import android.view.View
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -9,9 +11,10 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.layout.LayoutCoordinates
-import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
@@ -54,6 +57,9 @@ internal fun Modifier.trackNativeAdViewability(
     // Latest layout geometry, refreshed by onGloballyPositioned and sampled by the loop below.
     val coords = remember { mutableStateOf<LayoutCoordinates?>(null) }
     val lifecycleOwner = LocalLifecycleOwner.current
+    // The Compose host view. Its on-screen location reflects scrolling done by a NON-Compose
+    // ancestor (e.g. a React Native list), which findRootCoordinates() cannot observe.
+    val hostView = LocalView.current
 
     LaunchedEffect(enabled, thresholdFraction, minVisibleMillis) {
         if (!enabled) return@LaunchedEffect
@@ -66,7 +72,7 @@ internal fun Modifier.trackNativeAdViewability(
             val dwell = ViewabilityDwell(thresholdFraction, minVisibleMillis)
             while (true) {
                 delay(ViewabilityDwell.SAMPLE_INTERVAL_MS)
-                val fraction = coords.value?.let(::visibleFraction) ?: 0f
+                val fraction = coords.value?.let { visibleFraction(it, hostView) } ?: 0f
                 if (dwell.sample(fraction, SystemClock.elapsedRealtime())) {
                     fired = true
                     currentOnImpression()
@@ -123,29 +129,39 @@ internal class ViewabilityDwell(
 }
 
 /**
- * Fraction (0..1) of [coords]' area currently inside the visible window, clipped by every ancestor
- * (so a scrolling list's viewport bounds are honored). Area-based so it matches OMID's "≥50% of the
- * creative" rather than a pure vertical heuristic.
+ * Fraction (0..1) of [coords]' area currently visible on screen. Measured in SCREEN pixels — the
+ * `host`'s on-screen location plus the slot's offset within the Compose root — then intersected with
+ * the visible window rect. Area-based, matching OMID's "≥50% of the creative".
+ *
+ * Why screen-relative rather than `findRootCoordinates`-relative: a `NativeAdSlot` may be hosted in
+ * its own `ComposeView` whose scrolling is owned by a NON-Compose ancestor (e.g. a React Native
+ * `FlatList`). The Compose root is then that per-slot host, which the slot always fills — so a
+ * root-relative fraction reads ~1.0 even while the row is scrolled off screen, firing the impression
+ * for never-seen rows. `View.getLocationOnScreen` DOES reflect that ancestor's scroll, so anchoring
+ * to the screen is correct for both a Compose `LazyColumn` and a React Native list.
  */
-private fun visibleFraction(coords: LayoutCoordinates): Float {
+private fun visibleFraction(coords: LayoutCoordinates, host: View): Float {
     if (!coords.isAttached) return 0f
     val w = coords.size.width
     val h = coords.size.height
     if (w == 0 || h == 0) return 0f
 
-    val root = coords.findRootCoordinates()
-    // Bounding box of the slot in root coordinates, clipped by ancestor clip bounds (the list).
-    val box = root.localBoundingBoxOf(coords, clipBounds = true)
-    val rootW = root.size.width.toFloat()
-    val rootH = root.size.height.toFloat()
+    // Slot's top-left in screen pixels: the host's on-screen origin + the slot's offset in the root.
+    val hostLoc = IntArray(2)
+    host.getLocationOnScreen(hostLoc)
+    val offsetInRoot = coords.positionInRoot()
+    val slotLeft = hostLoc[0] + offsetInRoot.x
+    val slotTop = hostLoc[1] + offsetInRoot.y
+    val slotRight = slotLeft + w
+    val slotBottom = slotTop + h
 
-    // Intersect once more with the root's own visible bounds (the window).
-    val left = box.left.coerceAtLeast(0f)
-    val top = box.top.coerceAtLeast(0f)
-    val right = box.right.coerceAtMost(rootW)
-    val bottom = box.bottom.coerceAtMost(rootH)
+    // Visible window rect in screen pixels (excludes the status bar / system insets).
+    val window = AndroidRect()
+    host.getWindowVisibleDisplayFrame(window)
 
-    val visibleW = (right - left).coerceAtLeast(0f)
-    val visibleH = (bottom - top).coerceAtLeast(0f)
+    val visibleW = (slotRight.coerceAtMost(window.right.toFloat()) -
+        slotLeft.coerceAtLeast(window.left.toFloat())).coerceAtLeast(0f)
+    val visibleH = (slotBottom.coerceAtMost(window.bottom.toFloat()) -
+        slotTop.coerceAtLeast(window.top.toFloat())).coerceAtLeast(0f)
     return ((visibleW * visibleH) / (w.toFloat() * h.toFloat())).coerceIn(0f, 1f)
 }
