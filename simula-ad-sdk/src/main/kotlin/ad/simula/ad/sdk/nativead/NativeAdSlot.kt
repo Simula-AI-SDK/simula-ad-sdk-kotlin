@@ -230,7 +230,7 @@ fun NativeAdSlot(
                 // the slot would collapse to ~1dp between "filled" and "measured", jolting the feed
                 // below up and then back down (it "looks broken"). One smooth grow instead.
                 if (heightDp <= 0f) {
-                    NativeAdShimmer(Modifier.matchParentSize())
+                    NativeAdShimmer(Modifier.matchParentSize(), isDark = resolvedTheme == "dark")
                 }
 
                 // Tap-to-open AdChoices over the creative's top-left "AD" badge (Interested /
@@ -243,7 +243,7 @@ fun NativeAdSlot(
 
         NativeAdSlotState.Loading -> {
             // While the request is in flight, show a shimmer placeholder.
-            NativeAdShimmer(slotModifier)
+            NativeAdShimmer(slotModifier, isDark = resolvedTheme == "dark")
         }
 
         NativeAdSlotState.Empty -> {
@@ -286,9 +286,12 @@ private fun initialNativeAdState(
 }
 
 /** Animated shimmer shown while a native ad request is in flight. Collapses to nothing once the
- * slot resolves to a fill (the creative replaces it) or a no-fill/error (zero height). */
+ * slot resolves to a fill (the creative replaces it) or a no-fill/error (zero height).
+ *
+ * [isDark] matches the shimmer to the creative that's about to render (the resolved ad theme), so a
+ * light-themed ad in a light app shows a light skeleton rather than a dark block that then flips. */
 @Composable
-private fun NativeAdShimmer(modifier: Modifier = Modifier) {
+private fun NativeAdShimmer(modifier: Modifier = Modifier, isDark: Boolean) {
     val transition = rememberInfiniteTransition(label = "native-ad-shimmer")
     val progress by transition.animateFloat(
         initialValue = 0f,
@@ -299,8 +302,8 @@ private fun NativeAdShimmer(modifier: Modifier = Modifier) {
         ),
         label = "native-ad-shimmer-progress",
     )
-    val base = Color(0xFF24242C)
-    val highlight = Color(0xFF34343F)
+    val base = if (isDark) Color(0xFF24242C) else Color(0xFFE3E3E8)
+    val highlight = if (isDark) Color(0xFF34343F) else Color(0xFFF2F2F6)
     Box(
         modifier
             .height(NATIVE_AD_PROVISIONAL_HEIGHT_DP.dp)
