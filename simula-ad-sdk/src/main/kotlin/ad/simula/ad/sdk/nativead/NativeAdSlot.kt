@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.model.NativeAdData
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.LocalSimulaContext
+import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.util.ParsedDimension
 import ad.simula.ad.sdk.util.clampMinWidth
 import ad.simula.ad.sdk.util.parseDimension
@@ -49,7 +50,8 @@ import kotlinx.coroutines.launch
  * network call), mounts the creative in a content-sized [WebView][NativeAdWebView], and reports an
  * impression only when ≥50% of the creative is visible for ≥1 continuous second (the OMID-shaped
  * [trackNativeAdViewability] seam). A no-fill or any error collapses the slot to **zero height** with
- * no placeholder; an error additionally surfaces via [onError] (a no-fill does not — PRD).
+ * no placeholder, and additionally surfaces via [onError] as a [NativeAdError] (including a no-fill, so
+ * the publisher can show fallback content).
  *
  * Targeting context is not a parameter here: it is read automatically from the
  * [SimulaProvider][ad.simula.ad.sdk.provider.SimulaProvider] this slot is composed within (PRD). Must
@@ -68,7 +70,9 @@ import kotlinx.coroutines.launch
  *                      live call with no error surfaced.
  * @param onImpression  Fired once when the viewability threshold is met (co-fired with the server
  *                      impression). Carries the [NativeAdData].
- * @param onError       Fired on a load/render failure (network, bad session). Not fired on a no-fill.
+ * @param onError       Fired with a [NativeAdError] on a load/render failure (not-initialized, no
+ *                      session, network) and on a no-fill ([NativeAdError.NoFill]). A cached outcome
+ *                      replayed on a recycled row does not re-fire (one report per served slot).
  * @param previewHtml   Debug/QA only: render this HTML creative directly through the full pipeline
  *                      (WebView + height sizing + viewability + AD-badge feedback bridge) with no
  *                      network call. Mirrors the imperative ads' `showPreview`.
@@ -82,13 +86,19 @@ fun NativeAdSlot(
     modifier: Modifier = Modifier,
     preloadedAdId: String? = null,
     onImpression: (NativeAdData) -> Unit = {},
-    onError: (SimulaAdError) -> Unit = {},
+    onError: (NativeAdError) -> Unit = {},
     previewHtml: String? = null,
 ) {
     val ctx = LocalSimulaContext.current
     val currentOnImpression by rememberUpdatedState(onImpression)
     val currentOnError by rememberUpdatedState(onError)
     val resolvedTheme = resolveAdTheme(theme)
+    // Surface a native failure to the publisher and record it for telemetry (errorCode parity with the
+    // imperative ads). Reused by the load, no-fill, and creative-render-failure paths.
+    fun reportError(error: NativeAdError) {
+        Telemetry.recordError(signature = "native:load", errorCode = error.telemetryCode(), breadcrumb = "NativeAdSlot")
+        currentOnError(error)
+    }
     val parsedWidth = remember(width) { parseDimension(width).clampMinWidth(MIN_SLOT_WIDTH) }
     val slotModifier = when (parsedWidth) {
         ParsedDimension.Fill -> modifier.fillMaxWidth()
@@ -136,9 +146,10 @@ fun NativeAdSlot(
                 impressionFired = false
                 state = NativeAdSlotState.Filled(result)
             } else {
-                // No-fill collapses silently (no onError). PRD.
+                // No-fill: collapse the slot AND surface NoFill so the publisher can react (fallback).
                 NativeAdCache.putNoFill(adUnitId, position)
                 state = NativeAdSlotState.Empty
+                reportError(NativeAdError.NoFill)
             }
         }
 
@@ -163,12 +174,12 @@ fun NativeAdSlot(
             apply(NativeAdController.load(ctx.ensureSession, adUnitId, position, resolvedTheme))
         } catch (e: SimulaAdError) {
             state = NativeAdSlotState.Empty // error → hide; not cached so it can retry next time
-            currentOnError(e)
+            reportError(e.toNativeAdError())
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             state = NativeAdSlotState.Empty
-            currentOnError(SimulaAdError.Network(e))
+            reportError(NativeAdError.Network)
         }
     }
 
@@ -200,7 +211,7 @@ fun NativeAdSlot(
                         if (state is NativeAdSlotState.Filled) {
                             heightDp = 0f
                             state = NativeAdSlotState.Empty
-                            currentOnError(SimulaAdError.Network(null))
+                            reportError(NativeAdError.Network)
                         }
                     },
                     modifier = Modifier.trackNativeAdViewability(
