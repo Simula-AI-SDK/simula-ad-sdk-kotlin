@@ -4,11 +4,15 @@ import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaApiClient
+import android.content.ComponentCallbacks2
 import android.content.Context
+import android.content.MutableContextWrapper
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -23,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.annotation.MainThread
 import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -37,10 +42,14 @@ import java.util.WeakHashMap
 /**
  * Hosts a native-ad creative in a pooled, non-scrollable [WebView] sized to its content.
  *
- * Performance: the [WebView] comes from [WebViewPool] (prewarmed, recycled — never allocated per
- * slot) and is returned to the pool on dispose. The creative is mounted from `iframe_url` (the URL
- * form, preferred for security) and falls back to `rendered_html`. The container grows to the height
- * the creative reports over the JS bridge; nothing is drawn while loading (transparent, no skeleton).
+ * Performance: the [WebView] is owned by [NativeAdWebViewStore], which retains a small LRU of loaded
+ * instances keyed by impression id. A first mount acquires a prewarmed view from [WebViewPool], loads
+ * the creative, and keeps it; scrolling the slot out **detaches and pauses** that view (preserving its
+ * rendered DOM) and scrolling back **reattaches the same view with no reload** — eliminating the
+ * blank-then-pop re-render a recycled feed row otherwise shows. The creative is mounted from
+ * `iframe_url` (the URL form, preferred for security) and falls back to `rendered_html`. The container
+ * grows to the height the creative reports over the JS bridge; nothing is drawn while loading
+ * (transparent, no skeleton).
  *
  * Bridge (reuses the relay pattern of [ad.simula.ad.sdk.bridge.BridgeWebViewInstaller], scoped to the
  * native-ad message set):
@@ -63,13 +72,15 @@ internal fun NativeAdWebView(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val wiring = remember(impressionId, apiKey) {
-        NativeAdWiring(appContext = context.applicationContext, apiKey = apiKey, impressionId = impressionId)
+    // Per-creative retained session (WebView + bridge wiring) keyed by impression id. Stable across
+    // remounts via the store, so a recycled feed row reattaches the same loaded view (no reload).
+    val session = remember(impressionId, apiKey) {
+        NativeAdWebViewStore.obtain(context.applicationContext, impressionId, apiKey)
     }
     // Point the wiring at the latest callbacks on each recomposition (cheap; @Volatile fields).
-    wiring.onHeightPx = onHeightPx
-    wiring.onAdClick = onAdClick
-    wiring.onLoadError = onLoadError
+    session.wiring.onHeightPx = onHeightPx
+    session.wiring.onAdClick = onAdClick
+    session.wiring.onLoadError = onLoadError
 
     AndroidView(
         modifier = modifier
@@ -77,33 +88,186 @@ internal fun NativeAdWebView(
             // Hold a provisional height (not ~0) while the creative measures, so the slot never
             // collapses to a sliver — the slot keeps a shimmer over this until the height arrives.
             .height(if (heightDp > 0f) heightDp.dp else NATIVE_AD_PROVISIONAL_HEIGHT_DP.dp),
-        factory = {
-            val docStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
-            val webView = WebViewPool.acquire(context, NativeAdWebViewClient(wiring, docStart))
-            webView.setBackgroundColor(Color.TRANSPARENT)
-            // device-width viewport so 1 CSS px == 1 dp → the reported height maps straight to dp.
-            webView.settings.useWideViewPort = true
-            webView.settings.loadWithOverviewMode = false
-            installBridge(webView, wiring, docStart)
-            when {
-                !iframeUrl.isNullOrBlank() -> webView.loadUrl(iframeUrl)
-                !renderedHtml.isNullOrBlank() ->
-                    webView.loadDataWithBaseURL(null, renderedHtml, "text/html", "utf-8", null)
-            }
-            webView
-        },
-        onRelease = { webView ->
-            uninstallBridge(webView)
-            WebViewPool.release(webView)
-        },
+        // Reattaches the retained WebView (no reload) or builds + loads a fresh one on first mount.
+        factory = { NativeAdWebViewStore.attach(session, context, iframeUrl, renderedHtml) },
+        // Scroll-out: detach + pause + keep the loaded DOM (retained ids); recycle ephemerals/orphans.
+        onRelease = { released -> NativeAdWebViewStore.release(session, released) },
     )
+}
+
+/**
+ * Retains a small LRU of loaded native-ad [WebView]s keyed by impression id, so a slot that scrolls
+ * out of a feed and back reattaches the **same, already-rendered** view instead of re-acquiring a
+ * blank one from [WebViewPool] and reloading the creative (the blank-then-pop "re-render on scroll").
+ *
+ * A [Session] bundles the view with the [NativeAdWiring] its bridge/client point at, so reattach only
+ * has to re-home the context and resume — the JS interface and document-start script survive untouched.
+ * Off-screen sessions are detached from their parent, [WebView.onPause]d, and have their context reset
+ * to the application context so a retained view can't leak the host Activity. The LRU is bounded
+ * ([MAX_RETAINED]); the eldest idle session is evicted (returned to [WebViewPool]) when the cap is
+ * exceeded, and everything idle is dropped under memory pressure.
+ *
+ * Blank impression ids (previews) are never retained — they get an ephemeral session that is recycled
+ * to the pool on release, preserving the old behavior for one-shot QA creatives.
+ *
+ * All methods touch [WebView], so all run on the main thread; [evict]/[evictAll] hop to main since
+ * cache invalidation can be called from any thread.
+ */
+internal object NativeAdWebViewStore {
+    private const val MAX_RETAINED = 3
+
+    /** One retained creative: its [webView] + the [wiring] its bridge points at + what's loaded. */
+    class Session(
+        val impressionId: String,
+        val apiKey: String,
+        val wiring: NativeAdWiring,
+    ) {
+        var webView: WebView? = null
+        /** Identity of the creative currently loaded into [webView] (so a changed creative rebuilds). */
+        var loadedKey: String? = null
+        /** True while mounted in a live `AndroidView` — guards against stealing a view shown elsewhere. */
+        var attached: Boolean = false
+    }
+
+    private val main = Handler(Looper.getMainLooper())
+
+    // Access-ordered so iteration is least-recently-used first (for eviction). Main-thread only.
+    private val sessions = LinkedHashMap<String, Session>(4, 0.75f, true)
+
+    @Volatile private var trimRegistered = false
+
+    /**
+     * The stable session for [impressionId] (created + registered on first use), or a fresh ephemeral
+     * session for a blank id. Reused across remounts so the retained view survives feed recycling.
+     */
+    @MainThread
+    fun obtain(appContext: Context, impressionId: String, apiKey: String): Session {
+        registerTrimCallbacks(appContext)
+        if (impressionId.isBlank()) {
+            return Session(impressionId, apiKey, NativeAdWiring(appContext, apiKey, impressionId))
+        }
+        sessions[impressionId]?.let {
+            if (it.apiKey == apiKey) return it
+            destroy(it); sessions.remove(impressionId) // api key changed → rebuild
+        }
+        val session = Session(impressionId, apiKey, NativeAdWiring(appContext, apiKey, impressionId))
+        sessions[impressionId] = session
+        evictIfNeeded()
+        return session
+    }
+
+    /** Return the view to mount: the retained one (already loaded → no reload) or a freshly built one. */
+    @MainThread
+    fun attach(session: Session, hostContext: Context, iframeUrl: String?, renderedHtml: String?): WebView {
+        val creativeKey = creativeKey(iframeUrl, renderedHtml)
+        val retained = session.webView
+        if (retained != null && session.loadedKey == creativeKey && !session.attached) {
+            (retained.context as? MutableContextWrapper)?.baseContext = hostContext // re-home for theming
+            (retained.parent as? ViewGroup)?.removeView(retained)                   // clear any stale parent
+            retained.onResume()
+            session.attached = true
+            return retained
+        }
+        val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml)
+        // Adopt as the retained instance only if the slot isn't already showing one (don't orphan it).
+        if (!session.attached) {
+            session.webView?.takeIf { it !== fresh }?.let { uninstallBridge(it); WebViewPool.release(it) }
+            session.webView = fresh
+            session.loadedKey = creativeKey
+            session.attached = true
+        }
+        return fresh
+    }
+
+    /** Scroll-out / dispose: retain (detach + pause) the loaded view, or recycle an ephemeral/orphan. */
+    @MainThread
+    fun release(session: Session, released: WebView) {
+        if (session.impressionId.isBlank() || released !== session.webView) {
+            uninstallBridge(released)
+            WebViewPool.release(released)
+            if (released === session.webView) { session.webView = null; session.loadedKey = null }
+            session.attached = false
+            return
+        }
+        session.attached = false
+        (released.parent as? ViewGroup)?.removeView(released)
+        released.onPause() // suspend the creative's JS/rendering while off-screen (per-instance; no global timers)
+        // Drop the Activity reference so a retained, off-screen view can't leak it.
+        (released.context as? MutableContextWrapper)?.let { it.baseContext = it.applicationContext }
+    }
+
+    /** Drop the retained view for [impressionId] (e.g. the slot was invalidated for a fresh ad). */
+    fun evict(impressionId: String) = onMain {
+        sessions.remove(impressionId)?.let { destroy(it) }
+    }
+
+    fun evictAll() = onMain {
+        sessions.values.toList().forEach { destroy(it) }
+        sessions.clear()
+    }
+
+    @MainThread
+    private fun buildWebView(wiring: NativeAdWiring, hostContext: Context, iframeUrl: String?, renderedHtml: String?): WebView {
+        val docStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+        val webView = WebViewPool.acquire(hostContext, NativeAdWebViewClient(wiring, docStart))
+        webView.setBackgroundColor(Color.TRANSPARENT)
+        // device-width viewport so 1 CSS px == 1 dp → the reported height maps straight to dp.
+        webView.settings.useWideViewPort = true
+        webView.settings.loadWithOverviewMode = false
+        installBridge(webView, wiring, docStart)
+        when {
+            !iframeUrl.isNullOrBlank() -> webView.loadUrl(iframeUrl)
+            !renderedHtml.isNullOrBlank() -> webView.loadDataWithBaseURL(null, renderedHtml, "text/html", "utf-8", null)
+        }
+        return webView
+    }
+
+    @MainThread
+    private fun destroy(session: Session) {
+        session.webView?.let { uninstallBridge(it); WebViewPool.release(it) }
+        session.webView = null
+        session.loadedKey = null
+        session.attached = false
+    }
+
+    @MainThread
+    private fun evictIfNeeded() {
+        if (sessions.size <= MAX_RETAINED) return
+        val it = sessions.entries.iterator()
+        while (it.hasNext() && sessions.size > MAX_RETAINED) {
+            val e = it.next()
+            if (!e.value.attached) { destroy(e.value); it.remove() } // LRU-first (access-ordered map)
+        }
+    }
+
+    private fun registerTrimCallbacks(appContext: Context) {
+        if (trimRegistered) return
+        trimRegistered = true
+        appContext.applicationContext.registerComponentCallbacks(object : ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) { if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) evictAll() }
+
+            @Deprecated("Deprecated in Java")
+            override fun onLowMemory() { evictAll() }
+
+            override fun onConfigurationChanged(newConfig: Configuration) {}
+        })
+    }
+
+    private fun onMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
+    }
+
+    /** Iframe URL identifies a creative directly; a rendered-HTML creative is keyed by its content. */
+    private fun creativeKey(iframeUrl: String?, renderedHtml: String?): String =
+        iframeUrl?.takeIf { it.isNotBlank() } ?: "html:${renderedHtml?.hashCode() ?: 0}"
 }
 
 // ── Bridge wiring ──────────────────────────────────────────────────────────────
 
 /** Per-WebView routing of bridge messages + CTA taps to native actions. Callbacks are hot-swapped
- * each recomposition; JS-thread entry points hop to main before touching them. */
-private class NativeAdWiring(
+ * each recomposition; JS-thread entry points hop to main before touching them. Held by a
+ * [NativeAdWebViewStore.Session] across remounts so a retained WebView's bridge keeps working. */
+internal class NativeAdWiring(
     private val appContext: Context,
     private val apiKey: String,
     private val impressionId: String,

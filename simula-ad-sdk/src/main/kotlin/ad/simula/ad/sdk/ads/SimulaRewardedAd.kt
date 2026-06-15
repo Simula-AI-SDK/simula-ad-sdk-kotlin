@@ -41,13 +41,6 @@ class SimulaRewardedAd(val adUnitId: String) {
 
     var listener: SimulaRewardedAdListener? = null
 
-    /**
-     * Optional minimum play time (seconds) requested from the server. When `> 0` it is
-     * sent as `min_play_threshold`; the server's returned `ad_behavior.close.delay_seconds`
-     * is what the SDK actually enforces.
-     */
-    var minPlayThreshold: Int = 0
-
     private sealed interface State {
         object Idle : State
         object Loading : State
@@ -165,7 +158,6 @@ class SimulaRewardedAd(val adUnitId: String) {
                 val ad = SimulaApiClient.loadRewarded(
                     adUnitId = adUnitId,
                     sessionId = session,
-                    minPlayThreshold = minPlayThreshold.takeIf { it > 0 },
                     charId = charId,
                     charName = charName,
                     charImage = charImage,
