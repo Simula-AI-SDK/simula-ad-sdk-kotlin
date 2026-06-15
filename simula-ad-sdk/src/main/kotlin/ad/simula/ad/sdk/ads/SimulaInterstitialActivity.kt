@@ -30,7 +30,6 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -308,13 +307,26 @@ private fun CreativeInterstitial(
                 closeEnabled = true
                 return@LaunchedEffect
             }
+            val showsBar = treatment == CloseTreatment.COUNTDOWN_CIRCLE || treatment == CloseTreatment.PROGRESS_BAR
             lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 if (closeEnabled) return@repeatOnLifecycle
-                // Show the ring/bar at the already-accrued fraction immediately on (re)resume.
-                if (treatment == CloseTreatment.COUNTDOWN_CIRCLE || treatment == CloseTreatment.PROGRESS_BAR) {
-                    closeProgress.snapTo((presentation.accumulatedGateTimeMs.toFloat() / totalMs).coerceIn(0f, 1f))
+                // Bar/ring fill: ONE continuous, frame-clock animation to full over the remaining
+                // foreground time — not a value snapped on each 250 ms tick. Anchored to the already-
+                // accrued fraction on every (re)resume; backgrounding cancels this child alongside the
+                // accounting loop so the fill freezes, and the next resume re-anchors + re-launches.
+                // Driving it off the frame clock (instead of chasing a stepped target with an equal-
+                // length tween) is what keeps it smooth when ticks land late under main-thread load.
+                if (showsBar) {
+                    val accruedFraction = (presentation.accumulatedGateTimeMs.toFloat() / totalMs).coerceIn(0f, 1f)
+                    closeProgress.snapTo(accruedFraction)
+                    val remainingMs = (totalMs - presentation.accumulatedGateTimeMs).coerceAtLeast(0L)
+                    launch {
+                        closeProgress.animateTo(1f, tween(durationMillis = remainingMs.toInt(), easing = LinearEasing))
+                    }
                 }
-                // Re-anchor on each resume so a backgrounded interval is never counted.
+                // Re-anchor on each resume so a backgrounded interval is never counted. This loop now
+                // owns ONLY the accounting (close-enable, countdown number, store prompt); the visual
+                // fill is the continuous animation above.
                 var lastTickMs = SystemClock.elapsedRealtime()
                 while (true) {
                     delay(250L)
@@ -322,12 +334,8 @@ private fun CreativeInterstitial(
                     presentation.accumulatedGateTimeMs += now - lastTickMs
                     lastTickMs = now
                     val accumulated = presentation.accumulatedGateTimeMs
-                    when (treatment) {
-                        CloseTreatment.COUNTDOWN_CIRCLE, CloseTreatment.PROGRESS_BAR ->
-                            closeProgress.snapTo((accumulated.toFloat() / totalMs).coerceIn(0f, 1f))
-                        CloseTreatment.REWARD_OR_CLOSE_LABEL ->
-                            closeRemaining = ceil((totalMs - accumulated).coerceAtLeast(0L) / 1000.0).toInt()
-                        else -> Unit
+                    if (treatment == CloseTreatment.REWARD_OR_CLOSE_LABEL) {
+                        closeRemaining = ceil((totalMs - accumulated).coerceAtLeast(0L) / 1000.0).toInt()
                     }
                     // Reveal the mid-ad store prompt at the halfway point (foreground dwell only).
                     if (accumulated >= totalMs / 2) {
@@ -555,15 +563,12 @@ internal fun BoxScope.AdCloseButton(
     onClose: () -> Unit,
 ) {
     val tint = remember(progressBarColor) { ColorUtil.parseColor(progressBarColor) }
-    // Glide the bar/ring fill between the gate loop's coarse (250 ms) progress updates instead of
-    // snapping to each one, so the indicator animates smoothly rather than stepping/looking laggy.
-    // Linear + matched to the tick cadence → continuous fill. (The countdown *number* still steps per
-    // second — it can't show fractions — only the bar/ring is interpolated.)
-    val animatedProgress by animateFloatAsState(
-        targetValue = progress.coerceIn(0f, 1f),
-        animationSpec = tween(durationMillis = 250, easing = LinearEasing),
-        label = "closeProgress",
-    )
+    // [progress] is already a continuous, frame-clock-driven fill: the caller animates its backing
+    // Animatable to 1f over the remaining foreground gate time, so it advances every frame on its own.
+    // Use it directly — a second animateFloatAsState pass here would only re-introduce lag (smoothing
+    // an already-smooth value) and was the source of the stepping/jank on slower devices. (The
+    // countdown *number* still steps per second — it can't show fractions — only the bar/ring fills.)
+    val animatedProgress = progress.coerceIn(0f, 1f)
     // The ✕ honors its configured corner, EXCEPT progress_bar at bottom_left: the gate bar takes the
     // bottom edge there, so the ✕ moves up to the top-right. (The mid-ad store prompt sits top-right
     // for any bottom_left close — diagonally opposite a bottom-left ✕, or sharing the top-right with

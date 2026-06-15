@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.ads.SimulaAdError
+import ad.simula.ad.sdk.ads.SimulaAds
 import ad.simula.ad.sdk.network.SimulaApiClient
 import kotlinx.coroutines.CancellationException
 
@@ -25,6 +26,9 @@ internal object NativeAdController {
         position: Int,
         theme: String? = null,
     ): SimulaApiClient.NativeAdResult {
+        // Distinguish "SDK never initialized" from "session creation failed" — both leave the session
+        // null, but the publisher's fix differs (call initialize() vs. check key/network).
+        if (!SimulaAds.isInitialized) throw SimulaAdError.NotInitialized
         val sessionId = ensureSession()
         if (sessionId.isNullOrBlank()) throw SimulaAdError.NoSession
 

@@ -56,14 +56,17 @@ internal object NativeAdCache {
     }
 
     fun invalidate(adUnitId: String?, position: Int) {
-        // Drop the impression-id mark too so a deliberately-refreshed slot can fire again.
+        // Drop the impression-id mark too so a deliberately-refreshed slot can fire again, and free the
+        // retained WebView so the refreshed slot rebuilds instead of reattaching the stale creative.
         (entries.remove(key(adUnitId, position)) as? Value.Fill)?.let {
             firedImpressions.remove(it.result.impressionId)
+            NativeAdWebViewStore.evict(it.result.impressionId)
         }
     }
 
     fun invalidateAll() {
         entries.clear()
         firedImpressions.clear()
+        NativeAdWebViewStore.evictAll()
     }
 }

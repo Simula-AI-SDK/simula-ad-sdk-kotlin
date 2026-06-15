@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
@@ -23,6 +24,9 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -212,8 +216,13 @@ private fun RewardedMinigame(
         mutableStateOf(RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, gateSeconds))
     }
     // 0→1 fill for the close treatment (progress bar / countdown ring), from play-to-earn progress.
-    var closeProgress by remember {
-        mutableStateOf(rewardCloseProgress(presentation.accumulatedPlayTimeMs, gateSeconds))
+    // An Animatable driven by one continuous animation (below) rather than a value stepped each tick,
+    // so the bar/ring advances every frame and stays smooth on slower devices.
+    val closeProgress = remember {
+        Animatable(rewardCloseProgress(presentation.accumulatedPlayTimeMs, gateSeconds))
+    }
+    val showsCloseBar = presentation.adBehavior?.close?.treatment.let {
+        it == CloseTreatment.COUNTDOWN_CIRCLE || it == CloseTreatment.PROGRESS_BAR
     }
 
     // Mid-ad store prompt — shown from half the play-to-earn gate until the reward unlocks.
@@ -296,7 +305,21 @@ private fun RewardedMinigame(
             // A re-run after the reward was already earned (background → resume) must not
             // keep accruing time.
             if (presentation.rewardEarned) return@repeatOnLifecycle
-            // Re-anchor on each resume so the backgrounded interval is never counted.
+            // Bar/ring fill: ONE continuous, frame-clock animation to full over the remaining
+            // foreground play time — not a value stepped each 250 ms tick. Anchored to the already-
+            // accrued fraction on every (re)resume; backgrounding cancels this child with the loop so
+            // the fill freezes, and the next resume re-anchors + re-launches. Frame-clock driven so it
+            // stays smooth when ticks land late under main-thread load.
+            if (showsCloseBar) {
+                closeProgress.snapTo(rewardCloseProgress(presentation.accumulatedPlayTimeMs, gateSeconds))
+                val remainingMs = (gateSeconds * 1000L - presentation.accumulatedPlayTimeMs).coerceAtLeast(0L)
+                launch {
+                    closeProgress.animateTo(1f, tween(durationMillis = remainingMs.toInt(), easing = LinearEasing))
+                }
+            }
+            // Re-anchor on each resume so the backgrounded interval is never counted. This loop now
+            // owns ONLY the accounting (reward earn, countdown number, store prompt); the visual fill
+            // is the continuous animation above.
             var lastTickMs = SystemClock.elapsedRealtime()
             while (true) {
                 delay(250L)
@@ -304,7 +327,6 @@ private fun RewardedMinigame(
                 presentation.accumulatedPlayTimeMs += now - lastTickMs
                 lastTickMs = now
                 secondsLeft = RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, gateSeconds)
-                closeProgress = rewardCloseProgress(presentation.accumulatedPlayTimeMs, gateSeconds)
                 // Reveal the store prompt at the halfway point to the reward (mid play-to-earn).
                 if (presentation.accumulatedPlayTimeMs >= gateSeconds * 1000L / 2) {
                     storePromptVisible = true
@@ -392,7 +414,7 @@ private fun RewardedMinigame(
             isRewardCopy = true,
             enabled = rewardEarned,
             remaining = secondsLeft,
-            progress = closeProgress,
+            progress = closeProgress.value,
             onClose = { onFinish(true) },
         )
 
