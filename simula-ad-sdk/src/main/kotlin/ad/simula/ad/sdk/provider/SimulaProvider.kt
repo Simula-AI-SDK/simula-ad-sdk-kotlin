@@ -13,6 +13,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import ad.simula.ad.sdk.ads.SimulaAds
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.model.SimulaContextValue
@@ -28,10 +29,64 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * CompositionLocal providing the Simula context to child composables.
- * Must be accessed within a [SimulaProvider] composable scope.
+ *
+ * Normally supplied by a [SimulaProvider] scope. When none is present — e.g. a
+ * standalone [ad.simula.ad.sdk.nativead.NativeAdSlot] hosted directly by the React
+ * Native wrapper, with no Compose `SimulaProvider` around it — it falls back to a
+ * process-global context backed by the session [ad.simula.ad.sdk.ads.SimulaAds.initialize]
+ * warmed. That way every such slot reuses ONE session instead of minting one per
+ * composition (mirrors iOS, where a `NativeAdSlot` reads `SimulaAds.shared`).
  */
 internal val LocalSimulaContext = staticCompositionLocalOf<SimulaContextValue> {
-    error("useSimula() / LocalSimulaContext must be used within a SimulaProvider")
+    globalSimulaContext()
+}
+
+// Process-global ad caches backing the fallback context (used by the older imperative
+// menu ad path; native ads use the standalone NativeAdCache object). Kept tiny and
+// thread-safe so the fallback is a complete, valid SimulaContextValue.
+private val globalAdCache = ConcurrentHashMap<String, AdData>()
+private val globalHeightCache = ConcurrentHashMap<String, Float>()
+private val globalNoFillSet = ConcurrentHashMap.newKeySet<String>()
+
+// Built once and reused. Only ever touched on the main thread (the
+// staticCompositionLocalOf default factory runs during composition), so no
+// synchronization is needed.
+private var cachedGlobalContext: SimulaContextValue? = null
+
+/**
+ * Builds (once) a [SimulaContextValue] backed by the global session that
+ * [ad.simula.ad.sdk.ads.SimulaAds.initialize] warmed — the fallback used by
+ * [LocalSimulaContext] when no [SimulaProvider] is in the tree.
+ *
+ * `ensureSession` and `apiKey` read the live global store, so a hosted `NativeAdSlot`
+ * resolves the same warmed session every other surface uses. The snapshot fields
+ * (`sessionId`, `consent`) are not consulted by the native-ad path (it reads targeting
+ * from [ad.simula.ad.sdk.nativead.NativeAdContextStore] and consent from
+ * [SimulaPrivacy] at request time), so caching a single instance is safe.
+ *
+ * @throws IllegalStateException if [ad.simula.ad.sdk.ads.SimulaAds.initialize] has not run.
+ */
+internal fun globalSimulaContext(): SimulaContextValue {
+    check(SimulaAds.isInitialized) {
+        "NativeAdSlot must be used inside a SimulaProvider, or after SimulaAds.initialize()."
+    }
+    cachedGlobalContext?.let { return it }
+    val consent = SimulaPrivacy.current
+    return SimulaContextValue(
+        apiKey = SimulaAds.apiKey,
+        devMode = SimulaAds.devMode,
+        sessionId = SimulaAds.store.sessionId,
+        hasPrivacyConsent = consent.hasPrivacyConsent,
+        consent = consent,
+        updateConsent = { SimulaPrivacy.apply(it) },
+        ensureSession = { SimulaAds.store.ensureSession() },
+        getCachedAd = { slot, position -> globalAdCache[getCacheKey(slot, position)] },
+        cacheAd = { slot, position, ad -> globalAdCache[getCacheKey(slot, position)] = ad },
+        getCachedHeight = { slot, position -> globalHeightCache[getCacheKey(slot, position)] },
+        cacheHeight = { slot, position, height -> globalHeightCache[getCacheKey(slot, position)] = height },
+        hasNoFill = { slot, position -> globalNoFillSet.contains(getCacheKey(slot, position)) },
+        markNoFill = { slot, position -> globalNoFillSet.add(getCacheKey(slot, position)) },
+    ).also { cachedGlobalContext = it }
 }
 
 /**

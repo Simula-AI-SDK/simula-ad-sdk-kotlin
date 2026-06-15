@@ -30,6 +30,7 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -73,6 +74,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -81,6 +83,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import kotlin.math.ceil
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -214,11 +218,11 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
     }
 }
 
-/** True if the close gate was already started in a prior Activity instance (config-change
- * recreation) and its wall-clock window has elapsed. Anchored so rotation can't reset the dwell. */
+/** True if the close gate's foreground dwell was already satisfied in a prior Activity instance
+ * (config-change recreation), so the close should start enabled. Based on accumulated foreground
+ * time so rotation can't reset the dwell. */
 private fun gateAlreadyElapsed(p: InterstitialPresentation, total: Duration): Boolean =
-    p.gateStartedAtMs != 0L &&
-        (SystemClock.elapsedRealtime() - p.gateStartedAtMs).milliseconds >= total
+    p.accumulatedGateTimeMs >= total.inWholeMilliseconds
 
 @Composable
 private fun CreativeInterstitial(
@@ -253,9 +257,17 @@ private fun CreativeInterstitial(
     }
     val closeProgress = remember { Animatable(0f) }
 
+    // Mid-ad store prompt (`store_prompt`) — an early install affordance revealed at the halfway
+    // point to the close button and removed the instant the real close button appears (see
+    // `!closeEnabled` at the render site). Revealed from the gate loop below so it tracks the same
+    // foreground-only dwell; with no gate (immediate close) there is no pre-close window.
+    val storePrompt = behavior?.storePrompt
+    var storePromptVisible by remember { mutableStateOf(false) }
+
     // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE unlocks the close button immediately,
     // bypassing the close-delay gate.
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     // auto_store_redirect: open the advertiser store once (no user tap). PLAYABLE_END fires when the
     // close button appears (below); END_SCREEN_1/2_OPEN fire when the creative navigates to the
     // matching end-screen marker (handled in the WebView client). A disabled/missing config no-ops.
@@ -285,60 +297,48 @@ private fun CreativeInterstitial(
     }
 
     if (gateTotal > Duration.ZERO) {
+        // Foreground-only close gate. Dwell accrues only while the Activity is RESUMED:
+        // repeatOnLifecycle cancels the ticking loop when the app is backgrounded and restarts it on
+        // return, so the close can't be unlocked by simply leaving the app for the gate duration. The
+        // accumulated time lives on the presentation, so a config change (rotation) resumes it. The
+        // mid-ad store prompt is revealed off the same accrued dwell at the halfway point.
         LaunchedEffect(Unit) {
-            // Anchor the dwell to wall-clock on first run so a config-change recreation resumes the
-            // remaining time instead of restarting it.
-            if (presentation.gateStartedAtMs == 0L) {
-                presentation.gateStartedAtMs = SystemClock.elapsedRealtime()
+            val totalMs = gateTotal.inWholeMilliseconds
+            if (presentation.accumulatedGateTimeMs >= totalMs) {
+                closeEnabled = true
+                return@LaunchedEffect
             }
-            val elapsed = (SystemClock.elapsedRealtime() - presentation.gateStartedAtMs).milliseconds
-            val remaining = gateTotal - elapsed
-            if (remaining.isPositive()) {
-                when (treatment) {
-                    // Ring / bar fill linearly over the remaining time (the animation IS the wait).
-                    CloseTreatment.COUNTDOWN_CIRCLE, CloseTreatment.PROGRESS_BAR -> {
-                        val start = (elapsed / gateTotal).toFloat().coerceIn(0f, 1f)
-                        closeProgress.snapTo(start)
-                        closeProgress.animateTo(
-                            1f,
-                            tween(remaining.inWholeMilliseconds.toInt(), easing = LinearEasing),
-                        )
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                if (closeEnabled) return@repeatOnLifecycle
+                // Show the ring/bar at the already-accrued fraction immediately on (re)resume.
+                if (treatment == CloseTreatment.COUNTDOWN_CIRCLE || treatment == CloseTreatment.PROGRESS_BAR) {
+                    closeProgress.snapTo((presentation.accumulatedGateTimeMs.toFloat() / totalMs).coerceIn(0f, 1f))
+                }
+                // Re-anchor on each resume so a backgrounded interval is never counted.
+                var lastTickMs = SystemClock.elapsedRealtime()
+                while (true) {
+                    delay(250L)
+                    val now = SystemClock.elapsedRealtime()
+                    presentation.accumulatedGateTimeMs += now - lastTickMs
+                    lastTickMs = now
+                    val accumulated = presentation.accumulatedGateTimeMs
+                    when (treatment) {
+                        CloseTreatment.COUNTDOWN_CIRCLE, CloseTreatment.PROGRESS_BAR ->
+                            closeProgress.snapTo((accumulated.toFloat() / totalMs).coerceIn(0f, 1f))
+                        CloseTreatment.REWARD_OR_CLOSE_LABEL ->
+                            closeRemaining = ceil((totalMs - accumulated).coerceAtLeast(0L) / 1000.0).toInt()
+                        else -> Unit
                     }
-                    // Tick the visible seconds down once per second.
-                    CloseTreatment.REWARD_OR_CLOSE_LABEL -> {
-                        var left = ceil(remaining.toDouble(DurationUnit.SECONDS)).toInt()
-                        closeRemaining = left
-                        while (left > 0) {
-                            delay(1000)
-                            left -= 1
-                            closeRemaining = left
-                        }
+                    // Reveal the mid-ad store prompt at the halfway point (foreground dwell only).
+                    if (accumulated >= totalMs / 2) {
+                        storePromptVisible = true
                     }
-                    else -> delay(remaining)
+                    if (accumulated >= totalMs) {
+                        closeEnabled = true
+                        break
+                    }
                 }
             }
-            closeEnabled = true
-        }
-    }
-
-    // Mid-ad store prompt (`store_prompt`) — an early install affordance shown at the halfway point
-    // to the close button (`closeTime / 2`, where closeTime is the server-driven close delay) and
-    // removed the instant the real close button appears (see `!closeEnabled` at the render site).
-    // Independent of close chrome + skoverlay. When the close is immediately available (no gate)
-    // there is no pre-close window, so it never shows.
-    val storePrompt = behavior?.storePrompt
-    var storePromptVisible by remember { mutableStateOf(false) }
-    if (storePrompt != null && storePrompt.enabled && gateTotal > Duration.ZERO) {
-        LaunchedEffect(Unit) {
-            // Anchor to the same wall-clock start as the close gate so a config-change recreation
-            // resumes the half-way reveal rather than restarting it.
-            if (presentation.gateStartedAtMs == 0L) {
-                presentation.gateStartedAtMs = SystemClock.elapsedRealtime()
-            }
-            val elapsed = (SystemClock.elapsedRealtime() - presentation.gateStartedAtMs).milliseconds
-            val remaining = gateTotal / 2 - elapsed
-            if (remaining.isPositive()) delay(remaining)
-            storePromptVisible = true
         }
     }
 
@@ -366,7 +366,7 @@ private fun CreativeInterstitial(
             // FIX M2: skip impression when there is no impression id.
             if (ad.impressionId.isNotBlank()) {
                 SimulaScope.launch {
-                    SimulaApiClient.trackImpression(ad.impressionId, presentation.apiKey, ad.experiment)
+                    SimulaApiClient.trackImpression(ad.impressionId, presentation.apiKey)
                 }
             }
         }
@@ -424,7 +424,13 @@ private fun CreativeInterstitial(
             StorePromptBadge(
                 prompt = storePrompt,
                 closePosition = close.position,
-                onTap = { openDestination(ad) },
+                onTap = {
+                    // Mid-store-prompt click beacon — only on a real user tap (not auto_store_redirect).
+                    if (ad.impressionId.isNotBlank()) {
+                        SimulaScope.launch { SimulaApiClient.trackClick(ad.impressionId, presentation.apiKey) }
+                    }
+                    openDestination(ad)
+                },
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
             )
         }
@@ -549,6 +555,15 @@ internal fun BoxScope.AdCloseButton(
     onClose: () -> Unit,
 ) {
     val tint = remember(progressBarColor) { ColorUtil.parseColor(progressBarColor) }
+    // Glide the bar/ring fill between the gate loop's coarse (250 ms) progress updates instead of
+    // snapping to each one, so the indicator animates smoothly rather than stepping/looking laggy.
+    // Linear + matched to the tick cadence → continuous fill. (The countdown *number* still steps per
+    // second — it can't show fractions — only the bar/ring is interpolated.)
+    val animatedProgress by animateFloatAsState(
+        targetValue = progress.coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 250, easing = LinearEasing),
+        label = "closeProgress",
+    )
     // The ✕ honors its configured corner, EXCEPT progress_bar at bottom_left: the gate bar takes the
     // bottom edge there, so the ✕ moves up to the top-right. (The mid-ad store prompt sits top-right
     // for any bottom_left close — diagonally opposite a bottom-left ✕, or sharing the top-right with
@@ -582,7 +597,7 @@ internal fun BoxScope.AdCloseButton(
         ) {
             Box(
                 modifier = Modifier
-                    .fillMaxWidth(progress.coerceIn(0f, 1f))
+                    .fillMaxWidth(animatedProgress)
                     .height(CLOSE_PROGRESS_BAR_HEIGHT_DP.dp)
                     .background(tint),
             )
@@ -631,7 +646,7 @@ internal fun BoxScope.AdCloseButton(
                             drawArc(
                                 color = tint,
                                 startAngle = -90f,
-                                sweepAngle = 360f * progress.coerceIn(0f, 1f),
+                                sweepAngle = 360f * animatedProgress,
                                 useCenter = false,
                                 topLeft = Offset(stroke / 2f, stroke / 2f),
                                 size = Size(size.width - stroke, size.height - stroke),

@@ -387,9 +387,10 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
                         val originalHost = Uri.parse(url).host
                         val requestHost = Uri.parse(requestUrl).host
                         if (originalHost == requestHost) return false
-                        // Open external URLs in system browser
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl))
-                        ctx.startActivity(intent)
+                        // Open external URLs in system browser. Wrapped so a URL with no matching
+                        // handler (custom scheme, tel:/mailto:, or no browser installed) can't crash
+                        // the host with ActivityNotFoundException — mirrors CreativeCtaRouter.
+                        runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl))) }
                         return true
                     }
                 },

@@ -74,6 +74,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     private var presentation: RewardedPresentation? = null
     private var token: String? = null
     private var closed = false
+    private var completed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -101,7 +102,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                 // reported when the minigame closes; the Activity finishes after the fallback.
                 FallbackAdHost(
                     impressionId = p.impressionId,
-                    onFullyClosed = ::finishAd,
+                    onFullyClosed = ::completeReward,
                     autoStoreRedirect = p.adBehavior?.autoStoreRedirect,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
@@ -131,6 +132,20 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         if (closed) return
         closed = true
         presentation?.let { p -> p.callbacks.onClose(earned, elapsedSeconds(p)) }
+    }
+
+    /**
+     * The user has dismissed every screen (playable + all fallback ad screens) — the unit is fully
+     * complete. Fire reward completion (the earned-reward signal + server verification) exactly once,
+     * then tear the Activity down. Deferred to here so closing the playable alone doesn't verify the
+     * reward; with no fallback screens, [FallbackAdHost] calls this immediately on close.
+     */
+    private fun completeReward() {
+        if (!completed) {
+            completed = true
+            presentation?.let { p -> p.callbacks.onRewardCompleted(p.rewardEarned, elapsedSeconds(p)) }
+        }
+        finishAd()
     }
 
     /** Tear the Activity down (after the optional fallback ad). */
@@ -393,6 +408,10 @@ private fun RewardedMinigame(
                 edgePadding = 8.dp,
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
                 onTap = {
+                    // Mid-store-prompt click beacon — only on a real user tap (not auto_store_redirect).
+                    if (presentation.impressionId.isNotBlank()) {
+                        SimulaScope.launch { SimulaApiClient.trackClick(presentation.impressionId, presentation.apiKey) }
+                    }
                     CreativeCtaRouter.open(
                         context.applicationContext,
                         presentation.trackingUrl,

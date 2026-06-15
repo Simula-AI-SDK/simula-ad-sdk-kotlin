@@ -18,6 +18,11 @@ android {
 
     buildTypes {
         release {
+            // Published SDK: the library is intentionally NOT minified here. The
+            // consuming app's R8 shrinks & obfuscates the SDK in its final build,
+            // so pre-minifying the AAR gives no app-size benefit and would
+            // obfuscate the public API (breaking consumers). Size is optimized
+            // for consumers via the tight rules in consumer-rules.pro.
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

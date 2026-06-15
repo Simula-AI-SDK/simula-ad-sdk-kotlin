@@ -191,6 +191,18 @@ fun NativeAdSlot(
                         }
                     },
                     onAdClick = { /* CLICKED — reserved for a future click callback / telemetry hook. */ },
+                    onLoadError = {
+                        // The creative's WebView failed to load (e.g. no connectivity when this row
+                        // scrolled into view — including a recycled row whose height was restored from
+                        // cache, so we must NOT gate on height here). Collapse the slot instead of
+                        // showing the WebView's built-in "Webpage not available" page. The fill stays
+                        // cached (not invalidated), so a remount retries once connectivity returns.
+                        if (state is NativeAdSlotState.Filled) {
+                            heightDp = 0f
+                            state = NativeAdSlotState.Empty
+                            currentOnError(SimulaAdError.Network(null))
+                        }
+                    },
                     modifier = Modifier.trackNativeAdViewability(
                         // Only measure once the creative has a real, laid-out height.
                         enabled = heightDp > 0f,
@@ -199,12 +211,16 @@ fun NativeAdSlot(
                             impressionFired = true
                             // Remember it on the cache entry so a remount of the same serve never re-fires.
                             (NativeAdCache.get(adUnitId, position) as? NativeAdCache.Value.Fill)?.impressionFired = true
-                            // Co-fire the callback and the server impression off the one viewability event.
-                            currentOnImpression(NativeAdData(result.impressionId, result.adFormat, adUnitId))
-                            // No server impression for a preview (blank id).
-                            if (result.impressionId.isNotBlank()) {
-                                SimulaScope.launch {
-                                    SimulaApiClient.trackImpression(result.impressionId, ctx.apiKey)
+                            // Dedup by impression id too, so the same served ad fires at most one
+                            // impression process-wide (e.g. shown in two slots, or re-composed). The
+                            // callback + server beacon co-fire together. A preview (blank id) always fires
+                            // the callback but never a beacon.
+                            if (result.impressionId.isBlank() || NativeAdCache.markImpressionFired(result.impressionId)) {
+                                currentOnImpression(NativeAdData(result.impressionId, result.adFormat, adUnitId))
+                                if (result.impressionId.isNotBlank()) {
+                                    SimulaScope.launch {
+                                        SimulaApiClient.trackImpression(result.impressionId, ctx.apiKey)
+                                    }
                                 }
                             }
                         }

@@ -30,7 +30,18 @@ internal object NativeAdCache {
 
     private val entries = ConcurrentHashMap<String, Value>()
 
+    /** Impression ids whose impression already fired. Backs [markImpressionFired] so the same served
+     * ad reports at most one impression process-wide — even if shown in two slots (same cache key) or
+     * re-composed — independent of the per-slot [Value.Fill.impressionFired] flag. */
+    private val firedImpressions: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     private fun key(adUnitId: String?, position: Int) = "${adUnitId.orEmpty()}:$position"
+
+    /** Atomically marks [impressionId] as having fired. Returns true only the first time, so callers
+     * fire the impression (callback + server beacon) at most once per served ad. Blank ids (previews)
+     * are never tracked and always return false. */
+    fun markImpressionFired(impressionId: String): Boolean =
+        impressionId.isNotBlank() && firedImpressions.add(impressionId)
 
     fun get(adUnitId: String?, position: Int): Value? = entries[key(adUnitId, position)]
 
@@ -45,10 +56,14 @@ internal object NativeAdCache {
     }
 
     fun invalidate(adUnitId: String?, position: Int) {
-        entries.remove(key(adUnitId, position))
+        // Drop the impression-id mark too so a deliberately-refreshed slot can fire again.
+        (entries.remove(key(adUnitId, position)) as? Value.Fill)?.let {
+            firedImpressions.remove(it.result.impressionId)
+        }
     }
 
     fun invalidateAll() {
         entries.clear()
+        firedImpressions.clear()
     }
 }

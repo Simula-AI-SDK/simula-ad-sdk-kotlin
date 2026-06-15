@@ -143,7 +143,7 @@ internal object SimulaApiClient {
                 when {
                     catalog is JsonArray -> catalog
                     catalog is JsonObject && catalog.containsKey("data") ->
-                        catalog["data"]!!.jsonArray
+                        catalog["data"] as? JsonArray ?: JsonArray(emptyList())
                     else ->
                         responseJson["data"]?.jsonArray ?: JsonArray(emptyList())
                 }
@@ -623,26 +623,43 @@ internal object SimulaApiClient {
     }
 
     /**
-     * Track an ad impression. Best-effort, silently fails. When the load response carried an
-     * `experiment` node, its assignment metadata rides along so impressions can be attributed
-     * to the A/B variant.
+     * Track an ad impression as seen (`POST /impressions/{impressionId}/seen`). Best-effort,
+     * silently fails. The endpoint takes no body — A/B attribution is stamped on the serve doc
+     * at load time, not on this beacon. [impressionId] is the serve handle for rewarded/
+     * interstitial and the ad id for native; the backend resolves either.
      */
     suspend fun trackImpression(
-        adId: String,
+        impressionId: String,
         apiKey: String,
-        experiment: Experiment? = null,
     ): Unit = withContext(Dispatchers.IO) {
+        if (impressionId.isBlank()) return@withContext
         try {
-            val body = buildJsonObject {
-                experiment?.experimentId?.let { put("experiment_id", it) }
-                experiment?.variantId?.let { put("variant_id", it) }
-                experiment?.layer?.let { put("layer", it) }
-            }
             SimulaHttp.request(
-                url = "$API_BASE_URL/track/impression/$adId",
+                url = "$API_BASE_URL/impressions/$impressionId/seen",
                 method = "POST",
                 headers = authHeaders(apiKey),
-                body = json.encodeToString(body),
+            )
+        } catch (_: Exception) {
+            // Silently fail
+        }
+    }
+
+    /**
+     * Track a user-initiated click on the impression (`POST /impressions/{impressionId}/click`).
+     * Increments the click counter; the endpoint takes no body. Fired when the mid-store prompt is
+     * tapped. [impressionId] is the serve handle for rewarded/interstitial and the ad id for native;
+     * the backend resolves either. Best-effort, silently fails — tracking must never disrupt the ad.
+     */
+    suspend fun trackClick(
+        impressionId: String,
+        apiKey: String,
+    ): Unit = withContext(Dispatchers.IO) {
+        if (impressionId.isBlank()) return@withContext
+        try {
+            SimulaHttp.request(
+                url = "$API_BASE_URL/impressions/$impressionId/click",
+                method = "POST",
+                headers = authHeaders(apiKey),
             )
         } catch (_: Exception) {
             // Silently fail
@@ -672,6 +689,29 @@ internal object SimulaApiClient {
                 method = "POST",
                 headers = authHeaders(apiKey),
                 body = json.encodeToString(reportBody),
+            )
+        } catch (_: Exception) {
+            // Silently fail
+        }
+    }
+
+    /**
+     * Record a user-initiated interest signal against the impression
+     * (`PATCH /impressions/{impressionId}/interest?interest=1|-1`). [interest] is `+1` for
+     * "Interested" and `-1` for "Not interested". The value rides in the query string and the
+     * endpoint takes no body. Best-effort, silently fails — feedback must never disrupt the ad.
+     */
+    suspend fun recordInterest(
+        impressionId: String,
+        interest: Int,
+        apiKey: String,
+    ): Unit = withContext(Dispatchers.IO) {
+        if (impressionId.isBlank()) return@withContext
+        try {
+            SimulaHttp.request(
+                url = "$API_BASE_URL/impressions/$impressionId/interest?interest=$interest",
+                method = "PATCH",
+                headers = authHeaders(apiKey),
             )
         } catch (_: Exception) {
             // Silently fail

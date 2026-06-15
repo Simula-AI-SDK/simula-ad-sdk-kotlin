@@ -6,13 +6,12 @@ import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -43,9 +42,12 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import kotlin.math.ceil
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
  * Hosts an ad creative and, when it closes, fetches the serve's fallback ad screens
@@ -144,12 +146,28 @@ private sealed interface FallbackPhase {
  */
 @Composable
 private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Unit) {
+    val lifecycleOwner = LocalLifecycleOwner.current
     var countdown by remember { mutableStateOf(5) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ring = remember { Animatable(0f) }
+    // Foreground-only 5s gate: time accrues only while the Activity is RESUMED, so leaving the app
+    // pauses the countdown (parity with the interstitial / rewarded close gates). repeatOnLifecycle
+    // cancels the loop when backgrounded and resumes it from the accrued time on return.
     LaunchedEffect(Unit) {
-        launch { ring.animateTo(1f, tween(5000, easing = LinearEasing)) }
-        repeat(5) { delay(1000); countdown-- }
+        val totalMs = 5_000L
+        var accumulatedMs = 0L
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            // Re-anchor on each resume so the backgrounded interval is never counted.
+            var lastTickMs = SystemClock.elapsedRealtime()
+            while (accumulatedMs < totalMs) {
+                delay(50L)
+                val now = SystemClock.elapsedRealtime()
+                accumulatedMs += now - lastTickMs
+                lastTickMs = now
+                ring.snapTo((accumulatedMs.toFloat() / totalMs).coerceIn(0f, 1f))
+                countdown = ceil((totalMs - accumulatedMs).coerceAtLeast(0L) / 1000.0).toInt()
+            }
+        }
     }
     // Back can only close once the countdown elapses (parity with the creative's gated close).
     BackHandler(enabled = true) { if (countdown <= 0) onClose() }
