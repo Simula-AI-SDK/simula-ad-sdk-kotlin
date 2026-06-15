@@ -1,19 +1,20 @@
 package ad.simula.ad.sdk.nativead
 
+import android.os.SystemClock
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.collectLatest
 
 /**
  * OMID-shaped viewability seam for native ads.
@@ -30,12 +31,18 @@ import kotlinx.coroutines.flow.collectLatest
  * one fire when the threshold is met — and the slot already co-fires `onImpression` with
  * `trackImpression` off the same call, satisfying the PRD's "co-fire, do not decouple" rule.
  *
- * Implementation: [onGloballyPositioned] recomputes the visible fraction on every layout/scroll
- * change and collapses it to a boolean (≥ [thresholdFraction]). A coroutine watches that boolean and
- * arms a [minVisibleMillis] dwell timer; `distinctUntilChanged` + `collectLatest` mean the timer runs
- * uninterrupted while the slot stays visible and is cancelled (reset) the instant it drops below
- * threshold. Fires at most once. The work runs only while the slot is composed, so a scrolled-away
- * slot costs nothing.
+ * ## Implementation
+ * [onGloballyPositioned] only *caches* the slot's latest geometry; a foreground-gated loop **samples**
+ * it on a fixed cadence and feeds the visible fraction to a [ViewabilityDwell] state machine that
+ * owns the ≥threshold + ≥dwell decision. Polling (rather than firing straight from the layout
+ * callback) is deliberate: layout/scroll callbacks are not a reliable "is it on screen right now"
+ * signal — an overlay or dialog dismissing, a sibling resizing, a parent fade, or the [enabled] flip
+ * landing without a fresh layout can all change effective visibility without ever repositioning *this*
+ * node, so an event-only gate silently under-fires. Sampling also lets [ViewabilityDwell] apply
+ * hysteresis around the threshold so a creative parked right at 50% can't flip in/out on sub-pixel
+ * jitter and keep resetting the dwell. Fires at most once. `repeatOnLifecycle(RESUMED)` means a
+ * backgrounded window accrues nothing (and breaks continuity), and a scrolled-away slot that leaves
+ * composition cancels the loop entirely, so it costs nothing.
  */
 internal fun Modifier.trackNativeAdViewability(
     enabled: Boolean,
@@ -44,26 +51,74 @@ internal fun Modifier.trackNativeAdViewability(
     onImpression: () -> Unit,
 ): Modifier = composed {
     val currentOnImpression by rememberUpdatedState(onImpression)
-    val visible = remember { mutableStateOf(false) }
+    // Latest layout geometry, refreshed by onGloballyPositioned and sampled by the loop below.
+    val coords = remember { mutableStateOf<LayoutCoordinates?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     LaunchedEffect(enabled, thresholdFraction, minVisibleMillis) {
         if (!enabled) return@LaunchedEffect
         var fired = false
-        snapshotFlow { visible.value }
-            .distinctUntilChanged()
-            .collectLatest { isVisible ->
-                if (isVisible && !fired) {
-                    // Held continuously? A drop below threshold cancels this block (collectLatest),
-                    // so reaching the end means ≥threshold for the full dwell window.
-                    delay(minVisibleMillis)
+        // Accrue dwell only while the host is foregrounded: a backgrounded window isn't viewable, and
+        // repeatOnLifecycle cancels the loop on background (so a fresh dwell restarts on return — the
+        // same foreground-only gating the interstitial/rewarded timers use).
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            if (fired) return@repeatOnLifecycle
+            val dwell = ViewabilityDwell(thresholdFraction, minVisibleMillis)
+            while (true) {
+                delay(ViewabilityDwell.SAMPLE_INTERVAL_MS)
+                val fraction = coords.value?.let(::visibleFraction) ?: 0f
+                if (dwell.sample(fraction, SystemClock.elapsedRealtime())) {
                     fired = true
                     currentOnImpression()
+                    return@repeatOnLifecycle
                 }
             }
+        }
     }
 
-    onGloballyPositioned { coords ->
-        visible.value = enabled && visibleFraction(coords) >= thresholdFraction
+    onGloballyPositioned { coords.value = it }
+}
+
+/**
+ * Pure viewability dwell state machine: feed it visibility samples over time and it reports the single
+ * moment the slot has been continuously viewable for [minVisibleMillis]. No Compose dependency, so the
+ * threshold + dwell + hysteresis logic is unit-testable in isolation.
+ *
+ * Hysteresis: a sample becomes viewable once the visible fraction reaches [enterFraction], and stays
+ * viewable until it falls below `enterFraction * `[EXIT_RATIO]. Without this band a creative parked
+ * right at the threshold would flip in and out on sub-pixel layout jitter and keep resetting the
+ * dwell, so the impression would never fire.
+ */
+internal class ViewabilityDwell(
+    private val enterFraction: Float,
+    private val minVisibleMillis: Long,
+) {
+    private var viewable = false
+    private var viewableSinceMs = -1L
+
+    /**
+     * Record a [fraction] (0..1) visible sample taken at [nowMs] (a monotonic clock, e.g.
+     * [SystemClock.elapsedRealtime]). Returns true exactly when continuous viewable time first reaches
+     * [minVisibleMillis] — the caller fires the impression once and stops sampling. A drop below the
+     * exit band resets the dwell so the next viewable run starts counting from zero.
+     */
+    fun sample(fraction: Float, nowMs: Long): Boolean {
+        viewable = if (viewable) fraction >= enterFraction * EXIT_RATIO else fraction >= enterFraction
+        if (!viewable) {
+            viewableSinceMs = -1L
+            return false
+        }
+        if (viewableSinceMs < 0L) viewableSinceMs = nowMs
+        return nowMs - viewableSinceMs >= minVisibleMillis
+    }
+
+    companion object {
+        /** Exit threshold as a fraction of the enter threshold (50% enter → 40% exit). */
+        const val EXIT_RATIO = 0.8f
+
+        /** How often the composable samples geometry while the slot is on screen. Fine enough that
+         *  the ≥1s dwell is measured to ~1 frame, coarse enough to be negligible while idle. */
+        const val SAMPLE_INTERVAL_MS = 150L
     }
 }
 
