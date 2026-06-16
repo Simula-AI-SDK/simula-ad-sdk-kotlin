@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,6 +60,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -239,6 +241,23 @@ private fun RewardedMinigame(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    // Suspend the creative's JS/timers/video while the host is backgrounded — AndroidView won't pause
+    // a WebView on its own, so a rewarded ad left open behind the home screen would keep running.
+    // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
+    var creativeWebView by remember { mutableStateOf<WebView?>(null) }
+    DisposableEffect(lifecycleOwner, creativeWebView) {
+        val wv = creativeWebView
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> wv?.onPause()
+                Lifecycle.Event.ON_RESUME -> wv?.onResume()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE (e.g. survey finished) grants the reward and
     // reveals the close button immediately, bypassing the play timer.
     val autoRedirect = presentation.adBehavior?.autoStoreRedirect
@@ -387,6 +406,7 @@ private fun RewardedMinigame(
                     } else {
                         loadUrl(url)
                     }
+                    creativeWebView = this
                 }
             },
             // The game canvas fills edge-to-edge: inset only vertically (status / nav / top

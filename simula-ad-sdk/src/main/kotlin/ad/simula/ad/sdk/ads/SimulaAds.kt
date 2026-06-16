@@ -101,9 +101,11 @@ object SimulaAds {
         // Seed the process-wide native-ad targeting context so every POST /load/native carries it.
         NativeAdContextStore.set(adContext)
 
-        // Build the custom User-Agent + device id once; SimulaHttp stamps them on every request.
+        // Build the custom User-Agent once (cheap, Build statics); SimulaHttp stamps it on every
+        // request. The device id is a synchronous ContentProvider read, so it's resolved off the
+        // main thread via prime() to keep it off the app-start critical path.
         SimulaUserAgent.build(appContext)
-        SimulaDeviceId.build(appContext)
+        SimulaDeviceId.prime(appContext)
 
         // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
         // seeds it — identical resolution to SimulaProvider, so the imperative and

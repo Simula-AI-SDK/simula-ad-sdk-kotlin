@@ -58,6 +58,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -83,6 +84,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
 import kotlin.math.ceil
 import kotlin.time.Duration
@@ -482,6 +484,23 @@ private fun CreativeHtml(
     // applicationContext so the store/browser open survives if the interstitial is
     // later dismissed.
     val appContext = LocalContext.current.applicationContext
+    var creativeWebView by remember { mutableStateOf<WebView?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    // Suspend the creative's JS/timers/video while the host is backgrounded — AndroidView won't pause
+    // a WebView on its own, so an interstitial left open behind the home screen would keep running.
+    // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
+    DisposableEffect(lifecycleOwner, creativeWebView) {
+        val wv = creativeWebView
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> wv?.onPause()
+                Lifecycle.Event.ON_RESUME -> wv?.onResume()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     AndroidView(
         factory = { ctx ->
             WebViewPool.acquire(
@@ -511,6 +530,7 @@ private fun CreativeHtml(
                 BridgeWebViewInstaller.install(this, bridge)
                 // Self-contained creative: asset URLs are absolute (baseURL = null).
                 loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+                creativeWebView = this
             }
         },
         modifier = modifier,

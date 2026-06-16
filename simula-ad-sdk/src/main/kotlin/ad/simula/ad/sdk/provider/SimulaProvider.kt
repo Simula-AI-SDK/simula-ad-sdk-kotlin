@@ -140,12 +140,13 @@ fun SimulaProvider(
 
     val context = LocalContext.current
 
-    // Build the custom User-Agent + device id synchronously during composition so they're set
-    // before the first /session/create. The imperative SimulaAds.initialize() path builds them
-    // too; first wins.
+    // Build the custom User-Agent synchronously during composition (cheap, Build statics) so it's set
+    // before the first /session/create. The device id is a synchronous ContentProvider read, so it's
+    // resolved off the main thread via prime() rather than blocking composition. The imperative
+    // SimulaAds.initialize() path primes them too; first wins.
     remember(context) {
         SimulaUserAgent.build(context.applicationContext)
-        SimulaDeviceId.build(context.applicationContext)
+        SimulaDeviceId.prime(context.applicationContext)
     }
 
     // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
