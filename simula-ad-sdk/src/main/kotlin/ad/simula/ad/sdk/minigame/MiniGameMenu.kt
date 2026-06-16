@@ -796,8 +796,12 @@ private fun AdIframeOverlay(
                                     val originalHost = Uri.parse(url).host
                                     val requestHost = Uri.parse(requestUrl).host
                                     if (originalHost == requestHost) return false
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl))
-                                    ctx.startActivity(intent)
+                                    // Consume the navigation either way; runCatching so a custom-scheme
+                                    // link with no installed handler can't throw ActivityNotFoundException
+                                    // into the host (matches the other CTA sites).
+                                    runCatching {
+                                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl)))
+                                    }
                                     return true
                                 }
                             },

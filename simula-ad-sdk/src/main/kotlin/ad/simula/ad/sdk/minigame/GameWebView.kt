@@ -149,7 +149,11 @@ fun GameWebView(
     val animatedHeightDp = remember { Animatable(initialHeightDp) }
     // Re-clamp height on screen rotation
     LaunchedEffect(screenHeightDp) {
-        val clamped = animatedHeightDp.value.coerceIn(500f, screenHeightDp)
+        // coerceAtMost-then-coerceAtLeast (not coerceIn) so a window shorter than 500dp — split-screen,
+        // freeform, foldable cover display — can't throw "empty range" (min > max) and crash the dialog.
+        val clamped = animatedHeightDp.value
+            .coerceAtMost(screenHeightDp)
+            .coerceAtLeast(minOf(500f, screenHeightDp))
         animatedHeightDp.snapTo(clamped)
     }
 
@@ -245,7 +249,8 @@ fun GameWebView(
                                     accumulatedDragPx += dragAmount
                                     val dragDp = accumulatedDragPx / density
                                     val newHeight = (startHeight - dragDp)
-                                        .coerceIn(500f, screenHeightDp)
+                                        .coerceAtMost(screenHeightDp)
+                                        .coerceAtLeast(minOf(500f, screenHeightDp))
                                     scope.launch {
                                         animatedHeightDp.snapTo(newHeight)
                                     }

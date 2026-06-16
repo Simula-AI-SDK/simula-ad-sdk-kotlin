@@ -108,6 +108,10 @@ internal object ImageCache {
             throw ce // never record a cancellation — stays immediately retryable
         } catch (e: Exception) {
             DecodedImage.Failed
+        } catch (t: Throwable) {
+            // Catch Error too (e.g. OutOfMemoryError decoding a huge/hostile ad image): the SDK must
+            // never crash the host, so a failed decode collapses to a no-image result.
+            DecodedImage.Failed
         }
         if (result is DecodedImage.Failed) {
             failures[url] = now() // negative-cache for the TTL, don't pollute the LruCache

@@ -21,6 +21,15 @@ internal object ImageDecoder {
     const val MAX_LONG_EDGE = 800
 
     /**
+     * Above this encoded size, an animated source is rendered as a single static (downsampled) frame
+     * instead of a live [android.graphics.drawable.AnimatedImageDrawable]. Animated playback decodes
+     * frames continuously on the OS RenderThread — an OutOfMemoryError there is outside every
+     * try/catch and would crash the host — so a pathologically large GIF/WebP is shown as one bounded,
+     * catchable static frame rather than animated. Comfortably above normal ad-creative sizes.
+     */
+    const val MAX_ANIMATED_BYTES = 4 * 1024 * 1024
+
+    /**
      * Decode raw bytes into a [DecodedImage]. Animated sources (GIF / animated
      * WebP) are kept as encoded bytes on API 28+ so the render layer can build a
      * streaming [AnimatedImageDrawable] per use; everything else is rasterized to
@@ -28,9 +37,13 @@ internal object ImageDecoder {
      */
     fun decode(bytes: ByteArray, maxLongEdge: Int = MAX_LONG_EDGE): DecodedImage {
         if (bytes.isEmpty()) return DecodedImage.Failed
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isAnimatedFormat(bytes)) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            bytes.size <= MAX_ANIMATED_BYTES && isAnimatedFormat(bytes)
+        ) {
             return DecodedImage.Animated(bytes)
         }
+        // Oversized animated source (or pre-P): fall through to a single downsampled static frame so
+        // the RenderThread never animates an unbounded source.
         val bmp = decodeStatic(bytes, maxLongEdge) ?: return DecodedImage.Failed
         return DecodedImage.Static(bmp)
     }
@@ -40,17 +53,19 @@ internal object ImageDecoder {
      * avatars/backgrounds and as the API 24-27 fallback for animated sources.
      * Runs the blocking [BitmapFactory] work on the caller's (background) thread.
      */
-    fun decodeStatic(bytes: ByteArray, maxLongEdge: Int = MAX_LONG_EDGE): Bitmap? {
-        if (bytes.isEmpty()) return null
+    fun decodeStatic(bytes: ByteArray, maxLongEdge: Int = MAX_LONG_EDGE): Bitmap? = runCatching {
+        if (bytes.isEmpty()) return@runCatching null
+        // The whole body is wrapped (not just the final decode) so even an OutOfMemoryError on the
+        // bounds pass of a huge/malformed ad image becomes a null result instead of crashing the host.
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
         val opts = BitmapFactory.Options().apply {
             inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, maxLongEdge)
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
-        return runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) }.getOrNull()
-    }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    }.getOrNull()
 
     /**
      * Build a live [AnimatedImageDrawable] (or a static drawable for single-frame

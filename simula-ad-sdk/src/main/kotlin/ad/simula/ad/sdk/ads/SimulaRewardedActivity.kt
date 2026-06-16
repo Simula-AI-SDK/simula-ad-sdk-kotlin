@@ -166,11 +166,21 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         // Only act when finishing for good; on a config-change recreation we keep the
         // handoff so the new instance can read it and must NOT report CLOSE.
         if (isFinishing) {
-            token?.let { RewardedHandoff.remove(it) }
             if (!closed) {
                 closed = true
                 presentation?.let { p -> p.callbacks.onClose(p.rewardEarned, elapsedSeconds(p)) }
             }
+            // Safety net: the unit is being torn down (back-out / swipe-away / finish) after the reward
+            // was earned but before completeReward() ran during the fallback phase. Fire completion now
+            // so the server-side verification is still enqueued (RewardVerificationManager) — otherwise
+            // the SSV postback is permanently lost and the durable queue has nothing to retry. Fired
+            // after onClose to preserve the normal close→complete callback order. (A truly abrupt
+            // process kill won't call onDestroy at all; this closes the common finish/teardown window.)
+            if (!completed && presentation?.rewardEarned == true) {
+                completed = true
+                presentation?.let { p -> p.callbacks.onRewardCompleted(p.rewardEarned, elapsedSeconds(p)) }
+            }
+            token?.let { RewardedHandoff.remove(it) }
         }
     }
 

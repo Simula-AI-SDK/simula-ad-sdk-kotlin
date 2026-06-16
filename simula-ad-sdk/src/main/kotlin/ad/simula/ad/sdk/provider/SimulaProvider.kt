@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.provider
 
+import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -53,6 +54,11 @@ private val globalNoFillSet = ConcurrentHashMap.newKeySet<String>()
 // synchronization is needed.
 private var cachedGlobalContext: SimulaContextValue? = null
 
+// Inert fallback (built once) for the not-yet-initialized case, plus a one-shot log guard so a
+// misintegrated host is warned once rather than on every composition.
+private var cachedEmptyContext: SimulaContextValue? = null
+private var emptyContextWarned = false
+
 /**
  * Builds (once) a [SimulaContextValue] backed by the global session that
  * [ad.simula.ad.sdk.ads.SimulaAds.initialize] warmed — the fallback used by
@@ -67,8 +73,20 @@ private var cachedGlobalContext: SimulaContextValue? = null
  * @throws IllegalStateException if [ad.simula.ad.sdk.ads.SimulaAds.initialize] has not run.
  */
 internal fun globalSimulaContext(): SimulaContextValue {
-    check(SimulaAds.isInitialized) {
-        "NativeAdSlot must be used inside a SimulaProvider, or after SimulaAds.initialize()."
+    // The SDK must never crash the host (PRD). A NativeAdSlot composed with no SimulaProvider
+    // ancestor AND before SimulaAds.initialize() reaches here via the LocalSimulaContext default
+    // factory; return an inert (empty) context so the slot renders blank instead of throwing
+    // IllegalStateException into the host's composition.
+    if (!SimulaAds.isInitialized) {
+        if (!emptyContextWarned) {
+            emptyContextWarned = true
+            Log.w(
+                "SimulaAdSDK",
+                "NativeAdSlot used before SimulaAds.initialize() and outside a SimulaProvider — " +
+                    "rendering a blank slot. Initialize the SDK or wrap the slot in a SimulaProvider.",
+            )
+        }
+        return emptySimulaContext()
     }
     cachedGlobalContext?.let { return it }
     val consent = SimulaPrivacy.current
@@ -87,6 +105,33 @@ internal fun globalSimulaContext(): SimulaContextValue {
         hasNoFill = { slot, position -> globalNoFillSet.contains(getCacheKey(slot, position)) },
         markNoFill = { slot, position -> globalNoFillSet.add(getCacheKey(slot, position)) },
     ).also { cachedGlobalContext = it }
+}
+
+/**
+ * Inert context returned by [globalSimulaContext] before [ad.simula.ad.sdk.ads.SimulaAds.initialize]
+ * has run (and with no [SimulaProvider] in the tree): a valid, empty value with no api key and no
+ * session, so a [ad.simula.ad.sdk.nativead.NativeAdSlot] resolves to a no-fill and renders blank
+ * rather than crashing the host. Never reads the lateinit [ad.simula.ad.sdk.ads.SimulaAds.store].
+ * Cached so repeated reads return a stable instance.
+ */
+private fun emptySimulaContext(): SimulaContextValue {
+    cachedEmptyContext?.let { return it }
+    val consent = SimulaPrivacy.current
+    return SimulaContextValue(
+        apiKey = "",
+        devMode = false,
+        sessionId = null,
+        hasPrivacyConsent = consent.hasPrivacyConsent,
+        consent = consent,
+        updateConsent = { SimulaPrivacy.apply(it) },
+        ensureSession = { null },
+        getCachedAd = { slot, position -> globalAdCache[getCacheKey(slot, position)] },
+        cacheAd = { slot, position, ad -> globalAdCache[getCacheKey(slot, position)] = ad },
+        getCachedHeight = { slot, position -> globalHeightCache[getCacheKey(slot, position)] },
+        cacheHeight = { slot, position, height -> globalHeightCache[getCacheKey(slot, position)] = height },
+        hasNoFill = { slot, position -> globalNoFillSet.contains(getCacheKey(slot, position)) },
+        markNoFill = { slot, position -> globalNoFillSet.add(getCacheKey(slot, position)) },
+    ).also { cachedEmptyContext = it }
 }
 
 /**

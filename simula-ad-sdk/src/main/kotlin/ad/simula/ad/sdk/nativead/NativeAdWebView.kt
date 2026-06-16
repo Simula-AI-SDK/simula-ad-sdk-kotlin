@@ -33,10 +33,10 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.util.WeakHashMap
 
 /**
@@ -282,13 +282,16 @@ internal class NativeAdWiring(
     /** Called off-main from the JS interface. Parses and dispatches on the main thread. */
     fun handleMessage(raw: String) {
         val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return
-        when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+        // `as? JsonPrimitive` (not `.jsonPrimitive`, which throws IllegalArgumentException on a
+        // non-primitive) so a creative sending an object/array for type/height/value can't crash the
+        // WebView's JS thread with an uncaught exception.
+        when ((obj["type"] as? JsonPrimitive)?.contentOrNull) {
             "SIMULA_AD_HEIGHT", "AD_RESIZE" -> {
-                val h = obj["height"]?.jsonPrimitive?.floatOrNull ?: return
+                val h = (obj["height"] as? JsonPrimitive)?.floatOrNull ?: return
                 if (h > 0f) main.post { onHeightPx(h) }
             }
             "AD_FEEDBACK" -> {
-                val value = obj["value"]?.jsonPrimitive?.contentOrNull ?: return
+                val value = (obj["value"] as? JsonPrimitive)?.contentOrNull ?: return
                 main.post { handleFeedback(value) }
             }
             else -> Unit
