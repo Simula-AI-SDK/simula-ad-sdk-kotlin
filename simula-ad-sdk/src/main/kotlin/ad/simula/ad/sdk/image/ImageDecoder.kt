@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.image
 
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Drawable
@@ -37,13 +38,13 @@ internal object ImageDecoder {
      */
     fun decode(bytes: ByteArray, maxLongEdge: Int = MAX_LONG_EDGE): DecodedImage {
         if (bytes.isEmpty()) return DecodedImage.Failed
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-            bytes.size <= MAX_ANIMATED_BYTES && isAnimatedFormat(bytes)
-        ) {
-            return DecodedImage.Animated(bytes)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && isAnimatedFormat(bytes)) {
+            if (bytes.size <= MAX_ANIMATED_BYTES) return DecodedImage.Animated(bytes)
+            // Oversized animated source: render one bounded static frame instead of animating, so the
+            // RenderThread never decodes an unbounded source. Surfaced so we can see how often it happens.
+            Telemetry.recordOperation("image_animated_oversized", 0L, success = true)
         }
-        // Oversized animated source (or pre-P): fall through to a single downsampled static frame so
-        // the RenderThread never animates an unbounded source.
+        // Static (or downgraded-animated / pre-P) path: a single downsampled frame.
         val bmp = decodeStatic(bytes, maxLongEdge) ?: return DecodedImage.Failed
         return DecodedImage.Static(bmp)
     }

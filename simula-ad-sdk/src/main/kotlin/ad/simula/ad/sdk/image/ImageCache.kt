@@ -107,10 +107,20 @@ internal object ImageCache {
         } catch (ce: CancellationException) {
             throw ce // never record a cancellation — stays immediately retryable
         } catch (e: Exception) {
+            Telemetry.recordError(
+                signature = "image:load_failed",
+                errorCode = e::class.java.simpleName,
+                breadcrumb = "ImageCache.performLoad",
+            )
             DecodedImage.Failed
         } catch (t: Throwable) {
             // Catch Error too (e.g. OutOfMemoryError decoding a huge/hostile ad image): the SDK must
             // never crash the host, so a failed decode collapses to a no-image result.
+            Telemetry.recordError(
+                signature = "image:decode_fatal",
+                errorCode = t::class.java.simpleName,
+                breadcrumb = "ImageCache.performLoad",
+            )
             DecodedImage.Failed
         }
         if (result is DecodedImage.Failed) {

@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
@@ -179,6 +180,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             if (!completed && presentation?.rewardEarned == true) {
                 completed = true
                 presentation?.let { p -> p.callbacks.onRewardCompleted(p.rewardEarned, elapsedSeconds(p)) }
+                Telemetry.recordLifecycle(stage = "reward_salvaged_on_teardown", adFormat = "rewarded")
             }
             token?.let { RewardedHandoff.remove(it) }
         }

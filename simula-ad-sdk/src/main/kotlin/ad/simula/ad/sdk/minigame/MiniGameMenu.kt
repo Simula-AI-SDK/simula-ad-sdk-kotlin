@@ -80,6 +80,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.ads.AdInfoReportOverlay
+import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.R
 import ad.simula.ad.sdk.model.GameData
@@ -801,6 +802,12 @@ private fun AdIframeOverlay(
                                     // into the host (matches the other CTA sites).
                                     runCatching {
                                         ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl)))
+                                    }.onFailure {
+                                        Telemetry.recordError(
+                                            signature = "minigame:cta_open_failed",
+                                            errorCode = it::class.java.simpleName,
+                                            breadcrumb = "MiniGameMenu.adOverlay",
+                                        )
                                     }
                                     return true
                                 }

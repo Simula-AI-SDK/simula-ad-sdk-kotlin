@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
+import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaApiClient
@@ -281,7 +282,12 @@ internal class NativeAdWiring(
 
     /** Called off-main from the JS interface. Parses and dispatches on the main thread. */
     fun handleMessage(raw: String) {
-        val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return
+        val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: run {
+            // Malformed JSON / non-object from the creative bridge — dropped, but counted so a broken
+            // or hostile creative is visible rather than silent. Aggregated by signature (bounded).
+            Telemetry.recordError(signature = "native:bridge_parse_failed", breadcrumb = "NativeAdWebView.handleMessage")
+            return
+        }
         // `as? JsonPrimitive` (not `.jsonPrimitive`, which throws IllegalArgumentException on a
         // non-primitive) so a creative sending an object/array for type/height/value can't crash the
         // WebView's JS thread with an uncaught exception.
