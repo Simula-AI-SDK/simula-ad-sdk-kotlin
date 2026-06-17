@@ -26,7 +26,6 @@ import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * CompositionLocal providing the Simula context to child composables.
@@ -45,9 +44,26 @@ internal val LocalSimulaContext = staticCompositionLocalOf<SimulaContextValue> {
 // Process-global ad caches backing the fallback context (used by the older imperative
 // menu ad path; native ads use the standalone NativeAdCache object). Kept tiny and
 // thread-safe so the fallback is a complete, valid SimulaContextValue.
-private val globalAdCache = ConcurrentHashMap<String, AdData>()
-private val globalHeightCache = ConcurrentHashMap<String, Float>()
-private val globalNoFillSet = ConcurrentHashMap.newKeySet<String>()
+/** Size cap for the legacy host-facing ad caches (getCachedAd/cacheAd/markNoFill). They have no
+ *  internal callers, but a host using the public cache API across many distinct slots would otherwise
+ *  grow them without bound for the process lifetime — so each evicts its eldest beyond this many. */
+private const val MAX_AD_CACHE_ENTRIES = 64
+
+/** Thread-safe, access-ordered LRU map capped at [max] entries (eldest evicted on overflow). */
+private fun <K, V> boundedLruMap(max: Int): MutableMap<K, V> =
+    java.util.Collections.synchronizedMap(
+        object : LinkedHashMap<K, V>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>): Boolean = size > max
+        },
+    )
+
+/** Thread-safe set capped at [max] entries (eldest evicted on overflow). */
+private fun boundedLruSet(max: Int): MutableSet<String> =
+    java.util.Collections.newSetFromMap(boundedLruMap<String, Boolean>(max))
+
+private val globalAdCache: MutableMap<String, AdData> = boundedLruMap(MAX_AD_CACHE_ENTRIES)
+private val globalHeightCache: MutableMap<String, Float> = boundedLruMap(MAX_AD_CACHE_ENTRIES)
+private val globalNoFillSet: MutableSet<String> = boundedLruSet(MAX_AD_CACHE_ENTRIES)
 
 // Built once and reused. Only ever touched on the main thread (the
 // staticCompositionLocalOf default factory runs during composition), so no
@@ -272,9 +288,9 @@ internal fun ProvideSimulaContext(
 
     // Ad caching infrastructure — thread-safe, so I/O coroutines can populate
     // these directly from any dispatcher (matching React's useRef<Map> pattern).
-    val adCache = remember { ConcurrentHashMap<String, AdData>() }
-    val heightCache = remember { ConcurrentHashMap<String, Float>() }
-    val noFillSet = remember { ConcurrentHashMap.newKeySet<String>() }
+    val adCache = remember { boundedLruMap<String, AdData>(MAX_AD_CACHE_ENTRIES) }
+    val heightCache = remember { boundedLruMap<String, Float>(MAX_AD_CACHE_ENTRIES) }
+    val noFillSet = remember { boundedLruSet(MAX_AD_CACHE_ENTRIES) }
 
     // Kick off session creation off the critical path (idempotent / coalesced).
     LaunchedEffect(store) {
