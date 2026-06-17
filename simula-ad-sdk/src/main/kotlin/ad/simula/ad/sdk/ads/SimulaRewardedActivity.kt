@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
@@ -40,6 +41,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,6 +61,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -164,11 +167,22 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         // Only act when finishing for good; on a config-change recreation we keep the
         // handoff so the new instance can read it and must NOT report CLOSE.
         if (isFinishing) {
-            token?.let { RewardedHandoff.remove(it) }
             if (!closed) {
                 closed = true
                 presentation?.let { p -> p.callbacks.onClose(p.rewardEarned, elapsedSeconds(p)) }
             }
+            // Safety net: the unit is being torn down (back-out / swipe-away / finish) after the reward
+            // was earned but before completeReward() ran during the fallback phase. Fire completion now
+            // so the server-side verification is still enqueued (RewardVerificationManager) — otherwise
+            // the SSV postback is permanently lost and the durable queue has nothing to retry. Fired
+            // after onClose to preserve the normal close→complete callback order. (A truly abrupt
+            // process kill won't call onDestroy at all; this closes the common finish/teardown window.)
+            if (!completed && presentation?.rewardEarned == true) {
+                completed = true
+                presentation?.let { p -> p.callbacks.onRewardCompleted(p.rewardEarned, elapsedSeconds(p)) }
+                Telemetry.recordLifecycle(stage = "reward_salvaged_on_teardown", adFormat = "rewarded")
+            }
+            token?.let { RewardedHandoff.remove(it) }
         }
     }
 
@@ -238,6 +252,23 @@ private fun RewardedMinigame(
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Suspend the creative's JS/timers/video while the host is backgrounded — AndroidView won't pause
+    // a WebView on its own, so a rewarded ad left open behind the home screen would keep running.
+    // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
+    var creativeWebView by remember { mutableStateOf<WebView?>(null) }
+    DisposableEffect(lifecycleOwner, creativeWebView) {
+        val wv = creativeWebView
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> wv?.onPause()
+                Lifecycle.Event.ON_RESUME -> wv?.onResume()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE (e.g. survey finished) grants the reward and
     // reveals the close button immediately, bypassing the play timer.
@@ -387,6 +418,7 @@ private fun RewardedMinigame(
                     } else {
                         loadUrl(url)
                     }
+                    creativeWebView = this
                 }
             },
             // The game canvas fills edge-to-edge: inset only vertically (status / nav / top

@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.provider
 
+import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -25,7 +26,6 @@ import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * CompositionLocal providing the Simula context to child composables.
@@ -44,14 +44,36 @@ internal val LocalSimulaContext = staticCompositionLocalOf<SimulaContextValue> {
 // Process-global ad caches backing the fallback context (used by the older imperative
 // menu ad path; native ads use the standalone NativeAdCache object). Kept tiny and
 // thread-safe so the fallback is a complete, valid SimulaContextValue.
-private val globalAdCache = ConcurrentHashMap<String, AdData>()
-private val globalHeightCache = ConcurrentHashMap<String, Float>()
-private val globalNoFillSet = ConcurrentHashMap.newKeySet<String>()
+/** Size cap for the legacy host-facing ad caches (getCachedAd/cacheAd/markNoFill). They have no
+ *  internal callers, but a host using the public cache API across many distinct slots would otherwise
+ *  grow them without bound for the process lifetime — so each evicts its eldest beyond this many. */
+private const val MAX_AD_CACHE_ENTRIES = 64
+
+/** Thread-safe, access-ordered LRU map capped at [max] entries (eldest evicted on overflow). */
+private fun <K, V> boundedLruMap(max: Int): MutableMap<K, V> =
+    java.util.Collections.synchronizedMap(
+        object : LinkedHashMap<K, V>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>): Boolean = size > max
+        },
+    )
+
+/** Thread-safe set capped at [max] entries (eldest evicted on overflow). */
+private fun boundedLruSet(max: Int): MutableSet<String> =
+    java.util.Collections.newSetFromMap(boundedLruMap<String, Boolean>(max))
+
+private val globalAdCache: MutableMap<String, AdData> = boundedLruMap(MAX_AD_CACHE_ENTRIES)
+private val globalHeightCache: MutableMap<String, Float> = boundedLruMap(MAX_AD_CACHE_ENTRIES)
+private val globalNoFillSet: MutableSet<String> = boundedLruSet(MAX_AD_CACHE_ENTRIES)
 
 // Built once and reused. Only ever touched on the main thread (the
 // staticCompositionLocalOf default factory runs during composition), so no
 // synchronization is needed.
 private var cachedGlobalContext: SimulaContextValue? = null
+
+// Inert fallback (built once) for the not-yet-initialized case, plus a one-shot log guard so a
+// misintegrated host is warned once rather than on every composition.
+private var cachedEmptyContext: SimulaContextValue? = null
+private var emptyContextWarned = false
 
 /**
  * Builds (once) a [SimulaContextValue] backed by the global session that
@@ -67,8 +89,20 @@ private var cachedGlobalContext: SimulaContextValue? = null
  * @throws IllegalStateException if [ad.simula.ad.sdk.ads.SimulaAds.initialize] has not run.
  */
 internal fun globalSimulaContext(): SimulaContextValue {
-    check(SimulaAds.isInitialized) {
-        "NativeAdSlot must be used inside a SimulaProvider, or after SimulaAds.initialize()."
+    // The SDK must never crash the host (PRD). A NativeAdSlot composed with no SimulaProvider
+    // ancestor AND before SimulaAds.initialize() reaches here via the LocalSimulaContext default
+    // factory; return an inert (empty) context so the slot renders blank instead of throwing
+    // IllegalStateException into the host's composition.
+    if (!SimulaAds.isInitialized) {
+        if (!emptyContextWarned) {
+            emptyContextWarned = true
+            Log.w(
+                "SimulaAdSDK",
+                "NativeAdSlot used before SimulaAds.initialize() and outside a SimulaProvider — " +
+                    "rendering a blank slot. Initialize the SDK or wrap the slot in a SimulaProvider.",
+            )
+        }
+        return emptySimulaContext()
     }
     cachedGlobalContext?.let { return it }
     val consent = SimulaPrivacy.current
@@ -87,6 +121,33 @@ internal fun globalSimulaContext(): SimulaContextValue {
         hasNoFill = { slot, position -> globalNoFillSet.contains(getCacheKey(slot, position)) },
         markNoFill = { slot, position -> globalNoFillSet.add(getCacheKey(slot, position)) },
     ).also { cachedGlobalContext = it }
+}
+
+/**
+ * Inert context returned by [globalSimulaContext] before [ad.simula.ad.sdk.ads.SimulaAds.initialize]
+ * has run (and with no [SimulaProvider] in the tree): a valid, empty value with no api key and no
+ * session, so a [ad.simula.ad.sdk.nativead.NativeAdSlot] resolves to a no-fill and renders blank
+ * rather than crashing the host. Never reads the lateinit [ad.simula.ad.sdk.ads.SimulaAds.store].
+ * Cached so repeated reads return a stable instance.
+ */
+private fun emptySimulaContext(): SimulaContextValue {
+    cachedEmptyContext?.let { return it }
+    val consent = SimulaPrivacy.current
+    return SimulaContextValue(
+        apiKey = "",
+        devMode = false,
+        sessionId = null,
+        hasPrivacyConsent = consent.hasPrivacyConsent,
+        consent = consent,
+        updateConsent = { SimulaPrivacy.apply(it) },
+        ensureSession = { null },
+        getCachedAd = { slot, position -> globalAdCache[getCacheKey(slot, position)] },
+        cacheAd = { slot, position, ad -> globalAdCache[getCacheKey(slot, position)] = ad },
+        getCachedHeight = { slot, position -> globalHeightCache[getCacheKey(slot, position)] },
+        cacheHeight = { slot, position, height -> globalHeightCache[getCacheKey(slot, position)] = height },
+        hasNoFill = { slot, position -> globalNoFillSet.contains(getCacheKey(slot, position)) },
+        markNoFill = { slot, position -> globalNoFillSet.add(getCacheKey(slot, position)) },
+    ).also { cachedEmptyContext = it }
 }
 
 /**
@@ -140,12 +201,13 @@ fun SimulaProvider(
 
     val context = LocalContext.current
 
-    // Build the custom User-Agent + device id synchronously during composition so they're set
-    // before the first /session/create. The imperative SimulaAds.initialize() path builds them
-    // too; first wins.
+    // Build the custom User-Agent synchronously during composition (cheap, Build statics) so it's set
+    // before the first /session/create. The device id is a synchronous ContentProvider read, so it's
+    // resolved off the main thread via prime() rather than blocking composition. The imperative
+    // SimulaAds.initialize() path primes them too; first wins.
     remember(context) {
         SimulaUserAgent.build(context.applicationContext)
-        SimulaDeviceId.build(context.applicationContext)
+        SimulaDeviceId.prime(context.applicationContext)
     }
 
     // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
@@ -226,9 +288,9 @@ internal fun ProvideSimulaContext(
 
     // Ad caching infrastructure — thread-safe, so I/O coroutines can populate
     // these directly from any dispatcher (matching React's useRef<Map> pattern).
-    val adCache = remember { ConcurrentHashMap<String, AdData>() }
-    val heightCache = remember { ConcurrentHashMap<String, Float>() }
-    val noFillSet = remember { ConcurrentHashMap.newKeySet<String>() }
+    val adCache = remember { boundedLruMap<String, AdData>(MAX_AD_CACHE_ENTRIES) }
+    val heightCache = remember { boundedLruMap<String, Float>(MAX_AD_CACHE_ENTRIES) }
+    val noFillSet = remember { boundedLruSet(MAX_AD_CACHE_ENTRIES) }
 
     // Kick off session creation off the critical path (idempotent / coalesced).
     LaunchedEffect(store) {

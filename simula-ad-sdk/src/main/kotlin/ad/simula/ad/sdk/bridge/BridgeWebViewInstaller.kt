@@ -57,10 +57,12 @@ internal object BridgeWebViewInstaller {
 
         webView.addJavascriptInterface(object {
             @JavascriptInterface
-            fun postMessage(json: String) {
+            fun postMessage(json: String?) {
                 // Off-main "JavaBridge" thread → the bridge hops to main; the reply runs on the
-                // web view's thread via post(). Guarded so a reply that lands after the pooled view
-                // is destroyed can't crash on a torn-down WebView.
+                // web view's thread via post(). Declared nullable + no-op on null so a malformed JS
+                // bridge invocation passing null can't NPE on entry. Guarded so a reply that lands
+                // after the pooled view is destroyed can't crash on a torn-down WebView.
+                json ?: return
                 bridge.handle(json) { js ->
                     webView.post { runCatching { webView.evaluateJavascript(js, null) } }
                 }

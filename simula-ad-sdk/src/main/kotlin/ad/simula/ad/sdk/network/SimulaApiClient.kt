@@ -8,10 +8,14 @@ import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.Message
+import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.telemetry.Telemetry
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -50,6 +54,33 @@ internal object SimulaApiClient {
 
     private fun authHeaders(apiKey: String) =
         jsonHeaders() + ("Authorization" to "Bearer $apiKey")
+
+    // ── In-flight de-duplication (idempotent GET-style reads only) ────────────
+
+    /**
+     * Coalesces concurrent identical reads keyed by [key] so two simultaneous loads share one
+     * request + parse instead of firing two. Mirrors [ad.simula.ad.sdk.image.ImageCache]'s
+     * in-flight pattern: the shared job runs in [SimulaScope] (so a cancelled caller doesn't kill
+     * the work others are awaiting), and the entry is removed when it settles (value-matched, so a
+     * newer in-flight entry for the same key is never clobbered).
+     *
+     * Restricted to genuinely idempotent, side-effect-free reads (catalog, fallbacks). Calls that
+     * mint a serve/impression, create a session, verify a reward, or return a randomized roster are
+     * deliberately NOT coalesced — sharing one response across callers would corrupt their
+     * one-per-call backend semantics.
+     */
+    private val inFlight = ConcurrentHashMap<String, Deferred<*>>()
+
+    @Suppress("UNCHECKED_CAST")
+    private suspend fun <T> coalesce(key: String, block: suspend () -> T): T {
+        var created: Deferred<T>? = null
+        val deferred = inFlight.computeIfAbsent(key) { _ ->
+            SimulaScope.async { block() }.also { created = it }
+        } as Deferred<T>
+        // Only the call that actually created the job registers cleanup (value-matched remove).
+        created?.invokeOnCompletion { inFlight.remove(key, deferred) }
+        return deferred.await()
+    }
 
     // ── Session ─────────────────────────────────────────────────────────────
 
@@ -119,7 +150,8 @@ internal object SimulaApiClient {
      * [sessionId] is passed through as the `session_id` query param when available (the
      * backend ties the catalog to the session); omitted when null/blank.
      */
-    suspend fun fetchCatalog(sessionId: String? = null): CatalogResult = withContext(Dispatchers.IO) {
+    suspend fun fetchCatalog(sessionId: String? = null): CatalogResult = coalesce(catalogUrl(sessionId)) {
+      withContext(Dispatchers.IO) {
         val response = SimulaHttp.request(
             url = catalogUrl(sessionId),
             method = "GET",
@@ -166,6 +198,7 @@ internal object SimulaApiClient {
         }
 
         CatalogResult(menuId = menuId, games = games)
+      }
     }
 
     /** Builds the catalog request URL, adding `session_id` when available. Pure/testable. */
@@ -578,24 +611,27 @@ internal object SimulaApiClient {
      * the serve (campaign creative, then the "Get the App" end screen) in reveal order.
      * Side-effect-free on the backend; best-effort here — an empty list on any failure.
      */
-    suspend fun fetchFallbacks(impressionId: String): List<FallbackAd> = withContext(Dispatchers.IO) {
-        try {
-            val response = SimulaHttp.request(
-                url = "$API_BASE_URL/load/fallbacks/$impressionId",
-                method = "GET",
-                headers = jsonHeaders(),
-            )
-            if (!response.isSuccessful) return@withContext emptyList()
+    suspend fun fetchFallbacks(impressionId: String): List<FallbackAd> =
+        coalesce("fallbacks:$impressionId") {
+            withContext(Dispatchers.IO) {
+                try {
+                    val response = SimulaHttp.request(
+                        url = "$API_BASE_URL/load/fallbacks/$impressionId",
+                        method = "GET",
+                        headers = jsonHeaders(),
+                    )
+                    if (!response.isSuccessful) return@withContext emptyList()
 
-            val data = json.decodeFromString<FallbackAdsApiResponse>(response.body)
-            data.ads.mapNotNull { ad ->
-                val url = ad.iframeUrl
-                if (url.isNullOrBlank()) null else FallbackAd(adId = ad.adId, iframeUrl = url)
+                    val data = json.decodeFromString<FallbackAdsApiResponse>(response.body)
+                    data.ads.mapNotNull { ad ->
+                        val url = ad.iframeUrl
+                        if (url.isNullOrBlank()) null else FallbackAd(adId = ad.adId, iframeUrl = url)
+                    }
+                } catch (_: Exception) {
+                    emptyList()
+                }
             }
-        } catch (_: Exception) {
-            emptyList()
         }
-    }
 
     // ── Tracking ────────────────────────────────────────────────────────────
 

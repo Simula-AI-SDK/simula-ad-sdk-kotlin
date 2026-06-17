@@ -237,7 +237,7 @@ internal class TelemetryManager(
         val pendingBuffer: List<TelemetryEvent>
         val pendingErrors: Map<String, Int>
         val droppedSnap: Int
-        val body: String
+        val events: List<TelemetryEvent>
         mutex.withLock {
             if (isFlushing) return
             if (buffer.isEmpty() && errorAgg.isEmpty()) return
@@ -247,13 +247,19 @@ internal class TelemetryManager(
             val errorEvents = errorAgg.values.map { it.copy() }
             pendingErrors = errorEvents.associate { it.name to (it.count ?: 1) }
             droppedSnap = droppedCount
-            val events = ArrayList<TelemetryEvent>(pendingBuffer.size + errorEvents.size + 1).apply {
+            // Snapshot the events under the lock (the buffers are mutable shared state); the actual
+            // JSON serialization happens AFTER releasing the lock so encoding a large batch can't
+            // block concurrent record/flush calls. envelope() reads only external providers
+            // (session/ppid/gaid) + immutable context, none of which are guarded by this mutex.
+            events = ArrayList<TelemetryEvent>(pendingBuffer.size + errorEvents.size + 1).apply {
                 addAll(pendingBuffer)
                 addAll(errorEvents)
                 if (droppedSnap > 0) add(newEvent(TYPE_META, "dropped").copy(count = droppedSnap))
             }
-            body = json.encodeToString(envelope(events))
         }
+
+        // Serialize outside the critical section (see above).
+        val body = json.encodeToString(envelope(events))
 
         val ack = try {
             sender.send(body)

@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
+import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaApiClient
@@ -33,10 +34,10 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.util.WeakHashMap
 
 /**
@@ -114,7 +115,19 @@ internal fun NativeAdWebView(
  * cache invalidation can be called from any thread.
  */
 internal object NativeAdWebViewStore {
+    /** Retained-view cap on a normal device. Three retained WebViews pin ~60-90 MB. */
     private const val MAX_RETAINED = 3
+
+    /** Retained-view cap on a low-RAM / small-heap device, where 3 retained views are too costly. */
+    private const val MAX_RETAINED_LOW_RAM = 1
+
+    /** Heaps below this are treated as low-end (small Dalvik heap ⇒ retain fewer views). */
+    private const val LOW_HEAP_THRESHOLD_BYTES = 128L * 1024 * 1024
+
+    // Resolved once on first [registerTrimCallbacks] (where an app context is available) so the cap
+    // can consult ActivityManager.isLowRamDevice(); a `const` can't read runtime state. Defaults to
+    // the normal cap until then. Volatile: written on the main thread, read in evictIfNeeded().
+    @Volatile private var maxRetained = MAX_RETAINED
 
     /** One retained creative: its [webView] + the [wiring] its bridge points at + what's loaded. */
     class Session(
@@ -232,17 +245,30 @@ internal object NativeAdWebViewStore {
 
     @MainThread
     private fun evictIfNeeded() {
-        if (sessions.size <= MAX_RETAINED) return
+        val cap = maxRetained
+        if (sessions.size <= cap) return
         val it = sessions.entries.iterator()
-        while (it.hasNext() && sessions.size > MAX_RETAINED) {
+        while (it.hasNext() && sessions.size > cap) {
             val e = it.next()
             if (!e.value.attached) { destroy(e.value); it.remove() } // LRU-first (access-ordered map)
         }
     }
 
+    /** Pick the retained-view cap once per process: 1 on a low-RAM / small-heap device, else 3. */
+    @MainThread
+    private fun resolveMaxRetained(appContext: Context) {
+        val lowRam = runCatching {
+            val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            am?.isLowRamDevice == true
+        }.getOrDefault(false)
+        val smallHeap = Runtime.getRuntime().maxMemory() < LOW_HEAP_THRESHOLD_BYTES
+        maxRetained = if (lowRam || smallHeap) MAX_RETAINED_LOW_RAM else MAX_RETAINED
+    }
+
     private fun registerTrimCallbacks(appContext: Context) {
         if (trimRegistered) return
         trimRegistered = true
+        resolveMaxRetained(appContext)
         appContext.applicationContext.registerComponentCallbacks(object : ComponentCallbacks2 {
             override fun onTrimMemory(level: Int) { if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) evictAll() }
 
@@ -281,14 +307,22 @@ internal class NativeAdWiring(
 
     /** Called off-main from the JS interface. Parses and dispatches on the main thread. */
     fun handleMessage(raw: String) {
-        val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return
-        when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+        val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: run {
+            // Malformed JSON / non-object from the creative bridge — dropped, but counted so a broken
+            // or hostile creative is visible rather than silent. Aggregated by signature (bounded).
+            Telemetry.recordError(signature = "native:bridge_parse_failed", breadcrumb = "NativeAdWebView.handleMessage")
+            return
+        }
+        // `as? JsonPrimitive` (not `.jsonPrimitive`, which throws IllegalArgumentException on a
+        // non-primitive) so a creative sending an object/array for type/height/value can't crash the
+        // WebView's JS thread with an uncaught exception.
+        when ((obj["type"] as? JsonPrimitive)?.contentOrNull) {
             "SIMULA_AD_HEIGHT", "AD_RESIZE" -> {
-                val h = obj["height"]?.jsonPrimitive?.floatOrNull ?: return
+                val h = (obj["height"] as? JsonPrimitive)?.floatOrNull ?: return
                 if (h > 0f) main.post { onHeightPx(h) }
             }
             "AD_FEEDBACK" -> {
-                val value = obj["value"]?.jsonPrimitive?.contentOrNull ?: return
+                val value = (obj["value"] as? JsonPrimitive)?.contentOrNull ?: return
                 main.post { handleFeedback(value) }
             }
             else -> Unit
@@ -317,14 +351,23 @@ internal class NativeAdWiring(
 
 private class NativeAdJsInterface(private val wiring: NativeAdWiring) {
     @JavascriptInterface
-    fun postMessage(json: String) = wiring.handleMessage(json)
+    fun postMessage(json: String?) {
+        // Runs on the WebView's JS thread. Declared nullable + no-op on null so a malformed JS
+        // bridge invocation passing null can't NPE on entry before reaching handleMessage.
+        json ?: return
+        wiring.handleMessage(json)
+    }
 }
 
 private class NativeAdWebViewClient(
     private val wiring: NativeAdWiring,
     private val documentStartSupported: Boolean,
 ) : WebViewClient() {
-    override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+    // Framework callback params are declared nullable to match the platform override signatures and
+    // guard against a non-conformant OEM WebView passing null (which would NPE on a non-null param) —
+    // mirroring the interstitial/rewarded clients.
+    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+        view ?: return
         // Fallback for older WebViews without document-start injection: wire the relay at page start.
         if (!documentStartSupported) view.evaluateJavascript(BRIDGE_SCRIPT, null)
     }
@@ -333,7 +376,8 @@ private class NativeAdWebViewClient(
     // connectivity when the slot scrolls into view. The creative never reports a height, so the
     // slot must collapse instead of holding the shimmer forever. Subresource failures (an image
     // inside the creative) are ignored so they can't hide an otherwise-rendered card.
-    override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+    override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+        if (view == null || request == null) return
         if (!request.isForMainFrame) return
         // Pre-empt the WebView's built-in "Webpage not available" page so it can't flash on screen
         // before the slot collapses.
@@ -341,13 +385,15 @@ private class NativeAdWebViewClient(
         wiring.onLoadError()
     }
 
-    override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+    override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
+        if (view == null || request == null) return
         if (!request.isForMainFrame) return
         view.loadUrl("about:blank")
         wiring.onLoadError()
     }
 
-    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+        if (view == null || request == null) return false
         if (!request.isForMainFrame) return false
         val url = request.url?.toString() ?: return false
         if (url.startsWith("about:")) return false

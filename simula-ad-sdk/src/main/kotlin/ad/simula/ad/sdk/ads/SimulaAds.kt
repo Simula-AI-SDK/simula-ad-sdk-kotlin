@@ -94,6 +94,12 @@ object SimulaAds {
         if (initialized) return
         require(apiKey.isNotBlank()) { "SimulaAds.initialize requires a non-blank apiKey" }
 
+        // Double-checked under a lock so two concurrent initialize() calls can't both run the body
+        // and double-init (e.g. two session warm-ups, two activity-tracking registrations). The
+        // require() above stays outside the lock so a blank key still fails fast on every call.
+        synchronized(this) {
+            if (initialized) return
+
         appContext = context.applicationContext
         this.apiKey = apiKey
         this.devMode = devMode
@@ -101,9 +107,11 @@ object SimulaAds {
         // Seed the process-wide native-ad targeting context so every POST /load/native carries it.
         NativeAdContextStore.set(adContext)
 
-        // Build the custom User-Agent + device id once; SimulaHttp stamps them on every request.
+        // Build the custom User-Agent once (cheap, Build statics); SimulaHttp stamps it on every
+        // request. The device id is a synchronous ContentProvider read, so it's resolved off the
+        // main thread via prime() to keep it off the app-start critical path.
         SimulaUserAgent.build(appContext)
-        SimulaDeviceId.build(appContext)
+        SimulaDeviceId.prime(appContext)
 
         // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
         // seeds it — identical resolution to SimulaProvider, so the imperative and
@@ -134,7 +142,6 @@ object SimulaAds {
         )
 
         registerActivityTracking()
-        initialized = true
 
         // Warm the session before the first load() so it's off the ad critical path.
         SimulaScope.launch { store.ensureSession() }
@@ -145,6 +152,11 @@ object SimulaAds {
         // without waiting for the next rewarded play. triggerProcessQueue launches its
         // own coroutine, so a slow/failed session create can't delay or skip recovery.
         RewardVerificationManager.triggerProcessQueue(appContext)
+
+            // Publish last: a concurrent initialize() that observed the volatile flag as true
+            // is guaranteed to see all of the above writes (lateinit store/appContext etc.).
+            initialized = true
+        }
     }
 
     // ── Native ad targeting context + preloading ──────────────────────────────

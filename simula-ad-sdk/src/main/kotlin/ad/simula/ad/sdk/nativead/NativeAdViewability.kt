@@ -60,6 +60,11 @@ internal fun Modifier.trackNativeAdViewability(
     // The Compose host view. Its on-screen location reflects scrolling done by a NON-Compose
     // ancestor (e.g. a React Native list), which findRootCoordinates() cannot observe.
     val hostView = LocalView.current
+    // Per-slot scratch buffers, reused across every sample so the ~6.7Hz poll allocates nothing while
+    // the slot is on screen. Safe to share: the loop runs single-threaded on the main dispatcher and
+    // both Android calls below overwrite the full contents each sample.
+    val hostLoc = remember { IntArray(2) }
+    val windowRect = remember { AndroidRect() }
 
     LaunchedEffect(enabled, thresholdFraction, minVisibleMillis) {
         if (!enabled) return@LaunchedEffect
@@ -72,7 +77,7 @@ internal fun Modifier.trackNativeAdViewability(
             val dwell = ViewabilityDwell(thresholdFraction, minVisibleMillis)
             while (true) {
                 delay(ViewabilityDwell.SAMPLE_INTERVAL_MS)
-                val fraction = coords.value?.let { visibleFraction(it, hostView) } ?: 0f
+                val fraction = coords.value?.let { visibleFraction(it, hostView, hostLoc, windowRect) } ?: 0f
                 if (dwell.sample(fraction, SystemClock.elapsedRealtime())) {
                     fired = true
                     currentOnImpression()
@@ -140,14 +145,19 @@ internal class ViewabilityDwell(
  * for never-seen rows. `View.getLocationOnScreen` DOES reflect that ancestor's scroll, so anchoring
  * to the screen is correct for both a Compose `LazyColumn` and a React Native list.
  */
-private fun visibleFraction(coords: LayoutCoordinates, host: View): Float {
+private fun visibleFraction(
+    coords: LayoutCoordinates,
+    host: View,
+    hostLoc: IntArray,
+    window: AndroidRect,
+): Float {
     if (!coords.isAttached) return 0f
     val w = coords.size.width
     val h = coords.size.height
     if (w == 0 || h == 0) return 0f
 
     // Slot's top-left in screen pixels: the host's on-screen origin + the slot's offset in the root.
-    val hostLoc = IntArray(2)
+    // hostLoc/window are caller-owned scratch buffers, fully overwritten by the two calls below.
     host.getLocationOnScreen(hostLoc)
     val offsetInRoot = coords.positionInRoot()
     val slotLeft = hostLoc[0] + offsetInRoot.x
@@ -156,7 +166,6 @@ private fun visibleFraction(coords: LayoutCoordinates, host: View): Float {
     val slotBottom = slotTop + h
 
     // Visible window rect in screen pixels (excludes the status bar / system insets).
-    val window = AndroidRect()
     host.getWindowVisibleDisplayFrame(window)
 
     val visibleW = (slotRight.coerceAtMost(window.right.toFloat()) -
