@@ -1,11 +1,18 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.model.AdValue
+
 /**
  * Lifecycle callbacks for a [SimulaRewardedAd]. Naming follows the Android ad-SDK
  * convention (AdMob-style `onAd*`).
  *
  * All methods have default no-op bodies — override only the ones you need. Every
  * callback is delivered on the main thread.
+ *
+ * The AdMob three-signal model maps to: [onAdDisplayed] = *shown*, [onAdImpression] =
+ * *billable impression*, [onAdPaid] = *paid* (carries estimated revenue). The impression and
+ * paid signals fire together, ~2 seconds after the playable begins to render — independent of
+ * the play-to-earn reward gate.
  */
 interface SimulaRewardedAdListener {
     /** The rewarded minigame finished loading and is ready to [SimulaRewardedAd.show]. */
@@ -14,8 +21,22 @@ interface SimulaRewardedAdListener {
     /** Loading failed. The ad returns to the idle state and may be loaded again. */
     fun onAdFailedToLoad(ad: SimulaRewardedAd, error: SimulaAdError) {}
 
-    /** The rewarded minigame was presented full-screen. */
+    /** The rewarded minigame was presented full-screen (AdMob's "shown"). */
     fun onAdDisplayed(ad: SimulaRewardedAd) {}
+
+    /**
+     * A billable impression was recorded — fired ~2s after the playable begins to render
+     * (AdMob's `onAdImpression`). Distinct from [onAdDisplayed]. Followed immediately by [onAdPaid].
+     */
+    fun onAdImpression(ad: SimulaRewardedAd) {}
+
+    /**
+     * The estimated revenue for this impression (AdMob's `onPaidEvent`). Fired together with
+     * [onAdImpression]; [adValue] is already on-device from load time (no network round-trip). Use it
+     * for your own analytics — the backend's impression confirmation remains the source of truth for
+     * billing.
+     */
+    fun onAdPaid(ad: SimulaRewardedAd, adValue: AdValue) {}
 
     /** Presentation failed (e.g. not ready, already showing, no Activity). */
     fun onAdFailedToDisplay(ad: SimulaRewardedAd, error: SimulaAdError) {}

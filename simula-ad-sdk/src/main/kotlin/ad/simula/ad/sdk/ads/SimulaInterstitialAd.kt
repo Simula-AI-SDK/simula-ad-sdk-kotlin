@@ -3,6 +3,7 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
@@ -13,6 +14,7 @@ import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
+import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
@@ -160,6 +162,9 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     charName = charName,
                     charImage = charImage,
                     charDesc = charDesc,
+                    // AdContext (contextual targeting) now rides on the full-screen request too, read
+                    // from the same provider-level store the native surface uses.
+                    context = NativeAdContextStore.current,
                 )
                 if (generation != loadGeneration) return@launch // superseded
                 // Fillable only when the payload carries a non-blank `rendered_html`
@@ -312,6 +317,8 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 // Preview is local-only: report lifecycle but do NOT auto-preload a real ad on close.
                 callbacks = object : InterstitialCallbacks {
                     override fun onDisplayed() { listener?.onAdDisplayed(this@SimulaInterstitialAd) }
+                    override fun onImpression() { listener?.onAdImpression(this@SimulaInterstitialAd) }
+                    override fun onPaid(adValue: AdValue) { listener?.onAdPaid(this@SimulaInterstitialAd, adValue) }
                     override fun onClicked() { listener?.onAdClicked(this@SimulaInterstitialAd) }
                     override fun onClosed() {
                         state = State.Idle
@@ -383,6 +390,16 @@ class SimulaInterstitialAd(val adUnitId: String) {
         override fun onDisplayed() {
             Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, null, elapsedSinceShow(), null)
             listener?.onAdDisplayed(this@SimulaInterstitialAd)
+        }
+
+        override fun onImpression() {
+            Telemetry.recordLifecycle("impression", AD_FORMAT, adUnitId, adId, null, elapsedSinceShow(), null)
+            listener?.onAdImpression(this@SimulaInterstitialAd)
+        }
+
+        override fun onPaid(adValue: AdValue) {
+            Telemetry.recordLifecycle("paid", AD_FORMAT, adUnitId, adId, null, null, null)
+            listener?.onAdPaid(this@SimulaInterstitialAd, adValue)
         }
 
         override fun onClicked() {

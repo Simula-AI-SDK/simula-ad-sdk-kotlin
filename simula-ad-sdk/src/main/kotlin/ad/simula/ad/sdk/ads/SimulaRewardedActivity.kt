@@ -305,14 +305,54 @@ private fun RewardedMinigame(
         }
     }
 
-    // DISPLAYED + impression fire once the creative first composes. Guarded so an
-    // Activity recreation doesn't double-report either.
+    // SHOWN (AdMob's onAdShowedFullScreenContent) — fired once the playable first composes
+    // (begin-to-render), reporting the `/shown` beacon. Guarded so an Activity recreation doesn't
+    // double-report.
     LaunchedEffect(Unit) {
         if (!presentation.displayedReported) {
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
             if (presentation.impressionId.isNotBlank()) {
+                SimulaScope.launch { SimulaApiClient.trackShown(presentation.impressionId, presentation.apiKey) }
+            }
+        }
+    }
+
+    // IMPRESSION + PAID (AdMob's billable impression + paid event) — fired together once the playable
+    // has been on screen for [FULLSCREEN_IMPRESSION_DELAY_MS] of FOREGROUND time after begin-to-render,
+    // independent of the play-to-earn reward gate. OMID measures viewability but does not gate us (PRD).
+    // Foreground-only so a backgrounded playable can't accrue the delay; the accrued time lives on the
+    // presentation so a config-change recreation resumes rather than restarts. The `/seen` beacon is the
+    // billing source of truth; onPaid is local analytics only (value already on-device, no network).
+    LaunchedEffect(Unit) {
+        if (presentation.impressionReported) return@LaunchedEffect
+
+        fun fireImpressionAndPaid() {
+            if (presentation.impressionReported) return
+            presentation.impressionReported = true
+            presentation.callbacks.onImpression()
+            presentation.callbacks.onPaid(presentation.adValue)
+            if (presentation.impressionId.isNotBlank()) {
                 SimulaScope.launch { SimulaApiClient.trackImpression(presentation.impressionId, presentation.apiKey) }
+            }
+        }
+
+        if (presentation.accumulatedImpressionTimeMs >= FULLSCREEN_IMPRESSION_DELAY_MS) {
+            fireImpressionAndPaid()
+            return@LaunchedEffect
+        }
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            if (presentation.impressionReported) return@repeatOnLifecycle
+            var lastTickMs = SystemClock.elapsedRealtime()
+            while (true) {
+                delay(IMPRESSION_TICK_MS)
+                val now = SystemClock.elapsedRealtime()
+                presentation.accumulatedImpressionTimeMs += now - lastTickMs
+                lastTickMs = now
+                if (presentation.accumulatedImpressionTimeMs >= FULLSCREEN_IMPRESSION_DELAY_MS) {
+                    fireImpressionAndPaid()
+                    return@repeatOnLifecycle
+                }
             }
         }
     }

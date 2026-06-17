@@ -3,6 +3,7 @@ package ad.simula.ad.sdk.network
 import android.util.Log
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.CharacterData
 import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.model.Experiment
@@ -366,6 +367,10 @@ internal object SimulaApiClient {
         // Creative descriptor (`creative` node) and experiment metadata; null when omitted.
         val creative: Creative? = null,
         val experiment: Experiment? = null,
+        // AdMob-shaped estimated revenue derived on-device from the serve's `bid_amt` (CPM). Held on
+        // the loaded ad and surfaced on the paid event when the impression fires. Defaults to a $0
+        // estimate so locally-built results (preview) need not supply it.
+        val adValue: AdValue = AdValue.fromBidCpm(0.0),
     ) {
         /** The ad format. Prefers the nested `creative.ad_unit_type`; falls back to the legacy
          * `rendered_format` (the imperative HTML model dropped the flat `rewarded` flag). Drives
@@ -388,6 +393,7 @@ internal object SimulaApiClient {
         charName: String? = null,
         charImage: String? = null,
         charDesc: String? = null,
+        context: ad.simula.ad.sdk.model.SimulaAdContext? = null,
     ): AdLoadResult = withContext(Dispatchers.IO) {
         val requestBody = AdLoadRequestBody(
             adUnitId = adUnitId,
@@ -396,6 +402,7 @@ internal object SimulaApiClient {
             charName = charName,
             charImage = charImage,
             charDesc = charDesc,
+            context = context?.toBody(),
             capabilities = currentDeviceCapabilities(),
         )
 
@@ -424,6 +431,7 @@ internal object SimulaApiClient {
             adBehavior = data.adBehavior.toDomain(),
             creative = data.creative.toDomain(),
             experiment = data.experiment.toDomain(),
+            adValue = AdValue.fromBidCpm(data.bidAmt),
         )
     }
 
@@ -438,6 +446,9 @@ internal object SimulaApiClient {
         // The mountable creative on a fill; both null on a no-fill.
         val iframeUrl: String?,
         val renderedHtml: String?,
+        // AdMob-shaped estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
+        // native paid event, co-fired with the impression. Defaults to a $0 estimate (preview path).
+        val adValue: AdValue = AdValue.fromBidCpm(0.0),
     )
 
     /**
@@ -494,6 +505,7 @@ internal object SimulaApiClient {
             adFormat = data.adFormat,
             iframeUrl = data.adResponse.iframeUrl,
             renderedHtml = data.adResponse.renderedHtml,
+            adValue = AdValue.fromBidCpm(data.bidAmt),
         )
     }
 
@@ -512,6 +524,9 @@ internal object SimulaApiClient {
         val destination: String = "appstore",
         val trackingUrl: String? = null,
         val adBehavior: AdBehavior? = null,
+        // AdMob-shaped estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
+        // paid event when the impression fires. Defaults to a $0 estimate (preview path).
+        val adValue: AdValue = AdValue.fromBidCpm(0.0),
     )
 
     /**
@@ -526,6 +541,7 @@ internal object SimulaApiClient {
         charName: String? = null,
         charImage: String? = null,
         charDesc: String? = null,
+        context: ad.simula.ad.sdk.model.SimulaAdContext? = null,
     ): RewardedInitResult = withContext(Dispatchers.IO) {
         val requestBody = RewardedInitRequestBody(
             adUnitId = adUnitId,
@@ -534,6 +550,7 @@ internal object SimulaApiClient {
             charName = charName,
             charImage = charImage,
             charDesc = charDesc,
+            context = context?.toBody(),
         )
         val response = SimulaHttp.request(
             url = "$API_BASE_URL/load/rewarded",
@@ -555,6 +572,7 @@ internal object SimulaApiClient {
             destination = data.destination,
             trackingUrl = data.trackingUrl,
             adBehavior = data.adBehavior.toDomain(),
+            adValue = AdValue.fromBidCpm(data.bidAmt),
         )
     }
 
@@ -657,10 +675,34 @@ internal object SimulaApiClient {
     }
 
     /**
+     * Track a full-screen ad as shown (`POST /impressions/{impressionId}/shown`) — AdMob's
+     * "shown" signal (`onAdShowedFullScreenContent`), fired when the creative first renders.
+     * Distinct from the billable impression beacon ([trackImpression] → `/seen`), which fires
+     * later at begin-to-render + 2s. The endpoint takes no body. Best-effort, silently fails —
+     * tracking must never disrupt the ad.
+     */
+    suspend fun trackShown(
+        impressionId: String,
+        apiKey: String,
+    ): Unit = withContext(Dispatchers.IO) {
+        if (impressionId.isBlank()) return@withContext
+        try {
+            SimulaHttp.request(
+                url = "$API_BASE_URL/impressions/$impressionId/shown",
+                method = "POST",
+                headers = authHeaders(apiKey),
+            )
+        } catch (_: Exception) {
+            // Silently fail
+        }
+    }
+
+    /**
      * Track an ad impression as seen (`POST /impressions/{impressionId}/seen`). Best-effort,
      * silently fails. The endpoint takes no body — A/B attribution is stamped on the serve doc
      * at load time, not on this beacon. [impressionId] is the serve handle for rewarded/
-     * interstitial and the ad id for native; the backend resolves either.
+     * interstitial and the ad id for native; the backend resolves either. For full-screen ads
+     * this is the **billable impression**, fired at begin-to-render + 2s (after [trackShown]).
      */
     suspend fun trackImpression(
         impressionId: String,

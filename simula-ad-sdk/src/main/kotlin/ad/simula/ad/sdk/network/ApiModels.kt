@@ -109,6 +109,10 @@ internal data class AdLoadRequestBody(
     @SerialName("char_name") val charName: String? = null,
     @SerialName("char_image") val charImage: String? = null,
     @SerialName("char_desc") val charDesc: String? = null,
+    // Contextual targeting signals (category, tags, customContext, …) — the same `NativeContext` the
+    // native surface sends, now extended to the full-screen formats so they get character-aware
+    // targeting too. Null omits the key (the backend treats it as no context).
+    val context: NativeContextBody? = null,
     // Device capability snapshot so the backend never assigns an unsupported variant. Defaults to a
     // neutral value (no framework access) so pure-JVM tests can construct this; the ad path injects
     // the real values via `currentDeviceCapabilities()`.
@@ -128,6 +132,10 @@ internal data class AdLoadApiResponse(
     // Server-rendered HTML creative. When present (non-blank) it is rendered
     // full-screen in a WebView — the imperative interstitial's sole creative.
     @SerialName("rendered_html") val renderedHtml: String? = null,
+    // Cleared bid (the estimated CPM) for this serve, backend-provided. The SDK derives the AdMob-shaped
+    // `adValue` from it (see [ad.simula.ad.sdk.model.AdValue.fromBidCpm]) and surfaces it on the paid
+    // event. Defaults to 0.0 → a $0 estimate when the field is absent (e.g. a no-fill).
+    @SerialName("bid_amt") val bidAmt: Double = 0.0,
     // Null when the payload omits `ad_behavior` — the renderer falls back to today's defaults.
     @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
     val creative: ApiCreative? = null,
@@ -286,6 +294,9 @@ internal data class RewardedInitRequestBody(
     @SerialName("char_name") val charName: String? = null,
     @SerialName("char_image") val charImage: String? = null,
     @SerialName("char_desc") val charDesc: String? = null,
+    // Contextual targeting signals — see [AdLoadRequestBody.context]. Extended to rewarded so the
+    // full-screen formats target the same way native does.
+    val context: NativeContextBody? = null,
 )
 
 @Serializable
@@ -299,6 +310,8 @@ internal data class RewardedInitApiResponse(
     @SerialName("rendered_html") val renderedHtml: String = "",
     val destination: String = "appstore",
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    // Cleared bid (estimated CPM) for this serve — see [AdLoadApiResponse.bidAmt]. Drives `adValue`.
+    @SerialName("bid_amt") val bidAmt: Double = 0.0,
     // Mirrors the interstitial response: the play-to-earn gate (`close.delay_seconds`) plus the
     // mid-ad store prompt + its tap routing. Null/absent → no gate / no store prompt.
     @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
@@ -361,6 +374,8 @@ internal data class NativeAdApiResponse(
     @SerialName("impression_id") val impressionId: String? = null,
     @SerialName("ad_inserted") val adInserted: Boolean = false,
     @SerialName("ad_format") val adFormat: String = "",
+    // Cleared bid (estimated CPM) for this serve — see [AdLoadApiResponse.bidAmt]. Drives `adValue`.
+    @SerialName("bid_amt") val bidAmt: Double = 0.0,
     val adResponse: NativeAdCreativeBody = NativeAdCreativeBody(),
 )
 
