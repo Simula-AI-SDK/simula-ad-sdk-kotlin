@@ -43,7 +43,13 @@ internal class SimulaSessionStore(
         }
 
         val id = try {
-            deferred.await()
+            // runCatching so even if createSession ever throws (today it returns null on failure),
+            // the exception can't escape into the calling LaunchedEffect and crash the host — a
+            // failed await collapses to null and stays retryable via the finally below. A
+            // CancellationException is rethrown so the caller's coroutine still cancels cooperatively.
+            runCatching { deferred.await() }
+                .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+                .getOrNull()
         } finally {
             // Clear regardless of success/failure so the next call can retry.
             mutex.withLock {

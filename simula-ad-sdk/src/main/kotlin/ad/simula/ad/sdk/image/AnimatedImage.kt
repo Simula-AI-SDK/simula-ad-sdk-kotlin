@@ -81,6 +81,13 @@ private fun AnimatedDrawableView(
     modifier: Modifier,
     contentScale: ContentScale,
 ) {
+    // Keyed on the `source` ByteArray by reference identity (ByteArray has no structural equals),
+    // which is safe here: the only caller (CachedCoverImage) hands in the SAME array instance for a
+    // given URL — it comes from a single DecodedImage.Animated that ImageCache stores per URL and
+    // returns on every load. So a recomposition with the same URL reuses the same array and does NOT
+    // re-decode the GIF/WebP. A content-hash key (source.contentHashCode()) would be O(n) over the
+    // full encoded bytes on every composition with no benefit given that reference stability, so it
+    // is deliberately avoided.
     val drawable = remember(source) { ImageDecoder.buildAnimatedDrawable(source) }
     if (drawable == null) {
         StaticFromBytes(source, modifier, contentScale)

@@ -46,9 +46,18 @@ internal object ImageCache {
     private const val MIN_BYTES = 8 * 1024 * 1024
     private const val NEGATIVE_TTL_MS = 30_000L
 
+    /** Heaps below this are treated as low-end and get a smaller cache fraction. */
+    private const val LOW_HEAP_THRESHOLD_BYTES = 128L * 1024 * 1024
+
     private val costLimit: Int = run {
-        val quarterHeap = Runtime.getRuntime().maxMemory() / 4
-        minOf(quarterHeap, HARD_CEILING_BYTES.toLong()).toInt().coerceAtLeast(MIN_BYTES)
+        val maxHeap = Runtime.getRuntime().maxMemory()
+        // Scale the LRU by available heap: on a small heap (< 128 MB) a quarter-heap cache crowds
+        // out the host, so use an eighth there and a quarter on roomier devices. No Context is
+        // available at field init, so isLowRamDevice() can't be consulted here — the heap size is a
+        // good proxy (low-RAM devices are configured with small Dalvik heaps). Floor + hard ceiling
+        // keep both ends sane.
+        val fraction = if (maxHeap < LOW_HEAP_THRESHOLD_BYTES) maxHeap / 8 else maxHeap / 4
+        minOf(fraction, HARD_CEILING_BYTES.toLong()).toInt().coerceAtLeast(MIN_BYTES)
     }
 
     private val cache = object : LruCache<String, DecodedImage>(costLimit) {

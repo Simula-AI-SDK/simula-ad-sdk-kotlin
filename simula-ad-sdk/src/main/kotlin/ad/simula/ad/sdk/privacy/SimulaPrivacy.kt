@@ -42,7 +42,19 @@ object SimulaPrivacy {
     private var appContext: Context? = null
     private var prefs: SharedPreferences? = null
 
+    // GAID re-read throttle: the reflective Play Services lookup runs on every ON_RESUME,
+    // but the id rarely changes within a session. Refresh at most once per [GAID_REFRESH_TTL_MS]
+    // unless the consent / limit-tracking gate actually changed (see [refreshAdvertisingId]).
+    // Volatile so the foreground (resume) read on any thread sees the latest stamp without a lock.
+    @Volatile private var lastGaidRefreshAt = 0L
+    // The collection-enabled gate (enableAdvertisingId && !coppaApplies) used for the last refresh,
+    // so a consent change forces an immediate re-read regardless of the TTL. null = never refreshed.
+    @Volatile private var lastGaidEnabled: Boolean? = null
+
     private const val ZERO_GAID = "00000000-0000-0000-0000-000000000000"
+
+    /** How long a collected GAID is considered fresh before a foreground re-read is allowed. */
+    private const val GAID_REFRESH_TTL_MS = 4 * 60 * 60 * 1000L // 4 hours
 
     // CMPs write the IAB keys asynchronously and may refresh them later; pick
     // changes up automatically.
@@ -147,8 +159,20 @@ object SimulaPrivacy {
             enabled = explicitConfig.enableAdvertisingId && !explicitConfig.coppaApplies
             ctx = appContext
         }
+
+        // Throttle the reflective Play Services lookup. The first call always proceeds
+        // (lastGaidEnabled == null), and any change to the collection gate forces an immediate
+        // re-read; otherwise honor the TTL so a frequently-foregrounded app doesn't re-read on
+        // every ON_RESUME (the id is stable within the window). When collection is disabled we
+        // still fall through to null out the id below — that path doesn't touch Play Services.
+        val now = System.currentTimeMillis()
+        val gateChanged = lastGaidEnabled != enabled
+        if (enabled && !gateChanged && now - lastGaidRefreshAt < GAID_REFRESH_TTL_MS) return
+
         val id = if (enabled && ctx != null) withContext(Dispatchers.IO) { readGaid(ctx) } else null
         synchronized(lock) { collectedAdvertisingId = id }
+        lastGaidEnabled = enabled
+        lastGaidRefreshAt = now
         recompute()
     }
 
