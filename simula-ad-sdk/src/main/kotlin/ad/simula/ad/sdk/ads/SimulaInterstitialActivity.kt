@@ -15,6 +15,7 @@ import ad.simula.ad.sdk.model.OverlayTiming
 import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import ad.simula.ad.sdk.util.ColorUtil
@@ -111,6 +112,8 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
     private var presentation: InterstitialPresentation? = null
     private var token: String? = null
     private var closed = false
+    // Store-exit funnel tracker for this presentation (store_opened/returned/abandoned). Main-thread only.
+    private var storeExit: StoreExitTracker? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -125,6 +128,10 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
             return
         }
         presentation = p
+        storeExit = StoreExitTracker(
+            adId = p.ad.impressionId.takeIf { it.isNotBlank() },
+            adFormat = "interstitial",
+        )
 
         configureWindow()
         @Suppress("DEPRECATION")
@@ -144,6 +151,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     autoStoreRedirect = p.ad.adBehavior?.autoStoreRedirect,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
+                        storeExit?.recordStoreOpen("auto_redirect")
                         CreativeCtaRouter.open(
                             applicationContext,
                             p.ad.trackingUrl,
@@ -158,6 +166,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                             reportClosed()
                             onClose()
                         },
+                        recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
                         openDestination = { ad ->
                             // applicationContext so the open survives auto-dismiss. `storeOpen` is
                             // null when the payload omits `ad_behavior` → today's store path.
@@ -179,7 +188,18 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
     private fun reportClosed() {
         if (closed) return
         closed = true
+        storeExit?.onAdClosed() // resolve any outstanding store visit as an abandon
         presentation?.callbacks?.onClosed()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        storeExit?.onResume()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        storeExit?.onPause()
     }
 
     /** Tear the Activity down (after the optional fallback ad). */
@@ -198,6 +218,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
             token?.let { InterstitialHandoff.remove(it) }
             if (!closed) {
                 closed = true
+                storeExit?.onAdClosed() // finished without a normal close → resolve any open store visit
                 presentation?.callbacks?.onClosed()
             }
         }
@@ -241,6 +262,7 @@ private fun gateAlreadyElapsed(p: InterstitialPresentation, total: Duration): Bo
 private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
     onFinish: () -> Unit,
+    recordStoreOpen: (String) -> Unit,
     openDestination: (SimulaApiClient.AdLoadResult) -> Unit,
 ) {
     val ad = presentation.ad
@@ -289,6 +311,7 @@ private fun CreativeInterstitial(
     fun fireAutoStoreRedirect() {
         if (!autoRedirectFired) {
             autoRedirectFired = true
+            recordStoreOpen("auto_redirect")
             openDestination(ad)
         }
     }
@@ -386,11 +409,8 @@ private fun CreativeInterstitial(
         if (!presentation.displayedReported) {
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
-            if (ad.impressionId.isNotBlank()) {
-                SimulaScope.launch {
-                    SimulaApiClient.trackShown(ad.impressionId, presentation.apiKey)
-                }
-            }
+            // Durable beacon (was a fire-and-forget trackShown).
+            AdBeaconManager.enqueue(ad.impressionId, "shown", adFormat = "interstitial")
         }
     }
 
@@ -408,11 +428,8 @@ private fun CreativeInterstitial(
             presentation.impressionReported = true
             presentation.callbacks.onImpression()
             presentation.callbacks.onPaid(ad.adValue)
-            if (ad.impressionId.isNotBlank()) {
-                SimulaScope.launch {
-                    SimulaApiClient.trackImpression(ad.impressionId, presentation.apiKey)
-                }
-            }
+            // Durable billable-impression beacon (was a fire-and-forget trackImpression).
+            AdBeaconManager.enqueue(ad.impressionId, "seen", adFormat = "interstitial")
         }
 
         if (presentation.accumulatedImpressionTimeMs >= FULLSCREEN_IMPRESSION_DELAY_MS) {
@@ -448,6 +465,8 @@ private fun CreativeInterstitial(
                 bridge = bridge,
                 onAdClick = {
                     presentation.callbacks.onClicked()
+                    // The creative CTA opens the advertiser store (CreativeCtaRouter.open in CreativeHtml).
+                    recordStoreOpen("cta")
                     // Play install banner timed to the click (independent of the store the CTA opens).
                     if (skoverlay != null && skoverlay.enabled &&
                         skoverlay.timing == OverlayTiming.ON_CLICK && Build.VERSION.SDK_INT >= 21
@@ -488,10 +507,9 @@ private fun CreativeInterstitial(
                 prompt = storePrompt,
                 closePosition = close.position,
                 onTap = {
-                    // Mid-store-prompt click beacon — only on a real user tap (not auto_store_redirect).
-                    if (ad.impressionId.isNotBlank()) {
-                        SimulaScope.launch { SimulaApiClient.trackClick(ad.impressionId, presentation.apiKey) }
-                    }
+                    // Mid-store-prompt click beacon (durable) — only on a real user tap (not auto_store_redirect).
+                    AdBeaconManager.enqueue(ad.impressionId, "click", adFormat = "interstitial")
+                    recordStoreOpen("store_prompt")
                     openDestination(ad)
                 },
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
@@ -502,7 +520,7 @@ private fun CreativeInterstitial(
         if (skoverlay != null && skoverlay.enabled && installBannerVisible) {
             PlayInstallBanner(
                 config = skoverlay,
-                onTap = { openDestination(ad) },
+                onTap = { recordStoreOpen("store_prompt"); openDestination(ad) },
                 onDismiss = { installBannerVisible = false },
             )
         }

@@ -2,6 +2,8 @@ package ad.simula.ad.sdk.telemetry
 
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.util.Log
 import kotlinx.serialization.json.Json
@@ -32,8 +34,9 @@ internal object Telemetry {
 
     /**
      * Install the telemetry pipeline. Call once from `SimulaAds.initialize`. When [enabled]
-     * is false nothing is created (host opt-out). [primaryUserId] is gated dynamically by the
-     * live consent snapshot, so a later consent change is honored.
+     * is false nothing is created (host opt-out). [primaryUserIdProvider] is read live on every
+     * flush so a mid-session `updatePrimaryUserID` is honored, and it is additionally gated by
+     * the live consent snapshot.
      */
     fun initialize(
         context: Context,
@@ -41,7 +44,7 @@ internal object Telemetry {
         devMode: Boolean,
         enabled: Boolean,
         sessionIdProvider: () -> String?,
-        primaryUserId: String?,
+        primaryUserIdProvider: () -> String?,
     ) {
         if (!enabled) {
             manager = null
@@ -58,13 +61,15 @@ internal object Telemetry {
         )
         manager = TelemetryManager(
             ctx = ctx,
-            store = SharedPrefsTelemetryStore(appCtx, json),
+            store = SqliteTelemetryStore(appCtx, json),
             sender = ApiTelemetrySender(apiKey),
             sessionIdProvider = sessionIdProvider,
             // Re-gate on every flush: ppid only with consent (& not under COPPA); the
             // advertising id is already nulled by the snapshot when not collectible.
-            primaryUserIdProvider = { primaryUserId },
+            primaryUserIdProvider = primaryUserIdProvider,
             advertisingIdProvider = { SimulaPrivacy.current.advertisingId },
+            // Resolved fresh on each flush (off the UI path); best-effort, never throws.
+            connectionTypeProvider = { resolveConnectionType(appCtx) },
             // In dev mode, mirror every (redacted) event to logcat for local verification.
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
         ).also { it.start() }
@@ -85,8 +90,13 @@ internal object Telemetry {
         failureClass: String?,
     ) = manager?.recordNetwork(path, method, statusCode, durationMs, requestBytes, responseBytes, failureClass) ?: Unit
 
-    fun recordOperation(name: String, durationMs: Long, success: Boolean) =
-        manager?.recordOperation(name, durationMs, success) ?: Unit
+    fun recordOperation(
+        name: String,
+        durationMs: Long,
+        success: Boolean,
+        failureClass: String? = null,
+        breadcrumb: String? = null,
+    ) = manager?.recordOperation(name, durationMs, success, failureClass, breadcrumb) ?: Unit
 
     fun recordLifecycle(
         stage: String,
@@ -96,11 +106,32 @@ internal object Telemetry {
         serveId: String? = null,
         durationMs: Long? = null,
         errorCode: String? = null,
-    ) = manager?.recordLifecycle(stage, adFormat, adUnitId, adId, serveId, durationMs, errorCode) ?: Unit
+        trigger: String? = null,
+        cacheSource: String? = null,
+    ) = manager?.recordLifecycle(stage, adFormat, adUnitId, adId, serveId, durationMs, errorCode, trigger, cacheSource) ?: Unit
 
     fun recordError(signature: String, errorCode: String? = null, message: String? = null, breadcrumb: String? = null) =
         manager?.recordError(signature, errorCode, message, breadcrumb) ?: Unit
 
     /** Persist + attempt delivery now (e.g. app background). */
     fun flush() = manager?.flushNow() ?: Unit
+
+    /**
+     * Best-effort connection class for the envelope, resolved at flush time. Returns
+     * `wifi` / `cellular` / `none` / `unknown`; any failure (missing permission, null
+     * service, old API) degrades to `unknown` and never throws. Requires
+     * `ACCESS_NETWORK_STATE` (a normal, install-time permission) to return anything but `unknown`.
+     */
+    private fun resolveConnectionType(appCtx: Context): String = runCatching {
+        val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return@runCatching "unknown"
+        val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+            ?: return@runCatching "none"
+        when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            else -> "unknown"
+        }
+    }.getOrDefault("unknown")
 }

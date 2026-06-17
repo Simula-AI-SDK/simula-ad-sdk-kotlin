@@ -52,6 +52,8 @@ internal class TelemetryManager(
     private val sessionIdProvider: () -> String?,
     private val primaryUserIdProvider: () -> String?,
     private val advertisingIdProvider: () -> String?,
+    // Resolved fresh on each flush (off the UI path). Must be best-effort/non-throwing.
+    private val connectionTypeProvider: () -> String? = { null },
     enabled: Boolean = true,
     sampleRate: Double = 1.0,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -118,8 +120,20 @@ internal class TelemetryManager(
         ),
     )
 
-    fun recordOperation(name: String, durationMs: Long, success: Boolean) =
-        enqueuePerf(newEvent(TYPE_OPERATION, name).copy(durationMs = durationMs, success = success))
+    fun recordOperation(
+        name: String,
+        durationMs: Long,
+        success: Boolean,
+        failureClass: String? = null,
+        breadcrumb: String? = null,
+    ) = enqueuePerf(
+        newEvent(TYPE_OPERATION, name).copy(
+            durationMs = durationMs,
+            success = success,
+            failureClass = failureClass,
+            breadcrumb = breadcrumb,
+        ),
+    )
 
     fun recordLifecycle(
         stage: String,
@@ -129,6 +143,8 @@ internal class TelemetryManager(
         serveId: String?,
         durationMs: Long?,
         errorCode: String?,
+        trigger: String? = null,
+        cacheSource: String? = null,
     ) = enqueuePerf(
         newEvent(TYPE_LIFECYCLE, name = stage).copy(
             adFormat = adFormat,
@@ -137,6 +153,8 @@ internal class TelemetryManager(
             serveId = serveId,
             durationMs = durationMs,
             errorCode = errorCode,
+            trigger = trigger,
+            cacheSource = cacheSource,
         ),
     )
 
@@ -258,8 +276,11 @@ internal class TelemetryManager(
             }
         }
 
-        // Serialize outside the critical section (see above).
-        val body = json.encodeToString(envelope(events))
+        // Stamp wall-clock staleness per event at flush time, then serialize outside the
+        // critical section (see above). Copies leave the buffered originals untouched for retries.
+        val stampClock = clock()
+        val stamped = events.map { if (it.eventAgeMs == null) it.copy(eventAgeMs = stampClock - it.timestamp) else it }
+        val body = json.encodeToString(envelope(stamped))
 
         val ack = try {
             sender.send(body)
@@ -328,6 +349,7 @@ internal class TelemetryManager(
         // PII providers are already consent-gated by the facade (re-checked at send time).
         primaryUserId = primaryUserIdProvider(),
         advertisingId = advertisingIdProvider(),
+        connectionType = connectionTypeProvider(),
         events = events,
     )
 

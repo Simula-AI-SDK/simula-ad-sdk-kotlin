@@ -137,6 +137,33 @@ internal object SimulaApiClient {
         }
     }
 
+    /**
+     * Update the PPID on an existing server session: `PATCH /session/{sessionId}/ppid/{ppid}`.
+     *
+     * Best-effort and non-throwing — returns true only on a 2xx. The SDK's local PPID is the
+     * source of truth for the *next* `session/create`, so a transient failure here is harmless
+     * (the backend is last-write-wins). Sent with `instrument = false` so the PPID, which rides
+     * in the URL path, never lands in a telemetry network event.
+     */
+    suspend fun updatePpid(apiKey: String, sessionId: String, ppid: String): Boolean = withContext(Dispatchers.IO) {
+        if (sessionId.isBlank() || ppid.isBlank()) return@withContext false
+        try {
+            val url = "$API_BASE_URL/session/" +
+                URLEncoder.encode(sessionId, "UTF-8") +
+                "/ppid/" + URLEncoder.encode(ppid, "UTF-8")
+            val response = SimulaHttp.request(
+                url = url,
+                method = "PATCH",
+                headers = authHeaders(apiKey),
+                body = null,
+                instrument = false,
+            )
+            response.isSuccessful
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     // ── Catalog ─────────────────────────────────────────────────────────────
 
     data class CatalogResult(
@@ -740,6 +767,25 @@ internal object SimulaApiClient {
         } catch (_: Exception) {
             // Silently fail
         }
+    }
+
+    /**
+     * Send a no-body impression-action beacon (`POST /impressions/{impressionId}/{action}`, where
+     * [action] is `shown` / `seen` / `click`) and return the HTTP status. Unlike the best-effort
+     * `track*` helpers, this surfaces the outcome — connectivity failures propagate as exceptions —
+     * so the durable [AdBeaconQueue] can decide retry vs. drop. Not for direct call-site use; ad
+     * surfaces enqueue via [AdBeaconManager].
+     */
+    internal suspend fun sendImpressionBeacon(
+        impressionId: String,
+        action: String,
+        apiKey: String,
+    ): Int = withContext(Dispatchers.IO) {
+        SimulaHttp.request(
+            url = "$API_BASE_URL/impressions/$impressionId/$action",
+            method = "POST",
+            headers = authHeaders(apiKey),
+        ).code
     }
 
     /**

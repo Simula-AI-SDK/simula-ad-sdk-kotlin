@@ -2,6 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Read the active network's transport (wifi/cellular/none) for the telemetry envelope's
+         connection_type. A normal, install-time permission (no runtime prompt); resolution is
+         best-effort and degrades to "unknown" if it is ever unavailable. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- SDK bridge TRIGGER_HAPTIC (PRD §3): lets a creative buzz the device via Vibrator. -->
     <uses-permission android:name="android.permission.VIBRATE" />
 

@@ -5,6 +5,7 @@ import ad.simula.ad.sdk.ads.SimulaAdError
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.NativeAdData
+import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.LocalSimulaContext
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -103,7 +104,33 @@ fun NativeAdSlot(
     // imperative ads). Reused by the load, no-fill, and creative-render-failure paths.
     fun reportError(error: NativeAdError) {
         Telemetry.recordError(signature = "native:load", errorCode = error.telemetryCode(), breadcrumb = "NativeAdSlot")
+        // load_fail lifecycle parity with interstitial/rewarded (native previously emitted error
+        // telemetry only). adFormat is fixed for native; no creative is loaded so adId is null.
+        Telemetry.recordLifecycle(
+            stage = "load_fail",
+            adFormat = "character_ad",
+            adUnitId = adUnitId,
+            adId = null,
+            serveId = null,
+            durationMs = null,
+            errorCode = error.telemetryCode(),
+        )
         currentOnError(error)
+    }
+
+    // load_success lifecycle parity, tagged with where the fill came from (preload | cache | network)
+    // so conversion can be analyzed by source. durationMs is the live-load latency (null for cache/preload).
+    fun reportLoadSuccess(result: SimulaApiClient.NativeAdResult, source: String, durationMs: Long? = null) {
+        Telemetry.recordLifecycle(
+            stage = "load_success",
+            adFormat = result.adFormat,
+            adUnitId = adUnitId,
+            adId = result.impressionId.takeIf { it.isNotBlank() },
+            serveId = null,
+            durationMs = durationMs,
+            errorCode = null,
+            cacheSource = source,
+        )
     }
     val parsedWidth = remember(width) { parseDimension(width).clampMinWidth(MIN_SLOT_WIDTH) }
     val slotModifier = when (parsedWidth) {
@@ -143,7 +170,8 @@ fun NativeAdSlot(
         }
 
         // Caches the outcome so the next remount of this slot reuses it (no duplicate serve).
-        fun apply(result: SimulaApiClient.NativeAdResult) {
+        // [source] tags the fill origin for the load_success lifecycle (preload | cache | network).
+        fun apply(result: SimulaApiClient.NativeAdResult, source: String, durationMs: Long? = null) {
             val hasCreative = result.adInserted &&
                 (!result.iframeUrl.isNullOrBlank() || !result.renderedHtml.isNullOrBlank())
             if (hasCreative) {
@@ -151,6 +179,7 @@ fun NativeAdSlot(
                 heightDp = 0f
                 impressionFired = false
                 state = NativeAdSlotState.Filled(result)
+                reportLoadSuccess(result, source, durationMs)
             } else {
                 // No-fill: collapse the slot AND surface NoFill so the publisher can react (fallback).
                 NativeAdCache.putNoFill(adUnitId, position)
@@ -160,7 +189,7 @@ fun NativeAdSlot(
         }
 
         // 1. Honor a fresh preload first (a new id the publisher just preloaded).
-        preloadedAdId?.let { NativeAdPreloadCache.consume(it) }?.let { apply(it); return@LaunchedEffect }
+        preloadedAdId?.let { NativeAdPreloadCache.consume(it) }?.let { apply(it, source = "preload"); return@LaunchedEffect }
 
         // 2. Per-slot cache hit → render without a network call (no duplicate serve / impression).
         when (val cached = NativeAdCache.get(adUnitId, position)) {
@@ -168,6 +197,7 @@ fun NativeAdSlot(
                 heightDp = cached.heightDp
                 impressionFired = cached.impressionFired
                 state = NativeAdSlotState.Filled(cached.result)
+                reportLoadSuccess(cached.result, source = "cache")
                 return@LaunchedEffect
             }
             NativeAdCache.Value.NoFill -> { state = NativeAdSlotState.Empty; return@LaunchedEffect }
@@ -176,8 +206,10 @@ fun NativeAdSlot(
 
         // 3. Live request.
         state = NativeAdSlotState.Loading
+        val loadStartNanos = System.nanoTime()
         try {
-            apply(NativeAdController.load(ctx.ensureSession, adUnitId, position, resolvedTheme))
+            val result = NativeAdController.load(ctx.ensureSession, adUnitId, position, resolvedTheme)
+            apply(result, source = "network", durationMs = (System.nanoTime() - loadStartNanos) / 1_000_000)
         } catch (e: SimulaAdError) {
             state = NativeAdSlotState.Empty // error → hide; not cached so it can retry next time
             reportError(e.toNativeAdError())
@@ -207,7 +239,18 @@ fun NativeAdSlot(
                             (NativeAdCache.get(adUnitId, position) as? NativeAdCache.Value.Fill)?.heightDp = px
                         }
                     },
-                    onAdClick = { /* CLICKED — reserved for a future click callback / telemetry hook. */ },
+                    onAdClick = {
+                        // click lifecycle parity with interstitial/rewarded (was a reserved no-op).
+                        Telemetry.recordLifecycle(
+                            stage = "click",
+                            adFormat = result.adFormat,
+                            adUnitId = adUnitId,
+                            adId = result.impressionId.takeIf { it.isNotBlank() },
+                            serveId = null,
+                            durationMs = null,
+                            errorCode = null,
+                        )
+                    },
                     onLoadError = {
                         // The creative's WebView failed to load (e.g. no connectivity when this row
                         // scrolled into view — including a recycled row whose height was restored from
@@ -233,15 +276,27 @@ fun NativeAdSlot(
                             // callback + server beacon co-fire together. A preview (blank id) always fires
                             // the callback but never a beacon.
                             if (result.impressionId.isBlank() || NativeAdCache.markImpressionFired(result.impressionId)) {
+                                // displayed lifecycle parity — fires once per served impression (same dedup gate).
+                                Telemetry.recordLifecycle(
+                                    stage = "displayed",
+                                    adFormat = result.adFormat,
+                                    adUnitId = adUnitId,
+                                    adId = result.impressionId.takeIf { it.isNotBlank() },
+                                    serveId = null,
+                                    durationMs = null,
+                                    errorCode = null,
+                                )
                                 currentOnImpression(NativeAdData(result.impressionId, result.adFormat, adUnitId))
                                 // PAID — co-fired with the impression (PRD "co-fire, do not decouple").
                                 // The estimate is already on-device from load; no network round-trip.
                                 currentOnPaid(result.adValue)
-                                if (result.impressionId.isNotBlank()) {
-                                    SimulaScope.launch {
-                                        SimulaApiClient.trackImpression(result.impressionId, ctx.apiKey)
-                                    }
-                                }
+                                // Durable impression beacon (was a fire-and-forget trackImpression).
+                                AdBeaconManager.enqueue(
+                                    result.impressionId,
+                                    "seen",
+                                    adFormat = result.adFormat,
+                                    adUnitId = adUnitId,
+                                )
                             }
                         }
                     },
