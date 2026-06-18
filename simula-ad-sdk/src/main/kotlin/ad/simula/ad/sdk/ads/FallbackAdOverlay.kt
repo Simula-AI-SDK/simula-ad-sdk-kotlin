@@ -100,6 +100,9 @@ internal fun FallbackAdHost(
         // Prefetch wasn't ready at close — hold on a black backdrop and advance the instant it lands.
         FallbackPhase.Fetching -> {
             Box(Modifier.fillMaxSize().background(Color.Black))
+            // Swallow back during this brief settle window so a fast back-press can't finish the
+            // Activity before the end screens are revealed (parity with the gated close).
+            BackHandler(enabled = true) {}
             LaunchedEffect(prefetched) {
                 val ads = prefetched ?: return@LaunchedEffect
                 phase = if (ads.isNotEmpty()) FallbackPhase.Showing(ads, index = 0) else FallbackPhase.Done

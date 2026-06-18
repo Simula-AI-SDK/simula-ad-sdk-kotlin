@@ -78,6 +78,9 @@ import kotlinx.coroutines.launch
  * @param onError       Fired with a [NativeAdError] on a load/render failure (not-initialized, no
  *                      session, network) and on a no-fill ([NativeAdError.NoFill]). A cached outcome
  *                      replayed on a recycled row does not re-fire (one report per served slot).
+ * @param onClick       Fired when the user taps the creative's CTA and it navigates out — a
+ *                      gesture-initiated click only (pixels and JS auto-redirects do not fire it).
+ *                      Mirrors the interstitial's `onAdClicked`; co-fired with the `click` beacon.
  * @param previewHtml   Debug/QA only: render this HTML creative directly through the full pipeline
  *                      (WebView + height sizing + viewability + AD-badge feedback bridge) with no
  *                      network call. Mirrors the imperative ads' `showPreview`.
@@ -93,12 +96,14 @@ fun NativeAdSlot(
     onImpression: (NativeAdData) -> Unit = {},
     onPaid: (AdValue) -> Unit = {},
     onError: (NativeAdError) -> Unit = {},
+    onClick: () -> Unit = {},
     previewHtml: String? = null,
 ) {
     val ctx = LocalSimulaContext.current
     val currentOnImpression by rememberUpdatedState(onImpression)
     val currentOnPaid by rememberUpdatedState(onPaid)
     val currentOnError by rememberUpdatedState(onError)
+    val currentOnClick by rememberUpdatedState(onClick)
     val resolvedTheme = resolveAdTheme(theme)
     // Surface a native failure to the publisher and record it for telemetry (errorCode parity with the
     // imperative ads). Reused by the load, no-fill, and creative-render-failure paths.
@@ -240,6 +245,9 @@ fun NativeAdSlot(
                         }
                     },
                     onAdClick = {
+                        // Surface the click to the publisher (parity with the interstitial's
+                        // onAdClicked; CAI consumes this) BEFORE recording telemetry.
+                        currentOnClick()
                         // click lifecycle parity with interstitial/rewarded (was a reserved no-op).
                         Telemetry.recordLifecycle(
                             stage = "click",
