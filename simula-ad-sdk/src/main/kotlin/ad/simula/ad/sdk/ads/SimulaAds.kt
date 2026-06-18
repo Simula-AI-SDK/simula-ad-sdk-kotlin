@@ -5,7 +5,9 @@ import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.nativead.NativeAdPreloadCache
+import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.RewardVerificationManager
+import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
@@ -94,6 +96,9 @@ object SimulaAds {
         if (initialized) return
         require(apiKey.isNotBlank()) { "SimulaAds.initialize requires a non-blank apiKey" }
 
+        // Monotonic start marker for the sdk_init telemetry duration (emitted once setup completes).
+        val startNanos = System.nanoTime()
+
         // Double-checked under a lock so two concurrent initialize() calls can't both run the body
         // and double-init (e.g. two session warm-ups, two activity-tracking registrations). The
         // require() above stays outside the lock so a blank key still fails fast on every call.
@@ -124,21 +129,18 @@ object SimulaAds {
         SimulaPrivacy.apply(resolved)
         SimulaPrivacy.attach(appContext)
 
-        // ppid is suppressed without consent and additionally under COPPA — reads the
-        // resolved snapshot, matching SimulaProvider's `sessionConsent.allowsPrimaryUserID` gate.
-        val effectiveUserID = primaryUserID
-        store = SimulaSessionStore(apiKey, devMode, effectiveUserID)
+        store = SimulaSessionStore(apiKey, devMode, primaryUserID)
 
         // Install telemetry before the session warm-up so the /session/create call (and every
-        // subsequent SDK request) is captured. The facade re-gates PII on the live consent
-        // snapshot, so pass the raw primaryUserID, not the init-time effectiveUserID.
+        // subsequent SDK request) is captured. The PPID is read live from the session store so a
+        // mid-session updatePrimaryUserID is honored.
         Telemetry.initialize(
             context = appContext,
             apiKey = apiKey,
             devMode = devMode,
             enabled = telemetryEnabled,
             sessionIdProvider = { store.sessionId },
-            primaryUserId = primaryUserID,
+            primaryUserIdProvider = { store.effectiveUserID },
         )
 
         registerActivityTracking()
@@ -153,9 +155,42 @@ object SimulaAds {
         // own coroutine, so a slow/failed session create can't delay or skip recovery.
         RewardVerificationManager.triggerProcessQueue(appContext)
 
+        // Durable impression/click beacon queue: build it and drain any beacons a prior process
+        // left undelivered (offline/killed). Off the telemetry pipeline; off the critical path.
+        AdBeaconManager.init(appContext, apiKey)
+        AdBeaconManager.triggerProcessQueue()
+
             // Publish last: a concurrent initialize() that observed the volatile flag as true
             // is guaranteed to see all of the above writes (lateinit store/appContext etc.).
             initialized = true
+        }
+
+        // SDK-init beacon, now that telemetry is installed (no-op when telemetry is disabled). Only
+        // the first valid initialize reaches here — a redundant call returns inside the lock above.
+        // Best-effort: the config summary carries no PII and never throws into the host.
+        val initMs = (System.nanoTime() - startNanos) / 1_000_000
+        val configSummary = runCatching {
+            val c = SimulaPrivacy.current
+            "dev=$devMode tel=$telemetryEnabled consent=${c.hasPrivacyConsent} " +
+                "coppa=${c.coppaApplies} adid=${c.advertisingId != null} ctx=${adContext != null}"
+        }.getOrNull()
+        Telemetry.recordOperation(
+            name = "sdk_init",
+            durationMs = initMs,
+            success = true,
+            breadcrumb = configSummary,
+        )
+
+        // SDK-upgrade beacon: compare the last-seen version to the current one. A first install just
+        // records the version (no event); a changed version emits sdk_upgrade. Best-effort, off-host.
+        runCatching {
+            val vPrefs = appContext.getSharedPreferences("simula_ad_sdk_version_prefs", Context.MODE_PRIVATE)
+            val last = vPrefs.getString("last_seen_sdk_version", null)
+            val current = ad.simula.ad.sdk.telemetry.SIMULA_SDK_VERSION
+            if (last != null && last != current) {
+                Telemetry.recordOperation(name = "sdk_upgrade", durationMs = 0, success = true, breadcrumb = "from=$last;to=$current")
+            }
+            if (last != current) vPrefs.edit().putString("last_seen_sdk_version", current).apply()
         }
     }
 
@@ -168,6 +203,34 @@ object SimulaAds {
      */
     fun updateContext(adContext: SimulaAdContext?) {
         NativeAdContextStore.set(adContext)
+    }
+
+    /**
+     * Update the primary user id (PPID) mid-session — e.g. after a login, a logout, or a first
+     * login that happened only after the session was already created. Mirrors [updateContext]:
+     * safe to call any time after [initialize] (a no-op before it). A null/blank id clears the
+     * PPID (logout).
+     *
+     * Effects: (1) the value the next `session/create` carries is updated; (2) telemetry reports
+     * the new value; (3) when a session already exists, the live session is PATCHed server-side off
+     * the caller's thread. Clearing (null) updates local + telemetry state only — the backend's
+     * `PATCH …/ppid/{ppid}` path can't express an empty id. The network call is best-effort; a
+     * failure is non-fatal because local state already reflects the new id.
+     */
+    fun updatePrimaryUserID(id: String?) {
+        if (!initialized) return
+        val normalized = id?.takeIf { it.isNotBlank() }
+        store.updatePpid(normalized)
+        // With no session yet, the pending/next createSession carries the new value, so no PATCH
+        // is needed. PATCH a live session to push the new value server-side.
+        if (normalized != null) {
+            val sid = store.sessionId
+            if (!sid.isNullOrBlank()) {
+                SimulaScope.launch {
+                    runCatching { SimulaApiClient.updatePpid(apiKey, sid, normalized) }
+                }
+            }
+        }
     }
 
     /**

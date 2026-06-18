@@ -43,6 +43,12 @@ internal data class TelemetryEvent(
     val breadcrumb: String? = null,
     @SerialName("cache_hit") val cacheHit: Boolean? = null,
     @SerialName("retry_count") val retryCount: Int? = null,
+    // Store-exit click type for store_opened/returned/abandoned: cta | store_prompt | auto_redirect.
+    val trigger: String? = null,
+    // Native load source for load_success: preload | cache | network.
+    @SerialName("cache_source") val cacheSource: String? = null,
+    // Wall-clock staleness, stamped at flush time = clock() - timestamp. Detects offline/queued events.
+    @SerialName("event_age_ms") val eventAgeMs: Long? = null,
     // Mutable so an error signature seen repeatedly within a flush window aggregates
     // in place instead of flooding the buffer.
     var count: Int? = null,
@@ -64,5 +70,11 @@ internal data class TelemetryEnvelope(
     // Consent-gated: only populated when the resolved ConsentSnapshot allows.
     @SerialName("primary_user_id") val primaryUserId: String? = null,
     @SerialName("advertising_id") val advertisingId: String? = null,
+    // Resolved at flush time: wifi | cellular | none | unknown. Best-effort; never blocks.
+    @SerialName("connection_type") val connectionType: String? = null,
+    // Experiment assignment for per-variant conversion analysis (server-driven, set when an ad
+    // resolves with experiment metadata). Session-scoped; last assignment wins.
+    @SerialName("experiment_id") val experimentId: String? = null,
+    @SerialName("variant_id") val variantId: String? = null,
     val events: List<TelemetryEvent>,
 )

@@ -36,6 +36,9 @@ internal object WebViewPool {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val idle = ArrayDeque<WebView>()
 
+    /** Count of idle pooled WebViews — for telemetry diagnostics. A benign cross-thread int read. */
+    val pooledCount: Int get() = idle.size
+
     @Volatile private var callbacksRegistered = false
 
     /** Swallows the prewarm `about:blank` navigation so consumers never see it. */

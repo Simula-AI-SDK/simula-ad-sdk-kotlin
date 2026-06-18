@@ -1,6 +1,8 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
+import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
@@ -9,6 +11,7 @@ import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
+import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
@@ -82,6 +85,8 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     private var token: String? = null
     private var closed = false
     private var completed = false
+    // Store-exit funnel tracker for this presentation (store_opened/returned/abandoned). Main-thread only.
+    private var storeExit: StoreExitTracker? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,6 +99,10 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             return
         }
         presentation = p
+        storeExit = StoreExitTracker(
+            adId = p.impressionId.takeIf { it.isNotBlank() },
+            adFormat = "rewarded",
+        )
 
         configureWindow()
         @Suppress("DEPRECATION")
@@ -113,6 +122,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     autoStoreRedirect = p.adBehavior?.autoStoreRedirect,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
+                        storeExit?.recordStoreOpen("auto_redirect")
                         CreativeCtaRouter.open(
                             applicationContext,
                             p.trackingUrl,
@@ -123,6 +133,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                 ) { onClose ->
                     RewardedMinigame(
                         presentation = p,
+                        recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
                         onFinish = { earned ->
                             reportClosed(earned)
                             onClose()
@@ -138,7 +149,18 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     private fun reportClosed(earned: Boolean) {
         if (closed) return
         closed = true
+        storeExit?.onAdClosed() // resolve any outstanding store visit as an abandon
         presentation?.let { p -> p.callbacks.onClose(earned, elapsedSeconds(p)) }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        storeExit?.onResume()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        storeExit?.onPause()
     }
 
     /**
@@ -169,6 +191,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         if (isFinishing) {
             if (!closed) {
                 closed = true
+                storeExit?.onAdClosed() // finished without a normal close → resolve any open store visit
                 presentation?.let { p -> p.callbacks.onClose(p.rewardEarned, elapsedSeconds(p)) }
             }
             // Safety net: the unit is being torn down (back-out / swipe-away / finish) after the reward
@@ -209,6 +232,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
 @Composable
 private fun RewardedMinigame(
     presentation: RewardedPresentation,
+    recordStoreOpen: (String) -> Unit,
     onFinish: (earned: Boolean) -> Unit,
 ) {
     // Play-to-earn gate length, in seconds — sourced from `ad_behavior.close.delay_seconds` (the
@@ -278,6 +302,7 @@ private fun RewardedMinigame(
     fun fireAutoStoreRedirect() {
         if (!autoRedirectFired) {
             autoRedirectFired = true
+            recordStoreOpen("auto_redirect")
             CreativeCtaRouter.open(
                 context.applicationContext,
                 presentation.trackingUrl,
@@ -312,9 +337,8 @@ private fun RewardedMinigame(
         if (!presentation.displayedReported) {
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
-            if (presentation.impressionId.isNotBlank()) {
-                SimulaScope.launch { SimulaApiClient.trackShown(presentation.impressionId, presentation.apiKey) }
-            }
+            // Durable beacon (was a fire-and-forget trackShown).
+            AdBeaconManager.enqueue(presentation.impressionId, "shown", adFormat = "rewarded")
         }
     }
 
@@ -332,9 +356,8 @@ private fun RewardedMinigame(
             presentation.impressionReported = true
             presentation.callbacks.onImpression()
             presentation.callbacks.onPaid(presentation.adValue)
-            if (presentation.impressionId.isNotBlank()) {
-                SimulaScope.launch { SimulaApiClient.trackImpression(presentation.impressionId, presentation.apiKey) }
-            }
+            // Durable billable-impression beacon (was a fire-and-forget trackImpression).
+            AdBeaconManager.enqueue(presentation.impressionId, "seen", adFormat = "rewarded")
         }
 
         if (presentation.accumulatedImpressionTimeMs >= FULLSCREEN_IMPRESSION_DELAY_MS) {
@@ -425,8 +448,9 @@ private fun RewardedMinigame(
                 val html = presentation.renderedHtml
                 WebViewPool.acquire(
                     context = ctx,
-                    client = object : WebViewClient() {
+                    client = object : CreativeTelemetryWebViewClient("rewarded") {
                         override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
+                            super.onPageStarted(view, pageUrl, favicon) // starts the page-load timer
                             // Bridge relay fallback when document-start injection is unavailable.
                             if (!BridgeWebViewInstaller.documentStartSupported() && pageUrl != "about:blank") {
                                 view?.evaluateJavascript(BridgeWebViewInstaller.relayScript, null)
@@ -443,6 +467,8 @@ private fun RewardedMinigame(
                             if (Uri.parse(url).host == Uri.parse(requestUrl).host) return false
                             return try {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl)))
+                                // External link from the playable is the CTA store-open.
+                                recordStoreOpen("cta")
                                 true
                             } catch (e: Exception) {
                                 false
@@ -450,6 +476,7 @@ private fun RewardedMinigame(
                         }
                     },
                 ).apply {
+                    webChromeClient = CreativeTelemetryWebChromeClient("rewarded") // capture JS console errors
                     BridgeWebViewInstaller.install(this, bridge)
                     // Prefer the server-rendered HTML when present (parity with the interstitial,
                     // which fills the surface); fall back to the iframe URL.
@@ -502,10 +529,9 @@ private fun RewardedMinigame(
                 edgePadding = 8.dp,
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
                 onTap = {
-                    // Mid-store-prompt click beacon — only on a real user tap (not auto_store_redirect).
-                    if (presentation.impressionId.isNotBlank()) {
-                        SimulaScope.launch { SimulaApiClient.trackClick(presentation.impressionId, presentation.apiKey) }
-                    }
+                    // Mid-store-prompt click beacon (durable) — only on a real user tap (not auto_store_redirect).
+                    AdBeaconManager.enqueue(presentation.impressionId, "click", adFormat = "rewarded")
+                    recordStoreOpen("store_prompt")
                     CreativeCtaRouter.open(
                         context.applicationContext,
                         presentation.trackingUrl,

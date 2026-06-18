@@ -1,6 +1,8 @@
 package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
+import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
+import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
@@ -223,6 +225,7 @@ internal object NativeAdWebViewStore {
     private fun buildWebView(wiring: NativeAdWiring, hostContext: Context, iframeUrl: String?, renderedHtml: String?): WebView {
         val docStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         val webView = WebViewPool.acquire(hostContext, NativeAdWebViewClient(wiring, docStart))
+        webView.webChromeClient = CreativeTelemetryWebChromeClient("character_ad") // capture JS console errors
         webView.setBackgroundColor(Color.TRANSPARENT)
         // device-width viewport so 1 CSS px == 1 dp → the reported height maps straight to dp.
         webView.settings.useWideViewPort = true
@@ -362,11 +365,12 @@ private class NativeAdJsInterface(private val wiring: NativeAdWiring) {
 private class NativeAdWebViewClient(
     private val wiring: NativeAdWiring,
     private val documentStartSupported: Boolean,
-) : WebViewClient() {
+) : CreativeTelemetryWebViewClient("character_ad") {
     // Framework callback params are declared nullable to match the platform override signatures and
     // guard against a non-conformant OEM WebView passing null (which would NPE on a non-null param) —
     // mirroring the interstitial/rewarded clients.
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+        super.onPageStarted(view, url, favicon) // starts the page-load timer
         view ?: return
         // Fallback for older WebViews without document-start injection: wire the relay at page start.
         if (!documentStartSupported) view.evaluateJavascript(BRIDGE_SCRIPT, null)
