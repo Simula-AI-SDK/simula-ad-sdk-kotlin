@@ -6,6 +6,8 @@ import android.os.Build
 import android.content.Intent
 import android.net.Uri
 import android.view.WindowManager
+import ad.simula.ad.sdk.bridge.recordRenderProcessGone
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -815,6 +817,10 @@ private fun AdIframeOverlay(
                                     }
                                     return true
                                 }
+                                // Absorb a renderer-process death so a crashing ad creative can't
+                                // take the host app process down with it (surfaced as telemetry).
+                                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
+                                    recordRenderProcessGone("minigame_ad", detail)
                             },
                         ).apply { loadUrl(url) }
                     },

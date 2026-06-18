@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -158,6 +159,16 @@ fun NativeAdSlot(
     var impressionFired by remember(adUnitId, position, preloadedAdId, previewHtml) {
         mutableStateOf(cachedFill?.impressionFired ?: false)
     }
+    // Native render time: monotonic start captured when a fresh (network/preload) creative begins
+    // loading; the elapsed-to-first-paint is recorded on the first real height report. Cache re-renders
+    // reattach an already-rendered view (height restored from cache), so they leave the start at 0 and
+    // record nothing — the fill→first-paint number only makes sense for a genuine load.
+    var renderStartNanos by remember(adUnitId, position, preloadedAdId, previewHtml) {
+        mutableLongStateOf(0L)
+    }
+    var renderTimeRecorded by remember(adUnitId, position, preloadedAdId, previewHtml) {
+        mutableStateOf(false)
+    }
 
     LaunchedEffect(adUnitId, position, preloadedAdId, previewHtml) {
         // Preview/QA: render the supplied HTML with no network (mirrors imperative showPreview).
@@ -183,6 +194,12 @@ fun NativeAdSlot(
                 NativeAdCache.putFill(adUnitId, position, result)
                 heightDp = 0f
                 impressionFired = false
+                // Start the native fill→first-paint render timer for a genuine load (network/preload);
+                // a cache re-render leaves it at 0 so it doesn't record a render time.
+                if (source != "cache") {
+                    renderStartNanos = System.nanoTime()
+                    renderTimeRecorded = false
+                }
                 state = NativeAdSlotState.Filled(result)
                 reportLoadSuccess(result, source, durationMs)
             } else {
@@ -229,6 +246,9 @@ fun NativeAdSlot(
     when (val s = state) {
         is NativeAdSlotState.Filled -> {
             val result = s.result
+            // Forwards the live visible fraction into this slot's creative (window.onVisibility); bound
+            // to the WebView by NativeAdWebView and fed by trackNativeAdViewability on every scroll frame.
+            val visibilityRelay = remember(result.impressionId) { VisibilityRelay() }
             Box(slotModifier) {
                 NativeAdWebView(
                     iframeUrl = result.iframeUrl,
@@ -239,12 +259,28 @@ fun NativeAdSlot(
                     // Server-provided click-through routing — a CTA tap opens the tracking link (PRD).
                     trackingUrl = result.trackingUrl,
                     destination = result.destination,
+                    visibilityRelay = visibilityRelay,
                     onHeightPx = { px ->
                         // Threshold sub-dp churn so a measuring creative can't thrash the feed below.
                         if (kotlin.math.abs(px - heightDp) >= 1f) {
                             heightDp = px
                             // Persist so a recycled row sizes correctly on its first frame.
                             (NativeAdCache.get(adUnitId, position) as? NativeAdCache.Value.Fill)?.heightDp = px
+                        }
+                        // Native render time (the fill→first-paint blind spot): from load-begin to the
+                        // creative's first real height report (it has laid out and is on screen). Records
+                        // once per genuine load; cache re-renders left renderStartNanos at 0.
+                        if (!renderTimeRecorded && renderStartNanos > 0L && px > 0f) {
+                            renderTimeRecorded = true
+                            Telemetry.recordLifecycle(
+                                stage = "native_render",
+                                adFormat = result.adFormat,
+                                adUnitId = adUnitId,
+                                adId = result.impressionId.takeIf { it.isNotBlank() },
+                                serveId = null,
+                                durationMs = (System.nanoTime() - renderStartNanos) / 1_000_000,
+                                errorCode = null,
+                            )
                         }
                     },
                     onAdClick = {
@@ -277,7 +313,10 @@ fun NativeAdSlot(
                     modifier = Modifier.trackNativeAdViewability(
                         // Only measure once the creative has a real, laid-out height.
                         enabled = heightDp > 0f,
-                    ) {
+                        // Forward the live visible fraction to the creative (window.onVisibility) every
+                        // scroll frame so a video/animation can react. Per-frame; never sent to telemetry.
+                        onVisibilityRatio = visibilityRelay::report,
+                    ) { stats ->
                         if (!impressionFired) {
                             impressionFired = true
                             // Remember it on the cache entry so a remount of the same serve never re-fires.
@@ -296,6 +335,25 @@ fun NativeAdSlot(
                                     serveId = null,
                                     durationMs = null,
                                     errorCode = null,
+                                )
+                                // Viewability exposure aggregate — once per impression. The per-frame
+                                // ratio is far too high-volume for the batch pipeline, so this records
+                                // the MRC-shaped summary instead: time-to-viewable + peak/avg/total exposure.
+                                Telemetry.recordLifecycle(
+                                    stage = "viewability",
+                                    adFormat = result.adFormat,
+                                    adUnitId = adUnitId,
+                                    adId = result.impressionId.takeIf { it.isNotBlank() },
+                                    serveId = null,
+                                    durationMs = stats.timeToViewableMs,
+                                    errorCode = null,
+                                    breadcrumb = String.format(
+                                        java.util.Locale.US,
+                                        "peak=%.2f;avg=%.2f;visible_ms=%d",
+                                        stats.peakExposure,
+                                        stats.avgExposure,
+                                        stats.totalVisibleMs,
+                                    ),
                                 )
                                 currentOnImpression(NativeAdData(result.impressionId, result.adFormat, adUnitId))
                                 // PAID — co-fired with the impression (PRD "co-fire, do not decouple").

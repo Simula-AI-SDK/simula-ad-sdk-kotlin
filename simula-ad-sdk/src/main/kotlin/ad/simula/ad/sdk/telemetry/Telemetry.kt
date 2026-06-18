@@ -111,7 +111,8 @@ internal object Telemetry {
         errorCode: String? = null,
         trigger: String? = null,
         cacheSource: String? = null,
-    ) = manager?.recordLifecycle(stage, adFormat, adUnitId, adId, serveId, durationMs, errorCode, trigger, cacheSource) ?: Unit
+        breadcrumb: String? = null,
+    ) = manager?.recordLifecycle(stage, adFormat, adUnitId, adId, serveId, durationMs, errorCode, trigger, cacheSource, breadcrumb) ?: Unit
 
     fun recordError(signature: String, errorCode: String? = null, message: String? = null, breadcrumb: String? = null) =
         manager?.recordError(signature, errorCode, message, breadcrumb) ?: Unit

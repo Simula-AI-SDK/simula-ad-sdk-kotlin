@@ -25,6 +25,7 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -77,6 +78,7 @@ internal fun NativeAdWebView(
     trackingUrl: String? = null,
     destination: String = "appstore",
     modifier: Modifier = Modifier,
+    visibilityRelay: VisibilityRelay? = null,
 ) {
     val context = LocalContext.current
     // Per-creative retained session (WebView + bridge wiring) keyed by impression id. Stable across
@@ -92,6 +94,13 @@ internal fun NativeAdWebView(
     session.wiring.onLoadError = onLoadError
     session.wiring.trackingUrl = trackingUrl
     session.wiring.destination = destination
+
+    // Route the live visible fraction (from the viewability tracker) into this slot's WebView while it
+    // is mounted; unbind on dispose so a retained, off-screen creative receives no further onVisibility.
+    DisposableEffect(session, visibilityRelay) {
+        visibilityRelay?.bind { ratio -> session.wiring.pushVisibility(ratio) }
+        onDispose { visibilityRelay?.bind(null) }
+    }
 
     AndroidView(
         modifier = modifier
@@ -189,6 +198,7 @@ internal object NativeAdWebViewStore {
             (retained.parent as? ViewGroup)?.removeView(retained)                   // clear any stale parent
             retained.onResume()
             session.attached = true
+            session.wiring.webView = retained // visibility pushes target the live view
             return retained
         }
         val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml)
@@ -198,6 +208,7 @@ internal object NativeAdWebViewStore {
             session.webView = fresh
             session.loadedKey = creativeKey
             session.attached = true
+            session.wiring.webView = fresh
         }
         return fresh
     }
@@ -208,7 +219,7 @@ internal object NativeAdWebViewStore {
         if (session.impressionId.isBlank() || released !== session.webView) {
             uninstallBridge(released)
             WebViewPool.release(released)
-            if (released === session.webView) { session.webView = null; session.loadedKey = null }
+            if (released === session.webView) { session.webView = null; session.loadedKey = null; session.wiring.webView = null }
             session.attached = false
             return
         }
@@ -252,6 +263,7 @@ internal object NativeAdWebViewStore {
         session.webView = null
         session.loadedKey = null
         session.attached = false
+        session.wiring.webView = null
     }
 
     @MainThread
@@ -317,8 +329,24 @@ internal class NativeAdWiring(
     @Volatile var trackingUrl: String? = null
     @Volatile var destination: String = "appstore"
 
+    // The WebView currently displaying this wiring's creative; set by the store on (re)attach and
+    // cleared on release/destroy. Used by [pushVisibility] to reach the live view.
+    @Volatile var webView: WebView? = null
+
     private val main = Handler(Looper.getMainLooper())
     private val json = Json { ignoreUnknownKeys = true }
+
+    /**
+     * Forward the slot's live visible fraction (0..1) to the creative via `window.onVisibility`, called
+     * on every scroll frame by the viewability tracker. Guarded so it's a no-op until the creative
+     * defines the function. Main-thread only — `evaluateJavascript` must run on the WebView's thread,
+     * and the relay that drives this already reports from the main dispatcher.
+     */
+    @MainThread
+    fun pushVisibility(ratio: Float) {
+        val r = String.format(java.util.Locale.US, "%.2f", ratio.coerceIn(0f, 1f))
+        webView?.evaluateJavascript("window.onVisibility&&window.onVisibility($r)", null)
+    }
 
     /** Called off-main from the JS interface. Parses and dispatches on the main thread. */
     fun handleMessage(raw: String) {
@@ -365,6 +393,34 @@ internal class NativeAdWiring(
         val target = trackingUrl?.takeIf { it.isNotBlank() } ?: tappedUrl
         CreativeCtaRouter.open(appContext, target, destination)
         onAdClick()
+    }
+}
+
+/**
+ * Throttling channel that forwards the native slot's live visible fraction (0..1) to the creative's
+ * `window.onVisibility`. Created per served slot by [NativeAdSlot], bound to that slot's WebView by
+ * [NativeAdWebView] while mounted, and fed by [trackNativeAdViewability] on every scroll frame. Rounds
+ * to ~1% and drops sub-1% changes so a 60 fps scroll can't flood the JS bridge. Single-threaded (the
+ * viewability tracker reports from the main dispatcher); no locking.
+ */
+internal class VisibilityRelay {
+    private var pusher: ((Float) -> Unit)? = null
+    private var last = -1f
+
+    /** Point the relay at the live WebView's pusher (or null to detach on dispose). */
+    @MainThread
+    fun bind(pusher: ((Float) -> Unit)?) {
+        this.pusher = pusher
+        last = -1f
+    }
+
+    /** Forward a 0..1 ratio, de-duped against the last forwarded value (~1% granularity). */
+    @MainThread
+    fun report(ratio: Float) {
+        val r = ratio.coerceIn(0f, 1f)
+        if (last >= 0f && kotlin.math.abs(r - last) < 0.01f) return
+        last = r
+        pusher?.invoke(r)
     }
 }
 

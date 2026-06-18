@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import ad.simula.ad.sdk.bridge.recordRenderProcessGone
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -402,6 +404,10 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
                         runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl))) }
                         return true
                     }
+                    // Absorb a renderer-process death so a crashing minigame can't take the host
+                    // app process down with it (and surface it as telemetry).
+                    override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
+                        recordRenderProcessGone("minigame", detail)
                 },
             ).apply { loadUrl(url) }
         },
