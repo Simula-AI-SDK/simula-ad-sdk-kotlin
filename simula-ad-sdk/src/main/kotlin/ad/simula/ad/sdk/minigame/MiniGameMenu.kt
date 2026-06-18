@@ -621,7 +621,9 @@ fun MiniGameMenu(
         }
 
         // ── Dialog 3: Game WebView ───────────────────────────────────────────
-        if (selectedGameId != null) {
+        // Capture into an immutable local so it smart-casts (was forced with `!!`).
+        val currentGameId = selectedGameId
+        if (currentGameId != null) {
             Dialog(
                 onDismissRequest = { handleIframeClose() },
                 properties = DialogProperties(
@@ -631,7 +633,7 @@ fun MiniGameMenu(
             ) {
                 FullscreenDialogWindowConfig()
                 GameWebView(
-                    gameId = selectedGameId!!,
+                    gameId = currentGameId,
                     charID = charID,
                     charName = charName,
                     charImage = charImage,
@@ -708,6 +710,8 @@ private fun AdIframeOverlay(
     }
 
     val isBottomSheet = playableHeightDp != null
+    // Capture once so the height branch smart-casts instead of forcing with `!!`.
+    val sheetHeightDp = playableHeightDp
 
     DisposableEffect(Unit) {
         val dialogWindow = (view.parent as? DialogWindowProvider)?.window
@@ -742,8 +746,8 @@ private fun AdIframeOverlay(
             modifier = Modifier
                 .fillMaxWidth()
                 .then(
-                    if (isBottomSheet) {
-                        Modifier.height(playableHeightDp!!.dp)
+                    if (sheetHeightDp != null) {
+                        Modifier.height(sheetHeightDp.dp)
                     } else {
                         Modifier.fillMaxSize()
                     }
