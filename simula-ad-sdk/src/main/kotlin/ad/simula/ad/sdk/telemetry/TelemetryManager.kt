@@ -54,6 +54,8 @@ internal class TelemetryManager(
     private val advertisingIdProvider: () -> String?,
     // Resolved fresh on each flush (off the UI path). Must be best-effort/non-throwing.
     private val connectionTypeProvider: () -> String? = { null },
+    // Compact diagnostics breadcrumb (memory/webview-pool/image-cache), sampled on flush. Best-effort.
+    private val diagnosticsProvider: () -> String? = { null },
     enabled: Boolean = true,
     sampleRate: Double = 1.0,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -76,6 +78,16 @@ internal class TelemetryManager(
 
     @Volatile private var isEnabled: Boolean = enabled
     @Volatile private var perfSampledIn: Boolean = enabled && random() < sampleRate
+
+    // Aux session state for the funnel / time-to-first-ad / experiment, guarded by a plain lock
+    // (recordLifecycle is non-suspend, so it can't take the coroutine `mutex`).
+    private val auxLock = Any()
+    private val createdAtMs: Long = clock()
+    private var firstAdRecorded = false
+    // Per-format funnel counters: [filled, nofill, failed, impressions, clicks]. Reset on emit (deltas).
+    private val funnel = LinkedHashMap<String, IntArray>()
+    private var experimentId: String? = null
+    private var variantId: String? = null
 
     /** Recover any buffer left by a prior process, then attempt a flush. */
     fun start() {
@@ -145,18 +157,53 @@ internal class TelemetryManager(
         errorCode: String?,
         trigger: String? = null,
         cacheSource: String? = null,
-    ) = enqueuePerf(
-        newEvent(TYPE_LIFECYCLE, name = stage).copy(
-            adFormat = adFormat,
-            adUnitId = adUnitId,
-            adId = adId,
-            serveId = serveId,
-            durationMs = durationMs,
-            errorCode = errorCode,
-            trigger = trigger,
-            cacheSource = cacheSource,
-        ),
-    )
+    ) {
+        accumulate(stage, adFormat, cacheSource, errorCode)
+        enqueuePerf(
+            newEvent(TYPE_LIFECYCLE, name = stage).copy(
+                adFormat = adFormat,
+                adUnitId = adUnitId,
+                adId = adId,
+                serveId = serveId,
+                durationMs = durationMs,
+                errorCode = errorCode,
+                trigger = trigger,
+                cacheSource = cacheSource,
+            ),
+        )
+    }
+
+    /** Set the session experiment assignment for the envelope (last assignment wins). */
+    fun setExperiment(experimentId: String?, variantId: String?) {
+        if (experimentId.isNullOrBlank() && variantId.isNullOrBlank()) return
+        synchronized(auxLock) {
+            this.experimentId = experimentId
+            this.variantId = variantId
+        }
+    }
+
+    /**
+     * Fold a lifecycle event into the per-format funnel and detect the first ad load. Unconditional
+     * (not perf-sampled) so the funnel reflects real activity; cheap (a map increment under a lock).
+     * Cache re-renders (`cacheSource == "cache"`) are excluded from `filled` so they don't inflate it.
+     */
+    private fun accumulate(stage: String, adFormat: String?, cacheSource: String?, errorCode: String?) {
+        val fmt = adFormat ?: return
+        val firstAd: Boolean
+        synchronized(auxLock) {
+            val c = funnel.getOrPut(fmt) { IntArray(5) }
+            when (stage) {
+                "load_success" -> if (cacheSource != "cache") c[0]++
+                "load_fail" -> if (errorCode == "no_fill") c[1]++ else c[2]++
+                "displayed" -> c[3]++
+                "click" -> c[4]++
+            }
+            firstAd = stage == "load_success" && !firstAdRecorded
+            if (firstAd) firstAdRecorded = true
+        }
+        // One-shot time-to-first-ad (init → first successful load). Emitted off the lock.
+        if (firstAd) recordOperation("time_to_first_ad", clock() - createdAtMs, success = true)
+    }
 
     /**
      * Record a handled error. [signature] is the dedup key (e.g. `domain:code`); identical
@@ -190,10 +237,40 @@ internal class TelemetryManager(
 
     /** Persist + attempt a flush now (e.g. on app background). */
     fun flushNow() {
+        // Emit the session funnel deltas + a diagnostics sample as part of this (background) flush.
+        emitFunnelSummary()
+        emitDiagnostics()
         scope.launch {
             mutex.withLock { store.save(snapshot()) }
             flush()
         }
+    }
+
+    /** Emit one `funnel_summary` operation per active format (cumulative since the last emit), then
+     * reset — so the backend can sum the deltas without double-counting across multiple backgrounds. */
+    private fun emitFunnelSummary() {
+        val snapshot: List<Pair<String, IntArray>> = synchronized(auxLock) {
+            if (funnel.isEmpty()) return
+            val out = funnel.map { it.key to it.value }
+            funnel.clear()
+            out
+        }
+        for ((fmt, c) in snapshot) {
+            val requested = c[0] + c[1] + c[2]
+            recordOperation(
+                name = "funnel_summary",
+                durationMs = 0,
+                success = true,
+                breadcrumb = "fmt=$fmt;req=$requested;fill=${c[0]};nofill=${c[1]};fail=${c[2]};imp=${c[3]};clk=${c[4]}",
+            )
+        }
+    }
+
+    /** Sample best-effort runtime diagnostics (memory / webview-pool / image-cache) onto a meta-ish
+     * operation event. No-op when the provider yields nothing. */
+    private fun emitDiagnostics() {
+        val line = diagnosticsProvider() ?: return
+        recordOperation(name = "diagnostics", durationMs = 0, success = true, breadcrumb = line)
     }
 
     // ── Internals ──────────────────────────────────────────────────────────────
@@ -350,6 +427,8 @@ internal class TelemetryManager(
         primaryUserId = primaryUserIdProvider(),
         advertisingId = advertisingIdProvider(),
         connectionType = connectionTypeProvider(),
+        experimentId = synchronized(auxLock) { experimentId },
+        variantId = synchronized(auxLock) { variantId },
         events = events,
     )
 

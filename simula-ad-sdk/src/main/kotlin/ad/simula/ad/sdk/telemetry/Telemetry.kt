@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.telemetry
 
+import ad.simula.ad.sdk.image.ImageCache
+import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import android.content.Context
 import android.net.ConnectivityManager
@@ -70,6 +72,7 @@ internal object Telemetry {
             advertisingIdProvider = { SimulaPrivacy.current.advertisingId },
             // Resolved fresh on each flush (off the UI path); best-effort, never throws.
             connectionTypeProvider = { resolveConnectionType(appCtx) },
+            diagnosticsProvider = { resolveDiagnostics() },
             // In dev mode, mirror every (redacted) event to logcat for local verification.
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
         ).also { it.start() }
@@ -116,6 +119,10 @@ internal object Telemetry {
     /** Persist + attempt delivery now (e.g. app background). */
     fun flush() = manager?.flushNow() ?: Unit
 
+    /** Record the session's experiment assignment (server-driven) for the telemetry envelope. */
+    fun setExperiment(experimentId: String?, variantId: String?) =
+        manager?.setExperiment(experimentId, variantId) ?: Unit
+
     /**
      * Best-effort connection class for the envelope, resolved at flush time. Returns
      * `wifi` / `cellular` / `none` / `unknown`; any failure (missing permission, null
@@ -134,4 +141,16 @@ internal object Telemetry {
             else -> "unknown"
         }
     }.getOrDefault("unknown")
+
+    /**
+     * Best-effort runtime diagnostics breadcrumb for the periodic `diagnostics` event: JVM heap usage,
+     * the image-cache entry count, and the pooled-WebView count. Wrapped so any failure degrades to
+     * null (no event) and never throws. Heap figures are MB; the rest are counts.
+     */
+    private fun resolveDiagnostics(): String? = runCatching {
+        val rt = Runtime.getRuntime()
+        val usedMb = (rt.totalMemory() - rt.freeMemory()) / (1024L * 1024L)
+        val maxMb = rt.maxMemory() / (1024L * 1024L)
+        "mem_used_mb=$usedMb;mem_max_mb=$maxMb;img_cache=${ImageCache.cacheSize()};wv_pool=${WebViewPool.pooledCount}"
+    }.getOrNull()
 }

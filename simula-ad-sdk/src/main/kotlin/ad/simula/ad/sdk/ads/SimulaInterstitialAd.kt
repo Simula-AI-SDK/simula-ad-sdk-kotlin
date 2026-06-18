@@ -174,6 +174,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
+                Telemetry.setExperiment(ad.experiment?.experimentId, ad.experiment?.variantId)
                 Telemetry.recordLifecycle(
                     stage = "load_success",
                     adFormat = AD_FORMAT,

@@ -2,6 +2,8 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
 import ad.simula.ad.sdk.bridge.CreativeBridge
+import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
+import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
@@ -576,8 +578,9 @@ private fun CreativeHtml(
         factory = { ctx ->
             WebViewPool.acquire(
                 context = ctx,
-                client = object : WebViewClient() {
+                client = object : CreativeTelemetryWebViewClient("interstitial") {
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                        super.onPageStarted(view, url, favicon) // starts the page-load timer
                         // Bridge relay fallback when document-start injection is unavailable.
                         if (!BridgeWebViewInstaller.documentStartSupported() && url != "about:blank") {
                             view?.evaluateJavascript(BridgeWebViewInstaller.relayScript, null)
@@ -598,6 +601,7 @@ private fun CreativeHtml(
                     }
                 },
             ).apply {
+                webChromeClient = CreativeTelemetryWebChromeClient("interstitial") // capture JS console errors
                 BridgeWebViewInstaller.install(this, bridge)
                 // Self-contained creative: asset URLs are absolute (baseURL = null).
                 loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)

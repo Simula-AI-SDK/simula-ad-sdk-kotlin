@@ -1,6 +1,8 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
+import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
@@ -446,8 +448,9 @@ private fun RewardedMinigame(
                 val html = presentation.renderedHtml
                 WebViewPool.acquire(
                     context = ctx,
-                    client = object : WebViewClient() {
+                    client = object : CreativeTelemetryWebViewClient("rewarded") {
                         override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
+                            super.onPageStarted(view, pageUrl, favicon) // starts the page-load timer
                             // Bridge relay fallback when document-start injection is unavailable.
                             if (!BridgeWebViewInstaller.documentStartSupported() && pageUrl != "about:blank") {
                                 view?.evaluateJavascript(BridgeWebViewInstaller.relayScript, null)
@@ -473,6 +476,7 @@ private fun RewardedMinigame(
                         }
                     },
                 ).apply {
+                    webChromeClient = CreativeTelemetryWebChromeClient("rewarded") // capture JS console errors
                     BridgeWebViewInstaller.install(this, bridge)
                     // Prefer the server-rendered HTML when present (parity with the interstitial,
                     // which fills the surface); fall back to the iframe URL.

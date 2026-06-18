@@ -72,5 +72,9 @@ internal data class TelemetryEnvelope(
     @SerialName("advertising_id") val advertisingId: String? = null,
     // Resolved at flush time: wifi | cellular | none | unknown. Best-effort; never blocks.
     @SerialName("connection_type") val connectionType: String? = null,
+    // Experiment assignment for per-variant conversion analysis (server-driven, set when an ad
+    // resolves with experiment metadata). Session-scoped; last assignment wins.
+    @SerialName("experiment_id") val experimentId: String? = null,
+    @SerialName("variant_id") val variantId: String? = null,
     val events: List<TelemetryEvent>,
 )

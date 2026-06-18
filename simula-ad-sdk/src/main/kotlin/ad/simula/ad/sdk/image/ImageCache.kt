@@ -73,6 +73,9 @@ internal object ImageCache {
     /** url -> last failure timestamp (negative cache, TTL-bounded). */
     private val failures = ConcurrentHashMap<String, Long>()
 
+    /** Approximate current size (bytes) of decoded images held by the cache — for telemetry diagnostics. */
+    internal fun cacheSize(): Int = cache.size()
+
     @Volatile private var callbacksRegistered = false
 
     /**

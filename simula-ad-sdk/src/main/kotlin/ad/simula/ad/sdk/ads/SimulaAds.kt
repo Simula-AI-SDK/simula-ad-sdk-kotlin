@@ -132,18 +132,15 @@ object SimulaAds {
         store = SimulaSessionStore(apiKey, devMode, primaryUserID)
 
         // Install telemetry before the session warm-up so the /session/create call (and every
-        // subsequent SDK request) is captured. The PPID is read live from the session store (so a
-        // mid-session updatePrimaryUserID is honored) and gated on the current consent snapshot —
-        // suppressed without consent and additionally under COPPA.
+        // subsequent SDK request) is captured. The PPID is read live from the session store so a
+        // mid-session updatePrimaryUserID is honored.
         Telemetry.initialize(
             context = appContext,
             apiKey = apiKey,
             devMode = devMode,
             enabled = telemetryEnabled,
             sessionIdProvider = { store.sessionId },
-            primaryUserIdProvider = {
-                if (SimulaPrivacy.current.allowsPrimaryUserID) store.effectiveUserID else null
-            },
+            primaryUserIdProvider = { store.effectiveUserID },
         )
 
         registerActivityTracking()
@@ -183,6 +180,18 @@ object SimulaAds {
             success = true,
             breadcrumb = configSummary,
         )
+
+        // SDK-upgrade beacon: compare the last-seen version to the current one. A first install just
+        // records the version (no event); a changed version emits sdk_upgrade. Best-effort, off-host.
+        runCatching {
+            val vPrefs = appContext.getSharedPreferences("simula_ad_sdk_version_prefs", Context.MODE_PRIVATE)
+            val last = vPrefs.getString("last_seen_sdk_version", null)
+            val current = ad.simula.ad.sdk.telemetry.SIMULA_SDK_VERSION
+            if (last != null && last != current) {
+                Telemetry.recordOperation(name = "sdk_upgrade", durationMs = 0, success = true, breadcrumb = "from=$last;to=$current")
+            }
+            if (last != current) vPrefs.edit().putString("last_seen_sdk_version", current).apply()
+        }
     }
 
     // ── Native ad targeting context + preloading ──────────────────────────────
@@ -203,18 +212,18 @@ object SimulaAds {
      * PPID (logout).
      *
      * Effects: (1) the value the next `session/create` carries is updated; (2) telemetry reports
-     * the new value; (3) when a session already exists and consent allows, the live session is
-     * PATCHed server-side off the caller's thread. Clearing (null) updates local + telemetry state
-     * only — the backend's `PATCH …/ppid/{ppid}` path can't express an empty id. The network call
-     * is best-effort; a failure is non-fatal because local state already reflects the new id.
+     * the new value; (3) when a session already exists, the live session is PATCHed server-side off
+     * the caller's thread. Clearing (null) updates local + telemetry state only — the backend's
+     * `PATCH …/ppid/{ppid}` path can't express an empty id. The network call is best-effort; a
+     * failure is non-fatal because local state already reflects the new id.
      */
     fun updatePrimaryUserID(id: String?) {
         if (!initialized) return
         val normalized = id?.takeIf { it.isNotBlank() }
         store.updatePpid(normalized)
         // With no session yet, the pending/next createSession carries the new value, so no PATCH
-        // is needed. Only PATCH a live session when consent permits forwarding the PPID.
-        if (normalized != null && SimulaPrivacy.current.allowsPrimaryUserID) {
+        // is needed. PATCH a live session to push the new value server-side.
+        if (normalized != null) {
             val sid = store.sessionId
             if (!sid.isNullOrBlank()) {
                 SimulaScope.launch {
