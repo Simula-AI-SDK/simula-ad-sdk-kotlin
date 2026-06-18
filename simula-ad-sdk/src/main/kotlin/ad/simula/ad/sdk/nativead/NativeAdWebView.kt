@@ -60,7 +60,9 @@ import java.util.WeakHashMap
  * - `AD_FEEDBACK` `{value}` from the creative's AD badge menu → `interested`/`not_interested`/`report`
  *   POST to `reportAd`; `about` opens https://simula.ad in the external browser.
  * - A user tap that navigates the main frame is intercepted and opened in the **external** system
- *   browser via [CreativeCtaRouter] (PRD), firing [onAdClick].
+ *   browser via [CreativeCtaRouter] (PRD), firing [onAdClick]. The server-provided [trackingUrl] (an
+ *   MMP click tracker) is preferred over the in-creative URL when present, so the click is attributed
+ *   the same way the imperative interstitial/rewarded CTAs are; [destination] rides along for parity.
  */
 @Composable
 internal fun NativeAdWebView(
@@ -72,6 +74,8 @@ internal fun NativeAdWebView(
     onHeightPx: (Float) -> Unit,
     onAdClick: () -> Unit,
     onLoadError: () -> Unit,
+    trackingUrl: String? = null,
+    destination: String = "appstore",
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -80,10 +84,14 @@ internal fun NativeAdWebView(
     val session = remember(impressionId, apiKey) {
         NativeAdWebViewStore.obtain(context.applicationContext, impressionId, apiKey)
     }
-    // Point the wiring at the latest callbacks on each recomposition (cheap; @Volatile fields).
+    // Point the wiring at the latest callbacks + server CTA routing on each recomposition (cheap;
+    // @Volatile fields). The routing is stable for a given impression but re-set here so a retained
+    // session that outlives a recompose always reflects the current creative's tracking link.
     session.wiring.onHeightPx = onHeightPx
     session.wiring.onAdClick = onAdClick
     session.wiring.onLoadError = onLoadError
+    session.wiring.trackingUrl = trackingUrl
+    session.wiring.destination = destination
 
     AndroidView(
         modifier = modifier
@@ -304,6 +312,10 @@ internal class NativeAdWiring(
     @Volatile var onHeightPx: (Float) -> Unit = {}
     @Volatile var onAdClick: () -> Unit = {}
     @Volatile var onLoadError: () -> Unit = {}
+    // Server-provided click-through routing for this creative. [trackingUrl] is the MMP click tracker
+    // (preferred over the in-creative tap URL when set); [destination] is "appstore" | "web".
+    @Volatile var trackingUrl: String? = null
+    @Volatile var destination: String = "appstore"
 
     private val main = Handler(Looper.getMainLooper())
     private val json = Json { ignoreUnknownKeys = true }
@@ -345,9 +357,13 @@ internal class NativeAdWiring(
         }
     }
 
-    /** Open a user-tapped creative URL in the external system browser (PRD) and fire CLICKED. */
-    fun openExternal(url: String) {
-        CreativeCtaRouter.open(appContext, url, destination = "web")
+    /** Open a user-tapped creative CTA in the external system browser (PRD) and fire CLICKED. Prefers
+     * the server-provided [trackingUrl] (the MMP click tracker — opened verbatim to preserve install
+     * attribution, exactly as the imperative ads do) over [tappedUrl], the URL the creative itself
+     * navigated to; falls back to [tappedUrl] when the serve carries no tracker. */
+    fun openExternal(tappedUrl: String) {
+        val target = trackingUrl?.takeIf { it.isNotBlank() } ?: tappedUrl
+        CreativeCtaRouter.open(appContext, target, destination)
         onAdClick()
     }
 }

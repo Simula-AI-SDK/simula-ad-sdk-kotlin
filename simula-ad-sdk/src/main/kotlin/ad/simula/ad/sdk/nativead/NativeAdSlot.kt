@@ -236,6 +236,9 @@ fun NativeAdSlot(
                     apiKey = ctx.apiKey,
                     impressionId = result.impressionId,
                     heightDp = heightDp,
+                    // Server-provided click-through routing — a CTA tap opens the tracking link (PRD).
+                    trackingUrl = result.trackingUrl,
+                    destination = result.destination,
                     onHeightPx = { px ->
                         // Threshold sub-dp churn so a measuring creative can't thrash the feed below.
                         if (kotlin.math.abs(px - heightDp) >= 1f) {

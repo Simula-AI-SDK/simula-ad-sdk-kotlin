@@ -473,6 +473,11 @@ internal object SimulaApiClient {
         // The mountable creative on a fill; both null on a no-fill.
         val iframeUrl: String?,
         val renderedHtml: String?,
+        // Click-through routing (mirrors [AdLoadResult]): where a CTA tap goes ("appstore" | "web")
+        // and the MMP click tracker the native CTA opens (attribution-preserving) when present.
+        // Defaults cover the preview path, which builds a result without server routing.
+        val destination: String = "appstore",
+        val trackingUrl: String? = null,
         // AdMob-shaped estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
         // native paid event, co-fired with the impression. Defaults to a $0 estimate (preview path).
         val adValue: AdValue = AdValue.fromBidCpm(0.0),
@@ -530,8 +535,10 @@ internal object SimulaApiClient {
             impressionId = data.impressionId.orEmpty(),
             adInserted = data.adInserted,
             adFormat = data.adFormat,
-            iframeUrl = data.adResponse.iframeUrl,
-            renderedHtml = data.adResponse.renderedHtml,
+            iframeUrl = data.iframeUrl,
+            renderedHtml = data.renderedHtml,
+            destination = data.destination,
+            trackingUrl = data.trackingUrl,
             adValue = AdValue.fromBidCpm(data.bidAmt),
         )
     }
