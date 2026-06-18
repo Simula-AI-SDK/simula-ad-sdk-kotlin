@@ -405,7 +405,7 @@ private fun CreativeInterstitial(
         }
     }
 
-    // SHOWN (AdMob's onAdShowedFullScreenContent) — fired once the creative first composes
+    // SHOWN — fired once the creative first composes
     // (begin-to-render), reporting the `/shown` beacon. Guarded so an Activity recreation
     // (config change) doesn't double-report.
     LaunchedEffect(Unit) {
@@ -417,7 +417,7 @@ private fun CreativeInterstitial(
         }
     }
 
-    // IMPRESSION + PAID (AdMob's billable impression + paid event) — fired together once the creative
+    // IMPRESSION + PAID (the billable impression + paid event) — fired together once the creative
     // has been on screen for [FULLSCREEN_IMPRESSION_DELAY_MS] of FOREGROUND time after begin-to-render.
     // OMID measures viewability but does not gate us (PRD). Foreground-only (repeatOnLifecycle(RESUMED))
     // so a backgrounded ad can't accrue the delay; the accrued time lives on the presentation so a
@@ -494,7 +494,7 @@ private fun CreativeInterstitial(
             )
         }
 
-        // Close button — always shown with the compact AppLovin-style chrome. Driven by
+        // Close button — always shown with the compact chrome. Driven by
         // `ad_behavior.close` when present; otherwise a default (top-right, always available) so ads
         // with no `ad_behavior` still get the small close, not a big one.
         val close = behavior?.close ?: CloseBehavior()
@@ -628,7 +628,7 @@ private fun CreativeHtml(
 
 // ── Ad-behavior close button ──────────────────────────────────────────────────
 
-// Visible close affordance sized to match AppLovin (a compact ~22dp circle); the tappable area stays
+// Visible close affordance sized to a compact ~22dp circle; the tappable area stays
 // at the 48dp Material minimum (see [MIN_TOUCH_TARGET_DP]), close to IAB MRAID's 50×50dp close
 // region. The visible graphic and the touch target are deliberately decoupled.
 private const val CLOSE_GLYPH_SP = 10
@@ -715,7 +715,7 @@ internal fun BoxScope.AdCloseButton(
     }
 
     // The button (or its in-delay indicator), pinned to the configured corner with a tight 8dp inset
-    // so it sits close to the edge (AdMob / AppLovin-style); each corner (incl. bottom-left) honored.
+    // so it sits close to the edge; each corner (incl. bottom-left) honored.
     Box(
         modifier = Modifier
             .align(alignment)
@@ -781,7 +781,7 @@ private fun CloseCircle(
     val circle = Modifier
         .size(CLOSE_BOX_DP.dp)
         .clip(CircleShape)
-        // Gray / translucent dark circle (AdMob / AppLovin style) rather than opaque white.
+        // Gray / translucent dark circle rather than opaque white.
         .background(Color.Black.copy(alpha = 0.5f * alpha))
     if (onClick != null) {
         Box(
@@ -874,7 +874,7 @@ internal fun BoxScope.StorePromptBadge(
             .then(if (rowHeight != null) Modifier.height(rowHeight) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
-        // Compact AppLovin-style pill: a filled skip-next glyph then the store name, with tight
+        // Compact pill: a filled skip-next glyph then the store name, with tight
         // padding, a fully-rounded (capsule) outline, and a small gap between the two.
         Row(
             modifier = Modifier
@@ -893,7 +893,7 @@ internal fun BoxScope.StorePromptBadge(
 
 /**
  * The filled "skip-next" glyph (▶|) — a right-pointing triangle with a trailing vertical bar,
- * matching the Material `skip_next` icon (and AppLovin's store-prompt badge). Drawn as a vector
+ * matching the Material `skip_next` icon. Drawn as a vector
  * path so it renders crisply at any [size] without a Material-icons font dependency.
  */
 @Composable

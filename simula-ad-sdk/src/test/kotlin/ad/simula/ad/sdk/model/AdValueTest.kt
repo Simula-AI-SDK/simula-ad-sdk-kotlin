@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * Tier-0 pure-logic tests for the AdMob-shaped [AdValue] derivation from the backend `bid_amt` (CPM).
+ * Tier-0 pure-logic tests for the [AdValue] derivation from the backend `bid_amt` (CPM).
  * The three figures must always agree (all derived from one `valueMicros`), and a missing/garbage bid
  * must degrade to a $0 estimate rather than throw — surfacing the paid event can't crash the host.
  */
@@ -13,7 +13,7 @@ class AdValueTest {
     private val EPS = 1e-9
 
     @Test
-    fun `derives the AdMob block from a whole-dollar CPM`() {
+    fun `derives the AdValue block from a whole-dollar CPM`() {
         // PRD worked example: $5.00 CPM → valueMicros 5000 → $0.005 per impression.
         val v = AdValue.fromBidCpm(5.0)
         assertEquals(5000L, v.valueMicros)

@@ -132,7 +132,7 @@ internal data class AdLoadApiResponse(
     // Server-rendered HTML creative. When present (non-blank) it is rendered
     // full-screen in a WebView — the imperative interstitial's sole creative.
     @SerialName("rendered_html") val renderedHtml: String? = null,
-    // Cleared bid (the estimated CPM) for this serve, backend-provided. The SDK derives the AdMob-shaped
+    // Cleared bid (the estimated CPM) for this serve, backend-provided. The SDK derives the
     // `adValue` from it (see [ad.simula.ad.sdk.model.AdValue.fromBidCpm]) and surfaces it on the paid
     // event. Defaults to 0.0 → a $0 estimate when the field is absent (e.g. a no-fill).
     @SerialName("bid_amt") val bidAmt: Double = 0.0,

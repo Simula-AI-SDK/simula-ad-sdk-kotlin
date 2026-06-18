@@ -423,7 +423,7 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
 internal fun CloseButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    // Compact AppLovin-style default (~16dp dark-translucent circle), matching the interstitial /
+    // Compact default (~16dp dark-translucent circle), matching the interstitial /
     // rewarded / fallback-ad close across the SDK.
     size: Int = 16,
     backgroundColor: Color = Color(0x80000000),

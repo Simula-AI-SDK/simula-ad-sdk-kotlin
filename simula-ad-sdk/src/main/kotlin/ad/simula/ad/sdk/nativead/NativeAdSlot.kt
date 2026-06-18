@@ -73,9 +73,9 @@ import kotlinx.coroutines.launch
  *                      live call with no error surfaced.
  * @param onImpression  Fired once when the viewability threshold is met (co-fired with the server
  *                      impression). Carries the [NativeAdData].
- * @param onPaid        AdMob's paid event — the estimated revenue ([AdValue]) for this impression,
+ * @param onPaid        The paid event — the estimated revenue ([AdValue]) for this impression,
  *                      fired together with [onImpression] (co-fired, not decoupled). Native has no
- *                      "shown" event, matching AdMob.
+ *                      "shown" event.
  * @param onError       Fired with a [NativeAdError] on a load/render failure (not-initialized, no
  *                      session, network) and on a no-fill ([NativeAdError.NoFill]). A cached outcome
  *                      replayed on a recycled row does not re-fire (one report per served slot).

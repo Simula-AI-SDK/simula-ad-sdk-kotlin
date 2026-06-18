@@ -330,7 +330,7 @@ private fun RewardedMinigame(
         }
     }
 
-    // SHOWN (AdMob's onAdShowedFullScreenContent) — fired once the playable first composes
+    // SHOWN — fired once the playable first composes
     // (begin-to-render), reporting the `/shown` beacon. Guarded so an Activity recreation doesn't
     // double-report.
     LaunchedEffect(Unit) {
@@ -342,7 +342,7 @@ private fun RewardedMinigame(
         }
     }
 
-    // IMPRESSION + PAID (AdMob's billable impression + paid event) — fired together once the playable
+    // IMPRESSION + PAID (the billable impression + paid event) — fired together once the playable
     // has been on screen for [FULLSCREEN_IMPRESSION_DELAY_MS] of FOREGROUND time after begin-to-render,
     // independent of the play-to-earn reward gate. OMID measures viewability but does not gate us (PRD).
     // Foreground-only so a backgrounded playable can't accrue the delay; the accrued time lives on the

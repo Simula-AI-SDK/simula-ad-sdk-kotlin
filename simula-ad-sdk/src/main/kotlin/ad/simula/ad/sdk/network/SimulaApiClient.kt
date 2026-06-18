@@ -394,7 +394,7 @@ internal object SimulaApiClient {
         // Creative descriptor (`creative` node) and experiment metadata; null when omitted.
         val creative: Creative? = null,
         val experiment: Experiment? = null,
-        // AdMob-shaped estimated revenue derived on-device from the serve's `bid_amt` (CPM). Held on
+        // Estimated revenue derived on-device from the serve's `bid_amt` (CPM). Held on
         // the loaded ad and surfaced on the paid event when the impression fires. Defaults to a $0
         // estimate so locally-built results (preview) need not supply it.
         val adValue: AdValue = AdValue.fromBidCpm(0.0),
@@ -478,7 +478,7 @@ internal object SimulaApiClient {
         // Defaults cover the preview path, which builds a result without server routing.
         val destination: String = "appstore",
         val trackingUrl: String? = null,
-        // AdMob-shaped estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
+        // Estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
         // native paid event, co-fired with the impression. Defaults to a $0 estimate (preview path).
         val adValue: AdValue = AdValue.fromBidCpm(0.0),
     )
@@ -558,7 +558,7 @@ internal object SimulaApiClient {
         val destination: String = "appstore",
         val trackingUrl: String? = null,
         val adBehavior: AdBehavior? = null,
-        // AdMob-shaped estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
+        // Estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
         // paid event when the impression fires. Defaults to a $0 estimate (preview path).
         val adValue: AdValue = AdValue.fromBidCpm(0.0),
     )
@@ -709,8 +709,8 @@ internal object SimulaApiClient {
     }
 
     /**
-     * Track a full-screen ad as shown (`POST /impressions/{impressionId}/shown`) — AdMob's
-     * "shown" signal (`onAdShowedFullScreenContent`), fired when the creative first renders.
+     * Track a full-screen ad as shown (`POST /impressions/{impressionId}/shown`) — the
+     * "shown" signal, fired when the creative first renders.
      * Distinct from the billable impression beacon ([trackImpression] → `/seen`), which fires
      * later at begin-to-render + 2s. The endpoint takes no body. Best-effort, silently fails —
      * tracking must never disrupt the ad.
