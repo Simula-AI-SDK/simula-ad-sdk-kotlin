@@ -3,10 +3,12 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdBehavior
+import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -162,6 +164,9 @@ class SimulaRewardedAd(val adUnitId: String) {
                     charName = charName,
                     charImage = charImage,
                     charDesc = charDesc,
+                    // AdContext (contextual targeting) now rides on the rewarded request too, read from
+                    // the same provider-level store the native surface uses.
+                    context = NativeAdContextStore.current,
                 )
                 if (generation != loadGeneration) return@launch // superseded
                 // A rewarded ad with no iframe to render is a no-fill.
@@ -282,6 +287,14 @@ class SimulaRewardedAd(val adUnitId: String) {
                         listener?.onAdDisplayed(this@SimulaRewardedAd)
                     }
 
+                    override fun onImpression() {
+                        listener?.onAdImpression(this@SimulaRewardedAd)
+                    }
+
+                    override fun onPaid(adValue: AdValue) {
+                        listener?.onAdPaid(this@SimulaRewardedAd, adValue)
+                    }
+
                     override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
                         state = State.Idle
                         listener?.onAdClosed(this@SimulaRewardedAd)
@@ -347,6 +360,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                 adBehavior = ad.adBehavior,
                 trackingUrl = ad.trackingUrl,
                 destination = ad.destination,
+                adValue = ad.adValue,
             ),
         )
 
@@ -362,6 +376,16 @@ class SimulaRewardedAd(val adUnitId: String) {
         override fun onDisplayed() {
             Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, null, elapsedSinceShow(), null)
             listener?.onAdDisplayed(this@SimulaRewardedAd)
+        }
+
+        override fun onImpression() {
+            Telemetry.recordLifecycle("impression", AD_FORMAT, adUnitId, adId, null, elapsedSinceShow(), null)
+            listener?.onAdImpression(this@SimulaRewardedAd)
+        }
+
+        override fun onPaid(adValue: AdValue) {
+            Telemetry.recordLifecycle("paid", AD_FORMAT, adUnitId, adId, null, null, null)
+            listener?.onAdPaid(this@SimulaRewardedAd, adValue)
         }
 
         override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {

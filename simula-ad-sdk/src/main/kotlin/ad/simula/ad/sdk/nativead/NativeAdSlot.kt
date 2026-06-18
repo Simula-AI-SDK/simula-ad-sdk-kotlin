@@ -3,6 +3,7 @@ package ad.simula.ad.sdk.nativead
 import ad.simula.ad.sdk.ads.NativeAdInfoOverlay
 import ad.simula.ad.sdk.ads.SimulaAdError
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.NativeAdData
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.LocalSimulaContext
@@ -70,6 +71,9 @@ import kotlinx.coroutines.launch
  *                      live call with no error surfaced.
  * @param onImpression  Fired once when the viewability threshold is met (co-fired with the server
  *                      impression). Carries the [NativeAdData].
+ * @param onPaid        AdMob's paid event — the estimated revenue ([AdValue]) for this impression,
+ *                      fired together with [onImpression] (co-fired, not decoupled). Native has no
+ *                      "shown" event, matching AdMob.
  * @param onError       Fired with a [NativeAdError] on a load/render failure (not-initialized, no
  *                      session, network) and on a no-fill ([NativeAdError.NoFill]). A cached outcome
  *                      replayed on a recycled row does not re-fire (one report per served slot).
@@ -86,11 +90,13 @@ fun NativeAdSlot(
     modifier: Modifier = Modifier,
     preloadedAdId: String? = null,
     onImpression: (NativeAdData) -> Unit = {},
+    onPaid: (AdValue) -> Unit = {},
     onError: (NativeAdError) -> Unit = {},
     previewHtml: String? = null,
 ) {
     val ctx = LocalSimulaContext.current
     val currentOnImpression by rememberUpdatedState(onImpression)
+    val currentOnPaid by rememberUpdatedState(onPaid)
     val currentOnError by rememberUpdatedState(onError)
     val resolvedTheme = resolveAdTheme(theme)
     // Surface a native failure to the publisher and record it for telemetry (errorCode parity with the
@@ -228,6 +234,9 @@ fun NativeAdSlot(
                             // the callback but never a beacon.
                             if (result.impressionId.isBlank() || NativeAdCache.markImpressionFired(result.impressionId)) {
                                 currentOnImpression(NativeAdData(result.impressionId, result.adFormat, adUnitId))
+                                // PAID — co-fired with the impression (PRD "co-fire, do not decouple").
+                                // The estimate is already on-device from load; no network round-trip.
+                                currentOnPaid(result.adValue)
                                 if (result.impressionId.isNotBlank()) {
                                     SimulaScope.launch {
                                         SimulaApiClient.trackImpression(result.impressionId, ctx.apiKey)

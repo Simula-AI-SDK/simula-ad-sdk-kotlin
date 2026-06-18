@@ -219,6 +219,18 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Foreground on-screen time after begin-to-render before the billable IMPRESSION + PAID fire for a
+ * full-screen ad. The PRD's OMID rule: "fire IMPRESSION + PAID at begin-to-render after 2 seconds"
+ * (viewability is measured by the OM SDK, not gated by us). Shared by the interstitial and rewarded
+ * Activities.
+ */
+internal const val FULLSCREEN_IMPRESSION_DELAY_MS = 2_000L
+
+/** Poll cadence for the foreground impression timer. Fine enough to land the 2s mark within ~1 frame,
+ * coarse enough to stay negligible. Shared by the interstitial and rewarded Activities. */
+internal const val IMPRESSION_TICK_MS = 200L
+
 /** True if the close gate's foreground dwell was already satisfied in a prior Activity instance
  * (config-change recreation), so the close should start enabled. Based on accumulated foreground
  * time so rotation can't reset the dwell. */
@@ -367,16 +379,57 @@ private fun CreativeInterstitial(
         }
     }
 
-    // DISPLAYED + impression fire once the creative first composes. Guarded so an
-    // Activity recreation (config change) doesn't double-report either.
+    // SHOWN (AdMob's onAdShowedFullScreenContent) — fired once the creative first composes
+    // (begin-to-render), reporting the `/shown` beacon. Guarded so an Activity recreation
+    // (config change) doesn't double-report.
     LaunchedEffect(Unit) {
         if (!presentation.displayedReported) {
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
-            // FIX M2: skip impression when there is no impression id.
+            if (ad.impressionId.isNotBlank()) {
+                SimulaScope.launch {
+                    SimulaApiClient.trackShown(ad.impressionId, presentation.apiKey)
+                }
+            }
+        }
+    }
+
+    // IMPRESSION + PAID (AdMob's billable impression + paid event) — fired together once the creative
+    // has been on screen for [FULLSCREEN_IMPRESSION_DELAY_MS] of FOREGROUND time after begin-to-render.
+    // OMID measures viewability but does not gate us (PRD). Foreground-only (repeatOnLifecycle(RESUMED))
+    // so a backgrounded ad can't accrue the delay; the accrued time lives on the presentation so a
+    // config-change recreation resumes rather than restarts. The `/seen` beacon is the billing source
+    // of truth; onPaid is local analytics only and needs no network (the value is already on-device).
+    LaunchedEffect(Unit) {
+        if (presentation.impressionReported) return@LaunchedEffect
+
+        fun fireImpressionAndPaid() {
+            if (presentation.impressionReported) return
+            presentation.impressionReported = true
+            presentation.callbacks.onImpression()
+            presentation.callbacks.onPaid(ad.adValue)
             if (ad.impressionId.isNotBlank()) {
                 SimulaScope.launch {
                     SimulaApiClient.trackImpression(ad.impressionId, presentation.apiKey)
+                }
+            }
+        }
+
+        if (presentation.accumulatedImpressionTimeMs >= FULLSCREEN_IMPRESSION_DELAY_MS) {
+            fireImpressionAndPaid()
+            return@LaunchedEffect
+        }
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            if (presentation.impressionReported) return@repeatOnLifecycle
+            var lastTickMs = SystemClock.elapsedRealtime()
+            while (true) {
+                delay(IMPRESSION_TICK_MS)
+                val now = SystemClock.elapsedRealtime()
+                presentation.accumulatedImpressionTimeMs += now - lastTickMs
+                lastTickMs = now
+                if (presentation.accumulatedImpressionTimeMs >= FULLSCREEN_IMPRESSION_DELAY_MS) {
+                    fireImpressionAndPaid()
+                    return@repeatOnLifecycle
                 }
             }
         }

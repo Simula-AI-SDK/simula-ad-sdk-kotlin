@@ -1,11 +1,19 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.AdBehavior
+import ad.simula.ad.sdk.model.AdValue
 import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the rewarded Activity back to the [SimulaRewardedAd] instance. */
 internal interface RewardedCallbacks {
+    /** AdMob's "shown" — the playable was presented full-screen. */
     fun onDisplayed()
+
+    /** AdMob's billable impression — fired ~2s after begin-to-render, independent of the reward gate. */
+    fun onImpression()
+
+    /** AdMob's paid event — fired together with [onImpression], carrying the on-device estimate. */
+    fun onPaid(adValue: AdValue)
 
     /**
      * The minigame (playable) surface was dismissed. [earned] is whether the play reached the
@@ -37,9 +45,22 @@ internal class RewardedPresentation(
     val adBehavior: AdBehavior? = null,
     val trackingUrl: String? = null,
     val destination: String = "appstore",
+    // AdMob-shaped estimated revenue for this serve, surfaced on the paid event when the impression
+    // fires. Held here from load time (no network round-trip at impression). Defaults to a $0 estimate
+    // for the preview path, which constructs this presentation without a real serve.
+    val adValue: AdValue = AdValue.fromBidCpm(0.0),
 ) {
-    /** Guards a duplicate DISPLAYED/impression if the Activity is recreated on a config change. */
+    /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */
     var displayedReported = false
+
+    /** Guards a duplicate billable IMPRESSION + PAID report across a config-change recreation. */
+    var impressionReported = false
+
+    /** Foreground-only on-screen time accrued toward the begin-to-render + 2s impression mark, in ms.
+     * Accrues only while the Activity is RESUMED so a backgrounded playable can't accrue it; anchored
+     * on the presentation so a config-change recreation resumes rather than restarts. `0L` until the
+     * impression loop first ticks. Independent of [accumulatedPlayTimeMs] (the reward gate). */
+    var accumulatedImpressionTimeMs = 0L
 
     /** Set true once the required play duration elapses; gates the reward. */
     var rewardEarned = false
