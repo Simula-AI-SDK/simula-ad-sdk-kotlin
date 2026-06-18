@@ -143,13 +143,21 @@ internal class RewardVerificationQueue(
         // True when we stopped because a task hit a retryable error: its peers (if any)
         // are intentionally left for a later trigger, so we must NOT immediately re-drain.
         var bailedForBackoff = false
+        // Successfully-verified / permanently-failed serveIds, persisted in ONE save in the finally
+        // block. The prior code did store.load() on every loop iteration AND a load+save per removal,
+        // re-parsing the whole queue JSON each time → O(n²) on a large backlog. We now pick from a
+        // single in-memory snapshot and batch the removals. Re-verifying a serveId after a crash
+        // mid-drain is safe: the server SSV is idempotent and the client signal is one-shot.
+        val removedServeIds = mutableSetOf<String>()
         try {
+            // One load per drain pass (was one per iteration). Concurrently-enqueued verifications
+            // are not in this snapshot, but the finally's re-drain re-loads and re-triggers for them.
+            var queue = mutex.withLock { store.load() }
             while (true) {
-                val task = mutex.withLock {
-                    val now = clock()
-                    store.load().firstOrNull {
+                val now = clock()
+                val task = queue.firstOrNull {
+                    it.serveId !in removedServeIds &&
                         now - it.lastAttemptTimestamp >= rewardVerificationBackoffMs(it.retryCount)
-                    }
                 } ?: break
 
                 // Resolve the outcome first, then deliver it. Keeping the callback OUT of
@@ -157,16 +165,25 @@ internal class RewardVerificationQueue(
                 // verification error (and can't derail the drain).
                 val outcome: Result<String?> = try {
                     val token = verifier.verify(task.serveId, task.sessionId, task.elapsedPlayTime, task.adUnitId)
-                    removeTask(task.serveId)
+                    removedServeIds += task.serveId
                     Result.success(token)
                 } catch (e: Exception) {
                     if (isPermanentVerificationError(e)) {
                         // 4xx (except 408/429): retrying won't help, so drop it.
-                        removeTask(task.serveId)
+                        removedServeIds += task.serveId
                     } else {
                         // Keep the task for a later trigger; the server-side SSV postback
                         // still lands on a successful retry — the client signal is one-shot.
+                        // Persist the retry bump immediately and reflect it in the snapshot so it
+                        // isn't re-picked this pass.
                         recordAttempt(task.serveId)
+                        queue = queue.map {
+                            if (it.serveId == task.serveId) {
+                                it.copy(retryCount = it.retryCount + 1, lastAttemptTimestamp = now)
+                            } else {
+                                it
+                            }
+                        }
                         bailedForBackoff = true
                     }
                     Result.failure(e)
@@ -180,14 +197,17 @@ internal class RewardVerificationQueue(
                 if (bailedForBackoff) break
             }
         } finally {
-            // Clear the claim and, under the SAME lock that observes the queue, decide
-            // whether to re-drain. This closes the race where a verification enqueued
-            // just as the drain finished would otherwise sit idle until some later
-            // trigger: a task persisted concurrently is either seen here (→ re-trigger)
-            // or seen by the enqueuer's own processQueue once isProcessing is false.
-            // NonCancellable so a cancellation mid-drain can't leave isProcessing stuck.
+            // Persist all removals in one pass, then — under the SAME lock that observes the queue —
+            // decide whether to re-drain. This closes the race where a verification enqueued just as
+            // the drain finished would otherwise sit idle until some later trigger.
+            // NonCancellable so a cancellation mid-drain can't leave isProcessing stuck or skip the save.
             val reDrain = withContext(NonCancellable) {
                 mutex.withLock {
+                    // Re-load before filtering so a verification enqueued concurrently during a
+                    // verify() is preserved rather than clobbered by a stale snapshot save.
+                    if (removedServeIds.isNotEmpty()) {
+                        store.save(store.load().filterNot { it.serveId in removedServeIds })
+                    }
                     isProcessing = false
                     if (bailedForBackoff) {
                         false
@@ -199,10 +219,6 @@ internal class RewardVerificationQueue(
             }
             if (reDrain) trigger()
         }
-    }
-
-    private suspend fun removeTask(serveId: String) = mutex.withLock {
-        store.save(store.load().filterNot { it.serveId == serveId })
     }
 
     private suspend fun recordAttempt(serveId: String) = mutex.withLock {

@@ -37,26 +37,34 @@ internal object NativeAdPreloadCache {
 
     private val entries = ConcurrentHashMap<String, Entry>()
 
+    /** Guards the cap check + insert so two concurrent [preload]s can't both pass `size < MAX`. */
+    private val capLock = Any()
+
     /** Fire one preload and return its id, or null if the [MAX] cap is already reached. */
     fun preload(adUnitId: String?, position: Int, theme: String? = null): String? {
-        if (entries.size >= MAX) {
-            Log.w(TAG, "preloadNativeAd ignored — at most $MAX preloaded ads are kept at once.")
-            Telemetry.recordOperation("native_preload_capped", 0L, false)
-            return null
+        // The check-and-insert must be atomic: a plain `size >= MAX` check then a separate put let
+        // two concurrent callers both pass the check and overshoot the cap. Launching the request
+        // inside the lock is fine — async() returns immediately without blocking.
+        synchronized(capLock) {
+            if (entries.size >= MAX) {
+                Log.w(TAG, "preloadNativeAd ignored — at most $MAX preloaded ads are kept at once.")
+                Telemetry.recordOperation("native_preload_capped", 0L, false)
+                return null
+            }
+            val id = UUID.randomUUID().toString()
+            // async on the process-lifetime supervisor scope: an un-awaited failure can't crash the
+            // host, and the exception is surfaced only when consume() awaits (then mapped to a live fallback).
+            val deferred = SimulaScope.async {
+                NativeAdController.load(
+                    ensureSession = { SimulaAds.store.ensureSession() },
+                    adUnitId = adUnitId,
+                    position = position,
+                    theme = theme,
+                )
+            }
+            entries[id] = Entry(deferred, adUnitId, position)
+            return id
         }
-        val id = UUID.randomUUID().toString()
-        // async on the process-lifetime supervisor scope: an un-awaited failure can't crash the host,
-        // and the exception is surfaced only when consume() awaits (then mapped to a live fallback).
-        val deferred = SimulaScope.async {
-            NativeAdController.load(
-                ensureSession = { SimulaAds.store.ensureSession() },
-                adUnitId = adUnitId,
-                position = position,
-                theme = theme,
-            )
-        }
-        entries[id] = Entry(deferred, adUnitId, position)
-        return id
     }
 
     /**

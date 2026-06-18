@@ -58,6 +58,12 @@ object SimulaPrivacy {
 
     // CMPs write the IAB keys asynchronously and may refresh them later; pick
     // changes up automatically.
+    //
+    // Registered for the process lifetime and intentionally never unregistered: SimulaPrivacy is a
+    // process-wide singleton with no teardown, mirroring the SDK's overall lifecycle (SimulaScope,
+    // the WebViewPool/ImageCache ComponentCallbacks2, and ActivityLifecycleCallbacks are likewise
+    // process-scoped). The SDK does not support runtime teardown / dynamic-feature unload by design —
+    // process death reclaims everything; there is deliberately no SimulaAds.shutdown().
     private val prefsListener =
         SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> recompute() }
 
@@ -66,14 +72,17 @@ object SimulaPrivacy {
      * safe to call from every `SimulaProvider` composition.
      */
     fun attach(context: Context) {
+        val app = context.applicationContext
+        // The IAB in-app spec stores consent in the *default* SharedPreferences,
+        // i.e. "<package>_preferences" — replicated here without pulling in androidx.preference.
+        // getSharedPreferences() does a first-access disk read, so resolve it OUTSIDE the lock —
+        // initialize() calls attach() inside its own synchronized block on the main thread, and we
+        // must not hold a lock across I/O. Android caches the instance, so a concurrent/repeat call
+        // is cheap and idempotent.
+        val p = app.getSharedPreferences("${app.packageName}_preferences", Context.MODE_PRIVATE)
         synchronized(lock) {
             if (appContext != null) return@attach
-            val app = context.applicationContext
             appContext = app
-            // The IAB in-app spec stores consent in the *default* SharedPreferences,
-            // i.e. "<package>_preferences" — replicated here without pulling in
-            // androidx.preference.
-            val p = app.getSharedPreferences("${app.packageName}_preferences", Context.MODE_PRIVATE)
             prefs = p
             p.registerOnSharedPreferenceChangeListener(prefsListener)
         }

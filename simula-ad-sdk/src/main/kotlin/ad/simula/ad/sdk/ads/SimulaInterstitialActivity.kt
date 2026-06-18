@@ -31,6 +31,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -453,6 +454,15 @@ private fun CreativeInterstitial(
             }
         }
     }
+
+    // System back mirrors the close button: once the close gate has elapsed it drives the SAME
+    // close → end-screen (FallbackAdHost) path via [onFinish]; while the gate is still counting it is
+    // swallowed (you can't dismiss early). This is the fix for "back skips the end screen" — without
+    // it the Activity's default back finished it outright, tearing down before FallbackAdHost ever
+    // advanced to its end-screen phase. (The end-screen phase has its own BackHandler in
+    // FallbackAdOverlay; this one is only composed during the primary creative.) Mirrors
+    // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
+    BackHandler(enabled = true) { if (closeEnabled) onFinish() }
 
     Box(
         modifier = Modifier

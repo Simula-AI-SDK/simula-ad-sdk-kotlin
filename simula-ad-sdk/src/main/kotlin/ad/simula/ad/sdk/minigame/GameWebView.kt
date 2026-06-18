@@ -288,25 +288,29 @@ fun GameWebView(
                         )
                     ),
             ) {
+                // Capture the nullable state into immutable locals so the null-guarded branches
+                // smart-cast — the `!!` on these delegated `var`s was a latent NPE one refactor away.
+                val errorMessage = error
+                val gameUrl = iframeUrl
                 when {
-                    error != null -> {
+                    errorMessage != null -> {
                         // Error state
                         Box(
                             modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
-                                text = error!!,
+                                text = errorMessage,
                                 color = Color.White,
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.Medium,
                             )
                         }
                     }
-                    iframeUrl != null -> {
+                    gameUrl != null -> {
                         // WebView loads in background
                         GameWebViewContent(
-                            url = iframeUrl!!,
+                            url = gameUrl,
                             onPageFinished = { pageLoaded = true },
                         )
                         // Loading overlay stays visible until page finishes painting

@@ -102,6 +102,12 @@ internal object WebViewPool {
         while (idle.isNotEmpty()) idle.removeFirst().destroy()
     }
 
+    // The check-and-set below is intentionally NOT synchronized: like the unsynchronized [idle]
+    // deque, it relies on this object's whole-class @MainThread contract (only `prewarm`/`acquire`,
+    // both @MainThread, reach here), so the two callers can never run concurrently. `callbacksRegistered`
+    // stays @Volatile only for safe visibility of the diagnostic read. Do NOT call from a background
+    // thread — that would both double-register here and corrupt the deque.
+    @MainThread
     private fun registerTrimCallbacks(context: Context) {
         if (callbacksRegistered) return
         context.applicationContext.registerComponentCallbacks(object : ComponentCallbacks2 {
