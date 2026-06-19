@@ -171,7 +171,8 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     CreativeInterstitial(
                         presentation = p,
                         onFinish = {
-                            reportClosed()
+                            // CLOSED is deferred to finishAd (after the last fallback screen), so
+                            // closing the playable alone doesn't fire the publisher close callback.
                             onClose()
                         },
                         recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
@@ -191,8 +192,9 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
         }
     }
 
-    /** Fire CLOSED exactly once when the primary creative closes. Does NOT finish — the fallback-ad
-     * host finishes the Activity via [finishAd] once any post-close fallback ad is done. */
+    /** Fire CLOSED exactly once when the WHOLE unit is done — the primary creative AND every
+     * post-close fallback ad screen. Driven from [finishAd] (the fallback host's fully-closed
+     * callback), with [onDestroy] as a teardown safety net. */
     private fun reportClosed() {
         if (closed) return
         closed = true
@@ -212,6 +214,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
 
     /** Tear the Activity down (after the optional fallback ad). */
     private fun finishAd() {
+        reportClosed() // CLOSED fires once the whole unit (creative + all fallback screens) is done
         finish() // isFinishing becomes true → onDestroy drops the handoff entry
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
@@ -224,11 +227,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
         // it, and we must NOT report CLOSED.
         if (isFinishing) {
             token?.let { InterstitialHandoff.remove(it) }
-            if (!closed) {
-                closed = true
-                storeExit?.onAdClosed() // finished without a normal close → resolve any open store visit
-                presentation?.callbacks?.onClosed()
-            }
+            reportClosed() // safety net: torn down (back-out / swipe-away) before finishAd ran
         }
     }
 
