@@ -37,6 +37,16 @@ class ApiModelsSerializationTest {
         assertNull(r.sessionId)
     }
 
+    // ── Error body (4xx {code, message}) ─────────────────────────────────────
+
+    @Test
+    fun `api error response decodes the stable code`() {
+        val r = json.decodeFromString<ApiErrorResponse>(
+            """{"code":"ad_unit_not_found","message":"Ad unit 'x' is not registered for this publisher."}""",
+        )
+        assertEquals("ad_unit_not_found", r.code)
+    }
+
     // ── Minigame init request ────────────────────────────────────────────────
 
     @Test

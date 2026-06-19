@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
@@ -7,6 +8,7 @@ import ad.simula.ad.sdk.network.SimulaApiClient
 import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -196,6 +198,11 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
                                 false
                             }
                         }
+                        // Absorb a renderer-process death so a crashing end-screen creative can't take
+                        // the host app process down with it (parity with the minigame/interstitial
+                        // clients; surfaced as telemetry).
+                        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
+                            recordRenderProcessGone("fallback_ad", detail)
                     },
                 ).apply { loadUrl(iframeUrl) }
             },

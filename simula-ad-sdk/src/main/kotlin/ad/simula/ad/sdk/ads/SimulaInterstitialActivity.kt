@@ -519,7 +519,11 @@ private fun CreativeInterstitial(
                 prompt = storePrompt,
                 closePosition = close.position,
                 onTap = {
-                    // Mid-store-prompt click beacon (durable) — only on a real user tap (not auto_store_redirect).
+                    // Surface the click to the publisher first (parity with the WebView CTA's
+                    // onClicked), then the durable click beacon — only on a real user tap.
+                    // openDestination is reused by auto_store_redirect (no tap), so the click
+                    // signal lives here on the badge, not in openDestination.
+                    presentation.callbacks.onClicked()
                     AdBeaconManager.enqueue(ad.impressionId, "click", adFormat = "interstitial")
                     recordStoreOpen("store_prompt")
                     openDestination(ad)

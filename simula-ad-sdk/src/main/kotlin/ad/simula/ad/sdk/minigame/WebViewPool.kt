@@ -70,8 +70,17 @@ internal object WebViewPool {
         registerTrimCallbacks(context)
         val pooled = idle.removeFirstOrNull()
         val webView = pooled ?: create(context)
+        // Defensive detach: a consumer's Compose AndroidView inserts this view into its holder via
+        // addView, which throws "child already has a parent" if the view is still attached. A pooled
+        // view should already be detached (release() removes it), but guarantee it here so a stale
+        // parent — from any release/acquire ordering across a branch/key swap — can never crash the
+        // host. Mirrors NativeAdWebViewStore.attach().
+        (webView.parent as? ViewGroup)?.removeView(webView)
         (webView.context as? MutableContextWrapper)?.baseContext = context
         webView.webViewClient = client
+        // Drop any WebChromeClient left by a prior consumer so it can't outlive its surface (e.g. a
+        // creative's telemetry chrome client mislabeling a later minigame/fallback iframe's JS errors).
+        webView.webChromeClient = null
         val appContext = context.applicationContext
         mainHandler.post { prewarm(appContext) }
         // Warm (pool hit) vs cold (had to create) — surfaces prewarm effectiveness + cold cost.
@@ -86,6 +95,10 @@ internal object WebViewPool {
     /** Reset a finished WebView and return it to the pool (or destroy if full). */
     @MainThread
     fun release(webView: WebView) {
+        // Guard against a double release: enqueuing the same instance twice would let two acquire()
+        // calls hand out one live WebView, and the second addView would crash with "child already has
+        // a parent". If it's already idle it was reset on the first release, so this is a safe no-op.
+        if (webView in idle) return
         webView.stopLoading()
         webView.webViewClient = blankIgnoringClient
         // about:blank tears down the page's DOM/JS context; clearHistory drops

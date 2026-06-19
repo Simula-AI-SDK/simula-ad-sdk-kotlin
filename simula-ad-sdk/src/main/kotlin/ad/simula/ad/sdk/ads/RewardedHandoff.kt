@@ -15,6 +15,9 @@ internal interface RewardedCallbacks {
     /** The paid event — fired together with [onImpression], carrying the on-device estimate. */
     fun onPaid(adValue: AdValue)
 
+    /** A user-gesture CTA / store-prompt tap (the CLICKED signal). Mirrors [InterstitialCallbacks.onClicked]. */
+    fun onClicked()
+
     /**
      * The minigame (playable) surface was dismissed. [earned] is whether the play reached the
      * required duration; [elapsedPlayTimeSeconds] is the measured play time. The post-game fallback

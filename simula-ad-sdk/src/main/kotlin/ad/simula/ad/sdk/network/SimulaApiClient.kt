@@ -31,6 +31,14 @@ import kotlinx.serialization.json.put
 import java.net.URLEncoder
 
 /**
+ * Thrown by the load endpoints when the backend rejects the ad unit id with the stable
+ * error code `ad_unit_not_found` (the publisher doesn't own this ad unit). Caught in the
+ * ad load paths and surfaced to host apps as SimulaAdError.AdUnitNotFound /
+ * NativeAdError.AdUnitNotFound — distinct from a generic transport error.
+ */
+internal class AdUnitNotFoundException(message: String) : Exception(message)
+
+/**
  * API client for Simula ad platform.
  * All functions are suspend and safe to call from coroutine scopes.
  * Mirrors the React SDK's utils/api.ts exactly.
@@ -46,6 +54,22 @@ internal object SimulaApiClient {
         ignoreUnknownKeys = true
         isLenient = true
         encodeDefaults = true
+    }
+
+    /**
+     * Maps a non-2xx load response to an exception. The backend's stable contract is a
+     * `{code, message}` body; `ad_unit_not_found` means the publisher doesn't own this ad
+     * unit id, so it's surfaced distinctly (non-retryable) rather than as a generic HTTP
+     * error. Any other failure (or an unparseable body) stays a plain HTTP error.
+     */
+    private fun failHttp(response: SimulaHttp.Response): Nothing {
+        val code = runCatching {
+            json.decodeFromString<ApiErrorResponse>(response.body).code
+        }.getOrNull()
+        if (code == "ad_unit_not_found") {
+            throw AdUnitNotFoundException("Ad unit not found.")
+        }
+        throw Exception("HTTP error! status: ${response.code}")
     }
 
     // Consent signals ride along on every request from this single chokepoint,
@@ -439,9 +463,7 @@ internal object SimulaApiClient {
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
         )
-        if (!response.isSuccessful) {
-            throw Exception("HTTP error! status: ${response.code}")
-        }
+        if (!response.isSuccessful) failHttp(response)
         if (response.body.isBlank()) {
             throw Exception("Empty response body")
         }
@@ -524,9 +546,7 @@ internal object SimulaApiClient {
             // Bad/unknown session — non-retryable (PRD). Distinct from a generic network error.
             throw IllegalArgumentException("Invalid or unknown session for native ad (HTTP 401).")
         }
-        if (!response.isSuccessful) {
-            throw Exception("HTTP error! status: ${response.code}")
-        }
+        if (!response.isSuccessful) failHttp(response)
         if (response.body.isBlank()) {
             throw Exception("Empty response body")
         }
@@ -592,9 +612,7 @@ internal object SimulaApiClient {
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
         )
-        if (!response.isSuccessful) {
-            throw Exception("HTTP error! status: ${response.code}")
-        }
+        if (!response.isSuccessful) failHttp(response)
         if (response.body.isBlank()) {
             throw Exception("Empty response body")
         }
