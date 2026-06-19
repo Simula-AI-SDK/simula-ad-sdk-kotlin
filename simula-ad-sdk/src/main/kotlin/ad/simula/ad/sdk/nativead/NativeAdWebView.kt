@@ -279,6 +279,7 @@ internal object NativeAdWebViewStore {
         webView.settings.loadWithOverviewMode = false
         installBridge(webView, wiring, docStart)
         when {
+            // Prefer rendered_html (the inline <iframe srcdoc> creative); fall back to iframe_url.
             !renderedHtml.isNullOrBlank() -> webView.loadDataWithBaseURL(null, renderedHtml, "text/html", "utf-8", null)
             !iframeUrl.isNullOrBlank() -> webView.loadUrl(iframeUrl)
         }

@@ -139,8 +139,9 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     RewardedMinigame(
                         presentation = p,
                         recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
-                        onFinish = { earned ->
-                            reportClosed(earned)
+                        onFinish = { _ ->
+                            // CLOSE is deferred to completeReward (after the last fallback screen), so
+                            // closing the playable alone doesn't fire the publisher close callback.
                             onClose()
                         },
                     )
@@ -149,13 +150,14 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         }
     }
 
-    /** Fire CLOSE (with reward state + measured play time) exactly once when the minigame closes.
-     * Does NOT finish — the fallback-ad host finishes via [finishAd] once any fallback ad is done. */
-    private fun reportClosed(earned: Boolean) {
+    /** Fire CLOSE (with reward state + measured play time) exactly once when the WHOLE unit is done —
+     * the minigame AND every post-close fallback ad screen. Driven from [completeReward] (the fallback
+     * host's fully-closed callback), with [onDestroy] as a teardown safety net. */
+    private fun reportClosed() {
         if (closed) return
         closed = true
         storeExit?.onAdClosed() // resolve any outstanding store visit as an abandon
-        presentation?.let { p -> p.callbacks.onClose(earned, elapsedSeconds(p)) }
+        presentation?.let { p -> p.callbacks.onClose(p.rewardEarned, elapsedSeconds(p)) }
     }
 
     override fun onResume() {
@@ -175,6 +177,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
      * reward; with no fallback screens, [FallbackAdHost] calls this immediately on close.
      */
     private fun completeReward() {
+        reportClosed() // CLOSE fires once the whole unit (playable + all fallback screens) is done
         if (!completed) {
             completed = true
             presentation?.let { p -> p.callbacks.onRewardCompleted(p.rewardEarned, elapsedSeconds(p)) }
@@ -194,11 +197,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         // Only act when finishing for good; on a config-change recreation we keep the
         // handoff so the new instance can read it and must NOT report CLOSE.
         if (isFinishing) {
-            if (!closed) {
-                closed = true
-                storeExit?.onAdClosed() // finished without a normal close → resolve any open store visit
-                presentation?.let { p -> p.callbacks.onClose(p.rewardEarned, elapsedSeconds(p)) }
-            }
+            reportClosed() // safety net: torn down (back-out / swipe-away) before completeReward ran
             // Safety net: the unit is being torn down (back-out / swipe-away / finish) after the reward
             // was earned but before completeReward() ran during the fallback phase. Fire completion now
             // so the server-side verification is still enqueued (RewardVerificationManager) — otherwise

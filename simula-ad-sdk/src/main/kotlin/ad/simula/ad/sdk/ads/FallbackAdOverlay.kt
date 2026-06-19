@@ -217,6 +217,9 @@ private fun FallbackAdOverlay(iframeUrl: String?, html: String? = null, adId: St
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : WebViewClient() {
+                        // Monotonic time of the last fired CTA click — de-dupes a single tap that surfaces
+                        // more than one navigation (e.g. window.open from the inline srcdoc creative).
+                        var lastClickMs = 0L
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val target = request?.url?.toString() ?: return false
                             // Inline-html (srcdoc) internal navigations aren't click-throughs.
@@ -228,7 +231,10 @@ private fun FallbackAdOverlay(iframeUrl: String?, html: String? = null, adId: St
                             // A genuine user tap on the end-screen CTA is a click (parity with the creative
                             // CTAs; programmatic redirects don't fire onClicked). The iframe self-reports its
                             // own click beacon, so fire the publisher callback only — no SDK beacon here.
-                            if (request?.hasGesture() == true) onAdClick()
+                            if (request?.hasGesture() == true) {
+                                val now = SystemClock.elapsedRealtime()
+                                if (now - lastClickMs >= 500) { lastClickMs = now; onAdClick() }
+                            }
                             return try {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
                                 true
