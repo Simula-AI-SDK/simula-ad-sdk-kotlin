@@ -140,6 +140,7 @@ internal fun BoxScope.NativeAdInfoOverlay(
             },
             onClose = { sheetVisible = false },
             alignment = Alignment.TopStart,
+            confined = true,
         )
     }
 }
@@ -151,6 +152,8 @@ internal fun BoxScope.NativeAdInfoOverlay(
  *
  * [alignment] places the menu: `BottomStart` (default, for full-screen ads — slides up from the
  * bottom over the safe area) or `TopStart` (for the inline native card — drops below the AD badge).
+ * [confined] (the inline native card) drops the dim scrim — it looked bad over a light feed — using a
+ * clear tap-catcher that still dismisses, instead of dimming behind the menu.
  */
 @Composable
 internal fun AdReportSheet(
@@ -158,6 +161,7 @@ internal fun AdReportSheet(
     onInterest: (Int) -> Unit,
     onClose: () -> Unit,
     alignment: Alignment = Alignment.BottomStart,
+    confined: Boolean = false,
 ) {
     val context = LocalContext.current
     // 0 = menu, 1 = reasons, 2 = done
@@ -168,7 +172,9 @@ internal fun AdReportSheet(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.6f))
+            // Inline native card drops the dim — it looked bad over a light feed; the clear scrim still
+            // catches taps to dismiss. Full-screen ads keep the 0.6 dim.
+            .then(if (confined) Modifier else Modifier.background(Color.Black.copy(alpha = 0.6f)))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
