@@ -37,6 +37,8 @@ import java.io.File
 internal object SimulaCrashGuard {
 
     private const val SDK_PACKAGE = "ad.simula.ad.sdk"
+    /** Trailing dot so a host package like `ad.simula.ad.sdkfoo` can't false-positive a class match. */
+    private const val SDK_CLASS_PREFIX = "ad.simula.ad.sdk."
     private const val DIR = "simula_crash"
     private const val PENDING_FILE = "pending_crashes.txt"
     private const val PREFS = "simula_crash_prefs"
@@ -52,6 +54,9 @@ internal object SimulaCrashGuard {
     private const val MAX_FRAMES = 6
     /** Bytes of an [ApplicationExitInfo] trace scanned for attribution. */
     private const val MAX_TRACE_BYTES = 256 * 1024
+    /** Most-recent crash records replayed per launch. Bounds the SQLite-write burst a crash-loop
+     * (which can fill the pending file) would otherwise cause; identical signatures aggregate anyway. */
+    private const val MAX_REPLAY = 20
 
     @Volatile private var installed = false
 
@@ -99,7 +104,7 @@ internal object SimulaCrashGuard {
         var cur = t
         val seen = HashSet<Throwable>()
         while (cur != null && seen.add(cur)) {
-            if (cur.stackTrace.any { it.className.startsWith(SDK_PACKAGE) }) return true
+            if (cur.stackTrace.any { it.className.startsWith(SDK_CLASS_PREFIX) }) return true
             cur = cur.cause
         }
         return false
@@ -124,7 +129,10 @@ internal object SimulaCrashGuard {
     private fun replayPending(app: Context) {
         val file = File(File(app.filesDir, DIR), PENDING_FILE)
         if (!file.exists()) return
-        val lines = file.readLines()
+        // Most-recent records only: a crash-loop can fill the pending file, and replaying every line
+        // would launch one recordError (→ store.save + flush) each at launch. The cap bounds that
+        // burst; the telemetry layer still aggregates identical signatures.
+        val lines = file.readLines().takeLast(MAX_REPLAY)
         file.delete()
         for (line in lines) {
             if (line.isBlank()) continue
@@ -150,7 +158,7 @@ internal object SimulaCrashGuard {
         var cur: Throwable? = t
         val seen = HashSet<Throwable>()
         while (cur != null && seen.add(cur)) {
-            cur.stackTrace.firstOrNull { it.className.startsWith(SDK_PACKAGE) }?.let { return it }
+            cur.stackTrace.firstOrNull { it.className.startsWith(SDK_CLASS_PREFIX) }?.let { return it }
             cur = cur.cause
         }
         return null
@@ -202,8 +210,14 @@ internal object SimulaCrashGuard {
             else -> return
         }
         val trace = readTrace(info)
-        // Attribute: only report when the trace implicates the SDK (don't exfiltrate the host's ANRs).
-        if (trace == null || !trace.contains(SDK_PACKAGE)) return
+        if (trace == null) return
+        // Attribute conservatively so we never exfiltrate the host's own crashes/ANRs:
+        // - ANR: the dump lists EVERY thread, and the SDK always has idle worker threads in it, so a
+        //   whole-dump `contains` would match almost any host ANR. An ANR is about the MAIN thread
+        //   being blocked → only attribute when the SDK is on the main thread's stack.
+        // - Native crash: the faulting thread can be any thread, so a whole-trace match is right.
+        val attributed = if (kind == "anr") anrMainThreadInvolvesSdk(trace) else trace.contains(SDK_PACKAGE)
+        if (!attributed) return
         Telemetry.recordError(
             signature = "exit:$kind",
             errorCode = "exit_reason_${info.reason}",
@@ -227,6 +241,22 @@ internal object SimulaCrashGuard {
             String(out.toByteArray())
         }
     }.getOrNull()
+
+    /**
+     * True only if the SDK appears in the **main thread's** stack within an ANR dump. ANR traces are
+     * grouped into per-thread blocks, each opening with a quoted thread name (`"main" …`, `"Thread-3" …`)
+     * and continuing until the next quoted header. We track only the `"main"` block so an idle SDK
+     * worker thread elsewhere in the dump can't attribute a host ANR to us. Errs toward under-matching
+     * (an unrecognized header format just means we skip) — never toward exfiltrating a host ANR.
+     */
+    private fun anrMainThreadInvolvesSdk(trace: String): Boolean {
+        var inMain = false
+        for (line in trace.lineSequence()) {
+            if (line.startsWith("\"")) inMain = line.startsWith("\"main\"")
+            else if (inMain && line.contains(SDK_PACKAGE)) return true
+        }
+        return false
+    }
 
     /** The trace lines that mention the SDK, joined + capped by [Telemetry] — the relevant frames. */
     private fun sdkExcerpt(trace: String): String {
