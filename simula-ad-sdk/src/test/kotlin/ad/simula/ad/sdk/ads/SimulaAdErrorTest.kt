@@ -36,5 +36,9 @@ class SimulaAdErrorTest {
             "Network error while loading the ad — check the connection and call load() again.",
             SimulaAdError.Network(null).message,
         )
+        assertEquals(
+            "Ad unit id is not registered for this app — check the ad unit id in your Simula dashboard.",
+            SimulaAdError.AdUnitNotFound.message,
+        )
     }
 }

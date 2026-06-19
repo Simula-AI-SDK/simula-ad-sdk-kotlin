@@ -1,12 +1,15 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -27,6 +30,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -45,6 +49,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
 import kotlin.math.ceil
 import kotlinx.coroutines.delay
@@ -66,6 +71,7 @@ internal fun FallbackAdHost(
     onFullyClosed: () -> Unit,
     autoStoreRedirect: AutoStoreRedirect? = null,
     onAutoStoreRedirect: () -> Unit = {},
+    onAdClick: () -> Unit = {},
     content: @Composable (onClose: () -> Unit) -> Unit,
 ) {
     var phase by remember { mutableStateOf<FallbackPhase>(FallbackPhase.Content) }
@@ -124,7 +130,9 @@ internal fun FallbackAdHost(
             key(p.index) {
                 FallbackAdOverlay(
                     iframeUrl = ad.iframeUrl,
+                    html = ad.html,
                     adId = ad.adId,
+                    onAdClick = onAdClick,
                     onClose = {
                         // Reveal the next screen on each close tap; done after the last one.
                         phase = if (p.index + 1 < p.ads.size) p.copy(index = p.index + 1) else FallbackPhase.Done
@@ -148,8 +156,32 @@ private sealed interface FallbackPhase {
  * a top-right close button (the same shape as the minigame menu's post-game overlay).
  */
 @Composable
-private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Unit) {
+private fun FallbackAdOverlay(iframeUrl: String?, html: String? = null, adId: String, onAdClick: () -> Unit = {}, onClose: () -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    // The pooled fallback WebView, captured from the AndroidView factory below so we can pause/resume
+    // it with the host and force a repaint on foreground return — AndroidView won't pause a WebView, and
+    // a hardware-accelerated WebView returns black/blank after the window loses visibility (background).
+    var fallbackWebView by remember { mutableStateOf<WebView?>(null) }
+    DisposableEffect(lifecycleOwner, fallbackWebView) {
+        val wv = fallbackWebView
+        var wasStopped = false
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> wv?.onPause()
+                Lifecycle.Event.ON_STOP -> wasStopped = true
+                Lifecycle.Event.ON_RESUME -> {
+                    wv?.onResume()
+                    if (wasStopped) {
+                        wasStopped = false
+                        wv?.repaintOnNextFrame()
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     var countdown by remember { mutableStateOf(5) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ring = remember { Animatable(0f) }
@@ -185,10 +217,24 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : WebViewClient() {
+                        // Monotonic time of the last fired CTA click — de-dupes a single tap that surfaces
+                        // more than one navigation (e.g. window.open from the inline srcdoc creative).
+                        var lastClickMs = 0L
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val target = request?.url?.toString() ?: return false
-                            // Same-origin stays in the webview; cross-origin opens externally.
-                            if (Uri.parse(iframeUrl).host == Uri.parse(target).host) return false
+                            // Inline-html (srcdoc) internal navigations aren't click-throughs.
+                            if (target.startsWith("about:")) return false
+                            // Same-origin stays in the webview; cross-origin opens externally. (When the
+                            // creative is inline html, iframeUrl is still the page's base origin.)
+                            val originHost = iframeUrl?.let { Uri.parse(it).host }
+                            if (originHost != null && originHost == Uri.parse(target).host) return false
+                            // A genuine user tap on the end-screen CTA is a click (parity with the creative
+                            // CTAs; programmatic redirects don't fire onClicked). The iframe self-reports its
+                            // own click beacon, so fire the publisher callback only — no SDK beacon here.
+                            if (request?.hasGesture() == true) {
+                                val now = SystemClock.elapsedRealtime()
+                                if (now - lastClickMs >= 500) { lastClickMs = now; onAdClick() }
+                            }
                             return try {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
                                 true
@@ -196,8 +242,23 @@ private fun FallbackAdOverlay(iframeUrl: String, adId: String, onClose: () -> Un
                                 false
                             }
                         }
+                        // Absorb a renderer-process death so a crashing end-screen creative can't take
+                        // the host app process down with it (parity with the minigame/interstitial
+                        // clients; surfaced as telemetry).
+                        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
+                            recordRenderProcessGone("fallback_ad", detail)
                     },
-                ).apply { loadUrl(iframeUrl) }
+                ).apply {
+                    val creative = html
+                    if (!creative.isNullOrBlank()) {
+                        // Inline html (preferred). baseUrl = the iframe origin so the end screen's own
+                        // click beacon (fetch to the API) stays same-origin, exactly as loadUrl did.
+                        loadDataWithBaseURL(iframeUrl, creative, "text/html", "UTF-8", null)
+                    } else if (!iframeUrl.isNullOrBlank()) {
+                        loadUrl(iframeUrl)
+                    }
+                    fallbackWebView = this
+                }
             },
             // The creative fills edge-to-edge: inset only vertically (status / nav / top notch),
             // matching the interstitial / rewarded creatives, and draw under any horizontal

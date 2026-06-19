@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * Locks the User-Agent wire format (User-Agent for Apps SDK PRD) against the AdMob-aligned
+ * Locks the User-Agent wire format (User-Agent for Apps SDK PRD) against the standard
  * template. Exercises the pure [SimulaUserAgent.compose] so no Android `Build` statics are needed.
  */
 class SimulaUserAgentTest {

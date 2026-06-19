@@ -20,6 +20,9 @@ enum class NativeAdError {
 
     /** A network or decoding error occurred while loading the creative. */
     Network,
+
+    /** The ad unit id isn't registered for this app (wrong id / different publisher). Non-retryable. */
+    AdUnitNotFound,
 }
 
 /** Stable, low-cardinality code for this error, used as the `error_code` on telemetry events. Matches
@@ -29,6 +32,7 @@ internal fun NativeAdError.telemetryCode(): String = when (this) {
     NativeAdError.NoSession -> "no_session"
     NativeAdError.NoFill -> "no_fill"
     NativeAdError.Network -> "network"
+    NativeAdError.AdUnitNotFound -> "ad_unit_not_found"
 }
 
 /**
@@ -41,5 +45,6 @@ internal fun SimulaAdError.toNativeAdError(): NativeAdError = when (this) {
     SimulaAdError.NoSession -> NativeAdError.NoSession
     SimulaAdError.NoFill -> NativeAdError.NoFill
     is SimulaAdError.Network -> NativeAdError.Network
+    SimulaAdError.AdUnitNotFound -> NativeAdError.AdUnitNotFound
     else -> NativeAdError.Network
 }

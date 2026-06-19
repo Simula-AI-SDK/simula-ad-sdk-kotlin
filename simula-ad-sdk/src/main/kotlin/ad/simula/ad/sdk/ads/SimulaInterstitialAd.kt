@@ -15,6 +15,7 @@ import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
+import ad.simula.ad.sdk.network.AdUnitNotFoundException
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
@@ -192,13 +193,17 @@ class SimulaInterstitialAd(val adUnitId: String) {
             } catch (e: Exception) {
                 // Genuine exception (network/decoding) — always-sent, deduped handled error,
                 // in addition to the sampled `load_fail` lifecycle event from failLoad().
+                // ad_unit_not_found is a distinct, non-retryable misconfiguration — surface it as
+                // its own case rather than burying it in the generic Network bucket.
+                val error =
+                    if (e is AdUnitNotFoundException) SimulaAdError.AdUnitNotFound else SimulaAdError.Network(e)
                 Telemetry.recordError(
                     signature = "interstitial:load",
-                    errorCode = e.javaClass.simpleName,
+                    errorCode = error.telemetryCode(),
                     message = e.message,
                     breadcrumb = "SimulaInterstitialAd.load",
                 )
-                failLoadOnMain(generation, SimulaAdError.Network(e))
+                failLoadOnMain(generation, error)
             }
         }
     }
@@ -360,7 +365,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
             }
         }
         // A foreground Activity is required to present — matching Swift's
-        // "no presentation context" semantics and AdMob's show(activity). A
+        // "no presentation context" semantics and the standard show(activity) entry point. A
         // background activity-start from the app context can be silently dropped
         // on Android 10+, which would strand us in the Showing state.
         if (activity == null) {

@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
@@ -152,6 +153,10 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     impressionId = p.ad.impressionId,
                     onFullyClosed = ::finishAd,
                     autoStoreRedirect = p.ad.adBehavior?.autoStoreRedirect,
+                    // A user tap on an end-screen CTA is a click (parity with the creative CTA / store
+                    // prompt): surface the PARENT interstitial ad to onAdClicked. The end-screen iframe
+                    // self-reports its own click beacon, so fire the callback only — no SDK beacon here.
+                    onAdClick = { p.callbacks.onClicked() },
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
                         storeExit?.recordStoreOpen("auto_redirect")
@@ -166,7 +171,8 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     CreativeInterstitial(
                         presentation = p,
                         onFinish = {
-                            reportClosed()
+                            // CLOSED is deferred to finishAd (after the last fallback screen), so
+                            // closing the playable alone doesn't fire the publisher close callback.
                             onClose()
                         },
                         recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
@@ -186,8 +192,9 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
         }
     }
 
-    /** Fire CLOSED exactly once when the primary creative closes. Does NOT finish — the fallback-ad
-     * host finishes the Activity via [finishAd] once any post-close fallback ad is done. */
+    /** Fire CLOSED exactly once when the WHOLE unit is done — the primary creative AND every
+     * post-close fallback ad screen. Driven from [finishAd] (the fallback host's fully-closed
+     * callback), with [onDestroy] as a teardown safety net. */
     private fun reportClosed() {
         if (closed) return
         closed = true
@@ -207,6 +214,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
 
     /** Tear the Activity down (after the optional fallback ad). */
     private fun finishAd() {
+        reportClosed() // CLOSED fires once the whole unit (creative + all fallback screens) is done
         finish() // isFinishing becomes true → onDestroy drops the handoff entry
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
@@ -219,11 +227,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
         // it, and we must NOT report CLOSED.
         if (isFinishing) {
             token?.let { InterstitialHandoff.remove(it) }
-            if (!closed) {
-                closed = true
-                storeExit?.onAdClosed() // finished without a normal close → resolve any open store visit
-                presentation?.callbacks?.onClosed()
-            }
+            reportClosed() // safety net: torn down (back-out / swipe-away) before finishAd ran
         }
     }
 
@@ -405,7 +409,7 @@ private fun CreativeInterstitial(
         }
     }
 
-    // SHOWN (AdMob's onAdShowedFullScreenContent) — fired once the creative first composes
+    // SHOWN — fired once the creative first composes
     // (begin-to-render), reporting the `/shown` beacon. Guarded so an Activity recreation
     // (config change) doesn't double-report.
     LaunchedEffect(Unit) {
@@ -417,7 +421,7 @@ private fun CreativeInterstitial(
         }
     }
 
-    // IMPRESSION + PAID (AdMob's billable impression + paid event) — fired together once the creative
+    // IMPRESSION + PAID (the billable impression + paid event) — fired together once the creative
     // has been on screen for [FULLSCREEN_IMPRESSION_DELAY_MS] of FOREGROUND time after begin-to-render.
     // OMID measures viewability but does not gate us (PRD). Foreground-only (repeatOnLifecycle(RESUMED))
     // so a backgrounded ad can't accrue the delay; the accrued time lives on the presentation so a
@@ -494,7 +498,7 @@ private fun CreativeInterstitial(
             )
         }
 
-        // Close button — always shown with the compact AppLovin-style chrome. Driven by
+        // Close button — always shown with the compact chrome. Driven by
         // `ad_behavior.close` when present; otherwise a default (top-right, always available) so ads
         // with no `ad_behavior` still get the small close, not a big one.
         val close = behavior?.close ?: CloseBehavior()
@@ -519,7 +523,11 @@ private fun CreativeInterstitial(
                 prompt = storePrompt,
                 closePosition = close.position,
                 onTap = {
-                    // Mid-store-prompt click beacon (durable) — only on a real user tap (not auto_store_redirect).
+                    // Surface the click to the publisher first (parity with the WebView CTA's
+                    // onClicked), then the durable click beacon — only on a real user tap.
+                    // openDestination is reused by auto_store_redirect (no tap), so the click
+                    // signal lives here on the badge, not in openDestination.
+                    presentation.callbacks.onClicked()
                     AdBeaconManager.enqueue(ad.impressionId, "click", adFormat = "interstitial")
                     recordStoreOpen("store_prompt")
                     openDestination(ad)
@@ -532,7 +540,14 @@ private fun CreativeInterstitial(
         if (skoverlay != null && skoverlay.enabled && installBannerVisible) {
             PlayInstallBanner(
                 config = skoverlay,
-                onTap = { recordStoreOpen("store_prompt"); openDestination(ad) },
+                onTap = {
+                    // A user tap on the install banner opens the primary ad's store — surface the click
+                    // (parity with the store-prompt badge / creative CTA) plus the durable click beacon.
+                    presentation.callbacks.onClicked()
+                    AdBeaconManager.enqueue(ad.impressionId, "click", adFormat = "interstitial")
+                    recordStoreOpen("store_prompt")
+                    openDestination(ad)
+                },
                 onDismiss = { installBannerVisible = false },
             )
         }
@@ -574,10 +589,23 @@ private fun CreativeHtml(
     // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
     DisposableEffect(lifecycleOwner, creativeWebView) {
         val wv = creativeWebView
+        // Track a real background (ON_STOP) so the repaint below fires only when the window actually
+        // lost its drawing surface — not on an incidental ON_PAUSE (a dialog / permission sheet over a
+        // still-visible Activity), which would cause a one-frame INVISIBLE flicker.
+        var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> wv?.onPause()
-                Lifecycle.Event.ON_RESUME -> wv?.onResume()
+                Lifecycle.Event.ON_STOP -> wasStopped = true
+                Lifecycle.Event.ON_RESUME -> {
+                    wv?.onResume()
+                    if (wasStopped) {
+                        wasStopped = false
+                        // A hardware-accelerated WebView drops its draw functor on background; force the
+                        // visibility transition that recreates it, else the creative returns black/blank.
+                        wv?.repaintOnNextFrame()
+                    }
+                }
                 else -> Unit
             }
         }
@@ -628,7 +656,7 @@ private fun CreativeHtml(
 
 // ── Ad-behavior close button ──────────────────────────────────────────────────
 
-// Visible close affordance sized to match AppLovin (a compact ~22dp circle); the tappable area stays
+// Visible close affordance sized to a compact ~22dp circle; the tappable area stays
 // at the 48dp Material minimum (see [MIN_TOUCH_TARGET_DP]), close to IAB MRAID's 50×50dp close
 // region. The visible graphic and the touch target are deliberately decoupled.
 private const val CLOSE_GLYPH_SP = 10
@@ -715,7 +743,7 @@ internal fun BoxScope.AdCloseButton(
     }
 
     // The button (or its in-delay indicator), pinned to the configured corner with a tight 8dp inset
-    // so it sits close to the edge (AdMob / AppLovin-style); each corner (incl. bottom-left) honored.
+    // so it sits close to the edge; each corner (incl. bottom-left) honored.
     Box(
         modifier = Modifier
             .align(alignment)
@@ -781,7 +809,7 @@ private fun CloseCircle(
     val circle = Modifier
         .size(CLOSE_BOX_DP.dp)
         .clip(CircleShape)
-        // Gray / translucent dark circle (AdMob / AppLovin style) rather than opaque white.
+        // Gray / translucent dark circle rather than opaque white.
         .background(Color.Black.copy(alpha = 0.5f * alpha))
     if (onClick != null) {
         Box(
@@ -874,7 +902,7 @@ internal fun BoxScope.StorePromptBadge(
             .then(if (rowHeight != null) Modifier.height(rowHeight) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
-        // Compact AppLovin-style pill: a filled skip-next glyph then the store name, with tight
+        // Compact pill: a filled skip-next glyph then the store name, with tight
         // padding, a fully-rounded (capsule) outline, and a small gap between the two.
         Row(
             modifier = Modifier
@@ -893,7 +921,7 @@ internal fun BoxScope.StorePromptBadge(
 
 /**
  * The filled "skip-next" glyph (▶|) — a right-pointing triangle with a trailing vertical bar,
- * matching the Material `skip_next` icon (and AppLovin's store-prompt badge). Drawn as a vector
+ * matching the Material `skip_next` icon. Drawn as a vector
  * path so it renders crisply at any [size] without a Material-icons font dependency.
  */
 @Composable

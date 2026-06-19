@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
@@ -120,6 +121,10 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     impressionId = p.impressionId,
                     onFullyClosed = ::completeReward,
                     autoStoreRedirect = p.adBehavior?.autoStoreRedirect,
+                    // A user tap on an end-screen CTA is a click (parity with the playable CTA / store
+                    // prompt): surface the PARENT rewarded ad to onAdClicked. The end-screen iframe
+                    // self-reports its own click beacon, so fire the callback only — no SDK beacon here.
+                    onAdClick = { p.callbacks.onClicked() },
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
                         storeExit?.recordStoreOpen("auto_redirect")
@@ -134,8 +139,9 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     RewardedMinigame(
                         presentation = p,
                         recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
-                        onFinish = { earned ->
-                            reportClosed(earned)
+                        onFinish = { _ ->
+                            // CLOSE is deferred to completeReward (after the last fallback screen), so
+                            // closing the playable alone doesn't fire the publisher close callback.
                             onClose()
                         },
                     )
@@ -144,13 +150,14 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         }
     }
 
-    /** Fire CLOSE (with reward state + measured play time) exactly once when the minigame closes.
-     * Does NOT finish — the fallback-ad host finishes via [finishAd] once any fallback ad is done. */
-    private fun reportClosed(earned: Boolean) {
+    /** Fire CLOSE (with reward state + measured play time) exactly once when the WHOLE unit is done —
+     * the minigame AND every post-close fallback ad screen. Driven from [completeReward] (the fallback
+     * host's fully-closed callback), with [onDestroy] as a teardown safety net. */
+    private fun reportClosed() {
         if (closed) return
         closed = true
         storeExit?.onAdClosed() // resolve any outstanding store visit as an abandon
-        presentation?.let { p -> p.callbacks.onClose(earned, elapsedSeconds(p)) }
+        presentation?.let { p -> p.callbacks.onClose(p.rewardEarned, elapsedSeconds(p)) }
     }
 
     override fun onResume() {
@@ -170,6 +177,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
      * reward; with no fallback screens, [FallbackAdHost] calls this immediately on close.
      */
     private fun completeReward() {
+        reportClosed() // CLOSE fires once the whole unit (playable + all fallback screens) is done
         if (!completed) {
             completed = true
             presentation?.let { p -> p.callbacks.onRewardCompleted(p.rewardEarned, elapsedSeconds(p)) }
@@ -189,11 +197,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         // Only act when finishing for good; on a config-change recreation we keep the
         // handoff so the new instance can read it and must NOT report CLOSE.
         if (isFinishing) {
-            if (!closed) {
-                closed = true
-                storeExit?.onAdClosed() // finished without a normal close → resolve any open store visit
-                presentation?.let { p -> p.callbacks.onClose(p.rewardEarned, elapsedSeconds(p)) }
-            }
+            reportClosed() // safety net: torn down (back-out / swipe-away) before completeReward ran
             // Safety net: the unit is being torn down (back-out / swipe-away / finish) after the reward
             // was earned but before completeReward() ran during the fallback phase. Fire completion now
             // so the server-side verification is still enqueued (RewardVerificationManager) — otherwise
@@ -283,10 +287,23 @@ private fun RewardedMinigame(
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
     DisposableEffect(lifecycleOwner, creativeWebView) {
         val wv = creativeWebView
+        // Track a real background (ON_STOP) so the repaint below fires only when the window actually
+        // lost its drawing surface — not on an incidental ON_PAUSE (a dialog / permission sheet over a
+        // still-visible Activity), which would cause a one-frame INVISIBLE flicker.
+        var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> wv?.onPause()
-                Lifecycle.Event.ON_RESUME -> wv?.onResume()
+                Lifecycle.Event.ON_STOP -> wasStopped = true
+                Lifecycle.Event.ON_RESUME -> {
+                    wv?.onResume()
+                    if (wasStopped) {
+                        wasStopped = false
+                        // A hardware-accelerated WebView drops its draw functor on background; force the
+                        // visibility transition that recreates it, else the creative returns black/blank.
+                        wv?.repaintOnNextFrame()
+                    }
+                }
                 else -> Unit
             }
         }
@@ -330,7 +347,7 @@ private fun RewardedMinigame(
         }
     }
 
-    // SHOWN (AdMob's onAdShowedFullScreenContent) — fired once the playable first composes
+    // SHOWN — fired once the playable first composes
     // (begin-to-render), reporting the `/shown` beacon. Guarded so an Activity recreation doesn't
     // double-report.
     LaunchedEffect(Unit) {
@@ -342,7 +359,7 @@ private fun RewardedMinigame(
         }
     }
 
-    // IMPRESSION + PAID (AdMob's billable impression + paid event) — fired together once the playable
+    // IMPRESSION + PAID (the billable impression + paid event) — fired together once the playable
     // has been on screen for [FULLSCREEN_IMPRESSION_DELAY_MS] of FOREGROUND time after begin-to-render,
     // independent of the play-to-earn reward gate. OMID measures viewability but does not gate us (PRD).
     // Foreground-only so a backgrounded playable can't accrue the delay; the accrued time lives on the
@@ -467,7 +484,10 @@ private fun RewardedMinigame(
                             if (Uri.parse(url).host == Uri.parse(requestUrl).host) return false
                             return try {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl)))
-                                // External link from the playable is the CTA store-open.
+                                // External link from the playable is the CTA store-open. Only a
+                                // user-gesture navigation counts as a click (parity with the
+                                // interstitial); auto-redirects open the store but don't fire CLICKED.
+                                if (request?.hasGesture() == true) presentation.callbacks.onClicked()
                                 recordStoreOpen("cta")
                                 true
                             } catch (e: Exception) {
@@ -529,7 +549,9 @@ private fun RewardedMinigame(
                 edgePadding = 8.dp,
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
                 onTap = {
-                    // Mid-store-prompt click beacon (durable) — only on a real user tap (not auto_store_redirect).
+                    // Surface the click to the publisher first (parity with the interstitial), then
+                    // the durable click beacon — only on a real user tap (not auto_store_redirect).
+                    presentation.callbacks.onClicked()
                     AdBeaconManager.enqueue(presentation.impressionId, "click", adFormat = "rewarded")
                     recordStoreOpen("store_prompt")
                     CreativeCtaRouter.open(

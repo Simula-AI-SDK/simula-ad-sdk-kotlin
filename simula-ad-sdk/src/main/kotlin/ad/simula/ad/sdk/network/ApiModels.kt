@@ -34,6 +34,18 @@ internal data class SessionResponse(
     @SerialName("telemetry_sample_rate") val telemetrySampleRate: Double? = null,
 )
 
+/**
+ * Structured error body the backend returns on a 4xx for the load endpoints:
+ * `{"code": "...", "message": "..."}`. The stable `code` is the SDK-facing contract
+ * (HTTP status alone is ambiguous); `ad_unit_not_found` means the publisher doesn't own
+ * the requested ad unit id.
+ */
+@Serializable
+internal data class ApiErrorResponse(
+    val code: String = "",
+    val message: String = "",
+)
+
 @Serializable
 internal data class InitMinigameRequestBody(
     @SerialName("game_type") val gameType: String,
@@ -132,7 +144,7 @@ internal data class AdLoadApiResponse(
     // Server-rendered HTML creative. When present (non-blank) it is rendered
     // full-screen in a WebView — the imperative interstitial's sole creative.
     @SerialName("rendered_html") val renderedHtml: String? = null,
-    // Cleared bid (the estimated CPM) for this serve, backend-provided. The SDK derives the AdMob-shaped
+    // Cleared bid (the estimated CPM) for this serve, backend-provided. The SDK derives the
     // `adValue` from it (see [ad.simula.ad.sdk.model.AdValue.fromBidCpm]) and surfaces it on the paid
     // event. Defaults to 0.0 → a $0 estimate when the field is absent (e.g. a no-fill).
     @SerialName("bid_amt") val bidAmt: Double = 0.0,
@@ -367,22 +379,26 @@ internal data class NativeContextBody(
     val nsfw: Boolean = false,
 )
 
-/** Response for `POST /load/native` (backend `CaiNativeResponse`). Note `adResponse` is camelCase
- * (a single deliberate exception in the snake_case envelope); it's `{}` on a no-fill. */
+/** Response for `POST /load/native` (backend `CaiNativeResponse`). A flat envelope mirroring the
+ * imperative [AdLoadApiResponse]: the creative (`iframe_url` + `rendered_html`) and the click-through
+ * params (`destination`, `tracking_url`) sit at the top level (the creative was previously nested
+ * under a camelCase `adResponse`). Every field defaults to its empty/no-fill value, so a `{}` or
+ * partial payload decodes safely. */
 @Serializable
 internal data class NativeAdApiResponse(
     @SerialName("impression_id") val impressionId: String? = null,
     @SerialName("ad_inserted") val adInserted: Boolean = false,
     @SerialName("ad_format") val adFormat: String = "",
-    // Cleared bid (estimated CPM) for this serve — see [AdLoadApiResponse.bidAmt]. Drives `adValue`.
-    @SerialName("bid_amt") val bidAmt: Double = 0.0,
-    val adResponse: NativeAdCreativeBody = NativeAdCreativeBody(),
-)
-
-@Serializable
-internal data class NativeAdCreativeBody(
+    // The mountable creative — now top-level (was nested under `adResponse`); both null on a no-fill.
     @SerialName("iframe_url") val iframeUrl: String? = null,
     @SerialName("rendered_html") val renderedHtml: String? = null,
+    // Click-through routing (mirrors [AdLoadApiResponse]): `destination` is where a CTA tap goes
+    // ("appstore" | "web") and `tracking_url` is the MMP click tracker the SDK opens verbatim
+    // (attribution-preserving). `tracking_url` is null when the chosen campaign has no tracker.
+    val destination: String = "appstore",
+    @SerialName("tracking_url") val trackingUrl: String? = null,
+    // Cleared bid (estimated CPM) for this serve — see [AdLoadApiResponse.bidAmt]. Drives `adValue`.
+    @SerialName("bid_amt") val bidAmt: Double = 0.0,
 )
 
 /** Maps the public [ad.simula.ad.sdk.model.SimulaAdContext] onto the camelCase wire object.

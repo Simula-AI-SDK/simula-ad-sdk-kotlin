@@ -10,6 +10,8 @@ import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
+import ad.simula.ad.sdk.bridge.recordRenderProcessGone
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -44,6 +46,10 @@ internal object WebViewPool {
     /** Swallows the prewarm `about:blank` navigation so consumers never see it. */
     private val blankIgnoringClient = object : WebViewClient() {
         override fun onPageFinished(view: WebView?, url: String?) { /* ignore about:blank */ }
+        // A pooled view can sit idle on about:blank for a while; absorb a renderer death here too so
+        // it can't kill the host process before the view is handed to (or returned by) a consumer.
+        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
+            recordRenderProcessGone("pool_idle", detail)
     }
 
     /** Create and warm an idle WebView if there's room. Cheap no-op when full. */
@@ -64,8 +70,17 @@ internal object WebViewPool {
         registerTrimCallbacks(context)
         val pooled = idle.removeFirstOrNull()
         val webView = pooled ?: create(context)
+        // Defensive detach: a consumer's Compose AndroidView inserts this view into its holder via
+        // addView, which throws "child already has a parent" if the view is still attached. A pooled
+        // view should already be detached (release() removes it), but guarantee it here so a stale
+        // parent — from any release/acquire ordering across a branch/key swap — can never crash the
+        // host. Mirrors NativeAdWebViewStore.attach().
+        (webView.parent as? ViewGroup)?.removeView(webView)
         (webView.context as? MutableContextWrapper)?.baseContext = context
         webView.webViewClient = client
+        // Drop any WebChromeClient left by a prior consumer so it can't outlive its surface (e.g. a
+        // creative's telemetry chrome client mislabeling a later minigame/fallback iframe's JS errors).
+        webView.webChromeClient = null
         val appContext = context.applicationContext
         mainHandler.post { prewarm(appContext) }
         // Warm (pool hit) vs cold (had to create) — surfaces prewarm effectiveness + cold cost.
@@ -80,19 +95,28 @@ internal object WebViewPool {
     /** Reset a finished WebView and return it to the pool (or destroy if full). */
     @MainThread
     fun release(webView: WebView) {
+        // Guard against a double release: enqueuing the same instance twice would let two acquire()
+        // calls hand out one live WebView, and the second addView would crash with "child already has
+        // a parent". If it's already idle it was reset on the first release, so this is a safe no-op.
+        if (webView in idle) return
         webView.stopLoading()
-        webView.webViewClient = blankIgnoringClient
-        // about:blank tears down the page's DOM/JS context; clearHistory drops
-        // back/forward state. (No clearCache — that flushes the app-global RAM
-        // cache and would undercut prewarming without adding isolation.)
-        webView.loadUrl("about:blank")
-        webView.clearHistory()
         (webView.parent as? ViewGroup)?.removeView(webView)
         // Drop the Activity reference so a pooled WebView can't leak it.
         (webView.context as? MutableContextWrapper)?.let { it.baseContext = it.applicationContext }
         if (idle.size < MAX_IDLE) {
+            // Re-pooling: reset to about:blank so a recycled view never flashes the prior creative.
+            // about:blank tears down the page's DOM/JS context; clearHistory drops back/forward state.
+            // (No clearCache — that flushes the app-global RAM cache and would undercut prewarming
+            // without adding isolation.)
+            webView.webViewClient = blankIgnoringClient
+            webView.loadUrl("about:blank")
+            webView.clearHistory()
             idle.addLast(webView)
         } else {
+            // Discarding: destroy WITHOUT first kicking off an about:blank load. That load completes
+            // asynchronously, and its loadingStateChanged callback would fire into the just-destroyed
+            // WebView ("Application attempted to call on a destroyed WebView"). stopLoading() above
+            // already cancelled the in-flight creative load, so go straight to destroy.
             webView.destroy()
         }
     }

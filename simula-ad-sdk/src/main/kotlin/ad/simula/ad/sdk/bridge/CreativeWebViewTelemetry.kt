@@ -46,19 +46,28 @@ internal open class CreativeTelemetryWebViewClient(private val adFormat: String)
         super.onPageFinished(view, url)
     }
 
-    override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-        // onRenderProcessGone exists since API 26; the platform never calls it on older versions, so
-        // detail.didCrash() (also API 26) is safe to reach here.
-        val crashed = detail?.didCrash() ?: false
-        Telemetry.recordError(
-            signature = "webview:render_gone",
-            errorCode = if (crashed) "render_crash" else "render_oom",
-            breadcrumb = adFormat,
-        )
-        // Returning true tells the platform we've handled it, so the HOST process is not killed (the
-        // creative is gone either way). Dead-view eviction is left to the normal teardown/pool path.
-        return true
-    }
+    override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
+        recordRenderProcessGone(adFormat, detail)
+}
+
+/**
+ * Shared render-process-death handling for **every** SDK WebView (ad creatives, minigames, and idle
+ * pooled views). Records `webview:render_gone` tagged with [surface] (`render_crash` vs `render_oom`)
+ * and returns `true` so the dead render process is absorbed by the SDK instead of killing the **host
+ * app process**. Lives as a free function so the minigame/pool clients — which can't extend
+ * [CreativeTelemetryWebViewClient] without inheriting its page-load timing — get the same protection.
+ *
+ * `onRenderProcessGone` exists since API 26; the platform never calls it on older versions, so
+ * `detail.didCrash()` (also API 26) is safe to reach here.
+ */
+internal fun recordRenderProcessGone(surface: String, detail: RenderProcessGoneDetail?): Boolean {
+    val crashed = detail?.didCrash() ?: false
+    Telemetry.recordError(
+        signature = "webview:render_gone",
+        errorCode = if (crashed) "render_crash" else "render_oom",
+        breadcrumb = surface,
+    )
+    return true
 }
 
 /**

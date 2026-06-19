@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import ad.simula.ad.sdk.bridge.recordRenderProcessGone
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -49,6 +51,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -58,6 +61,8 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.useSimula
@@ -375,6 +380,31 @@ fun GameWebView(
 @Composable
 private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    // Pause/resume the minigame WebView with the host (AndroidView won't on its own) and force a repaint
+    // on foreground return — a hardware-accelerated WebView returns black/blank after the window loses
+    // visibility on background. ON_STOP gates the repaint so an incidental pause doesn't flicker.
+    var gameWebView by remember { mutableStateOf<WebView?>(null) }
+    DisposableEffect(lifecycleOwner, gameWebView) {
+        val wv = gameWebView
+        var wasStopped = false
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> wv?.onPause()
+                Lifecycle.Event.ON_STOP -> wasStopped = true
+                Lifecycle.Event.ON_RESUME -> {
+                    wv?.onResume()
+                    if (wasStopped) {
+                        wasStopped = false
+                        wv?.repaintOnNextFrame()
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     AndroidView(
         factory = { ctx ->
@@ -402,8 +432,15 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
                         runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl))) }
                         return true
                     }
+                    // Absorb a renderer-process death so a crashing minigame can't take the host
+                    // app process down with it (and surface it as telemetry).
+                    override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
+                        recordRenderProcessGone("minigame", detail)
                 },
-            ).apply { loadUrl(url) }
+            ).apply {
+                loadUrl(url)
+                gameWebView = this
+            }
         },
         modifier = Modifier.fillMaxSize(),
         onRelease = { webView -> WebViewPool.release(webView) },
@@ -417,7 +454,7 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
 internal fun CloseButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    // Compact AppLovin-style default (~16dp dark-translucent circle), matching the interstitial /
+    // Compact default (~16dp dark-translucent circle), matching the interstitial /
     // rewarded / fallback-ad close across the SDK.
     size: Int = 16,
     backgroundColor: Color = Color(0x80000000),

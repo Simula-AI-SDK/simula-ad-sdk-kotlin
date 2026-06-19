@@ -13,6 +13,7 @@ import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.provider.SimulaSessionStore
+import ad.simula.ad.sdk.telemetry.SimulaCrashGuard
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
 import android.app.Application
@@ -142,6 +143,12 @@ object SimulaAds {
             sessionIdProvider = { store.sessionId },
             primaryUserIdProvider = { store.effectiveUserID },
         )
+
+        // Capture uncaught SDK crashes (+ ANR / native-renderer process exits on Android 11+) into
+        // telemetry. Gated by the same telemetry opt-out; chains to the host's existing crash handler
+        // and only reports crashes that involve SDK code. Installed right after the pipeline so the
+        // replay of any prior-process crash has somewhere to land.
+        SimulaCrashGuard.install(appContext, enabled = telemetryEnabled)
 
         registerActivityTracking()
 

@@ -31,6 +31,14 @@ import kotlinx.serialization.json.put
 import java.net.URLEncoder
 
 /**
+ * Thrown by the load endpoints when the backend rejects the ad unit id with the stable
+ * error code `ad_unit_not_found` (the publisher doesn't own this ad unit). Caught in the
+ * ad load paths and surfaced to host apps as SimulaAdError.AdUnitNotFound /
+ * NativeAdError.AdUnitNotFound — distinct from a generic transport error.
+ */
+internal class AdUnitNotFoundException(message: String) : Exception(message)
+
+/**
  * API client for Simula ad platform.
  * All functions are suspend and safe to call from coroutine scopes.
  * Mirrors the React SDK's utils/api.ts exactly.
@@ -46,6 +54,22 @@ internal object SimulaApiClient {
         ignoreUnknownKeys = true
         isLenient = true
         encodeDefaults = true
+    }
+
+    /**
+     * Maps a non-2xx load response to an exception. The backend's stable contract is a
+     * `{code, message}` body; `ad_unit_not_found` means the publisher doesn't own this ad
+     * unit id, so it's surfaced distinctly (non-retryable) rather than as a generic HTTP
+     * error. Any other failure (or an unparseable body) stays a plain HTTP error.
+     */
+    private fun failHttp(response: SimulaHttp.Response): Nothing {
+        val code = runCatching {
+            json.decodeFromString<ApiErrorResponse>(response.body).code
+        }.getOrNull()
+        if (code == "ad_unit_not_found") {
+            throw AdUnitNotFoundException("Ad unit not found.")
+        }
+        throw Exception("HTTP error! status: ${response.code}")
     }
 
     // Consent signals ride along on every request from this single chokepoint,
@@ -394,7 +418,7 @@ internal object SimulaApiClient {
         // Creative descriptor (`creative` node) and experiment metadata; null when omitted.
         val creative: Creative? = null,
         val experiment: Experiment? = null,
-        // AdMob-shaped estimated revenue derived on-device from the serve's `bid_amt` (CPM). Held on
+        // Estimated revenue derived on-device from the serve's `bid_amt` (CPM). Held on
         // the loaded ad and surfaced on the paid event when the impression fires. Defaults to a $0
         // estimate so locally-built results (preview) need not supply it.
         val adValue: AdValue = AdValue.fromBidCpm(0.0),
@@ -439,9 +463,7 @@ internal object SimulaApiClient {
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
         )
-        if (!response.isSuccessful) {
-            throw Exception("HTTP error! status: ${response.code}")
-        }
+        if (!response.isSuccessful) failHttp(response)
         if (response.body.isBlank()) {
             throw Exception("Empty response body")
         }
@@ -473,7 +495,12 @@ internal object SimulaApiClient {
         // The mountable creative on a fill; both null on a no-fill.
         val iframeUrl: String?,
         val renderedHtml: String?,
-        // AdMob-shaped estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
+        // Click-through routing (mirrors [AdLoadResult]): where a CTA tap goes ("appstore" | "web")
+        // and the MMP click tracker the native CTA opens (attribution-preserving) when present.
+        // Defaults cover the preview path, which builds a result without server routing.
+        val destination: String = "appstore",
+        val trackingUrl: String? = null,
+        // Estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
         // native paid event, co-fired with the impression. Defaults to a $0 estimate (preview path).
         val adValue: AdValue = AdValue.fromBidCpm(0.0),
     )
@@ -519,9 +546,7 @@ internal object SimulaApiClient {
             // Bad/unknown session — non-retryable (PRD). Distinct from a generic network error.
             throw IllegalArgumentException("Invalid or unknown session for native ad (HTTP 401).")
         }
-        if (!response.isSuccessful) {
-            throw Exception("HTTP error! status: ${response.code}")
-        }
+        if (!response.isSuccessful) failHttp(response)
         if (response.body.isBlank()) {
             throw Exception("Empty response body")
         }
@@ -530,8 +555,10 @@ internal object SimulaApiClient {
             impressionId = data.impressionId.orEmpty(),
             adInserted = data.adInserted,
             adFormat = data.adFormat,
-            iframeUrl = data.adResponse.iframeUrl,
-            renderedHtml = data.adResponse.renderedHtml,
+            iframeUrl = data.iframeUrl,
+            renderedHtml = data.renderedHtml,
+            destination = data.destination,
+            trackingUrl = data.trackingUrl,
             adValue = AdValue.fromBidCpm(data.bidAmt),
         )
     }
@@ -551,7 +578,7 @@ internal object SimulaApiClient {
         val destination: String = "appstore",
         val trackingUrl: String? = null,
         val adBehavior: AdBehavior? = null,
-        // AdMob-shaped estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
+        // Estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
         // paid event when the impression fires. Defaults to a $0 estimate (preview path).
         val adValue: AdValue = AdValue.fromBidCpm(0.0),
     )
@@ -585,9 +612,7 @@ internal object SimulaApiClient {
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
         )
-        if (!response.isSuccessful) {
-            throw Exception("HTTP error! status: ${response.code}")
-        }
+        if (!response.isSuccessful) failHttp(response)
         if (response.body.isBlank()) {
             throw Exception("Empty response body")
         }
@@ -647,7 +672,8 @@ internal object SimulaApiClient {
      * screen's own impression id (drives its report overlay). */
     data class FallbackAd(
         val adId: String,
-        val iframeUrl: String,
+        val iframeUrl: String? = null,
+        val html: String? = null,
     )
 
     /**
@@ -669,8 +695,12 @@ internal object SimulaApiClient {
 
                     val data = json.decodeFromString<FallbackAdsApiResponse>(response.body)
                     data.ads.mapNotNull { ad ->
-                        val url = ad.iframeUrl
-                        if (url.isNullOrBlank()) null else FallbackAd(adId = ad.adId, iframeUrl = url)
+                        // Prefer the inline html (rendered in FallbackAdOverlay); keep the iframe url as
+                        // the same-origin base + url fallback. Drop only when neither is present.
+                        val html = ad.html?.takeIf { it.isNotBlank() }
+                        val url = ad.iframeUrl?.takeIf { it.isNotBlank() }
+                        if (html == null && url == null) null
+                        else FallbackAd(adId = ad.adId, iframeUrl = url, html = html)
                     }
                 } catch (_: Exception) {
                     emptyList()
@@ -702,8 +732,8 @@ internal object SimulaApiClient {
     }
 
     /**
-     * Track a full-screen ad as shown (`POST /impressions/{impressionId}/shown`) — AdMob's
-     * "shown" signal (`onAdShowedFullScreenContent`), fired when the creative first renders.
+     * Track a full-screen ad as shown (`POST /impressions/{impressionId}/shown`) — the
+     * "shown" signal, fired when the creative first renders.
      * Distinct from the billable impression beacon ([trackImpression] → `/seen`), which fires
      * later at begin-to-render + 2s. The endpoint takes no body. Best-effort, silently fails —
      * tracking must never disrupt the ad.
