@@ -100,18 +100,23 @@ internal object WebViewPool {
         // a parent". If it's already idle it was reset on the first release, so this is a safe no-op.
         if (webView in idle) return
         webView.stopLoading()
-        webView.webViewClient = blankIgnoringClient
-        // about:blank tears down the page's DOM/JS context; clearHistory drops
-        // back/forward state. (No clearCache — that flushes the app-global RAM
-        // cache and would undercut prewarming without adding isolation.)
-        webView.loadUrl("about:blank")
-        webView.clearHistory()
         (webView.parent as? ViewGroup)?.removeView(webView)
         // Drop the Activity reference so a pooled WebView can't leak it.
         (webView.context as? MutableContextWrapper)?.let { it.baseContext = it.applicationContext }
         if (idle.size < MAX_IDLE) {
+            // Re-pooling: reset to about:blank so a recycled view never flashes the prior creative.
+            // about:blank tears down the page's DOM/JS context; clearHistory drops back/forward state.
+            // (No clearCache — that flushes the app-global RAM cache and would undercut prewarming
+            // without adding isolation.)
+            webView.webViewClient = blankIgnoringClient
+            webView.loadUrl("about:blank")
+            webView.clearHistory()
             idle.addLast(webView)
         } else {
+            // Discarding: destroy WITHOUT first kicking off an about:blank load. That load completes
+            // asynchronously, and its loadingStateChanged callback would fire into the just-destroyed
+            // WebView ("Application attempted to call on a destroyed WebView"). stopLoading() above
+            // already cancelled the in-flight creative load, so go straight to destroy.
             webView.destroy()
         }
     }

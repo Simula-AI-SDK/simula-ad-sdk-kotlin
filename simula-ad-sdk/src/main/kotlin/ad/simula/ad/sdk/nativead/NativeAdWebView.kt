@@ -263,9 +263,22 @@ internal object NativeAdWebViewStore {
         sessions.remove(impressionId)?.let { destroy(it) }
     }
 
+    /**
+     * Drop every **idle** retained session — called on memory pressure and when the app is
+     * backgrounded (`onTrimMemory` fires `TRIM_MEMORY_UI_HIDDEN` on every backgrounding, not just on
+     * real pressure). The currently-**attached**, on-screen session is deliberately preserved: its
+     * [WebView] is owned by a live `AndroidView`, so destroying it here yanks the view out of the
+     * holder (leaving a blank slot on foreground return) and races chromium callbacks into a
+     * destroyed WebView ("Application attempted to call on a destroyed WebView"). A mounted view is
+     * only ever torn down through [release] (scroll-out / composition dispose). Mirrors the
+     * `!attached` guard in [evictIfNeeded].
+     */
     fun evictAll() = onMain {
-        sessions.values.toList().forEach { destroy(it) }
-        sessions.clear()
+        val it = sessions.entries.iterator()
+        while (it.hasNext()) {
+            val e = it.next()
+            if (!e.value.attached) { destroy(e.value); it.remove() }
+        }
     }
 
     @MainThread
