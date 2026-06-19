@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
@@ -152,6 +153,10 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     impressionId = p.ad.impressionId,
                     onFullyClosed = ::finishAd,
                     autoStoreRedirect = p.ad.adBehavior?.autoStoreRedirect,
+                    // A user tap on an end-screen CTA is a click (parity with the creative CTA / store
+                    // prompt): surface the PARENT interstitial ad to onAdClicked. The end-screen iframe
+                    // self-reports its own click beacon, so fire the callback only — no SDK beacon here.
+                    onAdClick = { p.callbacks.onClicked() },
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
                         storeExit?.recordStoreOpen("auto_redirect")
@@ -536,7 +541,14 @@ private fun CreativeInterstitial(
         if (skoverlay != null && skoverlay.enabled && installBannerVisible) {
             PlayInstallBanner(
                 config = skoverlay,
-                onTap = { recordStoreOpen("store_prompt"); openDestination(ad) },
+                onTap = {
+                    // A user tap on the install banner opens the primary ad's store — surface the click
+                    // (parity with the store-prompt badge / creative CTA) plus the durable click beacon.
+                    presentation.callbacks.onClicked()
+                    AdBeaconManager.enqueue(ad.impressionId, "click", adFormat = "interstitial")
+                    recordStoreOpen("store_prompt")
+                    openDestination(ad)
+                },
                 onDismiss = { installBannerVisible = false },
             )
         }
@@ -578,10 +590,23 @@ private fun CreativeHtml(
     // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
     DisposableEffect(lifecycleOwner, creativeWebView) {
         val wv = creativeWebView
+        // Track a real background (ON_STOP) so the repaint below fires only when the window actually
+        // lost its drawing surface — not on an incidental ON_PAUSE (a dialog / permission sheet over a
+        // still-visible Activity), which would cause a one-frame INVISIBLE flicker.
+        var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> wv?.onPause()
-                Lifecycle.Event.ON_RESUME -> wv?.onResume()
+                Lifecycle.Event.ON_STOP -> wasStopped = true
+                Lifecycle.Event.ON_RESUME -> {
+                    wv?.onResume()
+                    if (wasStopped) {
+                        wasStopped = false
+                        // A hardware-accelerated WebView drops its draw functor on background; force the
+                        // visibility transition that recreates it, else the creative returns black/blank.
+                        wv?.repaintOnNextFrame()
+                    }
+                }
                 else -> Unit
             }
         }

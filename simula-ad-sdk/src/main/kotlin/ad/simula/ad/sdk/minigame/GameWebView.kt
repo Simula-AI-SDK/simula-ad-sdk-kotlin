@@ -51,6 +51,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -60,6 +61,8 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.useSimula
@@ -377,6 +380,31 @@ fun GameWebView(
 @Composable
 private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    // Pause/resume the minigame WebView with the host (AndroidView won't on its own) and force a repaint
+    // on foreground return — a hardware-accelerated WebView returns black/blank after the window loses
+    // visibility on background. ON_STOP gates the repaint so an incidental pause doesn't flicker.
+    var gameWebView by remember { mutableStateOf<WebView?>(null) }
+    DisposableEffect(lifecycleOwner, gameWebView) {
+        val wv = gameWebView
+        var wasStopped = false
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> wv?.onPause()
+                Lifecycle.Event.ON_STOP -> wasStopped = true
+                Lifecycle.Event.ON_RESUME -> {
+                    wv?.onResume()
+                    if (wasStopped) {
+                        wasStopped = false
+                        wv?.repaintOnNextFrame()
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     AndroidView(
         factory = { ctx ->
@@ -409,7 +437,10 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
                     override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
                         recordRenderProcessGone("minigame", detail)
                 },
-            ).apply { loadUrl(url) }
+            ).apply {
+                loadUrl(url)
+                gameWebView = this
+            }
         },
         modifier = Modifier.fillMaxSize(),
         onRelease = { webView -> WebViewPool.release(webView) },

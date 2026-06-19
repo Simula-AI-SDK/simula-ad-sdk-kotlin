@@ -113,6 +113,8 @@ class ApiModelsSerializationTest {
         assertEquals(2, r.ads.size)
         assertEquals("a1", r.ads[0].adId)
         assertEquals("https://i/1", r.ads[0].iframeUrl)
+        // html is the preferred creative source rendered by FallbackAdOverlay.
+        assertEquals("<html>1</html>", r.ads[0].html)
         assertEquals("a2", r.ads[1].adId)
     }
 
