@@ -360,7 +360,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
             }
         }
         // A foreground Activity is required to present — matching Swift's
-        // "no presentation context" semantics and AdMob's show(activity). A
+        // "no presentation context" semantics and the standard show(activity) entry point. A
         // background activity-start from the app context can be silently dropped
         // on Android 10+, which would strand us in the Showing state.
         if (activity == null) {

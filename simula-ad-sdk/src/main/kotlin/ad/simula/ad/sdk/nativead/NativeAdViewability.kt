@@ -51,9 +51,11 @@ internal fun Modifier.trackNativeAdViewability(
     enabled: Boolean,
     thresholdFraction: Float = 0.5f,
     minVisibleMillis: Long = 1_000L,
-    onImpression: () -> Unit,
+    onVisibilityRatio: ((Float) -> Unit)? = null,
+    onImpression: (ViewabilityStats) -> Unit,
 ): Modifier = composed {
     val currentOnImpression by rememberUpdatedState(onImpression)
+    val currentOnVisibility by rememberUpdatedState(onVisibilityRatio)
     // Latest layout geometry, refreshed by onGloballyPositioned and sampled by the loop below.
     val coords = remember { mutableStateOf<LayoutCoordinates?>(null) }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -71,24 +73,67 @@ internal fun Modifier.trackNativeAdViewability(
         var fired = false
         // Accrue dwell only while the host is foregrounded: a backgrounded window isn't viewable, and
         // repeatOnLifecycle cancels the loop on background (so a fresh dwell restarts on return — the
-        // same foreground-only gating the interstitial/rewarded timers use).
+        // same foreground-only gating the interstitial/rewarded timers use). The loop keeps running
+        // AFTER the impression fires (dwell flips to null) purely to forward the visible fraction to
+        // the creative via [onVisibilityRatio], so a video/animation can keep reacting to scroll.
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            if (fired) return@repeatOnLifecycle
-            val dwell = ViewabilityDwell(thresholdFraction, minVisibleMillis)
+            var dwell = if (fired) null else ViewabilityDwell(thresholdFraction, minVisibleMillis)
+            // Exposure aggregate for the once-per-impression `viewability` telemetry, accrued over this
+            // foreground run up to the impression fire. Reset on each RESUMED re-entry (matches the dwell).
+            val measureStartMs = SystemClock.elapsedRealtime()
+            var samples = 0
+            var sumFraction = 0f
+            var peakFraction = 0f
+            var totalVisibleMs = 0L
             while (true) {
                 delay(ViewabilityDwell.SAMPLE_INTERVAL_MS)
+                val now = SystemClock.elapsedRealtime()
                 val fraction = coords.value?.let { visibleFraction(it, hostView, hostLoc, windowRect) } ?: 0f
-                if (dwell.sample(fraction, SystemClock.elapsedRealtime())) {
+                currentOnVisibility?.invoke(fraction)
+                val activeDwell = dwell ?: continue // already fired → just keep forwarding visibility
+                samples++
+                sumFraction += fraction
+                if (fraction > peakFraction) peakFraction = fraction
+                if (fraction > 0f) totalVisibleMs += ViewabilityDwell.SAMPLE_INTERVAL_MS
+                if (activeDwell.sample(fraction, now)) {
                     fired = true
-                    currentOnImpression()
-                    return@repeatOnLifecycle
+                    dwell = null // stop feeding the dwell; the loop keeps forwarding visibility
+                    currentOnImpression(
+                        ViewabilityStats(
+                            timeToViewableMs = now - measureStartMs,
+                            peakExposure = peakFraction,
+                            avgExposure = if (samples > 0) sumFraction / samples else 0f,
+                            totalVisibleMs = totalVisibleMs,
+                        ),
+                    )
                 }
             }
         }
     }
 
-    onGloballyPositioned { coords.value = it }
+    onGloballyPositioned {
+        coords.value = it
+        // Forward visibility on every layout/scroll frame: a Compose LazyColumn repositions this node
+        // each frame, so this is the per-frame signal. The 150ms loop above additionally covers scroll
+        // driven by a NON-Compose ancestor (a React Native list), which never repositions this node.
+        // Both feed the same throttling relay downstream, so duplicate values cost nothing.
+        currentOnVisibility?.invoke(visibleFraction(it, hostView, hostLoc, windowRect))
+    }
 }
+
+/**
+ * Once-per-impression viewability exposure aggregate, measured over the continuous foreground run that
+ * led to the impression. [timeToViewableMs] is from when measurement began (creative painted /
+ * foreground entry) to the impression fire; [peakExposure] / [avgExposure] are 0..1; [totalVisibleMs]
+ * is the cumulative time any part of the slot was on screen. Streamed visibility is far too
+ * high-volume for the batch telemetry pipeline, so this MRC-shaped summary is what's recorded instead.
+ */
+internal data class ViewabilityStats(
+    val timeToViewableMs: Long,
+    val peakExposure: Float,
+    val avgExposure: Float,
+    val totalVisibleMs: Long,
+)
 
 /**
  * Pure viewability dwell state machine: feed it visibility samples over time and it reports the single

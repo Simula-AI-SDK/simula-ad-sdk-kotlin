@@ -157,6 +157,7 @@ internal class TelemetryManager(
         errorCode: String?,
         trigger: String? = null,
         cacheSource: String? = null,
+        breadcrumb: String? = null,
     ) {
         accumulate(stage, adFormat, cacheSource, errorCode)
         enqueuePerf(
@@ -169,6 +170,7 @@ internal class TelemetryManager(
                 errorCode = errorCode,
                 trigger = trigger,
                 cacheSource = cacheSource,
+                breadcrumb = breadcrumb,
             ),
         )
     }

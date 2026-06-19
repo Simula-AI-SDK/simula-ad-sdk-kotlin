@@ -6,13 +6,13 @@ import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the interstitial Activity back to the [SimulaInterstitialAd] instance. */
 internal interface InterstitialCallbacks {
-    /** AdMob's "shown" — the creative was presented full-screen. */
+    /** The "shown" signal — the creative was presented full-screen. */
     fun onDisplayed()
 
-    /** AdMob's billable impression — fired ~2s after begin-to-render. */
+    /** The billable impression — fired ~2s after begin-to-render. */
     fun onImpression()
 
-    /** AdMob's paid event — fired together with [onImpression], carrying the on-device estimate. */
+    /** The paid event — fired together with [onImpression], carrying the on-device estimate. */
     fun onPaid(adValue: AdValue)
 
     fun onClicked()

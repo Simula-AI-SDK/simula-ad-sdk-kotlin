@@ -6,13 +6,13 @@ import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the rewarded Activity back to the [SimulaRewardedAd] instance. */
 internal interface RewardedCallbacks {
-    /** AdMob's "shown" — the playable was presented full-screen. */
+    /** The "shown" signal — the playable was presented full-screen. */
     fun onDisplayed()
 
-    /** AdMob's billable impression — fired ~2s after begin-to-render, independent of the reward gate. */
+    /** The billable impression — fired ~2s after begin-to-render, independent of the reward gate. */
     fun onImpression()
 
-    /** AdMob's paid event — fired together with [onImpression], carrying the on-device estimate. */
+    /** The paid event — fired together with [onImpression], carrying the on-device estimate. */
     fun onPaid(adValue: AdValue)
 
     /**
@@ -45,7 +45,7 @@ internal class RewardedPresentation(
     val adBehavior: AdBehavior? = null,
     val trackingUrl: String? = null,
     val destination: String = "appstore",
-    // AdMob-shaped estimated revenue for this serve, surfaced on the paid event when the impression
+    // Estimated revenue for this serve, surfaced on the paid event when the impression
     // fires. Held here from load time (no network round-trip at impression). Defaults to a $0 estimate
     // for the preview path, which constructs this presentation without a real serve.
     val adValue: AdValue = AdValue.fromBidCpm(0.0),

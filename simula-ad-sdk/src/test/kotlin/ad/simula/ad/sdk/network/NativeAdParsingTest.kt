@@ -123,16 +123,16 @@ class NativeAdParsingTest {
     // ── Response: fill ──────────────────────────────────────────────────────────
 
     @Test
-    fun `fill response decodes the camelCase adResponse wrapper`() {
+    fun `fill response decodes the flat creative and click-through params`() {
         val payload = """
             {
               "impression_id": "serve-123",
               "ad_inserted": true,
               "ad_format": "character_ad",
-              "adResponse": {
-                "iframe_url": "https://api/iframe/abc",
-                "rendered_html": "<iframe srcdoc=...></iframe>"
-              }
+              "iframe_url": "https://api/iframe/abc",
+              "rendered_html": "<iframe srcdoc=...></iframe>",
+              "destination": "web",
+              "tracking_url": "https://mmp.example/click?cid=1"
             }
         """.trimIndent()
         val r = json.decodeFromString<NativeAdApiResponse>(payload)
@@ -140,22 +140,37 @@ class NativeAdParsingTest {
         assertEquals("serve-123", r.impressionId)
         assertTrue(r.adInserted)
         assertEquals("character_ad", r.adFormat)
-        assertEquals("https://api/iframe/abc", r.adResponse.iframeUrl)
-        assertEquals("<iframe srcdoc=...></iframe>", r.adResponse.renderedHtml)
+        assertEquals("https://api/iframe/abc", r.iframeUrl)
+        assertEquals("<iframe srcdoc=...></iframe>", r.renderedHtml)
+        assertEquals("web", r.destination)
+        assertEquals("https://mmp.example/click?cid=1", r.trackingUrl)
+    }
+
+    @Test
+    fun `destination defaults to appstore and tracking_url to null when omitted`() {
+        val payload = """
+            {"impression_id":"s","ad_inserted":true,"ad_format":"character_ad","iframe_url":"u"}
+        """.trimIndent()
+        val r = json.decodeFromString<NativeAdApiResponse>(payload)
+
+        assertEquals("appstore", r.destination)
+        assertNull(r.trackingUrl)
     }
 
     // ── Response: no-fill / tolerance ───────────────────────────────────────────
 
     @Test
     fun `no-fill response decodes with null impression and empty creative`() {
-        val payload = """{"impression_id":null,"ad_inserted":false,"ad_format":"","adResponse":{}}"""
+        val payload = """{"impression_id":null,"ad_inserted":false,"ad_format":""}"""
         val r = json.decodeFromString<NativeAdApiResponse>(payload)
 
         assertNull(r.impressionId)
         assertFalse(r.adInserted)
         assertEquals("", r.adFormat)
-        assertNull(r.adResponse.iframeUrl)
-        assertNull(r.adResponse.renderedHtml)
+        assertNull(r.iframeUrl)
+        assertNull(r.renderedHtml)
+        assertEquals("appstore", r.destination)
+        assertNull(r.trackingUrl)
     }
 
     @Test
@@ -164,15 +179,17 @@ class NativeAdParsingTest {
         assertNull(r.impressionId)
         assertFalse(r.adInserted)
         assertEquals("", r.adFormat)
-        assertNull(r.adResponse.iframeUrl)
-        assertNull(r.adResponse.renderedHtml)
+        assertNull(r.iframeUrl)
+        assertNull(r.renderedHtml)
+        assertEquals("appstore", r.destination)
+        assertNull(r.trackingUrl)
     }
 
     @Test
     fun `unknown keys are ignored`() {
-        val payload = """{"ad_inserted":true,"ad_format":"character_ad","adResponse":{"iframe_url":"u"},"future":1}"""
+        val payload = """{"ad_inserted":true,"ad_format":"character_ad","iframe_url":"u","future":1}"""
         val r = json.decodeFromString<NativeAdApiResponse>(payload)
         assertTrue(r.adInserted)
-        assertEquals("u", r.adResponse.iframeUrl)
+        assertEquals("u", r.iframeUrl)
     }
 }

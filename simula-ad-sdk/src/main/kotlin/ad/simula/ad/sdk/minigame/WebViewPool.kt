@@ -10,6 +10,8 @@ import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
+import ad.simula.ad.sdk.bridge.recordRenderProcessGone
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -44,6 +46,10 @@ internal object WebViewPool {
     /** Swallows the prewarm `about:blank` navigation so consumers never see it. */
     private val blankIgnoringClient = object : WebViewClient() {
         override fun onPageFinished(view: WebView?, url: String?) { /* ignore about:blank */ }
+        // A pooled view can sit idle on about:blank for a while; absorb a renderer death here too so
+        // it can't kill the host process before the view is handed to (or returned by) a consumer.
+        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
+            recordRenderProcessGone("pool_idle", detail)
     }
 
     /** Create and warm an idle WebView if there's room. Cheap no-op when full. */

@@ -3,7 +3,7 @@ package ad.simula.ad.sdk.model
 import kotlin.math.roundToLong
 
 /**
- * Estimated per-impression revenue for a served ad, in AdMob's `AdValue` shape so it's a drop-in for a
+ * Estimated per-impression revenue for a served ad, in a standard `AdValue` shape so it's a drop-in for a
  * publisher's existing analytics / MMP pipeline. Surfaced on the **paid** callback
  * ([ad.simula.ad.sdk.ads.SimulaInterstitialAdListener.onAdPaid] / `NativeAdSlot`'s `onPaid`) at the
  * moment the impression fires — never at load.
