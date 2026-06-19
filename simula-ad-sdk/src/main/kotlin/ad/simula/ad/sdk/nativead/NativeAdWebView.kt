@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.content.ComponentCallbacks2
 import android.content.Context
@@ -15,7 +16,6 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
-import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceError
@@ -30,9 +30,12 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.annotation.MainThread
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -52,7 +55,7 @@ import java.util.WeakHashMap
  * the creative, and keeps it; scrolling the slot out **detaches and pauses** that view (preserving its
  * rendered DOM) and scrolling back **reattaches the same view with no reload** — eliminating the
  * blank-then-pop re-render a recycled feed row otherwise shows. The creative is mounted from
- * `iframe_url` (the URL form, preferred for security) and falls back to `rendered_html`. The container
+ * `rendered_html` (the inline `<iframe srcdoc>`, preferred) and falls back to `iframe_url`. The container
  * grows to the height the creative reports over the JS bridge; nothing is drawn while loading
  * (transparent, no skeleton).
  *
@@ -101,6 +104,29 @@ internal fun NativeAdWebView(
     DisposableEffect(session, visibilityRelay) {
         visibilityRelay?.bind { ratio -> session.wiring.pushVisibility(ratio) }
         onDispose { visibilityRelay?.bind(null) }
+    }
+
+    // App background → foreground: a hardware-accelerated WebView drops its draw functor when the window
+    // loses visibility (ON_STOP), so an attached, on-screen native creative can return black/blank. Force
+    // the repaint on foreground return — only for the live attached view (a retained, scrolled-out session
+    // is already managed INVISIBLE by reattach; don't toggle it out from under the feed).
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, session) {
+        var wasStopped = false
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> wasStopped = true
+                Lifecycle.Event.ON_RESUME -> {
+                    if (wasStopped) {
+                        wasStopped = false
+                        if (session.attached) session.webView?.repaintOnNextFrame()
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     AndroidView(
@@ -200,7 +226,7 @@ internal object NativeAdWebViewStore {
             retained.onResume()
             session.attached = true
             session.wiring.webView = retained // visibility pushes target the live view
-            scheduleReattachRepaint(retained) // repaint the stale hardware layer (avoid a black/blank frame)
+            retained.repaintOnNextFrame() // repaint the stale hardware layer (avoid a black/blank frame)
             return retained
         }
         val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml)
@@ -232,39 +258,6 @@ internal object NativeAdWebViewStore {
         (released.context as? MutableContextWrapper)?.let { it.baseContext = it.applicationContext }
     }
 
-    /**
-     * Repaint a reattached retained WebView. A hardware-accelerated WebView discards its
-     * render-node / draw functor when detached (scroll-out); on reattach the first composited frame
-     * can come back black/blank until a real redraw is forced ([WebView.onResume] resumes JS/timers,
-     * not drawing). Starting the view INVISIBLE and flipping it back to VISIBLE on the next frame —
-     * once it is back on the window — guarantees the visibility transition that recreates the hardware
-     * layer (a bare [View.invalidate] is unreliable for the stale-layer case). INVISIBLE (not GONE)
-     * preserves the slot's measured height so the feed doesn't reflow; the view is hidden for at most
-     * one frame, showing the slot's own (transparent) background — never black — in the meantime.
-     */
-    @MainThread
-    private fun scheduleReattachRepaint(webView: WebView) {
-        webView.visibility = View.INVISIBLE
-        val reveal = Runnable {
-            webView.visibility = View.VISIBLE
-            webView.invalidate()
-        }
-        if (webView.isAttachedToWindow) {
-            webView.post(reveal) // already on the window → reveal on the next frame
-            return
-        }
-        webView.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-            override fun onViewAttachedToWindow(v: View) {
-                v.removeOnAttachStateChangeListener(this)
-                v.post(reveal)
-            }
-
-            override fun onViewDetachedFromWindow(v: View) {
-                v.removeOnAttachStateChangeListener(this)
-            }
-        })
-    }
-
     /** Drop the retained view for [impressionId] (e.g. the slot was invalidated for a fresh ad). */
     fun evict(impressionId: String) = onMain {
         sessions.remove(impressionId)?.let { destroy(it) }
@@ -286,8 +279,8 @@ internal object NativeAdWebViewStore {
         webView.settings.loadWithOverviewMode = false
         installBridge(webView, wiring, docStart)
         when {
-            !iframeUrl.isNullOrBlank() -> webView.loadUrl(iframeUrl)
             !renderedHtml.isNullOrBlank() -> webView.loadDataWithBaseURL(null, renderedHtml, "text/html", "utf-8", null)
+            !iframeUrl.isNullOrBlank() -> webView.loadUrl(iframeUrl)
         }
         return webView
     }

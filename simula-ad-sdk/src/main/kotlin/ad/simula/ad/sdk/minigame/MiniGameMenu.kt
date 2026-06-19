@@ -612,7 +612,7 @@ fun MiniGameMenu(
                 // key() so each revealed screen gets fresh overlay state (countdown, WebView).
                 key(fallbackAdIndex) {
                     AdIframeOverlay(
-                        url = currentFallbackAd.iframeUrl,
+                        url = currentFallbackAd.iframeUrl ?: "",
                         onClose = { handleAdIframeClose() },
                         playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
                         playableBorderColor = theme.playableBorderColor ?: "#262626",

@@ -672,7 +672,8 @@ internal object SimulaApiClient {
      * screen's own impression id (drives its report overlay). */
     data class FallbackAd(
         val adId: String,
-        val iframeUrl: String,
+        val iframeUrl: String? = null,
+        val html: String? = null,
     )
 
     /**
@@ -694,8 +695,12 @@ internal object SimulaApiClient {
 
                     val data = json.decodeFromString<FallbackAdsApiResponse>(response.body)
                     data.ads.mapNotNull { ad ->
-                        val url = ad.iframeUrl
-                        if (url.isNullOrBlank()) null else FallbackAd(adId = ad.adId, iframeUrl = url)
+                        // Prefer the inline html (rendered in FallbackAdOverlay); keep the iframe url as
+                        // the same-origin base + url fallback. Drop only when neither is present.
+                        val html = ad.html?.takeIf { it.isNotBlank() }
+                        val url = ad.iframeUrl?.takeIf { it.isNotBlank() }
+                        if (html == null && url == null) null
+                        else FallbackAd(adId = ad.adId, iframeUrl = url, html = html)
                     }
                 } catch (_: Exception) {
                     emptyList()

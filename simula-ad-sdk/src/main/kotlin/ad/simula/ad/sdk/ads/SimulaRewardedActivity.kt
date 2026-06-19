@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.bridge.androidCreativeBridge
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
@@ -120,6 +121,10 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     impressionId = p.impressionId,
                     onFullyClosed = ::completeReward,
                     autoStoreRedirect = p.adBehavior?.autoStoreRedirect,
+                    // A user tap on an end-screen CTA is a click (parity with the playable CTA / store
+                    // prompt): surface the PARENT rewarded ad to onAdClicked. The end-screen iframe
+                    // self-reports its own click beacon, so fire the callback only — no SDK beacon here.
+                    onAdClick = { p.callbacks.onClicked() },
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
                         storeExit?.recordStoreOpen("auto_redirect")
@@ -283,10 +288,23 @@ private fun RewardedMinigame(
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
     DisposableEffect(lifecycleOwner, creativeWebView) {
         val wv = creativeWebView
+        // Track a real background (ON_STOP) so the repaint below fires only when the window actually
+        // lost its drawing surface — not on an incidental ON_PAUSE (a dialog / permission sheet over a
+        // still-visible Activity), which would cause a one-frame INVISIBLE flicker.
+        var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> wv?.onPause()
-                Lifecycle.Event.ON_RESUME -> wv?.onResume()
+                Lifecycle.Event.ON_STOP -> wasStopped = true
+                Lifecycle.Event.ON_RESUME -> {
+                    wv?.onResume()
+                    if (wasStopped) {
+                        wasStopped = false
+                        // A hardware-accelerated WebView drops its draw functor on background; force the
+                        // visibility transition that recreates it, else the creative returns black/blank.
+                        wv?.repaintOnNextFrame()
+                    }
+                }
                 else -> Unit
             }
         }
