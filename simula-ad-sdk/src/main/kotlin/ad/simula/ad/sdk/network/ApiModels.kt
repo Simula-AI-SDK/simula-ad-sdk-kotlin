@@ -34,6 +34,18 @@ internal data class SessionResponse(
     @SerialName("telemetry_sample_rate") val telemetrySampleRate: Double? = null,
 )
 
+/**
+ * Structured error body the backend returns on a 4xx for the load endpoints:
+ * `{"code": "...", "message": "..."}`. The stable `code` is the SDK-facing contract
+ * (HTTP status alone is ambiguous); `ad_unit_not_found` means the publisher doesn't own
+ * the requested ad unit id.
+ */
+@Serializable
+internal data class ApiErrorResponse(
+    val code: String = "",
+    val message: String = "",
+)
+
 @Serializable
 internal data class InitMinigameRequestBody(
     @SerialName("game_type") val gameType: String,

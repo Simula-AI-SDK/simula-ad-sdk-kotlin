@@ -66,6 +66,16 @@ sealed class SimulaAdError(message: String, cause: Throwable? = null) : Exceptio
      * platform-specific detail; the message is the shared, descriptive copy (matches the Swift SDK). */
     class Network(cause: Throwable?) :
         SimulaAdError("Network error while loading the ad — check the connection and call load() again.", cause)
+
+    /**
+     * The backend rejected the requested ad unit id — it isn't registered for this app (wrong id, or
+     * it belongs to a different app/publisher). Non-retryable: fix the ad unit id. Surfaced through the
+     * same `onAdFailedToLoad` callback as other load failures. The message is part of the public
+     * contract, shared verbatim with the Swift SDK.
+     */
+    object AdUnitNotFound : SimulaAdError(
+        "Ad unit id is not registered for this app — check the ad unit id in your Simula dashboard.",
+    )
 }
 
 /** Stable, low-cardinality code for this error, used as the `error_code` on telemetry events. */
@@ -79,4 +89,5 @@ internal fun SimulaAdError.telemetryCode(): String = when (this) {
     SimulaAdError.AlreadyShowing -> "already_showing"
     SimulaAdError.NoPresentationContext -> "no_presentation_context"
     is SimulaAdError.Network -> "network"
+    SimulaAdError.AdUnitNotFound -> "ad_unit_not_found"
 }

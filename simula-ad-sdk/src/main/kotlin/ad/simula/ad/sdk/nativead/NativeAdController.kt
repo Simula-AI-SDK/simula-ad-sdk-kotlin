@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.ads.SimulaAdError
 import ad.simula.ad.sdk.ads.SimulaAds
+import ad.simula.ad.sdk.network.AdUnitNotFoundException
 import ad.simula.ad.sdk.network.SimulaApiClient
 import kotlinx.coroutines.CancellationException
 
@@ -42,6 +43,9 @@ internal object NativeAdController {
             )
         } catch (e: CancellationException) {
             throw e
+        } catch (_: AdUnitNotFoundException) {
+            // Wrong ad unit id — non-retryable misconfiguration; surfaced as its own case.
+            throw SimulaAdError.AdUnitNotFound
         } catch (_: IllegalArgumentException) {
             // 401 bad/unknown session — non-retryable (PRD).
             throw SimulaAdError.NoSession

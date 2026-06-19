@@ -9,6 +9,7 @@ import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
+import ad.simula.ad.sdk.network.AdUnitNotFoundException
 import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -193,13 +194,17 @@ class SimulaRewardedAd(val adUnitId: String) {
                     listener?.onAdLoaded(this@SimulaRewardedAd)
                 }
             } catch (e: Exception) {
+                // ad_unit_not_found is a distinct, non-retryable misconfiguration — surface it as
+                // its own case rather than burying it in the generic Network bucket.
+                val error =
+                    if (e is AdUnitNotFoundException) SimulaAdError.AdUnitNotFound else SimulaAdError.Network(e)
                 Telemetry.recordError(
                     signature = "rewarded:load",
-                    errorCode = e.javaClass.simpleName,
+                    errorCode = error.telemetryCode(),
                     message = e.message,
                     breadcrumb = "SimulaRewardedAd.load",
                 )
-                failLoadOnMain(generation, SimulaAdError.Network(e))
+                failLoadOnMain(generation, error)
             }
         }
     }

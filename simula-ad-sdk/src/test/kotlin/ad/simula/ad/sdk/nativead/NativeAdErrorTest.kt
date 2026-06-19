@@ -14,6 +14,7 @@ class NativeAdErrorTest {
         assertEquals("no_session", NativeAdError.NoSession.telemetryCode())
         assertEquals("no_fill", NativeAdError.NoFill.telemetryCode())
         assertEquals("network", NativeAdError.Network.telemetryCode())
+        assertEquals("ad_unit_not_found", NativeAdError.AdUnitNotFound.telemetryCode())
     }
 
     @Test
@@ -22,6 +23,7 @@ class NativeAdErrorTest {
         assertEquals(NativeAdError.NoSession, SimulaAdError.NoSession.toNativeAdError())
         assertEquals(NativeAdError.NoFill, SimulaAdError.NoFill.toNativeAdError())
         assertEquals(NativeAdError.Network, SimulaAdError.Network(null).toNativeAdError())
+        assertEquals(NativeAdError.AdUnitNotFound, SimulaAdError.AdUnitNotFound.toNativeAdError())
     }
 
     @Test
