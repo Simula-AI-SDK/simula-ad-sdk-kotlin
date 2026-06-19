@@ -467,7 +467,10 @@ private fun RewardedMinigame(
                             if (Uri.parse(url).host == Uri.parse(requestUrl).host) return false
                             return try {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl)))
-                                // External link from the playable is the CTA store-open.
+                                // External link from the playable is the CTA store-open. Only a
+                                // user-gesture navigation counts as a click (parity with the
+                                // interstitial); auto-redirects open the store but don't fire CLICKED.
+                                if (request?.hasGesture() == true) presentation.callbacks.onClicked()
                                 recordStoreOpen("cta")
                                 true
                             } catch (e: Exception) {
@@ -529,7 +532,9 @@ private fun RewardedMinigame(
                 edgePadding = 8.dp,
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
                 onTap = {
-                    // Mid-store-prompt click beacon (durable) — only on a real user tap (not auto_store_redirect).
+                    // Surface the click to the publisher first (parity with the interstitial), then
+                    // the durable click beacon — only on a real user tap (not auto_store_redirect).
+                    presentation.callbacks.onClicked()
                     AdBeaconManager.enqueue(presentation.impressionId, "click", adFormat = "rewarded")
                     recordStoreOpen("store_prompt")
                     CreativeCtaRouter.open(

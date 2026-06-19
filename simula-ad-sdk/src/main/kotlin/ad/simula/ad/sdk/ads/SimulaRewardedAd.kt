@@ -295,6 +295,11 @@ class SimulaRewardedAd(val adUnitId: String) {
                         listener?.onAdPaid(this@SimulaRewardedAd, adValue)
                     }
 
+                    // Preview is local-only: surface the click callback, no telemetry.
+                    override fun onClicked() {
+                        listener?.onAdClicked(this@SimulaRewardedAd)
+                    }
+
                     override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
                         state = State.Idle
                         listener?.onAdClosed(this@SimulaRewardedAd)
@@ -386,6 +391,11 @@ class SimulaRewardedAd(val adUnitId: String) {
         override fun onPaid(adValue: AdValue) {
             Telemetry.recordLifecycle("paid", AD_FORMAT, adUnitId, adId, null, null, null)
             listener?.onAdPaid(this@SimulaRewardedAd, adValue)
+        }
+
+        override fun onClicked() {
+            Telemetry.recordLifecycle("click", AD_FORMAT, adUnitId, adId, null, null, null)
+            listener?.onAdClicked(this@SimulaRewardedAd)
         }
 
         override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {

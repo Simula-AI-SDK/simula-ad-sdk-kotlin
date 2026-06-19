@@ -15,6 +15,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceError
@@ -199,6 +200,7 @@ internal object NativeAdWebViewStore {
             retained.onResume()
             session.attached = true
             session.wiring.webView = retained // visibility pushes target the live view
+            scheduleReattachRepaint(retained) // repaint the stale hardware layer (avoid a black/blank frame)
             return retained
         }
         val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml)
@@ -228,6 +230,39 @@ internal object NativeAdWebViewStore {
         released.onPause() // suspend the creative's JS/rendering while off-screen (per-instance; no global timers)
         // Drop the Activity reference so a retained, off-screen view can't leak it.
         (released.context as? MutableContextWrapper)?.let { it.baseContext = it.applicationContext }
+    }
+
+    /**
+     * Repaint a reattached retained WebView. A hardware-accelerated WebView discards its
+     * render-node / draw functor when detached (scroll-out); on reattach the first composited frame
+     * can come back black/blank until a real redraw is forced ([WebView.onResume] resumes JS/timers,
+     * not drawing). Starting the view INVISIBLE and flipping it back to VISIBLE on the next frame —
+     * once it is back on the window — guarantees the visibility transition that recreates the hardware
+     * layer (a bare [View.invalidate] is unreliable for the stale-layer case). INVISIBLE (not GONE)
+     * preserves the slot's measured height so the feed doesn't reflow; the view is hidden for at most
+     * one frame, showing the slot's own (transparent) background — never black — in the meantime.
+     */
+    @MainThread
+    private fun scheduleReattachRepaint(webView: WebView) {
+        webView.visibility = View.INVISIBLE
+        val reveal = Runnable {
+            webView.visibility = View.VISIBLE
+            webView.invalidate()
+        }
+        if (webView.isAttachedToWindow) {
+            webView.post(reveal) // already on the window → reveal on the next frame
+            return
+        }
+        webView.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                v.removeOnAttachStateChangeListener(this)
+                v.post(reveal)
+            }
+
+            override fun onViewDetachedFromWindow(v: View) {
+                v.removeOnAttachStateChangeListener(this)
+            }
+        })
     }
 
     /** Drop the retained view for [impressionId] (e.g. the slot was invalidated for a fresh ad). */

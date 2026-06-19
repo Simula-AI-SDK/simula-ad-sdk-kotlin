@@ -60,6 +60,13 @@ interface SimulaRewardedAdListener {
      */
     fun onAdRewardVerificationFailed(ad: SimulaRewardedAd, error: Throwable) {}
 
+    /**
+     * The user tapped the playable's CTA or the mid-ad store prompt (the `CLICKED` signal).
+     * A gesture-initiated tap only — pixels and JS/meta auto-redirects do not fire it. Mirrors
+     * the interstitial's [SimulaInterstitialAdListener.onAdClicked].
+     */
+    fun onAdClicked(ad: SimulaRewardedAd) {}
+
     /** The rewarded minigame was dismissed. The next ad is auto-preloaded. */
     fun onAdClosed(ad: SimulaRewardedAd) {}
 }
