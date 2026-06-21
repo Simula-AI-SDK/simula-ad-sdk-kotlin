@@ -1,14 +1,14 @@
 plugins {
-    id("com.android.library")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.serialization")
-    id("org.jetbrains.kotlin.plugin.compose")
-    id("com.vanniktech.maven.publish")
+    alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.vanniktech.maven.publish)
 }
 
 android {
     namespace = "ad.simula.ad.sdk"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         minSdk = 24
@@ -83,41 +83,41 @@ mavenPublishing {
 
 dependencies {
     // Compose BOM
-    val composeBom = platform("androidx.compose:compose-bom:2024.02.00")
+    val composeBom = platform(libs.androidx.compose.bom)
     implementation(composeBom)
 
     // Compose
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.animation:animation")
-    implementation("androidx.compose.runtime:runtime")
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.foundation)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.animation)
+    implementation(libs.androidx.compose.runtime)
 
     // Activity Compose (for BackHandler)
-    implementation("androidx.activity:activity-compose:1.8.2")
+    implementation(libs.androidx.activity.compose)
 
     // Lifecycle
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
+    implementation(libs.androidx.lifecycle.runtime.compose)
 
     // Coroutines
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
+    implementation(libs.kotlinx.coroutines.android)
 
     // Networking (native HttpURLConnection via SimulaHttp — no third-party HTTP lib)
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    implementation(libs.kotlinx.serialization.json)
 
     // Image loading: native ImageDecoder/BitmapFactory pipeline (see ad.simula.ad.sdk.image) — no third-party lib
 
     // WebView
-    implementation("androidx.webkit:webkit:1.10.0")
+    implementation(libs.androidx.webkit)
 
     // Core
-    implementation("androidx.core:core-ktx:1.12.0")
+    implementation(libs.androidx.core.ktx)
 
     // Unit tests (JVM). kotlinx-serialization-json is already on the test classpath
     // via the implementation dependency above.
-    testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.junit)
     // Deterministic coroutine testing (runTest / StandardTestDispatcher / virtual time)
     // for the reward-verification queue engine. Version tracks kotlinx-coroutines-android.
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
+    testImplementation(libs.kotlinx.coroutines.test)
 }
