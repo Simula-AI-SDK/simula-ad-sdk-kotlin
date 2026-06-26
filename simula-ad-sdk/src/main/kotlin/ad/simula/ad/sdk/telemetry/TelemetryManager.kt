@@ -241,6 +241,8 @@ internal class TelemetryManager(
             // payload sent to the backend (exception text can embed URLs/tokens).
             message = redact(message),
             breadcrumb = breadcrumb,
+            // Frames are structural (Class.method(File:line) / SDK trace lines) — no free text,
+            // so unlike `message` they carry no URLs/tokens/PII and need no redaction.
             stack = stack,
             count = 1,
         )
