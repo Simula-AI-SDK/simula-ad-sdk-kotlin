@@ -38,8 +38,11 @@ class TelemetryEnrichmentTest {
         clock: () -> Long,
         connectionType: () -> String? = { null },
         diagnostics: () -> String? = { null },
+        battery: () -> BatteryInfo? = { null },
+        carrier: () -> CarrierInfo? = { null },
+        ctx: TelemetryContext = TelemetryContext(sdkVersion = "9.9", osVersion = "14", deviceModel = "Test", hostAppId = "com.test", devMode = true),
     ) = TelemetryManager(
-        ctx = TelemetryContext(sdkVersion = "9.9", osVersion = "14", deviceModel = "Test", hostAppId = "com.test", devMode = true),
+        ctx = ctx,
         store = store,
         sender = sender,
         sessionIdProvider = { "sess" },
@@ -47,6 +50,8 @@ class TelemetryEnrichmentTest {
         advertisingIdProvider = { null },
         connectionTypeProvider = connectionType,
         diagnosticsProvider = diagnostics,
+        batteryProvider = battery,
+        carrierProvider = carrier,
         enabled = true,
         sampleRate = 1.0,
         clock = clock,
@@ -176,5 +181,45 @@ class TelemetryEnrichmentTest {
         val env = sender.batches.first()
         assertEquals("exp_7", env.experimentId)
         assertEquals("variant_b", env.variantId)
+    }
+
+    @Test
+    fun `device diagnostics are attached to the envelope`() = runTest {
+        val sender = FakeSender()
+        val ctx = TelemetryContext(
+            sdkVersion = "9.9", osVersion = "14", deviceModel = "Test", hostAppId = "com.test",
+            devMode = true, manufacturer = "Samsung", locale = "en-US", deviceRamMb = 8192, buildType = "release",
+        )
+        val m = build(
+            this, FakeStore(), sender, clock = { 1_000L },
+            battery = { BatteryInfo(level = 0.5f, charging = true) },
+            carrier = { CarrierInfo(carrier = "Verizon", radio = "5G") },
+            ctx = ctx,
+        )
+
+        m.recordError("api:boom", "boom")
+        advanceUntilIdle()
+
+        val env = sender.batches.first()
+        assertEquals("Samsung", env.manufacturer)
+        assertEquals("en-US", env.locale)
+        assertEquals(8192L, env.deviceRamMb)
+        assertEquals(0.5f, env.batteryLevel)
+        assertEquals(true, env.batteryCharging)
+        assertEquals("Verizon", env.carrier)
+        assertEquals("5G", env.radio)
+        assertEquals("release", env.buildType)
+    }
+
+    @Test
+    fun `recordError carries a structured stack`() = runTest {
+        val sender = FakeSender()
+        val m = build(this, FakeStore(), sender, clock = { 1_000L })
+
+        m.recordError("crash:Foo.bar", "code", stack = listOf("Foo.bar(Foo.kt:1)", "Baz.qux(Baz.kt:2)"))
+        advanceUntilIdle()
+
+        val e = sender.batches.flatMap { it.events }.single { it.type == TYPE_ERROR }
+        assertEquals(listOf("Foo.bar(Foo.kt:1)", "Baz.qux(Baz.kt:2)"), e.stack)
     }
 }

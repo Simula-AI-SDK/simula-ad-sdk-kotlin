@@ -3,11 +3,18 @@ package ad.simula.ad.sdk.telemetry
 import ad.simula.ad.sdk.image.ImageCache
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
+import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.ApplicationInfo
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.BatteryManager
 import android.os.Build
+import android.telephony.TelephonyManager
 import android.util.Log
+import java.util.Locale
 import kotlinx.serialization.json.Json
 
 /**
@@ -60,6 +67,11 @@ internal object Telemetry {
             deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
             hostAppId = appCtx.packageName,
             devMode = devMode,
+            // Always-on device diagnostics, resolved once (constant per process).
+            manufacturer = Build.MANUFACTURER,
+            locale = resolveLocale(),
+            deviceRamMb = resolveRamMb(appCtx),
+            buildType = if ((appCtx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) "debug" else "release",
         )
         manager = TelemetryManager(
             ctx = ctx,
@@ -73,6 +85,8 @@ internal object Telemetry {
             // Resolved fresh on each flush (off the UI path); best-effort, never throws.
             connectionTypeProvider = { resolveConnectionType(appCtx) },
             diagnosticsProvider = { resolveDiagnostics() },
+            batteryProvider = { resolveBattery(appCtx) },
+            carrierProvider = { resolveCarrier(appCtx) },
             // In dev mode, mirror every (redacted) event to logcat for local verification.
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
         ).also { it.start() }
@@ -114,8 +128,13 @@ internal object Telemetry {
         breadcrumb: String? = null,
     ) = manager?.recordLifecycle(stage, adFormat, adUnitId, adId, serveId, durationMs, errorCode, trigger, cacheSource, breadcrumb) ?: Unit
 
-    fun recordError(signature: String, errorCode: String? = null, message: String? = null, breadcrumb: String? = null) =
-        manager?.recordError(signature, errorCode, message, breadcrumb) ?: Unit
+    fun recordError(
+        signature: String,
+        errorCode: String? = null,
+        message: String? = null,
+        breadcrumb: String? = null,
+        stack: List<String>? = null,
+    ) = manager?.recordError(signature, errorCode, message, breadcrumb, stack) ?: Unit
 
     /** Persist + attempt delivery now (e.g. app background). */
     fun flush() = manager?.flushNow() ?: Unit
@@ -153,5 +172,63 @@ internal object Telemetry {
         val usedMb = (rt.totalMemory() - rt.freeMemory()) / (1024L * 1024L)
         val maxMb = rt.maxMemory() / (1024L * 1024L)
         "mem_used_mb=$usedMb;mem_max_mb=$maxMb;img_cache=${ImageCache.cacheSize()};wv_pool=${WebViewPool.pooledCount}"
+    }.getOrNull()
+
+    /** Default locale as a BCP-47 tag (e.g. "en-US"). Best-effort; null on failure. */
+    private fun resolveLocale(): String? = runCatching {
+        Locale.getDefault().toLanguageTag().takeIf { it.isNotBlank() && it != "und" }
+    }.getOrNull()
+
+    /** Total physical RAM in MB. Best-effort; null when ActivityManager is unavailable. */
+    private fun resolveRamMb(appCtx: Context): Long? = runCatching {
+        val am = appCtx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return@runCatching null
+        val mi = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        (mi.totalMem / (1024L * 1024L)).takeIf { it > 0 }
+    }.getOrNull()
+
+    /**
+     * Battery level (0..1) + charging, read from the sticky ACTION_BATTERY_CHANGED broadcast — no
+     * receiver registered, no permission. Resolved at flush; null when unavailable.
+     */
+    private fun resolveBattery(appCtx: Context): BatteryInfo? = runCatching {
+        val intent = appCtx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            ?: return@runCatching null
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        if (level < 0 || scale <= 0) return@runCatching null
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        BatteryInfo(level = level.toFloat() / scale.toFloat(), charging = charging)
+    }.getOrNull()
+
+    /**
+     * Carrier name (needs no permission) + radio generation (needs host-declared READ_PHONE_STATE;
+     * null otherwise). Best-effort; resolved at flush; null when nothing resolves / no SIM.
+     */
+    private fun resolveCarrier(appCtx: Context): CarrierInfo? = runCatching {
+        val tm = appCtx.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager ?: return@runCatching null
+        val name = tm.networkOperatorName?.takeIf { it.isNotBlank() }
+        val radio = resolveRadio(tm)
+        if (name == null && radio == null) null else CarrierInfo(carrier = name, radio = radio)
+    }.getOrNull()
+
+    /** Coarse generation label for the current data network. Returns null without READ_PHONE_STATE
+     *  (SecurityException) or on older APIs — the caller's runCatching absorbs it. */
+    private fun resolveRadio(tm: TelephonyManager): String? = runCatching {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return@runCatching null
+        when (tm.dataNetworkType) {
+            TelephonyManager.NETWORK_TYPE_NR -> "5G"
+            TelephonyManager.NETWORK_TYPE_LTE -> "LTE"
+            TelephonyManager.NETWORK_TYPE_UMTS,
+            TelephonyManager.NETWORK_TYPE_HSPA,
+            TelephonyManager.NETWORK_TYPE_HSPAP,
+            TelephonyManager.NETWORK_TYPE_HSDPA,
+            TelephonyManager.NETWORK_TYPE_HSUPA -> "3G"
+            TelephonyManager.NETWORK_TYPE_EDGE,
+            TelephonyManager.NETWORK_TYPE_GPRS,
+            TelephonyManager.NETWORK_TYPE_CDMA -> "2G"
+            else -> null
+        }
     }.getOrNull()
 }
