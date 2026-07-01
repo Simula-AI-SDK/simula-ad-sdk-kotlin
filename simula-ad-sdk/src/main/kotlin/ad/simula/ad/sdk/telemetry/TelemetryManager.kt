@@ -25,7 +25,19 @@ internal data class TelemetryContext(
     val hostAppId: String,
     val devMode: Boolean,
     val platform: String = "android",
+    // Always-on device diagnostics, resolved once at init (constant per process).
+    val manufacturer: String? = null,
+    val locale: String? = null,
+    val deviceRamMb: Long? = null,
+    val buildType: String? = null,
 )
+
+/** Flush-time battery snapshot (level 0..1 + charging). Best-effort; null when unavailable. */
+internal data class BatteryInfo(val level: Float, val charging: Boolean)
+
+/** Flush-time carrier/radio snapshot. Either field may be null (carrier needs no permission;
+ *  radio needs host-declared READ_PHONE_STATE). */
+internal data class CarrierInfo(val carrier: String?, val radio: String?)
 
 /**
  * Batches handled-error + performance telemetry and delivers it to the Simula backend,
@@ -56,6 +68,9 @@ internal class TelemetryManager(
     private val connectionTypeProvider: () -> String? = { null },
     // Compact diagnostics breadcrumb (memory/webview-pool/image-cache), sampled on flush. Best-effort.
     private val diagnosticsProvider: () -> String? = { null },
+    // Resolved fresh on each flush (off the UI path). Best-effort/non-throwing; null when unavailable.
+    private val batteryProvider: () -> BatteryInfo? = { null },
+    private val carrierProvider: () -> CarrierInfo? = { null },
     enabled: Boolean = true,
     sampleRate: Double = 1.0,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -212,7 +227,13 @@ internal class TelemetryManager(
      * signatures aggregate with a count instead of flooding the buffer. [message] is
      * truncated; never pass raw URLs/tokens/PII.
      */
-    fun recordError(signature: String, errorCode: String? = null, message: String? = null, breadcrumb: String? = null) {
+    fun recordError(
+        signature: String,
+        errorCode: String? = null,
+        message: String? = null,
+        breadcrumb: String? = null,
+        stack: List<String>? = null,
+    ) {
         if (!isEnabled) return
         val event = newEvent(TYPE_ERROR, name = signature).copy(
             errorCode = errorCode,
@@ -220,6 +241,9 @@ internal class TelemetryManager(
             // payload sent to the backend (exception text can embed URLs/tokens).
             message = redact(message),
             breadcrumb = breadcrumb,
+            // Frames are structural (Class.method(File:line) / SDK trace lines) — no free text,
+            // so unlike `message` they carry no URLs/tokens/PII and need no redaction.
+            stack = stack,
             count = 1,
         )
         debugLog?.invoke(formatForLog(event))
@@ -417,22 +441,35 @@ internal class TelemetryManager(
         }
     }
 
-    private fun envelope(events: List<TelemetryEvent>) = TelemetryEnvelope(
-        sdkVersion = ctx.sdkVersion,
-        platform = ctx.platform,
-        osVersion = ctx.osVersion,
-        deviceModel = ctx.deviceModel,
-        hostAppId = ctx.hostAppId,
-        devMode = ctx.devMode,
-        sessionId = sessionIdProvider(),
-        // PII providers are already consent-gated by the facade (re-checked at send time).
-        primaryUserId = primaryUserIdProvider(),
-        advertisingId = advertisingIdProvider(),
-        connectionType = connectionTypeProvider(),
-        experimentId = synchronized(auxLock) { experimentId },
-        variantId = synchronized(auxLock) { variantId },
-        events = events,
-    )
+    private fun envelope(events: List<TelemetryEvent>): TelemetryEnvelope {
+        // Resolve the flush-time providers once each (best-effort; null when unavailable).
+        val battery = batteryProvider()
+        val carrier = carrierProvider()
+        return TelemetryEnvelope(
+            sdkVersion = ctx.sdkVersion,
+            platform = ctx.platform,
+            osVersion = ctx.osVersion,
+            deviceModel = ctx.deviceModel,
+            hostAppId = ctx.hostAppId,
+            devMode = ctx.devMode,
+            sessionId = sessionIdProvider(),
+            // PII providers are already consent-gated by the facade (re-checked at send time).
+            primaryUserId = primaryUserIdProvider(),
+            advertisingId = advertisingIdProvider(),
+            connectionType = connectionTypeProvider(),
+            experimentId = synchronized(auxLock) { experimentId },
+            variantId = synchronized(auxLock) { variantId },
+            manufacturer = ctx.manufacturer,
+            locale = ctx.locale,
+            deviceRamMb = ctx.deviceRamMb,
+            batteryLevel = battery?.level,
+            batteryCharging = battery?.charging,
+            carrier = carrier?.carrier,
+            radio = carrier?.radio,
+            buildType = ctx.buildType,
+            events = events,
+        )
+    }
 
     private companion object {
         const val MAX_BUFFER = 200

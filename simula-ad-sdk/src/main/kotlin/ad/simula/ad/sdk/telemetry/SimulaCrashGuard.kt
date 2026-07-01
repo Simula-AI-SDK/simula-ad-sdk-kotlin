@@ -48,6 +48,9 @@ internal object SimulaCrashGuard {
     private const val FIELD_SEP = "\u0001"
     private const val NL_ESC = "\u0002"
 
+    /** Separator between stack frames within the single persisted frames field (off real text). */
+    private const val FRAME_SEP = "\u0003"
+
     /** Cap the pending file so a crash-on-launch loop can't grow it without bound. */
     private const val MAX_FILE_BYTES = 64L * 1024
     /** Stack frames kept in the (300-char-capped) telemetry message — enough to locate + group. */
@@ -122,6 +125,7 @@ internal object SimulaCrashGuard {
             signatureFor(t),
             t.javaClass.simpleName,
             compactStack(t),
+            stackFrames(t).joinToString(FRAME_SEP),
         ).joinToString(FIELD_SEP) { it.replace(FIELD_SEP, " ").replace("\n", NL_ESC) }
         file.appendText(record + "\n")
     }
@@ -138,11 +142,15 @@ internal object SimulaCrashGuard {
             if (line.isBlank()) continue
             val f = line.split(FIELD_SEP)
             if (f.size < 5) continue
+            // 6th field (frames) is present on records written by this SDK version; older
+            // 5-field records simply carry no structured stack.
+            val stack = if (f.size >= 6 && f[5].isNotBlank()) f[5].split(FRAME_SEP) else null
             Telemetry.recordError(
                 signature = f[2],
                 errorCode = f[3],
                 message = f[4].replace(NL_ESC, "\n"),
                 breadcrumb = "fatal=uncaught;thread=${f[1]}",
+                stack = stack,
             )
         }
     }
@@ -179,6 +187,10 @@ internal object SimulaCrashGuard {
         return if (e.fileName != null && e.lineNumber >= 0) "$cls.${e.methodName}(${e.fileName}:${e.lineNumber})"
         else "$cls.${e.methodName}"
     }
+
+    /** Top [MAX_FRAMES] frames as structured strings, for the wire `stack` field. */
+    private fun stackFrames(t: Throwable): List<String> =
+        t.stackTrace.take(MAX_FRAMES).map { fmtFrame(it) }
 
     // ── ApplicationExitInfo sweep (ANR / native crash; API 30+) ───────────────────
 
@@ -223,6 +235,7 @@ internal object SimulaCrashGuard {
             errorCode = "exit_reason_${info.reason}",
             message = sdkExcerpt(trace),
             breadcrumb = "fatal=$kind;desc=${info.description?.take(40)}",
+            stack = sdkFrames(trace).ifEmpty { null },
         )
     }
 
@@ -258,9 +271,13 @@ internal object SimulaCrashGuard {
         return false
     }
 
-    /** The trace lines that mention the SDK, joined + capped by [Telemetry] — the relevant frames. */
+    /** The SDK-mentioning trace lines (trimmed), capped — the relevant frames for [stack]. */
+    private fun sdkFrames(trace: String): List<String> =
+        trace.lineSequence().filter { it.contains(SDK_PACKAGE) }.take(MAX_FRAMES).map { it.trim() }.toList()
+
+    /** Those frames joined for the (300-char-capped) telemetry message; falls back to the raw trace. */
     private fun sdkExcerpt(trace: String): String {
-        val lines = trace.lineSequence().filter { it.contains(SDK_PACKAGE) }.take(MAX_FRAMES).toList()
-        return if (lines.isNotEmpty()) lines.joinToString(" <- ") { it.trim() } else trace
+        val lines = sdkFrames(trace)
+        return if (lines.isNotEmpty()) lines.joinToString(" <- ") else trace
     }
 }
