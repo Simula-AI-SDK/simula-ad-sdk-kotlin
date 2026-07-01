@@ -41,6 +41,8 @@ internal data class TelemetryEvent(
     @SerialName("error_code") val errorCode: String? = null,
     val message: String? = null,
     val breadcrumb: String? = null,
+    // Symbolicated SDK frames for crash/exit errors (structured, alongside the compacted message).
+    val stack: List<String>? = null,
     @SerialName("cache_hit") val cacheHit: Boolean? = null,
     @SerialName("retry_count") val retryCount: Int? = null,
     // Store-exit click type for store_opened/returned/abandoned: cta | store_prompt | auto_redirect.
@@ -76,5 +78,15 @@ internal data class TelemetryEnvelope(
     // resolves with experiment metadata). Session-scoped; last assignment wins.
     @SerialName("experiment_id") val experimentId: String? = null,
     @SerialName("variant_id") val variantId: String? = null,
+    // Device/network diagnostics. Always-on (like device_model/connection_type), not consent-gated;
+    // statics resolved at init, battery/carrier resolved best-effort at flush. Any field may be null.
+    val manufacturer: String? = null,
+    val locale: String? = null,
+    @SerialName("device_ram_mb") val deviceRamMb: Long? = null,
+    @SerialName("battery_level") val batteryLevel: Float? = null,
+    @SerialName("battery_charging") val batteryCharging: Boolean? = null,
+    val carrier: String? = null,
+    val radio: String? = null,
+    @SerialName("build_type") val buildType: String? = null,
     val events: List<TelemetryEvent>,
 )
