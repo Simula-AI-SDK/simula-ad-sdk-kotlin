@@ -164,6 +164,10 @@ internal object SimulaHttp {
             // caller could still override them; null (pre-init / unavailable) is simply omitted.
             SimulaUserAgent.value?.let { setRequestProperty("User-Agent", it) }
             SimulaDeviceId.value?.let { setRequestProperty("X-Device-Id", it) }
+            // Read live on every call (never cached at init) — a session begun on Wi-Fi can hand
+            // off to cellular mid-flight, and SimulaConnectionType's cached value updates on that
+            // transition, so the very next request carries it. OpenRTB `device.connectiontype`.
+            setRequestProperty("X-Connection-Type", SimulaConnectionType.value.toString())
             headers.forEach { (k, v) -> setRequestProperty(k, v) }
         }
 

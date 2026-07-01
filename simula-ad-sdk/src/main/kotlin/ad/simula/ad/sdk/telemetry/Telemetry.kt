@@ -2,14 +2,13 @@ package ad.simula.ad.sdk.telemetry
 
 import ad.simula.ad.sdk.image.ImageCache
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import android.os.Build
 import android.telephony.TelephonyManager
@@ -82,8 +81,9 @@ internal object Telemetry {
             // advertising id is already nulled by the snapshot when not collectible.
             primaryUserIdProvider = primaryUserIdProvider,
             advertisingIdProvider = { SimulaPrivacy.current.advertisingId },
-            // Resolved fresh on each flush (off the UI path); best-effort, never throws.
-            connectionTypeProvider = { resolveConnectionType(appCtx) },
+            // Reads SimulaConnectionType's cached value (kept fresh by its own network callback —
+            // see SimulaConnectionType.prime) instead of a fresh binder call per flush.
+            connectionTypeProvider = { SimulaConnectionType.label },
             diagnosticsProvider = { resolveDiagnostics() },
             batteryProvider = { resolveBattery(appCtx) },
             carrierProvider = { resolveCarrier(appCtx) },
@@ -142,25 +142,6 @@ internal object Telemetry {
     /** Record the session's experiment assignment (server-driven) for the telemetry envelope. */
     fun setExperiment(experimentId: String?, variantId: String?) =
         manager?.setExperiment(experimentId, variantId) ?: Unit
-
-    /**
-     * Best-effort connection class for the envelope, resolved at flush time. Returns
-     * `wifi` / `cellular` / `none` / `unknown`; any failure (missing permission, null
-     * service, old API) degrades to `unknown` and never throws. Requires
-     * `ACCESS_NETWORK_STATE` (a normal, install-time permission) to return anything but `unknown`.
-     */
-    private fun resolveConnectionType(appCtx: Context): String = runCatching {
-        val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            ?: return@runCatching "unknown"
-        val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
-            ?: return@runCatching "none"
-        when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "wifi"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
-            else -> "unknown"
-        }
-    }.getOrDefault("unknown")
 
     /**
      * Best-effort runtime diagnostics breadcrumb for the periodic `diagnostics` event: JVM heap usage,

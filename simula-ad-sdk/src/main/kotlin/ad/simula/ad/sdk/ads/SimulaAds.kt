@@ -8,6 +8,7 @@ import ad.simula.ad.sdk.nativead.NativeAdPreloadCache
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
@@ -118,6 +119,9 @@ object SimulaAds {
         // main thread via prime() to keep it off the app-start critical path.
         SimulaUserAgent.build(appContext)
         SimulaDeviceId.prime(appContext)
+        // Independent of telemetryEnabled: the X-Connection-Type header is a first-party-request
+        // signal, not a telemetry one, so it must work even when telemetry is disabled.
+        SimulaConnectionType.prime(appContext)
 
         // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
         // seeds it — identical resolution to SimulaProvider, so the imperative and

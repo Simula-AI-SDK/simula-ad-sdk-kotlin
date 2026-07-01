@@ -19,6 +19,7 @@ import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.model.SimulaContextValue
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
+import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
@@ -208,6 +209,10 @@ fun SimulaProvider(
     remember(context) {
         SimulaUserAgent.build(context.applicationContext)
         SimulaDeviceId.prime(context.applicationContext)
+        // Independent of telemetry: the X-Connection-Type header must work even when a host
+        // never enables telemetry. Idempotent — the imperative SimulaAds.initialize() path
+        // primes it too; first wins.
+        SimulaConnectionType.prime(context.applicationContext)
     }
 
     // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
