@@ -90,10 +90,18 @@ internal object SimulaConnectionType {
                     value = classify(context, caps)
                 }
 
-                // The default network is gone; briefly unknown/offline until the system picks
-                // (and reports via onAvailable) a new default, if any.
+                // Callback delivery order isn't guaranteed across a handoff (e.g. Wi-Fi -> cellular):
+                // this onLost(oldNetwork) can arrive AFTER onAvailable(newNetwork) already refreshed
+                // `value` to the new (correct, still-online) type. Unconditionally zeroing here would
+                // clobber that valid value back to "unknown" while the device is still connected.
+                // Instead, re-query the live default network: if one exists (the common handoff case),
+                // trust its capabilities over this stale event; only report offline (0) when there
+                // genuinely isn't a default network anymore.
                 override fun onLost(network: Network) {
-                    value = 0
+                    val activeCaps = runCatching {
+                        cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+                    }.getOrNull()
+                    value = classify(context, activeCaps)
                 }
             },
         )
