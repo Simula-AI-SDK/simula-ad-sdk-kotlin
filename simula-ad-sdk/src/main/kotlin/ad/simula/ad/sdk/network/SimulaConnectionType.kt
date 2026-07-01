@@ -55,21 +55,28 @@ internal object SimulaConnectionType {
      * network. Safe to call from the main thread — registration itself is lightweight; the
      * one-time seed read (and any binder/Telephony cost) runs on [SimulaScope] (IO), off the
      * app-start / composition critical path, mirroring [SimulaDeviceId.prime].
+     *
+     * If setup fails (e.g. `ConnectivityManager` unavailable, or `registerDefaultNetworkCallback`
+     * throwing — some OEMs/OS versions enforce a per-app cap on concurrent network callbacks),
+     * the priming latch is released so a later `prime()` call can retry instead of leaving
+     * [value] permanently stuck at its last reading with no way to recover.
      */
     fun prime(context: Context) {
         if (!priming.compareAndSet(false, true)) return
         val appContext = context.applicationContext
         SimulaScope.launch {
-            runCatching {
+            val succeeded = runCatching {
                 val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-                    ?: return@runCatching
+                    ?: return@runCatching false
                 // Seed synchronously from the current default network so the very first request
                 // (before any callback fires) gets a best-effort value instead of staying at 0
                 // for the whole session.
                 val caps = runCatching { cm.activeNetwork?.let { cm.getNetworkCapabilities(it) } }.getOrNull()
                 value = classify(appContext, caps)
                 registerCallback(appContext, cm)
-            }
+                true
+            }.getOrDefault(false)
+            if (!succeeded) priming.set(false)
         }
     }
 
