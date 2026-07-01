@@ -5,7 +5,6 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.os.Build
 import android.telephony.TelephonyManager
 import java.util.concurrent.atomic.AtomicBoolean
@@ -15,11 +14,19 @@ import kotlinx.coroutines.launch
  * Live network-connection-type signal for the `X-Connection-Type` request header (OpenRTB
  * `device.connectiontype` enum) and telemetry's `connection_type` label.
  *
- * A single [ConnectivityManager.NetworkCallback] runs for the life of the process — registered
- * once from [prime], **independent of the telemetry opt-out** — and keeps [value] fresh on every
- * default-network change, so [SimulaHttp.open] reads a cached int with zero per-request cost. A
- * transport switch (e.g. Wi-Fi → cellular) updates [value] via the callback, so the very next
- * request carries the new value.
+ * A single [ConnectivityManager.registerDefaultNetworkCallback] runs for the life of the
+ * process — registered once from [prime], **independent of the telemetry opt-out** — and keeps
+ * [value] fresh on every change to the system's *default* (actually-used-for-internet) network,
+ * so [SimulaHttp.open] reads a cached int with zero per-request cost. A transport switch (e.g.
+ * Wi-Fi → cellular) updates [value] via the callback, so the very next request carries the new
+ * value.
+ *
+ * Deliberately uses `registerDefaultNetworkCallback`, **not** a plain
+ * `registerNetworkCallback(request, ...)`: the latter fires for *every* network matching the
+ * request, including a background radio a dual-stack device keeps up for fast handoff (e.g.
+ * cellular staying "available" while Wi-Fi is the active default) — that would let a background
+ * cellular event clobber the cache with `3-7` even though Wi-Fi is still the real connection.
+ * `registerDefaultNetworkCallback` only reports the network actually carrying traffic.
  *
  * Requires only `ACCESS_NETWORK_STATE` — already declared in the manifest (normal, install-time,
  * no runtime prompt) for the SDK's telemetry — for the coarse transport (0/1/2/3). Cellular
@@ -56,35 +63,40 @@ internal object SimulaConnectionType {
             runCatching {
                 val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
                     ?: return@runCatching
-                // Seed synchronously so the very first request (before any network event fires)
-                // gets a best-effort value instead of staying at 0 for the whole session.
-                refresh(appContext, cm, network = null)
+                // Seed synchronously from the current default network so the very first request
+                // (before any callback fires) gets a best-effort value instead of staying at 0
+                // for the whole session.
+                val caps = runCatching { cm.activeNetwork?.let { cm.getNetworkCapabilities(it) } }.getOrNull()
+                value = classify(appContext, caps)
                 registerCallback(appContext, cm)
             }
         }
     }
 
+    /**
+     * Registers the default-network callback. `onAvailable`/`onCapabilitiesChanged` only fire for
+     * the network the system currently routes internet traffic through — never a background
+     * radio — so [value] can never be clobbered by a non-default network's state.
+     */
     private fun registerCallback(context: Context, cm: ConnectivityManager) {
-        val request = NetworkRequest.Builder().build()
-        cm.registerNetworkCallback(
-            request,
+        cm.registerDefaultNetworkCallback(
             object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) = refresh(context, cm, network)
+                override fun onAvailable(network: Network) {
+                    val caps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull()
+                    value = classify(context, caps)
+                }
+
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                     value = classify(context, caps)
                 }
-                // The default network dropped; re-check what's active — a new default may already
-                // be up (e.g. a Wi-Fi -> cellular handoff), so don't blindly zero out.
-                override fun onLost(network: Network) = refresh(context, cm, network = null)
+
+                // The default network is gone; briefly unknown/offline until the system picks
+                // (and reports via onAvailable) a new default, if any.
+                override fun onLost(network: Network) {
+                    value = 0
+                }
             },
         )
-    }
-
-    private fun refresh(context: Context, cm: ConnectivityManager, network: Network?) {
-        val caps = runCatching {
-            (network ?: cm.activeNetwork)?.let { cm.getNetworkCapabilities(it) }
-        }.getOrNull()
-        value = classify(context, caps)
     }
 
     /** Resolves [caps] to the OpenRTB value, refining cellular via [context] when applicable. */

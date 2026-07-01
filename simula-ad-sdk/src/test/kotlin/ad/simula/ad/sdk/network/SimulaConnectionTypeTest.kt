@@ -45,8 +45,13 @@ class SimulaConnectionTypeTest {
 
     @Test
     fun `wifi takes priority over cellular when both transports are reported`() {
-        // A device can have both wifi and cellular capabilities up at once; wifi (the data path
-        // actually used) must win and the cellular generation lookup must be skipped entirely.
+        // A single capabilities snapshot can carry both transports; wifi (the data path actually
+        // used when it's present) must win and the cellular generation lookup must be skipped
+        // entirely. This is the invariant `classify()` must uphold on top of `prime()` sourcing
+        // capabilities ONLY from the *default* network (via `registerDefaultNetworkCallback`,
+        // not a plain `registerNetworkCallback(request, ...)`) — otherwise a background cellular
+        // radio staying up on a dual-stack device could clobber the cache with cellular even
+        // while Wi-Fi is the device's real active connection.
         val value = SimulaConnectionType.classify(
             isWifi = true, isEthernet = false, isCellular = true, cellularGeneration = { fail() },
         )
