@@ -72,6 +72,18 @@ class FrequencyCapCacheTest {
     }
 
     @Test
+    fun `a late prior-day mark does not wipe current-day entries`() {
+        val nextDay = day1Noon + oneDayMillis
+        // A request on the new day establishes the current day and caps "current".
+        FrequencyCapCache.markCapped("current", "user_1", nextDay)
+        // A request that STARTED before midnight finishes now and marks with its prior-day start time;
+        // it must neither rewind the day (wiping "current") nor resurrect the reset prior-day cap.
+        FrequencyCapCache.markCapped("late", "user_1", day1Noon)
+        assertTrue(FrequencyCapCache.isCapped("current", "user_1", nextDay))
+        assertFalse(FrequencyCapCache.isCapped("late", "user_1", nextDay))
+    }
+
+    @Test
     fun `pipe characters in ids do not collide across pairs`() {
         // "foo" + "bar|baz" and "foo|bar" + "baz" must be distinct keys (a naive concatenation with
         // a '|' delimiter would collide them into "foo|bar|baz").

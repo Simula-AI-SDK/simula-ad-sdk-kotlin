@@ -44,21 +44,31 @@ internal object FrequencyCapCache {
     /** Returns `true` only if [adUnitId]/[ppid] was marked capped on the current local day. */
     fun isCapped(adUnitId: String, ppid: String?, nowMillis: Long = System.currentTimeMillis()): Boolean =
         synchronized(lock) {
-            rolloverIfNeeded(localDay(nowMillis))
-            cappedKeys.contains(CacheKey(adUnitId, ppid))
+            val today = localDay(nowMillis)
+            rolloverIfNeeded(today)
+            // `today < currentDay` is a stale read (a request whose start time predates a rollover
+            // another call already advanced): that day's cap has reset, so report not-capped.
+            today == currentDay && cappedKeys.contains(CacheKey(adUnitId, ppid))
         }
 
     /** Marks [adUnitId]/[ppid] as capped for the rest of the current local day. */
     fun markCapped(adUnitId: String, ppid: String?, nowMillis: Long = System.currentTimeMillis()) {
         synchronized(lock) {
-            rolloverIfNeeded(localDay(nowMillis))
-            cappedKeys.add(CacheKey(adUnitId, ppid))
+            val today = localDay(nowMillis)
+            rolloverIfNeeded(today)
+            // Ignore a mark carrying an already-past day: it must neither resurrect a reset cap nor
+            // (via a rewind) wipe the current day's still-valid entries.
+            if (today == currentDay) cappedKeys.add(CacheKey(adUnitId, ppid))
         }
     }
 
-    /** Clears the set whenever the local day changes, so cached caps never survive past local midnight. */
+    /**
+     * Advances to a NEWER local day only, clearing the prior day's caps (the midnight reset). It
+     * never rewinds: a late call carrying an older day (e.g. a check whose start time was captured
+     * before midnight but that completes after) must not wipe the current day's valid entries.
+     */
     private fun rolloverIfNeeded(today: Long) {
-        if (today != currentDay) {
+        if (today > currentDay) {
             currentDay = today
             cappedKeys.clear()
         }
