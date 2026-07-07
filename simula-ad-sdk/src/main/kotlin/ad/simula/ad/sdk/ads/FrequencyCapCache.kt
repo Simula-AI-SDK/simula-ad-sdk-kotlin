@@ -1,6 +1,5 @@
 package ad.simula.ad.sdk.ads
 
-import java.util.Collections
 import java.util.TimeZone
 
 /**
@@ -35,27 +34,50 @@ internal object FrequencyCapCache {
 
     private fun key(adUnitId: String, ppid: String?): String = "$adUnitId|${ppid.orEmpty()}"
 
-    // key -> local day the `true` result was cached on. Access-ordered LRU capped at MAX_ENTRIES,
-    // synchronized for cross-thread use (isCapped/markCapped run on arbitrary caller threads).
-    private val cappedDays: MutableMap<String, Long> = Collections.synchronizedMap(
-        object : LinkedHashMap<String, Long>(16, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>): Boolean = size > MAX_ENTRIES
-        },
-    )
+    // key -> local day the `true` result was cached on. Recency-ordered (eldest first): re-marking a
+    // key moves it to the tail, so eviction never drops a freshly re-marked current-day entry. Stale
+    // (prior-day) entries are removed on read and pruned on write, so they can't consume a slot and
+    // push out a valid entry. Guarded by [lock] for cross-thread use (isCapped/markCapped run on
+    // arbitrary caller threads).
+    private val lock = Any()
+    private val cappedDays = LinkedHashMap<String, Long>()
 
     /** Returns `true` only if [adUnitId]/[ppid] was marked capped on the current local day. */
-    fun isCapped(adUnitId: String, ppid: String?, nowMillis: Long = System.currentTimeMillis()): Boolean {
-        val cachedDay = cappedDays[key(adUnitId, ppid)] ?: return false
-        return cachedDay == localDay(nowMillis)
-    }
+    fun isCapped(adUnitId: String, ppid: String?, nowMillis: Long = System.currentTimeMillis()): Boolean =
+        synchronized(lock) {
+            val k = key(adUnitId, ppid)
+            val cachedDay = cappedDays[k] ?: return@synchronized false
+            if (cachedDay == localDay(nowMillis)) {
+                true
+            } else {
+                // Prior day: the cap has reset. Drop the stale entry so it can't occupy a slot.
+                cappedDays.remove(k)
+                false
+            }
+        }
 
     /** Marks [adUnitId]/[ppid] as capped for the rest of the current local day. */
     fun markCapped(adUnitId: String, ppid: String?, nowMillis: Long = System.currentTimeMillis()) {
-        cappedDays[key(adUnitId, ppid)] = localDay(nowMillis)
+        synchronized(lock) {
+            val today = localDay(nowMillis)
+            val k = key(adUnitId, ppid)
+            // Prune prior-day entries up front so stale ones never consume a slot.
+            val it = cappedDays.entries.iterator()
+            while (it.hasNext()) {
+                if (it.next().value != today) it.remove()
+            }
+            // Refresh recency: remove then re-insert so this key moves to the tail (most recent).
+            cappedDays.remove(k)
+            cappedDays[k] = today
+            // Evict the eldest (least-recently marked) while over the cap.
+            while (cappedDays.size > MAX_ENTRIES) {
+                cappedDays.remove(cappedDays.keys.iterator().next())
+            }
+        }
     }
 
     /** Clears every cached entry. Exposed for tests. */
     internal fun clear() {
-        cappedDays.clear()
+        synchronized(lock) { cappedDays.clear() }
     }
 }

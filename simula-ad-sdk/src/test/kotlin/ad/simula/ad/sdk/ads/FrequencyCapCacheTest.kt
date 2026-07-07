@@ -60,4 +60,27 @@ class FrequencyCapCacheTest {
         assertFalse(FrequencyCapCache.isCapped("unit_0", "user_1", day1Noon))
         assertTrue(FrequencyCapCache.isCapped("unit_64", "user_1", day1Noon))
     }
+
+    @Test
+    fun `re-marking refreshes recency so a valid entry is not evicted early`() {
+        FrequencyCapCache.markCapped("unit_0", "user_1", day1Noon)
+        for (i in 1..63) FrequencyCapCache.markCapped("unit_$i", "user_1", day1Noon) // 64 entries
+        // Re-mark the eldest so it moves back to the tail, then overflow by one.
+        FrequencyCapCache.markCapped("unit_0", "user_1", day1Noon)
+        FrequencyCapCache.markCapped("unit_64", "user_1", day1Noon) // 65 -> evicts the new eldest
+        assertTrue(FrequencyCapCache.isCapped("unit_0", "user_1", day1Noon))
+        assertFalse(FrequencyCapCache.isCapped("unit_1", "user_1", day1Noon))
+    }
+
+    @Test
+    fun `stale entries do not evict a current-day entry`() {
+        // A prior-day entry must not occupy a slot: fill the cap with fresh entries and the valid
+        // ones must all survive (the stale one is pruned, not counted against the cap).
+        FrequencyCapCache.markCapped("stale", "user_1", day1Noon)
+        val nextDay = day1Noon + oneDayMillis
+        for (i in 0 until 64) FrequencyCapCache.markCapped("unit_$i", "user_1", nextDay)
+        assertFalse(FrequencyCapCache.isCapped("stale", "user_1", nextDay))
+        assertTrue(FrequencyCapCache.isCapped("unit_0", "user_1", nextDay))
+        assertTrue(FrequencyCapCache.isCapped("unit_63", "user_1", nextDay))
+    }
 }

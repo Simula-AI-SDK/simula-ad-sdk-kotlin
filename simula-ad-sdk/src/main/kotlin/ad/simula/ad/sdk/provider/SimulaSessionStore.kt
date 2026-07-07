@@ -85,13 +85,12 @@ internal class SimulaSessionStore(
                     if (target == sessionUserID) break
                     val ok = runCatching { SimulaApiClient.updatePpid(apiKey, sid, target) }.getOrDefault(false)
                     if (!ok) break
-                    // Accept the result only if the target is still current; otherwise loop to sync
-                    // the newer value. Because this ran under the mutex, the PATCH just sent is the
-                    // latest to reach the server, so this never marks an unconverged identity.
-                    if (target == effectiveUserID) {
-                        sessionUserID = target
-                        break
-                    }
+                    // The PATCH just moved the server session to `target` (under the mutex, so no
+                    // other PATCH interleaves). Record that truth UNCONDITIONALLY — even if the
+                    // desired identity has already moved on — so sessionUserID always reflects the
+                    // server's real state and can never falsely match a newer effectiveUserID. Then
+                    // loop; the top-of-loop check exits once the server has converged to the latest.
+                    sessionUserID = target
                 }
             }
         }
