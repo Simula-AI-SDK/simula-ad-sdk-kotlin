@@ -264,7 +264,13 @@ object SimulaAds {
     suspend fun checkFrequencyCap(adUnitId: String, primaryUserID: String? = null): Boolean {
         if (!initialized || adUnitId.isBlank()) return false
         val ppid = primaryUserID?.takeIf { it.isNotBlank() } ?: store.effectiveUserID
-        if (FrequencyCapCache.isCapped(adUnitId, ppid)) return true
+        // Capture the local day at the START of the check and attribute the result to it. The network
+        // round-trip can cross local midnight; stamping the cache with the completion time would file
+        // a prior-day capped result under the new day and keep hiding surfaces after the backend's
+        // daily reset. The start time is the day the result actually reflects (a capped==true near
+        // midnight came from the backend evaluating before the reset).
+        val nowMillis = System.currentTimeMillis()
+        if (FrequencyCapCache.isCapped(adUnitId, ppid, nowMillis)) return true
 
         // Warm/ensure the session, but only attach its id when it represents the same identity we're
         // checking. After a mid-session login/logout/switch the server session can still reflect the
@@ -273,7 +279,7 @@ object SimulaAds {
         // and let the backend fall back to the ppid + device-id/IP signals.
         val sessionId = consistentSessionId(store.ensureSession(), store.sessionUserID, ppid)
         val capped = SimulaApiClient.checkFrequencyCap(apiKey, adUnitId, ppid, sessionId)
-        if (capped) FrequencyCapCache.markCapped(adUnitId, ppid)
+        if (capped) FrequencyCapCache.markCapped(adUnitId, ppid, nowMillis)
         return capped
     }
 
