@@ -21,7 +21,9 @@ import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Bundle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
 
 /**
@@ -241,6 +243,45 @@ object SimulaAds {
                     runCatching { SimulaApiClient.updatePpid(apiKey, sid, normalized) }
                 }
             }
+        }
+    }
+
+    /**
+     * Checks whether the user has hit their frequency cap for [adUnitId] — a read-only check
+     * against the backend that records no impression (PRD). Publishers can call this before
+     * rendering an ad-gated surface to skip it entirely when no ad would serve.
+     *
+     * @param adUnitId required.
+     * @param primaryUserID optional; falls back to the SDK's current PPID (set at [initialize] or
+     *                       via [updatePrimaryUserID]) when omitted, and ultimately to the
+     *                       backend's IP/device/session signals when neither is available.
+     * @return `true` if the cap has been reached (skip the surface); `false` if the user is still
+     *         eligible, before [initialize], or on any network/server failure (fails open so a
+     *         transport hiccup can never hide an ad surface that would otherwise have served).
+     *
+     * A `true` result is cached for the rest of the local day (reset at local midnight, per the
+     * PRD) so repeated checks for the same ad unit + user don't re-hit the network.
+     */
+    suspend fun checkFrequencyCap(adUnitId: String, primaryUserID: String? = null): Boolean {
+        if (!initialized || adUnitId.isBlank()) return false
+        val ppid = primaryUserID?.takeIf { it.isNotBlank() } ?: store.effectiveUserID
+        if (FrequencyCapCache.isCapped(adUnitId, ppid)) return true
+
+        val sessionId = store.ensureSession()
+        val capped = SimulaApiClient.checkFrequencyCap(apiKey, adUnitId, ppid, sessionId)
+        if (capped) FrequencyCapCache.markCapped(adUnitId, ppid)
+        return capped
+    }
+
+    /**
+     * Callback overload of [checkFrequencyCap] for Java / React Native interop, where a
+     * `suspend` function isn't directly callable. Runs on [SimulaScope] and delivers [onResult]
+     * on the main thread.
+     */
+    fun checkFrequencyCap(adUnitId: String, primaryUserID: String? = null, onResult: (Boolean) -> Unit) {
+        SimulaScope.launch {
+            val result = checkFrequencyCap(adUnitId, primaryUserID)
+            withContext(Dispatchers.Main) { onResult(result) }
         }
     }
 

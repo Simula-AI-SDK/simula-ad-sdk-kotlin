@@ -188,6 +188,50 @@ internal object SimulaApiClient {
         }
     }
 
+    // ── Frequency Cap ───────────────────────────────────────────────────────
+
+    /**
+     * Builds the frequency-cap status request URL. `adUnitId` is required; `ppid` and
+     * `sessionId` are appended only when non-blank (the backend falls back to IP address,
+     * device id, and other session signals when omitted). Pure/testable.
+     */
+    internal fun frequencyCapUrl(adUnitId: String, ppid: String?, sessionId: String?): String = buildString {
+        append("$API_BASE_URL/frequency-cap/status?ad_unit_id=${URLEncoder.encode(adUnitId, "UTF-8")}")
+        if (!ppid.isNullOrBlank()) {
+            append("&ppid=${URLEncoder.encode(ppid, "UTF-8")}")
+        }
+        if (!sessionId.isNullOrBlank()) {
+            append("&session_id=${URLEncoder.encode(sessionId, "UTF-8")}")
+        }
+    }
+
+    /**
+     * Checks whether the user has hit their frequency cap for [adUnitId] via
+     * `GET /frequency-cap/status` — a read-only check that records no impression. Fails open:
+     * any non-2xx response, empty/unparseable body, or network failure resolves to `false` so a
+     * transport hiccup can never hide an ad surface that would otherwise have served.
+     */
+    suspend fun checkFrequencyCap(
+        apiKey: String,
+        adUnitId: String,
+        ppid: String?,
+        sessionId: String?,
+    ): Boolean = coalesce(frequencyCapUrl(adUnitId, ppid, sessionId)) {
+        withContext(Dispatchers.IO) {
+            try {
+                val response = SimulaHttp.request(
+                    url = frequencyCapUrl(adUnitId, ppid, sessionId),
+                    method = "GET",
+                    headers = authHeaders(apiKey),
+                )
+                if (!response.isSuccessful || response.body.isBlank()) return@withContext false
+                json.decodeFromString<FrequencyCapResponse>(response.body).capped
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+
     // ── Catalog ─────────────────────────────────────────────────────────────
 
     data class CatalogResult(
