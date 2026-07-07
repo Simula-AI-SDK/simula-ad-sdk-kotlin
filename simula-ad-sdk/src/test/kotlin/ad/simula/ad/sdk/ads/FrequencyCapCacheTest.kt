@@ -51,36 +51,32 @@ class FrequencyCapCacheTest {
     }
 
     @Test
-    fun `cache is bounded and evicts the eldest entry`() {
-        // Mark more than the cap (64) distinct ad units; the earliest inserted must be evicted so
-        // the store can never grow without bound for the process lifetime.
-        for (i in 0..64) {
+    fun `same-day capped entries are never evicted regardless of count`() {
+        // The "cache true for the rest of the day" guarantee must hold no matter how many distinct
+        // ad units are checked in a day — there is no fixed cap that could drop a valid entry.
+        for (i in 0 until 500) {
             FrequencyCapCache.markCapped("unit_$i", "user_1", day1Noon)
         }
-        assertFalse(FrequencyCapCache.isCapped("unit_0", "user_1", day1Noon))
-        assertTrue(FrequencyCapCache.isCapped("unit_64", "user_1", day1Noon))
-    }
-
-    @Test
-    fun `re-marking refreshes recency so a valid entry is not evicted early`() {
-        FrequencyCapCache.markCapped("unit_0", "user_1", day1Noon)
-        for (i in 1..63) FrequencyCapCache.markCapped("unit_$i", "user_1", day1Noon) // 64 entries
-        // Re-mark the eldest so it moves back to the tail, then overflow by one.
-        FrequencyCapCache.markCapped("unit_0", "user_1", day1Noon)
-        FrequencyCapCache.markCapped("unit_64", "user_1", day1Noon) // 65 -> evicts the new eldest
         assertTrue(FrequencyCapCache.isCapped("unit_0", "user_1", day1Noon))
-        assertFalse(FrequencyCapCache.isCapped("unit_1", "user_1", day1Noon))
+        assertTrue(FrequencyCapCache.isCapped("unit_499", "user_1", day1Noon))
     }
 
     @Test
-    fun `stale entries do not evict a current-day entry`() {
-        // A prior-day entry must not occupy a slot: fill the cap with fresh entries and the valid
-        // ones must all survive (the stale one is pruned, not counted against the cap).
-        FrequencyCapCache.markCapped("stale", "user_1", day1Noon)
+    fun `crossing midnight clears all cached caps`() {
+        FrequencyCapCache.markCapped("unit_1", "user_1", day1Noon)
+        FrequencyCapCache.markCapped("unit_2", "user_2", day1Noon)
         val nextDay = day1Noon + oneDayMillis
-        for (i in 0 until 64) FrequencyCapCache.markCapped("unit_$i", "user_1", nextDay)
-        assertFalse(FrequencyCapCache.isCapped("stale", "user_1", nextDay))
-        assertTrue(FrequencyCapCache.isCapped("unit_0", "user_1", nextDay))
-        assertTrue(FrequencyCapCache.isCapped("unit_63", "user_1", nextDay))
+        // Any read/mark on the new day resets the whole set.
+        assertFalse(FrequencyCapCache.isCapped("unit_1", "user_1", nextDay))
+        assertFalse(FrequencyCapCache.isCapped("unit_2", "user_2", nextDay))
+    }
+
+    @Test
+    fun `pipe characters in ids do not collide across pairs`() {
+        // "foo" + "bar|baz" and "foo|bar" + "baz" must be distinct keys (a naive concatenation with
+        // a '|' delimiter would collide them into "foo|bar|baz").
+        FrequencyCapCache.markCapped("foo", "bar|baz", day1Noon)
+        assertTrue(FrequencyCapCache.isCapped("foo", "bar|baz", day1Noon))
+        assertFalse(FrequencyCapCache.isCapped("foo|bar", "baz", day1Noon))
     }
 }
