@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -54,17 +55,46 @@ internal class SimulaSessionStore(
     private val mutex = Mutex()
     private var sessionDeferred: Deferred<String?>? = null
 
+    // Serializes PPID reconciliation so at most one PATCH is ever in flight. The server then applies
+    // updates in submission order (no reordering), which is what lets [sessionUserID] be advanced
+    // safely — a late/out-of-order PATCH can never mark an identity the server didn't converge to.
+    private val ppidSyncMutex = Mutex()
+
     /** Replace the PPID mid-session. Blank/empty normalizes to null (logout). */
     fun updatePpid(id: String?) {
         effectiveUserID = id?.takeIf { it.isNotBlank() }
     }
 
     /**
-     * Record that the server session now represents [id] — called after a successful
-     * `PATCH …/ppid`. A no-op-safe setter kept internal to the SDK.
+     * Drive the server session's PPID toward the current [effectiveUserID] and, on success, advance
+     * [sessionUserID] to match — but only while that value is still the desired identity.
+     *
+     * Single-flight via [ppidSyncMutex]: only one reconcile loop runs at a time and it issues its
+     * PATCHes sequentially, so the server applies them in order (no reordering can leave the local
+     * [sessionUserID] disagreeing with the real server identity). Rapid switches collapse — a queued
+     * reconcile finds the value already synced and no-ops. A logout (null) or a not-yet-created
+     * session is intentionally a no-op that leaves [sessionUserID] stale, so a frequency-cap check
+     * drops the now-mismatched session id rather than trusting it.
      */
-    fun markSessionUserID(id: String?) {
-        sessionUserID = id
+    fun reconcileServerPpid() {
+        SimulaScope.launch {
+            ppidSyncMutex.withLock {
+                while (true) {
+                    val target = effectiveUserID ?: break
+                    val sid = sessionId?.takeIf { it.isNotBlank() } ?: break
+                    if (target == sessionUserID) break
+                    val ok = runCatching { SimulaApiClient.updatePpid(apiKey, sid, target) }.getOrDefault(false)
+                    if (!ok) break
+                    // Accept the result only if the target is still current; otherwise loop to sync
+                    // the newer value. Because this ran under the mutex, the PATCH just sent is the
+                    // latest to reach the server, so this never marks an unconverged identity.
+                    if (target == effectiveUserID) {
+                        sessionUserID = target
+                        break
+                    }
+                }
+            }
+        }
     }
 
     suspend fun ensureSession(): String? {

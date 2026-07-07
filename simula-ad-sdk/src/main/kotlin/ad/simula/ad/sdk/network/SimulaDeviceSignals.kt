@@ -37,7 +37,9 @@ internal object SimulaDeviceSignals {
     /** How long a computed snapshot is served before a background refresh is triggered. */
     private const val TTL_MS = 10_000L
 
-    private val priming = AtomicBoolean(false)
+    // Single-flight guard shared by BOTH the prime and the TTL-driven refresh paths, so a
+    // prime-time refresh can't clear the flag out from under a headers()-triggered refresh (or vice
+    // versa) and let two overlap. Owned entirely by [launchRefresh].
     private val refreshing = AtomicBoolean(false)
 
     @Volatile
@@ -57,8 +59,7 @@ internal object SimulaDeviceSignals {
     fun prime(context: Context) {
         val app = context.applicationContext
         appContext = app
-        if (!priming.compareAndSet(false, true)) return
-        SimulaScope.launch { refresh(app) }
+        launchRefresh(app)
     }
 
     /**
@@ -68,16 +69,31 @@ internal object SimulaDeviceSignals {
      */
     fun headers(): Map<String, String> {
         val app = appContext
-        if (app != null && System.currentTimeMillis() - computedAtMs > TTL_MS && refreshing.compareAndSet(false, true)) {
-            SimulaScope.launch { refresh(app) }
+        if (app != null && System.currentTimeMillis() - computedAtMs > TTL_MS) {
+            launchRefresh(app)
         }
         return snapshot
     }
 
+    /**
+     * Launch a snapshot refresh at most once at a time. The [refreshing] guard is acquired here and
+     * released in the same place ([finally] below) — regardless of which caller (prime or the TTL
+     * path) triggered it — so the single-flight contract holds across both.
+     */
+    private fun launchRefresh(context: Context) {
+        if (!refreshing.compareAndSet(false, true)) return
+        SimulaScope.launch {
+            try {
+                refresh(context)
+            } finally {
+                refreshing.set(false)
+            }
+        }
+    }
+
     /** Recompute the snapshot from live device state. Runs off the main thread (via [SimulaScope]). */
     private fun refresh(context: Context) {
-        try {
-            snapshot = buildHeaders(
+        snapshot = buildHeaders(
                 timezone = runCatching { TimeZone.getDefault().id }.getOrNull(),
                 storageFreeBytes = runCatching { StatFs(context.filesDir.path).availableBytes }.getOrNull(),
                 memoryFreeBytes = runCatching {
@@ -104,11 +120,8 @@ internal object SimulaDeviceSignals {
                     val audio = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
                     audio?.ringerMode
                 }.getOrNull(),
-            )
-            computedAtMs = System.currentTimeMillis()
-        } finally {
-            refreshing.set(false)
-        }
+        )
+        computedAtMs = System.currentTimeMillis()
     }
 
     // ── Pure mappers (unit-testable without a live device) ────────────────────

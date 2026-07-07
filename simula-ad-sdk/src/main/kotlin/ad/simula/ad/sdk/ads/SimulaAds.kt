@@ -238,20 +238,11 @@ object SimulaAds {
         if (!initialized) return
         val normalized = id?.takeIf { it.isNotBlank() }
         store.updatePpid(normalized)
-        // With no session yet, the pending/next createSession carries the new value, so no PATCH
-        // is needed. PATCH a live session to push the new value server-side.
-        if (normalized != null) {
-            val sid = store.sessionId
-            if (!sid.isNullOrBlank()) {
-                SimulaScope.launch {
-                    // Advance the tracked session identity only once the server confirms the PATCH,
-                    // so checkFrequencyCap keeps treating the session as stale until it actually
-                    // reflects the new user.
-                    val ok = runCatching { SimulaApiClient.updatePpid(apiKey, sid, normalized) }.getOrDefault(false)
-                    if (ok) store.markSessionUserID(normalized)
-                }
-            }
-        }
+        // Reconcile the live server session toward the new id. Single-flight and serialized in the
+        // store, so rapid switches can't leave the tracked session identity disagreeing with the
+        // server. No-op when there's no session yet (the next createSession carries the value) or on
+        // logout (which can't be pushed server-side; the session is then treated as stale).
+        store.reconcileServerPpid()
     }
 
     /**
