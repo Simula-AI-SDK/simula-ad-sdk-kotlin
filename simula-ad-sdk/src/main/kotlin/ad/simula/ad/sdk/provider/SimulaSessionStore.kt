@@ -39,12 +39,32 @@ internal class SimulaSessionStore(
     var effectiveUserID: String? = initialUserID
         private set
 
+    /**
+     * The PPID the current *server* session actually represents — set to the value the session was
+     * created with, and advanced only when a `PATCH …/ppid` succeeds. This can lag [effectiveUserID]
+     * after a mid-session login/logout/switch (the local id updates immediately; the server session
+     * reconciles asynchronously, and a logout can't be pushed at all). Consumers that must evaluate
+     * for a specific identity (e.g. the frequency-cap check) compare the two and drop the session id
+     * when they diverge, so a stale session can't make the backend answer for the wrong user.
+     */
+    @Volatile
+    var sessionUserID: String? = null
+        private set
+
     private val mutex = Mutex()
     private var sessionDeferred: Deferred<String?>? = null
 
     /** Replace the PPID mid-session. Blank/empty normalizes to null (logout). */
     fun updatePpid(id: String?) {
         effectiveUserID = id?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Record that the server session now represents [id] — called after a successful
+     * `PATCH …/ppid`. A no-op-safe setter kept internal to the SDK.
+     */
+    fun markSessionUserID(id: String?) {
+        sessionUserID = id
     }
 
     suspend fun ensureSession(): String? {
@@ -56,10 +76,14 @@ internal class SimulaSessionStore(
                 // Emit session_created/session_failed exactly once per creation attempt (this block
                 // runs once even though many callers await the shared deferred). Best-effort.
                 val startNanos = System.nanoTime()
-                val id = SimulaApiClient.createSession(apiKey, devMode, effectiveUserID)
+                // Capture the ppid this session is created with so sessionUserID tracks the server
+                // session's true identity (used to detect a stale session after a mid-session change).
+                val ppidAtCreation = effectiveUserID
+                val id = SimulaApiClient.createSession(apiKey, devMode, ppidAtCreation)
                     ?.takeIf { it.isNotBlank() }
                 val durationMs = (System.nanoTime() - startNanos) / 1_000_000
                 if (id != null) {
+                    sessionUserID = ppidAtCreation
                     Telemetry.recordOperation("session_created", durationMs, success = true)
                 } else {
                     Telemetry.recordOperation("session_failed", durationMs, success = false, failureClass = "no_session")

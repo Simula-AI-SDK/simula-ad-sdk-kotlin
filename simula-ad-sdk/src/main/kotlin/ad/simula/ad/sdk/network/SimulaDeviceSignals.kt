@@ -122,13 +122,19 @@ internal object SimulaDeviceSignals {
     /** Battery capacity clamped to 0–100; null when the platform reports it as unknown (`< 0`). */
     internal fun batteryPercent(raw: Int?): Int? = raw?.takeIf { it in 0..100 }
 
-    /** Maps a [BatteryManager.BATTERY_PROPERTY_STATUS] value to a stable label; null when unknown. */
+    /**
+     * Maps a [BatteryManager.BATTERY_PROPERTY_STATUS] value to a stable label; null when unknown.
+     *
+     * `NOT_CHARGING` is deliberately distinct from `unplugged`: on Android it means the device is
+     * still connected to power but not accepting charge (e.g. full on AC, or charging paused/limited
+     * by the OS), so collapsing it into `unplugged` would misreport the power state to the backend.
+     * Only `DISCHARGING` (running on battery) maps to `unplugged`.
+     */
     internal fun batteryStateLabel(status: Int?): String? = when (status) {
         BatteryManager.BATTERY_STATUS_CHARGING -> "charging"
         BatteryManager.BATTERY_STATUS_FULL -> "full"
-        BatteryManager.BATTERY_STATUS_DISCHARGING,
-        BatteryManager.BATTERY_STATUS_NOT_CHARGING,
-        -> "unplugged"
+        BatteryManager.BATTERY_STATUS_DISCHARGING -> "unplugged"
+        BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "not_charging"
         BatteryManager.BATTERY_STATUS_UNKNOWN -> "unknown"
         else -> null
     }

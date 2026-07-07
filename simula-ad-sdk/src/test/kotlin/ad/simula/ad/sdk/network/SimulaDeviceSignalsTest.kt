@@ -50,8 +50,10 @@ class SimulaDeviceSignalsTest {
     fun `battery state maps to stable labels`() {
         assertEquals("charging", SimulaDeviceSignals.batteryStateLabel(BatteryManager.BATTERY_STATUS_CHARGING))
         assertEquals("full", SimulaDeviceSignals.batteryStateLabel(BatteryManager.BATTERY_STATUS_FULL))
+        // Discharging (on battery) is the only "unplugged" state; NOT_CHARGING means plugged in but
+        // not accepting charge, so it maps to its own label rather than being misreported as unplugged.
         assertEquals("unplugged", SimulaDeviceSignals.batteryStateLabel(BatteryManager.BATTERY_STATUS_DISCHARGING))
-        assertEquals("unplugged", SimulaDeviceSignals.batteryStateLabel(BatteryManager.BATTERY_STATUS_NOT_CHARGING))
+        assertEquals("not_charging", SimulaDeviceSignals.batteryStateLabel(BatteryManager.BATTERY_STATUS_NOT_CHARGING))
         assertEquals("unknown", SimulaDeviceSignals.batteryStateLabel(BatteryManager.BATTERY_STATUS_UNKNOWN))
         assertNull(SimulaDeviceSignals.batteryStateLabel(null))
         assertNull(SimulaDeviceSignals.batteryStateLabel(999))

@@ -244,7 +244,11 @@ object SimulaAds {
             val sid = store.sessionId
             if (!sid.isNullOrBlank()) {
                 SimulaScope.launch {
-                    runCatching { SimulaApiClient.updatePpid(apiKey, sid, normalized) }
+                    // Advance the tracked session identity only once the server confirms the PATCH,
+                    // so checkFrequencyCap keeps treating the session as stale until it actually
+                    // reflects the new user.
+                    val ok = runCatching { SimulaApiClient.updatePpid(apiKey, sid, normalized) }.getOrDefault(false)
+                    if (ok) store.markSessionUserID(normalized)
                 }
             }
         }
@@ -271,11 +275,24 @@ object SimulaAds {
         val ppid = primaryUserID?.takeIf { it.isNotBlank() } ?: store.effectiveUserID
         if (FrequencyCapCache.isCapped(adUnitId, ppid)) return true
 
-        val sessionId = store.ensureSession()
+        // Warm/ensure the session, but only attach its id when it represents the same identity we're
+        // checking. After a mid-session login/logout/switch the server session can still reflect the
+        // prior user (the PATCH is async, and logout can't be pushed at all); sending that stale id
+        // could make the backend evaluate the cap for the wrong user. When it diverges we drop the id
+        // and let the backend fall back to the ppid + device-id/IP signals.
+        val sessionId = consistentSessionId(store.ensureSession(), store.sessionUserID, ppid)
         val capped = SimulaApiClient.checkFrequencyCap(apiKey, adUnitId, ppid, sessionId)
         if (capped) FrequencyCapCache.markCapped(adUnitId, ppid)
         return capped
     }
+
+    /**
+     * Returns [sessionId] only when the session's identity ([sessionUserID]) matches the [ppid]
+     * being checked; otherwise null (drop the stale session). Pure/testable. Both-null (anonymous)
+     * counts as a match.
+     */
+    internal fun consistentSessionId(sessionId: String?, sessionUserID: String?, ppid: String?): String? =
+        sessionId?.takeIf { sessionUserID == ppid }
 
     /**
      * Callback overload of [checkFrequencyCap] for Java / React Native interop, where a
