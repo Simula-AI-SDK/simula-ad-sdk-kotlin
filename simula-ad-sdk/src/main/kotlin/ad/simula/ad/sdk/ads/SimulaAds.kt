@@ -10,6 +10,7 @@ import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
+import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
@@ -124,6 +125,9 @@ object SimulaAds {
         // Independent of telemetryEnabled: the X-Connection-Type header is a first-party-request
         // signal, not a telemetry one, so it must work even when telemetry is disabled.
         SimulaConnectionType.prime(appContext)
+        // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
+        // request. Also a first-party-request signal, primed off the critical path.
+        SimulaDeviceSignals.prime(appContext)
 
         // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
         // seeds it — identical resolution to SimulaProvider, so the imperative and

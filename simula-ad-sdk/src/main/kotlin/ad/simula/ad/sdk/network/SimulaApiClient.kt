@@ -72,10 +72,13 @@ internal object SimulaApiClient {
         throw Exception("HTTP error! status: ${response.code}")
     }
 
-    // Consent signals ride along on every request from this single chokepoint,
-    // read from the process-wide store (see SimulaPrivacy).
+    // Consent signals + device-context signals ride along on every request from this single
+    // chokepoint: consent from the process-wide store (see SimulaPrivacy), device signals from the
+    // cached snapshot (see SimulaDeviceSignals — an O(1) read, no per-request syscalls).
     private fun jsonHeaders(): Map<String, String> =
-        mapOf("Content-Type" to "application/json") + SimulaPrivacy.current.consentHeaders()
+        mapOf("Content-Type" to "application/json") +
+            SimulaPrivacy.current.consentHeaders() +
+            SimulaDeviceSignals.headers()
 
     private fun authHeaders(apiKey: String) =
         jsonHeaders() + ("Authorization" to "Bearer $apiKey")
