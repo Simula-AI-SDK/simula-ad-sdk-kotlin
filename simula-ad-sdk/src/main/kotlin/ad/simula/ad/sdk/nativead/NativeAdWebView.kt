@@ -119,9 +119,14 @@ internal fun NativeAdWebView(
     // App background → foreground: a hardware-accelerated WebView drops its draw functor when the window
     // loses visibility (ON_STOP), so an attached, on-screen native creative can return black/blank. Force
     // the repaint on foreground return — only for the live attached view (a retained, scrolled-out session
-    // is already managed INVISIBLE by reattach; don't toggle it out from under the feed).
+    // is already managed INVISIBLE by reattach; don't toggle it out from under the feed). Also: the
+    // creative itself (character_ad.html) can freeze mid-video/mid-typing when its WebView's JS timers
+    // were suspended while backgrounded, and the viewability relay de-dupes `onVisibility` pushes when
+    // the on-screen geometry hasn't changed — so the creative would otherwise never learn it's live
+    // again. Resume timers, re-arm the relay so the next sample is forwarded even if unchanged, and
+    // deterministically wake the creative via the `onAppForeground` bridge (see character_ad.html).
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, session) {
+    DisposableEffect(lifecycleOwner, session, visibilityRelay) {
         var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -129,7 +134,14 @@ internal fun NativeAdWebView(
                 Lifecycle.Event.ON_RESUME -> {
                     if (wasStopped) {
                         wasStopped = false
-                        if (session.attached) session.webView?.repaintOnNextFrame()
+                        if (session.attached) {
+                            val webView = session.webView
+                            webView?.repaintOnNextFrame()
+                            webView?.onResume()
+                            webView?.resumeTimers() // defensive; pauseTimers() is process-global
+                            session.wiring.pushForeground()
+                            visibilityRelay?.resetDedupe()
+                        }
                     }
                 }
                 else -> Unit
@@ -450,6 +462,17 @@ internal class NativeAdWiring(
         webView?.evaluateJavascript("window.onVisibility&&window.onVisibility($r)", null)
     }
 
+    /**
+     * Deterministic foreground wake-up for the creative's freeze self-heal (see
+     * `character_ad.html`'s `window.onAppForeground`). `evaluateJavascript` runs independent of the
+     * WebView's own JS timers, so this reaches the page even if its internal listeners
+     * (visibilitychange/pageshow/focus) never fired across the suspend.
+     */
+    @MainThread
+    fun pushForeground() {
+        webView?.evaluateJavascript("window.onAppForeground&&window.onAppForeground()", null)
+    }
+
     /** Called off-main from the JS interface. Parses and dispatches on the main thread. */
     fun handleMessage(raw: String) {
         val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: run {
@@ -523,6 +546,17 @@ internal class VisibilityRelay {
         if (last >= 0f && kotlin.math.abs(r - last) < 0.01f) return
         last = r
         pusher?.invoke(r)
+    }
+
+    /**
+     * Re-arm the dedupe so the next [report] is forwarded even if the ratio is unchanged from the
+     * last push. Called on app foreground return: the on-screen geometry is typically identical to
+     * what it was before backgrounding, so without this the creative would never receive another
+     * `onVisibility` call to tell it the app (and thus playback) is live again.
+     */
+    @MainThread
+    fun resetDedupe() {
+        last = -1f
     }
 }
 
