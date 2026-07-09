@@ -106,6 +106,7 @@ internal fun NativeAdWebView(
     session.wiring.onAdClick = onAdClick
     session.wiring.onLoadError = onLoadError
     session.wiring.onRenderGone = { generation++ }
+    session.wiring.onPageReady = { visibilityRelay?.flush() }
     session.wiring.trackingUrl = trackingUrl
     session.wiring.destination = destination
 
@@ -438,6 +439,10 @@ internal class NativeAdWiring(
     @Volatile var onRenderGone: () -> Unit = {}
     @Volatile var renderGone: Boolean = false
     @Volatile var renderGoneStrikes: Int = 0
+    // Fired by the client when the creative's page finishes a real load (not about:blank) — the slot
+    // replays the current visibility ratio, since pushes issued mid-load were dropped by the
+    // `window.onVisibility&&…` guard yet still advanced the relay's dedupe baseline.
+    @Volatile var onPageReady: () -> Unit = {}
     // Server-provided click-through routing for this creative. [trackingUrl] is the MMP click tracker
     // (preferred over the in-creative tap URL when set); [destination] is "appstore" | "web".
     @Volatile var trackingUrl: String? = null
@@ -530,7 +535,10 @@ internal class NativeAdWiring(
  */
 internal class VisibilityRelay {
     private var pusher: ((Float) -> Unit)? = null
+    /** Last ratio actually pushed (dedupe baseline). -1 = nothing pushed yet. */
     private var last = -1f
+    /** Latest ratio the tracker reported, whether or not the push reached the page. -1 = no sample yet. */
+    private var latest = -1f
 
     /** Point the relay at the live WebView's pusher (or null to detach on dispose). */
     @MainThread
@@ -543,7 +551,24 @@ internal class VisibilityRelay {
     @MainThread
     fun report(ratio: Float) {
         val r = ratio.coerceIn(0f, 1f)
+        latest = r
         if (last >= 0f && kotlin.math.abs(r - last) < 0.01f) return
+        last = r
+        pusher?.invoke(r)
+    }
+
+    /**
+     * Re-deliver the latest ratio unconditionally, bypassing the dedupe. Called when the creative
+     * finishes loading: any [report] issued while the page was still loading was silently dropped
+     * (by the `window.onVisibility&&…` guard, or a not-yet-attached WebView) but still advanced the
+     * dedupe baseline — so a slot that mounted off-screen would never push again and the creative's
+     * no-bridge fallback would animate it before it scrolls into view. With no sample yet, sends 0
+     * ("bridge is live, not visible") so the creative arms its visibility gating instead of the
+     * fallback timer; the first real sample follows through [report].
+     */
+    @MainThread
+    fun flush() {
+        val r = maxOf(latest, 0f)
         last = r
         pusher?.invoke(r)
     }
@@ -590,7 +615,12 @@ private class NativeAdWebViewClient(
     // strike count so a later, unrelated render kill still earns a fresh rebuild.
     override fun onPageFinished(view: WebView?, url: String?) {
         super.onPageFinished(view, url) // records page-load timing
-        if (url != null && url != "about:blank") wiring.renderGoneStrikes = 0
+        if (url != null && url != "about:blank") {
+            wiring.renderGoneStrikes = 0
+            // window.onVisibility now exists — let the slot replay the current visibility ratio
+            // (mid-load pushes were guard-dropped but still advanced the relay's dedupe baseline).
+            wiring.onPageReady()
+        }
     }
 
     // The creative's render process died — commonly an OS jettison while the app is backgrounded under
