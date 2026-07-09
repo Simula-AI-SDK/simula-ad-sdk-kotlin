@@ -242,6 +242,19 @@ private fun FallbackAdOverlay(
                             // creative is inline html, iframeUrl is still the page's base origin.)
                             val originHost = iframeUrl?.let { Uri.parse(it).host }
                             if (originHost != null && originHost == Uri.parse(target).host) return false
+                            // Route through the shared CTA router: the tapped tracker opens
+                            // verbatim (referrer-preserving); the serve's raw store link is the
+                            // deterministic fallback when it can't be launched. A failed launch
+                            // returns false so the WebView navigates in place (the pre-router
+                            // failure behavior).
+                            val opened = CreativeCtaRouter.open(
+                                ctx.applicationContext,
+                                target,
+                                ctaDestination,
+                                null,
+                                ctaStoreUrl,
+                            )
+                            if (!opened) return false
                             // A genuine user tap on the end-screen CTA is a click (parity with the creative
                             // CTAs; programmatic redirects don't fire onClicked). The iframe self-reports its
                             // own click beacon, so fire the publisher callback only — no SDK beacon here.
@@ -249,18 +262,7 @@ private fun FallbackAdOverlay(
                                 val now = SystemClock.elapsedRealtime()
                                 if (now - lastClickMs >= 500) { lastClickMs = now; onAdClick() }
                             }
-                            // Route through the shared CTA router: the tapped tracker opens
-                            // verbatim (referrer-preserving); the serve's raw store link is the
-                            // deterministic fallback when it can't be launched. A failed launch
-                            // returns false so the WebView navigates in place (the pre-router
-                            // failure behavior).
-                            return CreativeCtaRouter.open(
-                                ctx.applicationContext,
-                                target,
-                                ctaDestination,
-                                null,
-                                ctaStoreUrl,
-                            )
+                            return true
                         }
                         // Absorb a renderer-process death so a crashing end-screen creative can't take
                         // the host app process down with it (parity with the minigame/interstitial
