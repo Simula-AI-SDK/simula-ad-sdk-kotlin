@@ -640,10 +640,15 @@ private fun CreativeHtml(
                         // Only a user gesture counts as the ad click-through; pixels
                         // and auto-redirects (no gesture) navigate normally.
                         if (!request.hasGesture()) return false
-                        onAdClick() // CLICKED
                         // Tapped tracker opens verbatim (referrer-preserving); the raw store
-                        // link is the deterministic fallback when it can't be launched.
-                        CreativeCtaRouter.open(appContext, url, destination, null, storeUrl)
+                        // link is the deterministic fallback when it can't be launched. CLICKED
+                        // (and the caller's recordStoreOpen("cta") / install banner) is gated on
+                        // the launch actually succeeding — parity with the rewarded playable — so
+                        // a failed launch is never recorded as a click/store visit; returning
+                        // false then lets the WebView navigate in place.
+                        val opened = CreativeCtaRouter.open(appContext, url, destination, null, storeUrl)
+                        if (!opened) return false
+                        onAdClick() // CLICKED
                         return true
                     }
                 },
