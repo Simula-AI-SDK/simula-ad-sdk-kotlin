@@ -21,6 +21,7 @@ import ad.simula.ad.sdk.model.SimulaContextValue
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
+import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
@@ -213,6 +214,9 @@ fun SimulaProvider(
         // never enables telemetry. Idempotent — the imperative SimulaAds.initialize() path
         // primes it too; first wins.
         SimulaConnectionType.prime(context.applicationContext)
+        // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
+        // request. Idempotent; primed off the first frame like the signals above.
+        SimulaDeviceSignals.prime(context.applicationContext)
     }
 
     // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag

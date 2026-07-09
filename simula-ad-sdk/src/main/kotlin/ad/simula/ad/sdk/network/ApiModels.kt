@@ -46,6 +46,13 @@ internal data class ApiErrorResponse(
     val message: String = "",
 )
 
+/** Response body for `GET /frequency-cap/status`: `{"capped": true|false}`. Defaults to `false`
+ * (not capped) so a malformed/partial payload never falsely hides an ad surface. */
+@Serializable
+internal data class FrequencyCapResponse(
+    val capped: Boolean = false,
+)
+
 @Serializable
 internal data class InitMinigameRequestBody(
     @SerialName("game_type") val gameType: String,

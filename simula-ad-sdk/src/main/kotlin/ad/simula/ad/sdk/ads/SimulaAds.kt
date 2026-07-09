@@ -10,6 +10,7 @@ import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
+import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
@@ -21,7 +22,9 @@ import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Bundle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
 
 /**
@@ -122,6 +125,9 @@ object SimulaAds {
         // Independent of telemetryEnabled: the X-Connection-Type header is a first-party-request
         // signal, not a telemetry one, so it must work even when telemetry is disabled.
         SimulaConnectionType.prime(appContext)
+        // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
+        // request. Also a first-party-request signal, primed off the critical path.
+        SimulaDeviceSignals.prime(appContext)
 
         // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
         // seeds it — identical resolution to SimulaProvider, so the imperative and
@@ -232,15 +238,68 @@ object SimulaAds {
         if (!initialized) return
         val normalized = id?.takeIf { it.isNotBlank() }
         store.updatePpid(normalized)
-        // With no session yet, the pending/next createSession carries the new value, so no PATCH
-        // is needed. PATCH a live session to push the new value server-side.
-        if (normalized != null) {
-            val sid = store.sessionId
-            if (!sid.isNullOrBlank()) {
-                SimulaScope.launch {
-                    runCatching { SimulaApiClient.updatePpid(apiKey, sid, normalized) }
-                }
-            }
+        // Reconcile the live server session toward the new id. Single-flight and serialized in the
+        // store, so rapid switches can't leave the tracked session identity disagreeing with the
+        // server. No-op when there's no session yet (the next createSession carries the value) or on
+        // logout (which can't be pushed server-side; the session is then treated as stale).
+        store.reconcileServerPpid()
+    }
+
+    /**
+     * Checks whether the user has hit their frequency cap for [adUnitId] — a read-only check
+     * against the backend that records no impression (PRD). Publishers can call this before
+     * rendering an ad-gated surface to skip it entirely when no ad would serve.
+     *
+     * @param adUnitId required.
+     * @param primaryUserID optional; falls back to the SDK's current PPID (set at [initialize] or
+     *                       via [updatePrimaryUserID]) when omitted, and ultimately to the
+     *                       backend's IP/device/session signals when neither is available.
+     * @return `true` if the cap has been reached (skip the surface); `false` if the user is still
+     *         eligible, before [initialize], or on any network/server failure (fails open so a
+     *         transport hiccup can never hide an ad surface that would otherwise have served).
+     *
+     * A `true` result is cached for the rest of the local day (reset at local midnight, per the
+     * PRD) so repeated checks for the same ad unit + user don't re-hit the network.
+     */
+    suspend fun checkFrequencyCap(adUnitId: String, primaryUserID: String? = null): Boolean {
+        if (!initialized || adUnitId.isBlank()) return false
+        val ppid = primaryUserID?.takeIf { it.isNotBlank() } ?: store.effectiveUserID
+        // Capture the local day at the START of the check and attribute the result to it. The network
+        // round-trip can cross local midnight; stamping the cache with the completion time would file
+        // a prior-day capped result under the new day and keep hiding surfaces after the backend's
+        // daily reset. The start time is the day the result actually reflects (a capped==true near
+        // midnight came from the backend evaluating before the reset).
+        val nowMillis = System.currentTimeMillis()
+        if (FrequencyCapCache.isCapped(adUnitId, ppid, nowMillis)) return true
+
+        // Warm/ensure the session, but only attach its id when it represents the same identity we're
+        // checking. After a mid-session login/logout/switch the server session can still reflect the
+        // prior user (the PATCH is async, and logout can't be pushed at all); sending that stale id
+        // could make the backend evaluate the cap for the wrong user. When it diverges we drop the id
+        // and let the backend fall back to the ppid + device-id/IP signals.
+        val sessionId = consistentSessionId(store.ensureSession(), store.sessionUserID, ppid)
+        val capped = SimulaApiClient.checkFrequencyCap(apiKey, adUnitId, ppid, sessionId)
+        if (capped) FrequencyCapCache.markCapped(adUnitId, ppid, nowMillis)
+        return capped
+    }
+
+    /**
+     * Returns [sessionId] only when the session's identity ([sessionUserID]) matches the [ppid]
+     * being checked; otherwise null (drop the stale session). Pure/testable. Both-null (anonymous)
+     * counts as a match.
+     */
+    internal fun consistentSessionId(sessionId: String?, sessionUserID: String?, ppid: String?): String? =
+        sessionId?.takeIf { sessionUserID == ppid }
+
+    /**
+     * Callback overload of [checkFrequencyCap] for Java / React Native interop, where a
+     * `suspend` function isn't directly callable. Runs on [SimulaScope] and delivers [onResult]
+     * on the main thread.
+     */
+    fun checkFrequencyCap(adUnitId: String, primaryUserID: String? = null, onResult: (Boolean) -> Unit) {
+        SimulaScope.launch {
+            val result = checkFrequencyCap(adUnitId, primaryUserID)
+            withContext(Dispatchers.Main) { onResult(result) }
         }
     }
 
