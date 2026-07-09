@@ -16,7 +16,6 @@ import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
-import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -133,8 +132,12 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                             p.trackingUrl,
                             p.destination,
                             p.adBehavior?.storeOpen,
+                            p.androidStoreUrl,
                         )
                     },
+                    // End-screen CTA routing context (deterministic store fallback).
+                    ctaDestination = p.destination,
+                    ctaStoreUrl = p.androidStoreUrl,
                 ) { onClose ->
                     RewardedMinigame(
                         presentation = p,
@@ -325,6 +328,7 @@ private fun RewardedMinigame(
                 presentation.trackingUrl,
                 presentation.destination,
                 presentation.adBehavior?.storeOpen,
+                presentation.androidStoreUrl,
             )
         }
     }
@@ -482,17 +486,26 @@ private fun RewardedMinigame(
                             if (requestUrl == url) return false
                             // Allow same-origin navigation; open external links externally.
                             if (Uri.parse(url).host == Uri.parse(requestUrl).host) return false
-                            return try {
-                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl)))
-                                // External link from the playable is the CTA store-open. Only a
-                                // user-gesture navigation counts as a click (parity with the
-                                // interstitial); auto-redirects open the store but don't fire CLICKED.
-                                if (request?.hasGesture() == true) presentation.callbacks.onClicked()
-                                recordStoreOpen("cta")
-                                true
-                            } catch (e: Exception) {
-                                false
-                            }
+                            // External link from the playable is the CTA store-open — routed
+                            // through the shared CTA router so the tapped tracker opens verbatim
+                            // (referrer-preserving) with the raw store link as the deterministic
+                            // fallback. CLICKED and the store-exit funnel are gated on the launch
+                            // actually succeeding, so a failed launch is never recorded as a store
+                            // visit (a false `opened` lets the WebView navigate in place, the
+                            // pre-router failure behavior). Only a user-gesture navigation counts
+                            // as a click (parity with the interstitial); auto-redirects open the
+                            // store but don't fire CLICKED.
+                            val opened = CreativeCtaRouter.open(
+                                ctx.applicationContext,
+                                requestUrl,
+                                presentation.destination,
+                                presentation.adBehavior?.storeOpen,
+                                presentation.androidStoreUrl,
+                            )
+                            if (!opened) return false
+                            if (request?.hasGesture() == true) presentation.callbacks.onClicked()
+                            recordStoreOpen("cta")
+                            return true
                         }
                     },
                 ).apply {
@@ -559,6 +572,7 @@ private fun RewardedMinigame(
                         presentation.trackingUrl,
                         presentation.destination,
                         presentation.adBehavior?.storeOpen,
+                        presentation.androidStoreUrl,
                     )
                 },
             )

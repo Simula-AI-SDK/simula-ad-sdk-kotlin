@@ -219,17 +219,20 @@ internal enum class ClosePosition {
     }
 }
 
-/** How a CTA tap opens the store. Unknown → EXTERNAL. `sk_overlay`/`sk_store_product` map to the
- * native store (SKSTOREPRODUCT), which the Android router routes to the Play Store app. Retained
- * from v1; the v2 payload omits `store_open`, so it simply defaults. */
+/** How a CTA tap opens the store. Missing/unknown → SKSTOREPRODUCT (the platform's native
+ * in-app store surface — the documented default; the v2 payload omits `store_open` entirely), so
+ * leaving the app is opt-in via an explicit `external` (legacy `external_browser` aliased).
+ * `sk_overlay`/`sk_store_product` map to the native store (SKSTOREPRODUCT), which the Android
+ * router routes to the Play Store app. Parity with the iOS SDK's `StoreOpen.from`. */
 internal enum class StoreOpen {
     EXTERNAL, SKSTOREPRODUCT, INLINE_INSTALL;
 
     companion object {
         fun from(raw: String?): StoreOpen = when (normalizeBehaviorToken(raw)) {
+            "external", "external_browser" -> EXTERNAL
             "inline_install" -> INLINE_INSTALL
-            "skstoreproduct", "sk_store_product", "sk_overlay" -> SKSTOREPRODUCT
-            else -> EXTERNAL
+            // skstoreproduct / sk_store_product / sk_overlay, plus missing/unknown → native store.
+            else -> SKSTOREPRODUCT
         }
     }
 }
@@ -367,7 +370,7 @@ internal data class AutoStoreRedirect(
 
 internal data class AdBehavior(
     val close: CloseBehavior = CloseBehavior(),
-    val storeOpen: StoreOpen = StoreOpen.EXTERNAL,
+    val storeOpen: StoreOpen = StoreOpen.SKSTOREPRODUCT,
     val storePrompt: StorePrompt? = null,
     val skoverlay: SkOverlayConfig? = null,
     val autoStoreRedirect: AutoStoreRedirect? = null,

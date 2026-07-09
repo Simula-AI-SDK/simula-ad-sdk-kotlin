@@ -48,6 +48,9 @@ internal class RewardedPresentation(
     val adBehavior: AdBehavior? = null,
     val trackingUrl: String? = null,
     val destination: String = "appstore",
+    // Raw, unwrapped Play Store link — the deterministic CTA fallback when the tracker is
+    // missing or can't be launched (see CreativeCtaRouter).
+    val androidStoreUrl: String? = null,
     // Estimated revenue for this serve, surfaced on the paid event when the impression
     // fires. Held here from load time (no network round-trip at impression). Defaults to a $0 estimate
     // for the preview path, which constructs this presentation without a real serve.

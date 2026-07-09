@@ -459,6 +459,9 @@ internal object SimulaApiClient {
         val destination: String,
         val renderedFormat: String?,
         val trackingUrl: String?,
+        // Raw, unwrapped Play Store link — the deterministic CTA fallback when the tracker is
+        // missing or can't be launched. Null when the campaign has no raw store link.
+        val androidStoreUrl: String? = null,
         val renderedHtml: String?,
         // Null when the payload omits `ad_behavior` (renderer falls back to today's defaults).
         val adBehavior: AdBehavior? = null,
@@ -523,6 +526,7 @@ internal object SimulaApiClient {
             destination = data.destination,
             renderedFormat = data.renderedFormat,
             trackingUrl = data.trackingUrl,
+            androidStoreUrl = data.androidStoreUrl,
             renderedHtml = data.renderedHtml,
             adBehavior = data.adBehavior.toDomain(),
             creative = data.creative.toDomain(),
@@ -624,6 +628,8 @@ internal object SimulaApiClient {
         // `ad_behavior` → no gate (instantly earned) and no store prompt.
         val destination: String = "appstore",
         val trackingUrl: String? = null,
+        // Raw, unwrapped Play Store link — see [AdLoadResult.androidStoreUrl].
+        val androidStoreUrl: String? = null,
         val adBehavior: AdBehavior? = null,
         // Estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
         // paid event when the impression fires. Defaults to a $0 estimate (preview path).
@@ -670,6 +676,7 @@ internal object SimulaApiClient {
             renderedHtml = data.renderedHtml,
             destination = data.destination,
             trackingUrl = data.trackingUrl,
+            androidStoreUrl = data.androidStoreUrl,
             adBehavior = data.adBehavior.toDomain(),
             adValue = AdValue.fromBidCpm(data.bidAmt),
         )

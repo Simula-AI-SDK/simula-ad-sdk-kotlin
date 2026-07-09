@@ -370,6 +370,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                 adBehavior = ad.adBehavior,
                 trackingUrl = ad.trackingUrl,
                 destination = ad.destination,
+                androidStoreUrl = ad.androidStoreUrl,
                 adValue = ad.adValue,
             ),
         )

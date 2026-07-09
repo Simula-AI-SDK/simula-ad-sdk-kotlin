@@ -165,8 +165,12 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                             p.ad.trackingUrl,
                             p.ad.destination,
                             p.ad.adBehavior?.storeOpen,
+                            p.ad.androidStoreUrl,
                         )
                     },
+                    // End-screen CTA routing context (deterministic store fallback).
+                    ctaDestination = p.ad.destination,
+                    ctaStoreUrl = p.ad.androidStoreUrl,
                 ) { onClose ->
                     CreativeInterstitial(
                         presentation = p,
@@ -184,6 +188,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                                 ad.trackingUrl,
                                 ad.destination,
                                 ad.adBehavior?.storeOpen,
+                                ad.androidStoreUrl,
                             )
                         },
                     )
@@ -478,6 +483,7 @@ private fun CreativeInterstitial(
             CreativeHtml(
                 html = html,
                 destination = ad.destination,
+                storeUrl = ad.androidStoreUrl,
                 bridge = bridge,
                 onAdClick = {
                     presentation.callbacks.onClicked()
@@ -575,6 +581,7 @@ private fun CreativeInterstitial(
 private fun CreativeHtml(
     html: String,
     destination: String,
+    storeUrl: String? = null,
     bridge: CreativeBridge,
     onAdClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -633,8 +640,15 @@ private fun CreativeHtml(
                         // Only a user gesture counts as the ad click-through; pixels
                         // and auto-redirects (no gesture) navigate normally.
                         if (!request.hasGesture()) return false
+                        // Tapped tracker opens verbatim (referrer-preserving); the raw store
+                        // link is the deterministic fallback when it can't be launched. CLICKED
+                        // (and the caller's recordStoreOpen("cta") / install banner) is gated on
+                        // the launch actually succeeding — parity with the rewarded playable — so
+                        // a failed launch is never recorded as a click/store visit; returning
+                        // false then lets the WebView navigate in place.
+                        val opened = CreativeCtaRouter.open(appContext, url, destination, null, storeUrl)
+                        if (!opened) return false
                         onAdClick() // CLICKED
-                        CreativeCtaRouter.open(appContext, url, destination)
                         return true
                     }
                 },

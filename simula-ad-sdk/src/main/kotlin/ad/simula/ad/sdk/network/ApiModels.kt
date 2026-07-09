@@ -148,6 +148,11 @@ internal data class AdLoadApiResponse(
     val destination: String = "appstore",
     @SerialName("rendered_format") val renderedFormat: String? = null,
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    // Raw, unwrapped Play Store link for the advertised app — distinct from the
+    // attribution-wrapped tracking_url. The deterministic CTA fallback: opened when the tracker
+    // is missing or can't be launched, so the CTA still lands on the store. Null when the
+    // campaign has no raw store link.
+    @SerialName("android_store_url") val androidStoreUrl: String? = null,
     // Server-rendered HTML creative. When present (non-blank) it is rendered
     // full-screen in a WebView — the imperative interstitial's sole creative.
     @SerialName("rendered_html") val renderedHtml: String? = null,
@@ -329,6 +334,8 @@ internal data class RewardedInitApiResponse(
     @SerialName("rendered_html") val renderedHtml: String = "",
     val destination: String = "appstore",
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    // Raw, unwrapped Play Store link — see [AdLoadApiResponse.androidStoreUrl].
+    @SerialName("android_store_url") val androidStoreUrl: String? = null,
     // Cleared bid (estimated CPM) for this serve — see [AdLoadApiResponse.bidAmt]. Drives `adValue`.
     @SerialName("bid_amt") val bidAmt: Double = 0.0,
     // Mirrors the interstitial response: the play-to-earn gate (`close.delay_seconds`) plus the
