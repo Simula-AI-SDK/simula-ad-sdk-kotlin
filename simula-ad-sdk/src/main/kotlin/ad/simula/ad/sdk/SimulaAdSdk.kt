@@ -29,6 +29,6 @@ package ad.simula.ad.sdk
  */
 object SimulaAdSdkInfo {
     // Keep in sync with SIMULA_SDK_VERSION (telemetry/Telemetry.kt) and build.gradle.kts coordinates.
-    const val VERSION = "1.1.1"
+    const val VERSION = "1.1.2"
     const val SDK_NAME = "simula-ad-sdk-kotlin"
 }
