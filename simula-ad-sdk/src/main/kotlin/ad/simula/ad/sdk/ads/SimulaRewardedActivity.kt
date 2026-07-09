@@ -489,16 +489,20 @@ private fun RewardedMinigame(
                             // External link from the playable is the CTA store-open — routed
                             // through the shared CTA router so the tapped tracker opens verbatim
                             // (referrer-preserving) with the raw store link as the deterministic
-                            // fallback. Only a user-gesture navigation counts as a click (parity
-                            // with the interstitial); auto-redirects open the store but don't
-                            // fire CLICKED.
-                            CreativeCtaRouter.open(
+                            // fallback. CLICKED and the store-exit funnel are gated on the launch
+                            // actually succeeding, so a failed launch is never recorded as a store
+                            // visit (a false `opened` lets the WebView navigate in place, the
+                            // pre-router failure behavior). Only a user-gesture navigation counts
+                            // as a click (parity with the interstitial); auto-redirects open the
+                            // store but don't fire CLICKED.
+                            val opened = CreativeCtaRouter.open(
                                 ctx.applicationContext,
                                 requestUrl,
                                 presentation.destination,
                                 presentation.adBehavior?.storeOpen,
                                 presentation.androidStoreUrl,
                             )
+                            if (!opened) return false
                             if (request?.hasGesture() == true) presentation.callbacks.onClicked()
                             recordStoreOpen("cta")
                             return true

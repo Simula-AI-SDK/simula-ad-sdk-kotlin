@@ -47,20 +47,29 @@ internal object CreativeCtaRouter {
 
     /**
      * The URL a creative CTA should open: the tracking link itself, trimmed and **verbatim**
-     * (never rewritten into a store URL), or — when the tracker is blank/missing — the campaign's
-     * raw [storeUrl], so the CTA deterministically lands on the store instead of silently
-     * no-oping. `null` when neither is available (the caller then no-ops). Pure and
+     * (never rewritten into a store URL), or — when the tracker is blank/missing AND the
+     * [destination] is the app store — the campaign's raw [storeUrl], so the CTA deterministically
+     * lands on the store instead of silently no-oping. A web-destination CTA never falls back to
+     * the store link. `null` when nothing is applicable (the caller then no-ops). Pure and
      * framework-free so the "never rewrite the tracker" contract can be unit-tested.
      */
-    internal fun targetUrl(trackingUrl: String?, storeUrl: String? = null): String? =
+    internal fun targetUrl(
+        trackingUrl: String?,
+        storeUrl: String? = null,
+        destination: String = "appstore",
+    ): String? =
         trackingUrl?.trim()?.takeIf { it.isNotEmpty() }
-            ?: storeUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: storeUrl?.trim()?.takeIf { it.isNotEmpty() && destination == "appstore" }
 
     /**
      * Opens the advertiser destination for a creative CTA by handing [targetUrl] to the browser.
      * Best-effort: a blank link or unavailable browser silently no-ops (the CLICKED event has
-     * already fired upstream). When the tracker itself can't be launched, the raw [storeUrl]
-     * (if distinct) is the deterministic fallback.
+     * already fired upstream). When the tracker itself can't be launched and the destination is
+     * the app store, the raw [storeUrl] (if distinct) is the deterministic fallback.
+     *
+     * @return `true` when a launch actually succeeded (tracker or store fallback) — callers use
+     * this to gate store-open telemetry / click state so a failed launch is never recorded as a
+     * store visit.
      */
     fun open(
         context: Context,
@@ -68,15 +77,14 @@ internal object CreativeCtaRouter {
         destination: String,
         storeOpen: StoreOpen? = null,
         storeUrl: String? = null,
-    ) {
-        val url = targetUrl(trackingUrl, storeUrl) ?: return
-        val opened = launch(context, url)
-        if (!opened) {
-            // Deterministic fallback: the tracker had no handler / was malformed — land the CTA
-            // on the raw store link instead of dropping it.
-            val fallback = storeUrl?.trim()?.takeIf { it.isNotEmpty() && it != url } ?: return
-            launch(context, fallback)
-        }
+    ): Boolean {
+        val url = targetUrl(trackingUrl, storeUrl, destination) ?: return false
+        if (launch(context, url)) return true
+        // Deterministic fallback (appstore destinations only): the tracker had no handler / was
+        // malformed — land the CTA on the raw store link instead of dropping it.
+        if (destination != "appstore") return false
+        val fallback = storeUrl?.trim()?.takeIf { it.isNotEmpty() && it != url } ?: return false
+        return launch(context, fallback)
     }
 
     private fun launch(context: Context, url: String): Boolean = runCatching {

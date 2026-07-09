@@ -30,12 +30,22 @@ class CreativeCtaRouterTest {
     }
 
     @Test
-    fun `blank or missing tracker falls back to the raw store link`() {
+    fun `blank or missing tracker falls back to the raw store link for appstore destinations`() {
         val store = "https://play.google.com/store/apps/details?id=com.scrambly"
         // Previously a silent no-op; now the CTA deterministically lands on the store.
         assertEquals(store, CreativeCtaRouter.targetUrl(null, store))
         assertEquals(store, CreativeCtaRouter.targetUrl("", store))
-        assertEquals(store, CreativeCtaRouter.targetUrl("   ", store))
+        assertEquals(store, CreativeCtaRouter.targetUrl("   ", store, "appstore"))
+    }
+
+    @Test
+    fun `a web destination never falls back to the store link`() {
+        val store = "https://play.google.com/store/apps/details?id=com.scrambly"
+        // A web CTA with no tracker must no-op — opening the Play Store would be the wrong surface.
+        assertNull(CreativeCtaRouter.targetUrl(null, store, "web"))
+        assertNull(CreativeCtaRouter.targetUrl("  ", store, "web"))
+        // The tracker itself still opens verbatim for web destinations.
+        assertEquals("https://example.com/offer", CreativeCtaRouter.targetUrl("https://example.com/offer", store, "web"))
     }
 
     @Test

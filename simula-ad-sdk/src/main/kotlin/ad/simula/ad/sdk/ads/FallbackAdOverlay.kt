@@ -251,15 +251,16 @@ private fun FallbackAdOverlay(
                             }
                             // Route through the shared CTA router: the tapped tracker opens
                             // verbatim (referrer-preserving); the serve's raw store link is the
-                            // deterministic fallback when it can't be launched.
-                            CreativeCtaRouter.open(
+                            // deterministic fallback when it can't be launched. A failed launch
+                            // returns false so the WebView navigates in place (the pre-router
+                            // failure behavior).
+                            return CreativeCtaRouter.open(
                                 ctx.applicationContext,
                                 target,
                                 ctaDestination,
                                 null,
                                 ctaStoreUrl,
                             )
-                            return true
                         }
                         // Absorb a renderer-process death so a crashing end-screen creative can't take
                         // the host app process down with it (parity with the minigame/interstitial
