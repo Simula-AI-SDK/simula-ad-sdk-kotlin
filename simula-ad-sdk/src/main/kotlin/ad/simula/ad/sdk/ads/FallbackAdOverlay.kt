@@ -6,7 +6,6 @@ import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.network.SimulaApiClient
-import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
 import android.webkit.RenderProcessGoneDetail
@@ -72,6 +71,11 @@ internal fun FallbackAdHost(
     autoStoreRedirect: AutoStoreRedirect? = null,
     onAutoStoreRedirect: () -> Unit = {},
     onAdClick: () -> Unit = {},
+    // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
+    // through the shared router (tracker verbatim, raw store link as the deterministic fallback).
+    // Defaults preserve today's behavior when no context is available.
+    ctaDestination: String = "appstore",
+    ctaStoreUrl: String? = null,
     content: @Composable (onClose: () -> Unit) -> Unit,
 ) {
     var phase by remember { mutableStateOf<FallbackPhase>(FallbackPhase.Content) }
@@ -133,6 +137,8 @@ internal fun FallbackAdHost(
                     html = ad.html,
                     adId = ad.adId,
                     onAdClick = onAdClick,
+                    ctaDestination = ctaDestination,
+                    ctaStoreUrl = ctaStoreUrl,
                     onClose = {
                         // Reveal the next screen on each close tap; done after the last one.
                         phase = if (p.index + 1 < p.ads.size) p.copy(index = p.index + 1) else FallbackPhase.Done
@@ -156,7 +162,15 @@ private sealed interface FallbackPhase {
  * a top-right close button (the same shape as the minigame menu's post-game overlay).
  */
 @Composable
-private fun FallbackAdOverlay(iframeUrl: String?, html: String? = null, adId: String, onAdClick: () -> Unit = {}, onClose: () -> Unit) {
+private fun FallbackAdOverlay(
+    iframeUrl: String?,
+    html: String? = null,
+    adId: String,
+    onAdClick: () -> Unit = {},
+    ctaDestination: String = "appstore",
+    ctaStoreUrl: String? = null,
+    onClose: () -> Unit,
+) {
     val lifecycleOwner = LocalLifecycleOwner.current
     // The pooled fallback WebView, captured from the AndroidView factory below so we can pause/resume
     // it with the host and force a repaint on foreground return — AndroidView won't pause a WebView, and
@@ -235,12 +249,17 @@ private fun FallbackAdOverlay(iframeUrl: String?, html: String? = null, adId: St
                                 val now = SystemClock.elapsedRealtime()
                                 if (now - lastClickMs >= 500) { lastClickMs = now; onAdClick() }
                             }
-                            return try {
-                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
-                                true
-                            } catch (e: Exception) {
-                                false
-                            }
+                            // Route through the shared CTA router: the tapped tracker opens
+                            // verbatim (referrer-preserving); the serve's raw store link is the
+                            // deterministic fallback when it can't be launched.
+                            CreativeCtaRouter.open(
+                                ctx.applicationContext,
+                                target,
+                                ctaDestination,
+                                null,
+                                ctaStoreUrl,
+                            )
+                            return true
                         }
                         // Absorb a renderer-process death so a crashing end-screen creative can't take
                         // the host app process down with it (parity with the minigame/interstitial

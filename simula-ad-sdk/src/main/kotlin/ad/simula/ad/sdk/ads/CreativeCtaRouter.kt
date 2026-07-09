@@ -26,6 +26,14 @@ import android.net.Uri
  * attribution) and fired the tracker from a non-browser request (risking user-agent/IP mismatch
  * and double-counted clicks). We deliberately do neither now.
  *
+ * **Deterministic store fallback** ([storeUrl], the campaign's raw `android_store_url`): the raw
+ * Play link is used only when the tracker can't carry the click at all — a blank/missing
+ * [trackingUrl] (previously a silent no-op) or a tracker `startActivity` that throws — so the CTA
+ * still lands deterministically on the store. It never *replaces* an openable tracker: unlike the
+ * iOS router (which opens `SKStoreProductViewController` from `ios_store_url` and fires the
+ * tracker in the background), Android's install attribution rides the Play `referrer`, which only
+ * survives the real browser navigation through the tracker.
+ *
  * [destination] and [storeOpen] are retained for wire compatibility but no longer branch Android
  * behavior — every CTA opens its tracking link verbatim. (`storeOpen == INLINE_INSTALL` previously
  * tried an undocumented `market://…&overlay=true` half-sheet, which cannot carry the `referrer`;
@@ -38,29 +46,42 @@ import android.net.Uri
 internal object CreativeCtaRouter {
 
     /**
-     * The URL a creative CTA should open: the tracking link itself, trimmed, or `null` when it is
-     * blank/missing (the caller then no-ops). Intentionally independent of [destination]/[storeOpen]
-     * — the link is opened verbatim and never rewritten into a store URL. Pure and framework-free so
-     * the "never rewrite the tracker" contract can be unit-tested.
+     * The URL a creative CTA should open: the tracking link itself, trimmed and **verbatim**
+     * (never rewritten into a store URL), or — when the tracker is blank/missing — the campaign's
+     * raw [storeUrl], so the CTA deterministically lands on the store instead of silently
+     * no-oping. `null` when neither is available (the caller then no-ops). Pure and
+     * framework-free so the "never rewrite the tracker" contract can be unit-tested.
      */
-    internal fun targetUrl(trackingUrl: String?): String? = trackingUrl?.takeIf { it.isNotBlank() }
+    internal fun targetUrl(trackingUrl: String?, storeUrl: String? = null): String? =
+        trackingUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: storeUrl?.trim()?.takeIf { it.isNotEmpty() }
 
     /**
-     * Opens the advertiser destination for a creative CTA by handing [trackingUrl] to the browser.
+     * Opens the advertiser destination for a creative CTA by handing [targetUrl] to the browser.
      * Best-effort: a blank link or unavailable browser silently no-ops (the CLICKED event has
-     * already fired upstream).
+     * already fired upstream). When the tracker itself can't be launched, the raw [storeUrl]
+     * (if distinct) is the deterministic fallback.
      */
     fun open(
         context: Context,
         trackingUrl: String?,
         destination: String,
         storeOpen: StoreOpen? = null,
+        storeUrl: String? = null,
     ) {
-        val url = targetUrl(trackingUrl) ?: return
-        runCatching {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.applicationContext.startActivity(intent)
+        val url = targetUrl(trackingUrl, storeUrl) ?: return
+        val opened = launch(context, url)
+        if (!opened) {
+            // Deterministic fallback: the tracker had no handler / was malformed — land the CTA
+            // on the raw store link instead of dropping it.
+            val fallback = storeUrl?.trim()?.takeIf { it.isNotEmpty() && it != url } ?: return
+            launch(context, fallback)
         }
     }
+
+    private fun launch(context: Context, url: String): Boolean = runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.applicationContext.startActivity(intent)
+    }.isSuccess
 }
