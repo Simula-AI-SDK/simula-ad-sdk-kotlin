@@ -93,7 +93,16 @@ internal class SimulaSessionStore(
                         // the steady-state reconcile on every updatePrimaryUserID is free; a
                         // post-logout re-login with the same ppid lands here without needing a
                         // PATCH and re-captures because the logout cleared the dedup memory.
-                        Ipv4Beacon.fire(apiKey, sessionId = sid, ppid = target, reason = Ipv4Beacon.REASON_PPID_UPDATE)
+                        // Re-read the LIVE identity right before firing: a logout
+                        // (updatePrimaryUserID(null)) can land on another thread after this
+                        // iteration read `target` — its onLogout() clears the beacon's dedup
+                        // memory, so firing the cached value would send (and record) a beacon
+                        // for a user who is already logged out. The volatile re-read closes
+                        // that window to a few instructions, on par with a request already
+                        // in flight when the logout lands (which no client check can recall).
+                        if (effectiveUserID == target) {
+                            Ipv4Beacon.fire(apiKey, sessionId = sid, ppid = target, reason = Ipv4Beacon.REASON_PPID_UPDATE)
+                        }
                         break
                     }
                     val ok = runCatching { SimulaApiClient.updatePpid(apiKey, sid, target) }.getOrDefault(false)
@@ -135,7 +144,14 @@ internal class SimulaSessionStore(
                 // even when creation failed (sid omitted) so the backend can still key on
                 // ppid/did — parity with the RN-layer beacon this replaces. This single hook
                 // covers both entry points (SimulaAds.initialize warm-up + SimulaProvider).
-                Ipv4Beacon.fire(apiKey, sessionId = id, ppid = ppidAtCreation, reason = Ipv4Beacon.REASON_INIT)
+                // Guarded on the LIVE identity still being the one the session was created
+                // with: a login/switch that landed mid-creation is captured by the reconcile
+                // convergence beacon instead (with the ppid the server actually converged to),
+                // and a logout mid-creation must not beacon the stale user into the dedup
+                // memory that logout just reset.
+                if (effectiveUserID == ppidAtCreation) {
+                    Ipv4Beacon.fire(apiKey, sessionId = id, ppid = ppidAtCreation, reason = Ipv4Beacon.REASON_INIT)
+                }
                 id
             }.also { sessionDeferred = it }
         }
