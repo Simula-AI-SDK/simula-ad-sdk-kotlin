@@ -256,9 +256,11 @@ fun NativeAdSlot(
                     apiKey = ctx.apiKey,
                     impressionId = result.impressionId,
                     heightDp = heightDp,
-                    // Server-provided click-through routing — a CTA tap opens the tracking link (PRD).
+                    // Server-provided click-through routing — a CTA tap opens the tracking link (PRD);
+                    // the raw store link is the deterministic fallback when the tracker can't launch.
                     trackingUrl = result.trackingUrl,
                     destination = result.destination,
+                    storeUrl = result.androidStoreUrl,
                     visibilityRelay = visibilityRelay,
                     onHeightPx = { px ->
                         // Threshold sub-dp churn so a measuring creative can't thrash the feed below.

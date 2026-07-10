@@ -86,6 +86,7 @@ internal fun NativeAdWebView(
     onLoadError: () -> Unit,
     trackingUrl: String? = null,
     destination: String = "appstore",
+    storeUrl: String? = null,
     modifier: Modifier = Modifier,
     visibilityRelay: VisibilityRelay? = null,
 ) {
@@ -109,6 +110,7 @@ internal fun NativeAdWebView(
     session.wiring.onPageReady = { visibilityRelay?.flush() }
     session.wiring.trackingUrl = trackingUrl
     session.wiring.destination = destination
+    session.wiring.storeUrl = storeUrl
 
     // Route the live visible fraction (from the viewability tracker) into this slot's WebView while it
     // is mounted; unbind on dispose so a retained, off-screen creative receives no further onVisibility.
@@ -444,9 +446,12 @@ internal class NativeAdWiring(
     // `window.onVisibility&&…` guard yet still advanced the relay's dedupe baseline.
     @Volatile var onPageReady: () -> Unit = {}
     // Server-provided click-through routing for this creative. [trackingUrl] is the MMP click tracker
-    // (preferred over the in-creative tap URL when set); [destination] is "appstore" | "web".
+    // (preferred over the in-creative tap URL when set); [destination] is "appstore" | "web";
+    // [storeUrl] is the campaign's raw `android_store_url` — the router's deterministic fallback
+    // when the tracker is missing or can't be launched (parity with interstitial/rewarded CTAs).
     @Volatile var trackingUrl: String? = null
     @Volatile var destination: String = "appstore"
+    @Volatile var storeUrl: String? = null
 
     // The WebView currently displaying this wiring's creative; set by the store on (re)attach and
     // cleared on release/destroy. Used by [pushVisibility] to reach the live view.
@@ -518,10 +523,12 @@ internal class NativeAdWiring(
     /** Open a user-tapped creative CTA in the external system browser (PRD) and fire CLICKED. Prefers
      * the server-provided [trackingUrl] (the MMP click tracker — opened verbatim to preserve install
      * attribution, exactly as the imperative ads do) over [tappedUrl], the URL the creative itself
-     * navigated to; falls back to [tappedUrl] when the serve carries no tracker. */
+     * navigated to; falls back to [tappedUrl] when the serve carries no tracker. The raw [storeUrl]
+     * rides along so the router can deterministically land an appstore CTA on the store when the
+     * tracker can't be launched (parity with the interstitial/rewarded CTAs). */
     fun openExternal(tappedUrl: String) {
         val target = trackingUrl?.takeIf { it.isNotBlank() } ?: tappedUrl
-        CreativeCtaRouter.open(appContext, target, destination)
+        CreativeCtaRouter.open(appContext, target, destination, storeUrl = storeUrl)
         onAdClick()
     }
 }

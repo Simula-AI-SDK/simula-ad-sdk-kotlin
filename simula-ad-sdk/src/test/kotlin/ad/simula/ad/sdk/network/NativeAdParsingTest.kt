@@ -132,7 +132,8 @@ class NativeAdParsingTest {
               "iframe_url": "https://api/iframe/abc",
               "rendered_html": "<iframe srcdoc=...></iframe>",
               "destination": "web",
-              "tracking_url": "https://mmp.example/click?cid=1"
+              "tracking_url": "https://mmp.example/click?cid=1",
+              "android_store_url": "https://play.google.com/store/apps/details?id=com.example.app"
             }
         """.trimIndent()
         val r = json.decodeFromString<NativeAdApiResponse>(payload)
@@ -144,10 +145,11 @@ class NativeAdParsingTest {
         assertEquals("<iframe srcdoc=...></iframe>", r.renderedHtml)
         assertEquals("web", r.destination)
         assertEquals("https://mmp.example/click?cid=1", r.trackingUrl)
+        assertEquals("https://play.google.com/store/apps/details?id=com.example.app", r.androidStoreUrl)
     }
 
     @Test
-    fun `destination defaults to appstore and tracking_url to null when omitted`() {
+    fun `destination defaults to appstore and tracking_url and android_store_url to null when omitted`() {
         val payload = """
             {"impression_id":"s","ad_inserted":true,"ad_format":"character_ad","iframe_url":"u"}
         """.trimIndent()
@@ -155,6 +157,7 @@ class NativeAdParsingTest {
 
         assertEquals("appstore", r.destination)
         assertNull(r.trackingUrl)
+        assertNull(r.androidStoreUrl)
     }
 
     // ── Response: no-fill / tolerance ───────────────────────────────────────────
