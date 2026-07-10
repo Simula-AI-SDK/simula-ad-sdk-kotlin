@@ -3,7 +3,9 @@ package ad.simula.ad.sdk.network
 import ad.simula.ad.sdk.core.SimulaScope
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -82,6 +84,14 @@ internal class RewardVerificationQueue(
 ) {
     private val mutex = Mutex()
     private var isProcessing = false
+
+    /**
+     * A scheduled wake-up for the earliest backed-off task after a retryable failure (e.g. a
+     * server 5xx). Without it the backoff computed eligibility but nothing ever re-triggered
+     * the drain — a failed verify sat in the queue until the NEXT earned reward or app
+     * relaunch, so the reward-verified signal could stall for a whole session. Guarded by [mutex].
+     */
+    private var retryJob: Job? = null
 
     /**
      * Per-`serveId` result callbacks, so a verification's outcome reaches the caller
@@ -210,6 +220,25 @@ internal class RewardVerificationQueue(
                     }
                     isProcessing = false
                     if (bailedForBackoff) {
+                        // Bailed on a retryable failure: schedule a wake at the earliest remaining
+                        // backoff so the retry actually happens in-session, instead of waiting for
+                        // the next enqueue or launch. Scheduled ONLY from the bail path (not from
+                        // every pass with pending tasks), so a wake that finds nothing eligible —
+                        // e.g. under a frozen test clock — terminates instead of rescheduling
+                        // itself forever. One pending wake is enough: every bail recomputes the
+                        // earliest eligibility across the WHOLE queue and replaces the schedule.
+                        val remaining = store.load()
+                        if (remaining.isNotEmpty()) {
+                            val now = clock()
+                            val delayMs = remaining
+                                .minOf { rewardVerificationBackoffMs(it.retryCount) - (now - it.lastAttemptTimestamp) }
+                                .coerceAtLeast(1_000L) // ≥1s floor: never hot-loop a failing backend
+                            retryJob?.cancel()
+                            retryJob = scope.launch {
+                                delay(delayMs)
+                                processQueue()
+                            }
+                        }
                         false
                     } else {
                         val now = clock()
