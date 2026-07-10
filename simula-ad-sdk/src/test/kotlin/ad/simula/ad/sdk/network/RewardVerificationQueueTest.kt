@@ -2,7 +2,9 @@ package ad.simula.ad.sdk.network
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -229,5 +231,55 @@ class RewardVerificationQueueTest {
         advanceUntilIdle()
         assertEquals("now eligible → retried", 2, verifier.callCounts["A"])
         assertTrue(store.data.isEmpty())
+    }
+
+    // ── Retry wake (auto re-drain after a retryable bail) ───────────────────────
+
+    @Test
+    fun `retry wake re-drains after backoff without a new enqueue`() = runTest {
+        var now = 0L
+        val store = FakeStore()
+        val verifier = FakeVerifier().apply { errors["A"] = Exception("HTTP error! status: 500") }
+        val engine = RewardVerificationQueue(store, verifier, clock = { now }, scope = this)
+
+        engine.queue("A", "sess", 5.0)
+        // Drain the first attempt and park on the scheduled wake — do not advance through
+        // the delay yet (advanceUntilIdle would), so we can sync the fake clock first.
+        runCurrent()
+        assertEquals(1, verifier.callCounts["A"])
+        assertEquals(1, store.data.size)
+        assertEquals(1, store.data[0].retryCount) // backoff(1) = 5000ms
+
+        verifier.errors.remove("A")
+        verifier.tokens["A"] = "tokA"
+        now = 5_000L
+        advanceTimeBy(5_000L)
+        advanceUntilIdle()
+
+        assertEquals("wake must re-drain once backoff elapses", 2, verifier.callCounts["A"])
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `retry wake does not reschedule when the clock is still frozen`() = runTest {
+        var now = 0L
+        val store = FakeStore()
+        val verifier = FakeVerifier().apply { errors["A"] = Exception("HTTP error! status: 500") }
+        val engine = RewardVerificationQueue(store, verifier, clock = { now }, scope = this)
+
+        engine.queue("A", "sess", 5.0)
+        runCurrent()
+        assertEquals(1, verifier.callCounts["A"])
+
+        // Wake fires, but eligibility still uses now=0 → nothing to do, no chained delay.
+        advanceTimeBy(5_000L)
+        advanceUntilIdle()
+        assertEquals(1, verifier.callCounts["A"])
+        assertEquals(1, store.data.size)
+
+        advanceTimeBy(60_000L)
+        advanceUntilIdle()
+        assertEquals("ineligible wake must not loop", 1, verifier.callCounts["A"])
+        assertEquals(1, store.data.size)
     }
 }
