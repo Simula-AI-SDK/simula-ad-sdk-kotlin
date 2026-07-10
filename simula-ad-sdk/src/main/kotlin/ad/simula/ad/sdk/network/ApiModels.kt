@@ -411,6 +411,9 @@ internal data class NativeAdApiResponse(
     // (attribution-preserving). `tracking_url` is null when the chosen campaign has no tracker.
     val destination: String = "appstore",
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    // Raw, unwrapped Play Store link — see [AdLoadApiResponse.androidStoreUrl]. The native CTA's
+    // deterministic fallback when the tracker is missing or can't be launched.
+    @SerialName("android_store_url") val androidStoreUrl: String? = null,
     // Cleared bid (estimated CPM) for this serve — see [AdLoadApiResponse.bidAmt]. Drives `adValue`.
     @SerialName("bid_amt") val bidAmt: Double = 0.0,
 )

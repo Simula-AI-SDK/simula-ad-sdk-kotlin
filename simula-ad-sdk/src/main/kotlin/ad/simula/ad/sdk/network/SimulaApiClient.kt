@@ -551,6 +551,9 @@ internal object SimulaApiClient {
         // Defaults cover the preview path, which builds a result without server routing.
         val destination: String = "appstore",
         val trackingUrl: String? = null,
+        // Raw, unwrapped Play Store link — the CTA's deterministic fallback when the tracker is
+        // missing or can't be launched (see [CreativeCtaRouter]). Null when the campaign has none.
+        val androidStoreUrl: String? = null,
         // Estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
         // native paid event, co-fired with the impression. Defaults to a $0 estimate (preview path).
         val adValue: AdValue = AdValue.fromBidCpm(0.0),
@@ -610,6 +613,7 @@ internal object SimulaApiClient {
             renderedHtml = data.renderedHtml,
             destination = data.destination,
             trackingUrl = data.trackingUrl,
+            androidStoreUrl = data.androidStoreUrl,
             adValue = AdValue.fromBidCpm(data.bidAmt),
         )
     }
