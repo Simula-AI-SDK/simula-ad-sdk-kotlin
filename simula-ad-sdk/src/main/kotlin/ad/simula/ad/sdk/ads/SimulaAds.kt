@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.nativead.NativeAdPreloadCache
 import ad.simula.ad.sdk.network.AdBeaconManager
+import ad.simula.ad.sdk.network.Ipv4Beacon
 import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.SimulaConnectionType
@@ -243,6 +244,14 @@ object SimulaAds {
         // server. No-op when there's no session yet (the next createSession carries the value) or on
         // logout (which can't be pushed server-side; the session is then treated as stale).
         store.reconcileServerPpid()
+        // IPv4 capture: a login/switch re-captures against the new identity (with the current
+        // session id when one exists); a logout resets the dedup memory so a later re-login —
+        // even with the same ppid — runs a fresh capture. Fire-and-forget, never throws.
+        if (normalized != null) {
+            Ipv4Beacon.fire(apiKey, sessionId = store.sessionId, ppid = normalized, reason = Ipv4Beacon.REASON_PPID_UPDATE)
+        } else {
+            Ipv4Beacon.onLogout()
+        }
     }
 
     /**

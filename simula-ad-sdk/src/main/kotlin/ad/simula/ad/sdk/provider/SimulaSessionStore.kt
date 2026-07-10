@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.provider
 
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.network.Ipv4Beacon
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.telemetry.Telemetry
 import androidx.compose.runtime.getValue
@@ -117,6 +118,11 @@ internal class SimulaSessionStore(
                 } else {
                     Telemetry.recordOperation("session_failed", durationMs, success = false, failureClass = "no_session")
                 }
+                // IPv4 capture for this session (fire-and-forget, deduped per identity). Fired
+                // even when creation failed (sid omitted) so the backend can still key on
+                // ppid/did — parity with the RN-layer beacon this replaces. This single hook
+                // covers both entry points (SimulaAds.initialize warm-up + SimulaProvider).
+                Ipv4Beacon.fire(apiKey, sessionId = id, ppid = ppidAtCreation, reason = Ipv4Beacon.REASON_INIT)
                 id
             }.also { sessionDeferred = it }
         }
