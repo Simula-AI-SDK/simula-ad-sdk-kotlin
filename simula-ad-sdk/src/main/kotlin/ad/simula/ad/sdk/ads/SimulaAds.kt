@@ -244,14 +244,14 @@ object SimulaAds {
         // server. No-op when there's no session yet (the next createSession carries the value) or on
         // logout (which can't be pushed server-side; the session is then treated as stale).
         store.reconcileServerPpid()
-        // IPv4 capture: a login/switch re-captures against the new identity (with the current
-        // session id when one exists); a logout resets the dedup memory so a later re-login —
-        // even with the same ppid — runs a fresh capture. Fire-and-forget, never throws.
-        if (normalized != null) {
-            Ipv4Beacon.fire(apiKey, sessionId = store.sessionId, ppid = normalized, reason = Ipv4Beacon.REASON_PPID_UPDATE)
-        } else {
-            Ipv4Beacon.onLogout()
-        }
+        // IPv4 capture on a login/switch fires from INSIDE reconcileServerPpid, once the PATCH
+        // has landed — so the sid it carries belongs to the store that was actually reconciled
+        // and genuinely represents the new ppid server-side (the backend keys the capture by
+        // sid first; beaconing here with store.sessionId could attach it to a session that
+        // still represents the previous user, or one that provider-hosted ads never use). A
+        // login with no session yet is covered by ensureSession's init beacon, which carries
+        // the ppid current at creation. Only the logout reset lives here.
+        if (normalized == null) Ipv4Beacon.onLogout()
     }
 
     /**

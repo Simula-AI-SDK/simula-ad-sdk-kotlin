@@ -83,14 +83,27 @@ internal class SimulaSessionStore(
                 while (true) {
                     val target = effectiveUserID ?: break
                     val sid = sessionId?.takeIf { it.isNotBlank() } ?: break
-                    if (target == sessionUserID) break
+                    if (target == sessionUserID) {
+                        // Converged: the server session now genuinely represents `target`. Fire
+                        // the IPv4 capture HERE — not from SimulaAds.updatePrimaryUserID — so
+                        // the sid it carries (the backend keys the capture by sid first) is a
+                        // session that (a) belongs to THIS store rather than always the global
+                        // one, and (b) no longer represents the PREVIOUS user (pre-PATCH it
+                        // still does). Deduped per (apiKey, sid, ppid) inside the beacon, so
+                        // the steady-state reconcile on every updatePrimaryUserID is free; a
+                        // post-logout re-login with the same ppid lands here without needing a
+                        // PATCH and re-captures because the logout cleared the dedup memory.
+                        Ipv4Beacon.fire(apiKey, sessionId = sid, ppid = target, reason = Ipv4Beacon.REASON_PPID_UPDATE)
+                        break
+                    }
                     val ok = runCatching { SimulaApiClient.updatePpid(apiKey, sid, target) }.getOrDefault(false)
                     if (!ok) break
                     // The PATCH just moved the server session to `target` (under the mutex, so no
                     // other PATCH interleaves). Record that truth UNCONDITIONALLY — even if the
                     // desired identity has already moved on — so sessionUserID always reflects the
                     // server's real state and can never falsely match a newer effectiveUserID. Then
-                    // loop; the top-of-loop check exits once the server has converged to the latest.
+                    // loop; the top-of-loop check exits once the server has converged to the latest
+                    // (and fires the IPv4 capture for the identity it converged to).
                     sessionUserID = target
                 }
             }
