@@ -250,8 +250,12 @@ internal object NativeAdWebViewStore {
     fun attach(session: Session, hostContext: Context, iframeUrl: String?, renderedHtml: String?): WebView {
         val creativeKey = creativeKey(iframeUrl, renderedHtml)
         val retained = session.webView
-        // Reuse the retained view only if it is alive (render process intact) and holds this creative.
-        if (retained != null && session.loadedKey == creativeKey && !session.attached && !session.wiring.renderGone) {
+        // Reuse the retained view only if it is alive (render process intact), actually holds this
+        // creative (its load completed — not the about:blank a failed load left behind), and isn't
+        // already on screen elsewhere.
+        if (retained != null && session.loadedKey == creativeKey && !session.attached &&
+            !session.wiring.renderGone && !session.wiring.loadFailed
+        ) {
             (retained.context as? MutableContextWrapper)?.baseContext = hostContext // re-home for theming
             (retained.parent as? ViewGroup)?.removeView(retained)                   // clear any stale parent
             retained.onResume()
@@ -262,7 +266,18 @@ internal object NativeAdWebViewStore {
         }
         // A retained view whose render process died (e.g. killed while this slot was scrolled off) is
         // unusable — destroy it before rebuilding the creative fresh below.
-        if (retained != null && session.wiring.renderGone) discardDeadView(session)
+        if (retained != null && session.wiring.renderGone) {
+            discardDeadView(session)
+        } else if (retained != null && session.wiring.loadFailed && !session.attached) {
+            // A retained view whose creative load failed holds only about:blank. The view itself is
+            // healthy, so recycle it to the pool and rebuild the creative fresh below — this is the
+            // remount retry the still-cached fill is documented to get (see onLoadError in the slot).
+            uninstallBridge(retained)
+            WebViewPool.release(retained)
+            session.webView = null
+            session.loadedKey = null
+            session.wiring.webView = null
+        }
         val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml)
         // Adopt as the retained instance only if the slot isn't already showing one (don't orphan it).
         if (!session.attached) {
@@ -286,7 +301,10 @@ internal object NativeAdWebViewStore {
             discardDeadView(session)
             return
         }
-        if (session.impressionId.isBlank() || released !== session.webView) {
+        // Ephemeral (preview) / orphaned views are recycled, and so is a view whose creative load
+        // FAILED (it holds only the about:blank that pre-empted the error page): retaining it would
+        // reattach a blank card on remount instead of retrying the load (see NativeAdWiring.loadFailed).
+        if (session.impressionId.isBlank() || released !== session.webView || session.wiring.loadFailed) {
             uninstallBridge(released)
             WebViewPool.release(released)
             if (released === session.webView) { session.webView = null; session.loadedKey = null; session.wiring.webView = null }
@@ -349,6 +367,13 @@ internal object NativeAdWebViewStore {
         val webView = WebViewPool.acquire(hostContext, NativeAdWebViewClient(wiring, docStart))
         webView.webChromeClient = CreativeTelemetryWebChromeClient("character_ad") // capture JS console errors
         webView.setBackgroundColor(Color.TRANSPARENT)
+        // A native ad sizes to content and must never scroll (parity with iOS, where the scroll
+        // view is disabled): no scrollbars, no overscroll glow. The BRIDGE_SCRIPT additionally
+        // locks overflow inside the page so a sub-dp rounding overflow can't pan the viewport by
+        // the touch-slop a feed drag delivers before the list intercepts the gesture.
+        webView.isVerticalScrollBarEnabled = false
+        webView.isHorizontalScrollBarEnabled = false
+        webView.overScrollMode = android.view.View.OVER_SCROLL_NEVER
         // device-width viewport so 1 CSS px == 1 dp → the reported height maps straight to dp.
         webView.settings.useWideViewPort = true
         webView.settings.loadWithOverviewMode = false
@@ -441,6 +466,14 @@ internal class NativeAdWiring(
     @Volatile var onRenderGone: () -> Unit = {}
     @Volatile var renderGone: Boolean = false
     @Volatile var renderGoneStrikes: Int = 0
+    // The creative's main-frame load failed (e.g. offline when the slot scrolled in): the client
+    // pre-empted the error page with about:blank, so the view holds nothing valid to reattach.
+    // Without this flag the store would retain the blank view and — because [loadedKey] still
+    // claims the creative is loaded — reattach it on remount WITHOUT reloading, silently breaking
+    // the "remount retries once connectivity returns" contract of the still-cached fill. The view
+    // itself is healthy (unlike [renderGone]), so it is recycled to the pool, not destroyed.
+    // Cleared on a successful page load. Mirrors the Swift store's `unusable` flag.
+    @Volatile var loadFailed: Boolean = false
     // Fired by the client when the creative's page finishes a real load (not about:blank) — the slot
     // replays the current visibility ratio, since pushes issued mid-load were dropped by the
     // `window.onVisibility&&…` guard yet still advanced the relay's dedupe baseline.
@@ -624,6 +657,7 @@ private class NativeAdWebViewClient(
         super.onPageFinished(view, url) // records page-load timing
         if (url != null && url != "about:blank") {
             wiring.renderGoneStrikes = 0
+            wiring.loadFailed = false // the view holds a valid creative again — retainable
             // window.onVisibility now exists — let the slot replay the current visibility ratio
             // (mid-load pushes were guard-dropped but still advanced the relay's dedupe baseline).
             wiring.onPageReady()
@@ -651,6 +685,8 @@ private class NativeAdWebViewClient(
     override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
         if (view == null || request == null) return
         if (!request.isForMainFrame) return
+        // The view now holds nothing valid — don't let the store retain/reattach it (see loadFailed).
+        wiring.loadFailed = true
         // Pre-empt the WebView's built-in "Webpage not available" page so it can't flash on screen
         // before the slot collapses.
         view.loadUrl("about:blank")
@@ -660,6 +696,7 @@ private class NativeAdWebViewClient(
     override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
         if (view == null || request == null) return
         if (!request.isForMainFrame) return
+        wiring.loadFailed = true
         view.loadUrl("about:blank")
         wiring.onLoadError()
     }
@@ -707,6 +744,45 @@ private fun uninstallBridge(webView: WebView) {
  */
 private val BRIDGE_SCRIPT = """
     (function () {
+      // Nothing in the creative may scroll: the slot is content-sized (parity with iOS, whose
+      // scroll view is disabled). Native-side scrollbars/overscroll are already off, but a sub-dp
+      // rounding overflow would still let a feed drag pan the viewport by the touch slop before
+      // the list intercepts. Lock overflow on this document AND inside any (same-origin, srcdoc)
+      // iframe the creative renders in — WebKit/Chromium give iframes their own scrolling nodes.
+      // Re-applied on iframe load (a reload wipes injected styles) and via a MutationObserver for
+      // iframes attached later. Idempotent per document. Mirrors the iOS overflowLockScript.
+      function lockDoc(doc) {
+        try {
+          if (!doc || doc.__simulaNoScroll) return;
+          doc.__simulaNoScroll = true;
+          var s = doc.createElement('style');
+          s.textContent = 'html,body{overflow:hidden!important;overscroll-behavior:none!important;}';
+          (doc.head || doc.documentElement).appendChild(s);
+        } catch (e) {}
+      }
+      function lockFrame(frame) {
+        try {
+          frame.setAttribute('scrolling', 'no');
+          frame.style.overflow = 'hidden';
+        } catch (e) {}
+        lockDoc(frame.contentDocument);
+        if (!frame.__simulaNoScrollHook) {
+          frame.__simulaNoScrollHook = true;
+          try { frame.addEventListener('load', function () { lockDoc(frame.contentDocument); }); } catch (e) {}
+        }
+      }
+      function lockAll() {
+        try { document.querySelectorAll('iframe').forEach(lockFrame); } catch (e) {}
+      }
+      lockDoc(document);
+      lockAll();
+      try {
+        if (window.MutationObserver && document.body && !document.body.__simulaNoScrollMO) {
+          document.body.__simulaNoScrollMO = true;
+          new MutationObserver(lockAll).observe(document.body, { childList: true, subtree: true });
+        }
+      } catch (e) {}
+
       function bridge() { return window.$NATIVE_BRIDGE_OBJECT; }
 
       // Relay the creative's window.postMessage (e.g. AD_FEEDBACK) to native.
@@ -738,7 +814,9 @@ private val BRIDGE_SCRIPT = """
             if (bottom > max) max = bottom;
           }
           max += (window.scrollY || window.pageYOffset || 0);
-          return Math.ceil(max) || b.scrollHeight;
+          // +1dp cushion so sub-pixel layout can't leave the content taller than the view (a tiny
+          // scrollable overflow at the bottom). Mirrors the iOS height script.
+          return (Math.ceil(max) || b.scrollHeight) + 1;
         };
         var send = function () {
           try {
