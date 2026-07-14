@@ -485,7 +485,10 @@ internal class NativeAdWiring(
     // claims the creative is loaded — reattach it on remount WITHOUT reloading, silently breaking
     // the "remount retries once connectivity returns" contract of the still-cached fill. The view
     // itself is healthy (unlike [renderGone]), so it is recycled to the pool, not destroyed.
-    // Cleared on a successful page load. Mirrors the Swift store's `unusable` flag.
+    // The verdict describes one specific view, so it is cleared wherever that view is discarded and
+    // the session moves on (attach's rebuild-adopt, release's recycle, discardDeadView, destroy) —
+    // NOT in onPageFinished, which Android also fires for the failed URL (see the gate there).
+    // Mirrors the Swift store's `unusable` flag.
     @Volatile var loadFailed: Boolean = false
     // Fired by the client when the creative's page finishes a real load (not about:blank) — the slot
     // replays the current visibility ratio, since pushes issued mid-load were dropped by the
@@ -668,9 +671,15 @@ private class NativeAdWebViewClient(
     // strike count so a later, unrelated render kill still earns a fresh rebuild.
     override fun onPageFinished(view: WebView?, url: String?) {
         super.onPageFinished(view, url) // records page-load timing
-        if (url != null && url != "about:blank") {
+        // Android delivers onPageFinished for the FAILED URL too (right after onReceivedError /
+        // onReceivedHttpError, before the about:blank pre-emption commits), so the success path must
+        // be gated on the failure verdict — otherwise it would immediately wipe [loadFailed] and the
+        // store would retain and silently reattach the blank view instead of retrying on remount.
+        // The flag is reliably false on a real success: every rebuild clears it when the fresh view
+        // is adopted (see attach), so it can only be true here when the load actually failed.
+        // Mirrors the Swift coordinator's mainFrameHTTPFailed gate on didFinish.
+        if (url != null && url != "about:blank" && !wiring.loadFailed) {
             wiring.renderGoneStrikes = 0
-            wiring.loadFailed = false // the view holds a valid creative again — retainable
             // window.onVisibility now exists — let the slot replay the current visibility ratio
             // (mid-load pushes were guard-dropped but still advanced the relay's dedupe baseline).
             wiring.onPageReady()
