@@ -286,6 +286,10 @@ internal object NativeAdWebViewStore {
             session.loadedKey = creativeKey
             session.attached = true
             session.wiring.webView = fresh
+            // [loadFailed] described the view just discarded, not this fresh retry. Left sticky,
+            // release() would recycle the healthy mid-load view on scroll-out instead of retaining
+            // it. onReceivedError/onReceivedHttpError re-arm the flag if the retry fails too.
+            session.wiring.loadFailed = false
         }
         return fresh
     }
@@ -307,7 +311,14 @@ internal object NativeAdWebViewStore {
         if (session.impressionId.isBlank() || released !== session.webView || session.wiring.loadFailed) {
             uninstallBridge(released)
             WebViewPool.release(released)
-            if (released === session.webView) { session.webView = null; session.loadedKey = null; session.wiring.webView = null }
+            if (released === session.webView) {
+                session.webView = null
+                session.loadedKey = null
+                session.wiring.webView = null
+                // The failed view is gone — don't let its verdict outlive it and recycle the next
+                // (healthy, mid-load) retry too. Mirrors discardDeadView clearing renderGone.
+                session.wiring.loadFailed = false
+            }
             session.attached = false
             return
         }
@@ -331,6 +342,7 @@ internal object NativeAdWebViewStore {
         session.loadedKey = null
         session.wiring.webView = null
         session.wiring.renderGone = false
+        session.wiring.loadFailed = false // a failed-then-render-dead view must not leave the flag sticky
     }
 
     /** Drop the retained view for [impressionId] (e.g. the slot was invalidated for a fresh ad). */
@@ -398,6 +410,7 @@ internal object NativeAdWebViewStore {
         session.attached = false
         session.wiring.webView = null
         session.wiring.renderGone = false
+        session.wiring.loadFailed = false
     }
 
     @MainThread
