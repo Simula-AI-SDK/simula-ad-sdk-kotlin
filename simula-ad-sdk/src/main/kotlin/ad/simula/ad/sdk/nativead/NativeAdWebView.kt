@@ -777,11 +777,18 @@ private val BRIDGE_SCRIPT = """
       lockDoc(document);
       lockAll();
       try {
-        if (window.MutationObserver && document.body && !document.body.__simulaNoScrollMO) {
-          document.body.__simulaNoScrollMO = true;
-          new MutationObserver(lockAll).observe(document.body, { childList: true, subtree: true });
+        // Hook the observer on documentElement, not body: at document-start injection (Android)
+        // body is still null and no iframes exist yet, so a body-gated observer would never be
+        // installed and nothing would re-run the lock for the srcdoc iframe parsed later.
+        // documentElement exists from the first script tick; subtree:true covers body + iframes.
+        var root = document.documentElement;
+        if (window.MutationObserver && root && !root.__simulaNoScrollMO) {
+          root.__simulaNoScrollMO = true;
+          new MutationObserver(lockAll).observe(root, { childList: true, subtree: true });
         }
       } catch (e) {}
+      // Belt-and-braces: sweep once more when parsing completes.
+      try { document.addEventListener('DOMContentLoaded', lockAll); } catch (e) {}
 
       function bridge() { return window.$NATIVE_BRIDGE_OBJECT; }
 
@@ -814,9 +821,12 @@ private val BRIDGE_SCRIPT = """
             if (bottom > max) max = bottom;
           }
           max += (window.scrollY || window.pageYOffset || 0);
+          var raw = Math.ceil(max) || b.scrollHeight;
           // +1dp cushion so sub-pixel layout can't leave the content taller than the view (a tiny
-          // scrollable overflow at the bottom). Mirrors the iOS height script.
-          return (Math.ceil(max) || b.scrollHeight) + 1;
+          // scrollable overflow at the bottom). Mirrors the iOS height script. Only cushion a real
+          // measurement: an empty page (e.g. the about:blank a failed load leaves behind) must keep
+          // reporting 0 so it can't pass the h > 0 guard and cache a bogus 1dp slot height.
+          return raw > 0 ? raw + 1 : 0;
         };
         var send = function () {
           try {
