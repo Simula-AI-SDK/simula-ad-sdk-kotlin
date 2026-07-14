@@ -830,8 +830,17 @@ private val BRIDGE_SCRIPT = """
       if (window.top === window.self) {
         var lastH = 0, timer = null;
         var measure = function () {
+          // Report nothing until the page has FULLY loaded (readyState 'complete', i.e. the window
+          // load event — which the srcdoc iframe's own content, images included, delays). Mid-load
+          // the DOM measures its scaffolding, not the creative: the creative <iframe> sits at the
+          // 150 CSS px iframe default until its inner content loads and resizes it, so an early
+          // report dismisses the shimmer at ~150dp and the card then visibly expands when the real
+          // height lands ("renders half, then the rest"). This is also what keeps Android's first
+          // measurement at the same point as iOS, whose script is only injected after didFinish —
+          // WebKit fires that at the same all-subresources-loaded moment gated on here.
+          if (document.readyState !== 'complete') return 0;
           var b = document.body;
-          if (!b) { var de = document.documentElement; return de ? de.scrollHeight : 0; }
+          if (!b) return 0;
           // The bottom of the lowest in-flow child = the creative's content height, independent of the
           // height the SDK gave the WebView. A full-height creative (html,body{height:100%}) otherwise
           // reports back the size we set (Android WebView returns it even via scrollHeight/height:auto),
@@ -843,12 +852,20 @@ private val BRIDGE_SCRIPT = """
             if (bottom > max) max = bottom;
           }
           max += (window.scrollY || window.pageYOffset || 0);
+          // Child-less body → scrollHeight fallback (a text-only creative). An empty page (e.g. the
+          // about:blank a failed load leaves behind) reports 0 through it (empty body → scrollHeight
+          // 0), so it can't pass the h > 0 guard and cache a bogus slot height.
           var raw = Math.ceil(max) || b.scrollHeight;
+          if (!(raw > 0)) return 0;
+          // Viewport-echo guard (parity with the iOS script): a 100%/100vh child (or the child-less
+          // scrollHeight fallback above) doesn't measure content — it reflects whatever height the
+          // SDK just gave the WebView. Report it verbatim — identical to lastH after a resize, so
+          // the +1 cushion can't ratchet the slot taller on every resize→measure cycle.
+          var vh = window.innerHeight || 0;
+          if (vh > 0 && Math.abs(raw - vh) <= 2) return vh;
           // +1dp cushion so sub-pixel layout can't leave the content taller than the view (a tiny
-          // scrollable overflow at the bottom). Mirrors the iOS height script. Only cushion a real
-          // measurement: an empty page (e.g. the about:blank a failed load leaves behind) must keep
-          // reporting 0 so it can't pass the h > 0 guard and cache a bogus 1dp slot height.
-          return raw > 0 ? raw + 1 : 0;
+          // scrollable overflow at the bottom). Mirrors the iOS height script.
+          return raw + 1;
         };
         var send = function () {
           try {
