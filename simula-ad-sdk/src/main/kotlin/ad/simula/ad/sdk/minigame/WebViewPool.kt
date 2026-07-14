@@ -9,6 +9,7 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.view.ViewGroup
 import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import android.webkit.RenderProcessGoneDetail
@@ -109,6 +110,15 @@ internal object WebViewPool {
             // (No clearCache — that flushes the app-global RAM cache and would undercut prewarming
             // without adding isolation.)
             webView.webViewClient = blankIgnoringClient
+            // Restore the scroll chrome + viewport tweaks a consumer applied (the native-ad path
+            // disables scrollbars/overscroll and widens the viewport) so the next consumer of this
+            // shared instance (minigame, interstitial, rewarded, fallback) starts from the same
+            // platform defaults a freshly created view would have.
+            webView.isVerticalScrollBarEnabled = true
+            webView.isHorizontalScrollBarEnabled = true
+            webView.overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            webView.settings.useWideViewPort = false
+            webView.settings.loadWithOverviewMode = false
             webView.loadUrl("about:blank")
             webView.clearHistory()
             idle.addLast(webView)
