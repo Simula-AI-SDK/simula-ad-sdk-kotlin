@@ -16,7 +16,7 @@ import java.util.UUID
  *
  * JVM-only constraint: [NativeAdCache.invalidate] evicts removed FILLS through
  * [NativeAdWebViewStore], whose init needs a main Looper — so the invalidate tests here use
- * no-fill entries (which never reach the store) to exercise the same prefix-matching removal.
+ * no-fill entries (which never reach the store) to exercise the same placement-matching removal.
  * The cache is a process-wide object, so every test namespaces entries under a fresh UUID
  * adUnitId.
  */
@@ -107,6 +107,27 @@ class NativeAdCacheTest {
         assertNull(NativeAdCache.get(unit, 0, "preload-a"))
         assertNull(NativeAdCache.get(unit, 0, "preload-b"))
         assertNotNull("other positions must stay untouched", NativeAdCache.get(unit, 1, "preload-c"))
+    }
+
+    /** Bugbot regression (PR #42): with delimiter-joined string keys, an adUnitId containing the
+     * delimiter aliased another placement — ("unit:0", 5)'s plain key "unit:0:5" collided with
+     * ("unit", 0, preload "5") and prefix-matched ("unit", 0)'s invalidation, dropping an
+     * unrelated entry. Structured keys must keep the placements fully isolated. */
+    @Test
+    fun invalidateDoesNotAliasAcrossDelimiterCarryingAdUnitIds() {
+        val shortUnit = "unit-${UUID.randomUUID()}"
+        val colonUnit = "$shortUnit:0" // its (colonUnit, 5) identity string-aliased (shortUnit, 0, "5")
+
+        NativeAdCache.putNoFill(colonUnit, 5)
+        NativeAdCache.putNoFill(shortUnit, 0, preloadedAdId = "5")
+
+        NativeAdCache.invalidate(shortUnit, 0)
+
+        assertNull(NativeAdCache.get(shortUnit, 0, "5"))
+        assertNotNull(
+            "the other placement's entry must survive the invalidation",
+            NativeAdCache.get(colonUnit, 5),
+        )
     }
 
     /** The process-wide impression dedup is independent of the keying change: one fire per
