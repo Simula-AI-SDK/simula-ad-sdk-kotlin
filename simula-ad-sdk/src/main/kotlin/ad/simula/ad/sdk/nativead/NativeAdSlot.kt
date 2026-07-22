@@ -148,8 +148,10 @@ fun NativeAdSlot(
     }
 
     // Initial state from the per-slot cache so a recycled row renders the SAME ad instantly (no
-    // shimmer, no refetch). A preload id must be consumed asynchronously, so it starts Loading.
-    val cachedFill = NativeAdCache.get(adUnitId, position) as? NativeAdCache.Value.Fill
+    // shimmer, no refetch). Preload-scoped: a preloaded slot reads its own entry, which hits on
+    // remount (after the consume-once preload entry is gone) and misses on first mount (which then
+    // consumes in the effect).
+    val cachedFill = NativeAdCache.get(adUnitId, position, preloadedAdId) as? NativeAdCache.Value.Fill
     var state by remember(adUnitId, position, preloadedAdId, previewHtml) {
         mutableStateOf(initialNativeAdState(adUnitId, position, preloadedAdId, previewHtml))
     }
@@ -185,13 +187,16 @@ fun NativeAdSlot(
             return@LaunchedEffect
         }
 
-        // Caches the outcome so the next remount of this slot reuses it (no duplicate serve).
+        // Caches the outcome — under the slot's preload-scoped key when it has a [preloadedAdId] —
+        // so the next remount of this slot reuses it (no duplicate serve). The scoping keeps
+        // same-position preloaded slots (a host that never passes `position`) from overwriting each
+        // other's entry and converging to one ad as rows recycle.
         // [source] tags the fill origin for the load_success lifecycle (preload | cache | network).
         fun apply(result: SimulaApiClient.NativeAdResult, source: String, durationMs: Long? = null) {
             val hasCreative = result.adInserted &&
                 (!result.iframeUrl.isNullOrBlank() || !result.renderedHtml.isNullOrBlank())
             if (hasCreative) {
-                NativeAdCache.putFill(adUnitId, position, result)
+                NativeAdCache.putFill(adUnitId, position, result, preloadedAdId)
                 heightDp = 0f
                 impressionFired = false
                 // Start the native fill→first-paint render timer for a genuine load (network/preload);
@@ -204,7 +209,7 @@ fun NativeAdSlot(
                 reportLoadSuccess(result, source, durationMs)
             } else {
                 // No-fill: collapse the slot AND surface NoFill so the publisher can react (fallback).
-                NativeAdCache.putNoFill(adUnitId, position)
+                NativeAdCache.putNoFill(adUnitId, position, preloadedAdId)
                 state = NativeAdSlotState.Empty
                 reportError(NativeAdError.NoFill)
             }
@@ -214,7 +219,9 @@ fun NativeAdSlot(
         preloadedAdId?.let { NativeAdPreloadCache.consume(it) }?.let { apply(it, source = "preload"); return@LaunchedEffect }
 
         // 2. Per-slot cache hit → render without a network call (no duplicate serve / impression).
-        when (val cached = NativeAdCache.get(adUnitId, position)) {
+        // The lookup is preload-scoped: a preloaded slot replays ITS OWN serve here after step 1's
+        // consume-once entry is gone, even when other slots share this (adUnitId, position).
+        when (val cached = NativeAdCache.get(adUnitId, position, preloadedAdId)) {
             is NativeAdCache.Value.Fill -> {
                 heightDp = cached.heightDp
                 impressionFired = cached.impressionFired
@@ -267,7 +274,7 @@ fun NativeAdSlot(
                         if (kotlin.math.abs(px - heightDp) >= 1f) {
                             heightDp = px
                             // Persist so a recycled row sizes correctly on its first frame.
-                            (NativeAdCache.get(adUnitId, position) as? NativeAdCache.Value.Fill)?.heightDp = px
+                            (NativeAdCache.get(adUnitId, position, preloadedAdId) as? NativeAdCache.Value.Fill)?.heightDp = px
                         }
                         // Native render time (the fill→first-paint blind spot): from load-begin to the
                         // creative's first real height report (it has laid out and is on screen). Records
@@ -322,7 +329,7 @@ fun NativeAdSlot(
                         if (!impressionFired) {
                             impressionFired = true
                             // Remember it on the cache entry so a remount of the same serve never re-fires.
-                            (NativeAdCache.get(adUnitId, position) as? NativeAdCache.Value.Fill)?.impressionFired = true
+                            (NativeAdCache.get(adUnitId, position, preloadedAdId) as? NativeAdCache.Value.Fill)?.impressionFired = true
                             // Dedup by impression id too, so the same served ad fires at most one
                             // impression process-wide (e.g. shown in two slots, or re-composed). The
                             // callback + server beacon co-fire together. A preview (blank id) always fires
@@ -416,15 +423,17 @@ internal fun resolveAdTheme(theme: String?): String? = when (theme?.lowercase())
 }
 
 /** Initial slot state derived synchronously from [NativeAdCache] so a recycled row paints the cached
- * ad on its first frame (no shimmer flash). A preview / preload resolves in the effect, so starts Loading. */
+ * ad on its first frame (no shimmer flash). A preview resolves in the effect, so starts Loading. A
+ * preloaded slot reads its preload-scoped entry: a miss (first mount — the effect consumes the
+ * preload) starts Loading; a hit (remount) replays the slot's own serve same-frame. */
 private fun initialNativeAdState(
     adUnitId: String?,
     position: Int,
     preloadedAdId: String?,
     previewHtml: String?,
 ): NativeAdSlotState {
-    if (previewHtml != null || preloadedAdId != null) return NativeAdSlotState.Loading
-    return when (val cached = NativeAdCache.get(adUnitId, position)) {
+    if (previewHtml != null) return NativeAdSlotState.Loading
+    return when (val cached = NativeAdCache.get(adUnitId, position, preloadedAdId)) {
         is NativeAdCache.Value.Fill -> NativeAdSlotState.Filled(cached.result)
         NativeAdCache.Value.NoFill -> NativeAdSlotState.Empty
         null -> NativeAdSlotState.Loading

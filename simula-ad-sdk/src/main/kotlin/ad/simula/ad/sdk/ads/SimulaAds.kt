@@ -340,9 +340,11 @@ object SimulaAds {
 
     /**
      * Drop the cached ad for a native slot so its next appearance fetches a fresh one. A
-     * [ad.simula.ad.sdk.nativead.NativeAdSlot] caches its resolved ad per `(adUnitId, position)` so
-     * scrolling it out and back reuses the same serve (no duplicate request or impression); call this
-     * to force a refresh for that slot. Pass no args + [invalidateNativeAds] to clear them all.
+     * [ad.simula.ad.sdk.nativead.NativeAdSlot] caches its resolved ad per `(adUnitId, position)` —
+     * plus its `preloadedAdId` when it rendered a preload — so scrolling it out and back reuses the
+     * same serve (no duplicate request or impression); call this to force a refresh for that slot.
+     * Preload-scoped entries at this position are dropped too (the refresh intent addresses the
+     * placement). Pass no args + [invalidateNativeAds] to clear them all.
      */
     fun invalidateNativeAd(adUnitId: String? = null, position: Int = 0) {
         NativeAdCache.invalidate(adUnitId, position)
