@@ -3,14 +3,19 @@ package ad.simula.ad.sdk.nativead
 import ad.simula.ad.sdk.network.SimulaApiClient
 
 /**
- * Per-slot cache of resolved native ads, keyed by `"adUnitId:position"`.
+ * Per-slot cache of resolved native ads, keyed by `"adUnitId:position"` — extended with the slot's
+ * `preloadedAdId` (`"adUnitId:position:preloadedAdId"`) when it has one, so preloaded slots that
+ * share a position (e.g. a host that never passes `position` and leaves every slot at 0) keep
+ * distinct entries instead of clobbering one another into a single ad.
  *
  * A [NativeAdSlot] lives inside a lazy list, which disposes and recreates off-screen rows. Without
  * this cache, scrolling a slot out and back would re-run `POST /load/native` and re-fire the
  * impression every time — over-serving and inflating impression counts. With it, the first
  * appearance fetches once; every later remount renders the same ad from memory (no network, no
  * shimmer) and the impression fires exactly once per served ad. The reported height is cached too,
- * so a recycled row sizes correctly on the first frame.
+ * so a recycled row sizes correctly on the first frame. For a preloaded slot this replay is what
+ * preserves its own serve after the consume-once preload entry is gone: the preloadedAdId is the
+ * host-held slot identity, so the remount finds its own ad even when positions collide.
  *
  * The map is an access-ordered LRU bounded by [MAX_ENTRIES]: a long feed would otherwise accrue one
  * entry (each holding a full rendered creative) per scrolled-past position for the life of the
@@ -57,7 +62,12 @@ internal object NativeAdCache {
         }
     }
 
-    private fun key(adUnitId: String?, position: Int) = "${adUnitId.orEmpty()}:$position"
+    /** The slot identity: `(adUnitId, position)` plus, for a preloaded slot, its `preloadedAdId` —
+     * the extra component that keeps same-position preloaded slots from sharing one entry. */
+    private fun key(adUnitId: String?, position: Int, preloadedAdId: String?): String {
+        val base = "${adUnitId.orEmpty()}:$position"
+        return if (preloadedAdId.isNullOrEmpty()) base else "$base:$preloadedAdId"
+    }
 
     /** Atomically marks [impressionId] as having fired. Returns true only the first time, so callers
      * fire the impression (callback + server beacon) at most once per served ad. Blank ids (previews)
@@ -66,28 +76,40 @@ internal object NativeAdCache {
         impressionId.isNotBlank() && firedImpressions.add(impressionId)
     }
 
-    fun get(adUnitId: String?, position: Int): Value? =
-        synchronized(lock) { entries[key(adUnitId, position)] }
+    fun get(adUnitId: String?, position: Int, preloadedAdId: String? = null): Value? =
+        synchronized(lock) { entries[key(adUnitId, position, preloadedAdId)] }
 
-    fun putFill(adUnitId: String?, position: Int, result: SimulaApiClient.NativeAdResult): Value.Fill {
+    fun putFill(
+        adUnitId: String?,
+        position: Int,
+        result: SimulaApiClient.NativeAdResult,
+        preloadedAdId: String? = null,
+    ): Value.Fill {
         val fill = Value.Fill(result)
-        synchronized(lock) { entries[key(adUnitId, position)] = fill }
+        synchronized(lock) { entries[key(adUnitId, position, preloadedAdId)] = fill }
         return fill
     }
 
-    fun putNoFill(adUnitId: String?, position: Int) = synchronized(lock) {
-        entries[key(adUnitId, position)] = Value.NoFill
+    fun putNoFill(adUnitId: String?, position: Int, preloadedAdId: String? = null) = synchronized(lock) {
+        entries[key(adUnitId, position, preloadedAdId)] = Value.NoFill
     }
 
     fun invalidate(adUnitId: String?, position: Int) {
-        // Drop the impression-id mark too so a deliberately-refreshed slot can fire again, and free the
-        // retained WebView so the refreshed slot rebuilds instead of reattaching the stale creative.
+        // The publisher's refresh intent addresses the placement, so drop the plain entry AND every
+        // preload-scoped entry at this (adUnitId, position) — their keys extend the base with
+        // ":preloadedAdId". Drop the impression-id marks too so a deliberately-refreshed slot can
+        // fire again, and free the retained WebViews so the refreshed slot rebuilds instead of
+        // reattaching a stale creative.
+        val base = key(adUnitId, position, null)
         val removed = synchronized(lock) {
-            (entries.remove(key(adUnitId, position)) as? Value.Fill)?.also {
-                firedImpressions.remove(it.result.impressionId)
+            val doomed = entries.keys.filter { it == base || it.startsWith("$base:") }
+            doomed.mapNotNull { k ->
+                (entries.remove(k) as? Value.Fill)?.also {
+                    firedImpressions.remove(it.result.impressionId)
+                }
             }
         }
-        removed?.let { NativeAdWebViewStore.evict(it.result.impressionId) }
+        removed.forEach { NativeAdWebViewStore.evict(it.result.impressionId) }
     }
 
     fun invalidateAll() {
