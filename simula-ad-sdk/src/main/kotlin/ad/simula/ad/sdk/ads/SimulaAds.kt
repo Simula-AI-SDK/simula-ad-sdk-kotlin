@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
@@ -35,7 +36,11 @@ import java.lang.ref.WeakReference
  * server session off the critical path, and starts tracking the current Activity
  * so an interstitial can be presented from anywhere.
  *
- * All methods are intended to be called on the main thread.
+ * All methods are intended to be called on the main thread. [initialize] itself is
+ * deliberately cheap on the calling thread: the steps that do disk I/O
+ * (SharedPreferences/SQLite), telemetry-store construction, WebView prewarm, and the
+ * session warm-up run in a deferred [SimulaScope] startup, so calling from
+ * `Application.onCreate` adds no meaningful main-thread cost.
  */
 object SimulaAds {
 
@@ -137,34 +142,19 @@ object SimulaAds {
 
         // Seed the process-wide privacy store so the imperative path honors consent:
         // SimulaApiClient reads SimulaPrivacy.current for the /session/create body and
-        // per-request consent headers. attach() also wires IAB-standard CMP auto-read.
+        // per-request consent headers. Kept synchronous (in-memory) so consent ordering
+        // is guaranteed; the IAB auto-read (disk) is deferred to the startup below.
         SimulaPrivacy.apply(resolved)
-        SimulaPrivacy.attach(appContext)
 
         store = SimulaSessionStore(apiKey, devMode, primaryUserID)
 
-        // Install telemetry before the session warm-up so the /session/create call (and every
-        // subsequent SDK request) is captured. The PPID is read live from the session store so a
-        // mid-session updatePrimaryUserID is honored.
-        Telemetry.initialize(
-            context = appContext,
-            apiKey = apiKey,
-            devMode = devMode,
-            enabled = telemetryEnabled,
-            sessionIdProvider = { store.sessionId },
-            primaryUserIdProvider = { store.effectiveUserID },
-        )
-
         // Capture uncaught SDK crashes (+ ANR / native-renderer process exits on Android 11+) into
         // telemetry. Gated by the same telemetry opt-out; chains to the host's existing crash handler
-        // and only reports crashes that involve SDK code. Installed right after the pipeline so the
-        // replay of any prior-process crash has somewhere to land.
+        // and only reports crashes that involve SDK code. Kept synchronous: it is cheap (handler
+        // swap; the replay runs on IO) and installing it early maximizes the capture window.
         SimulaCrashGuard.install(appContext, enabled = telemetryEnabled)
 
         registerActivityTracking()
-
-        // Warm the session before the first load() so it's off the ad critical path.
-        SimulaScope.launch { store.ensureSession() }
 
         // Independently of session warm-up (each queued verification carries its own
         // session), drain any reward verifications a prior process left pending (e.g. a
@@ -173,42 +163,75 @@ object SimulaAds {
         // own coroutine, so a slow/failed session create can't delay or skip recovery.
         RewardVerificationManager.triggerProcessQueue(appContext)
 
-        // Durable impression/click beacon queue: build it and drain any beacons a prior process
-        // left undelivered (offline/killed). Off the telemetry pipeline; off the critical path.
-        AdBeaconManager.init(appContext, apiKey)
-        AdBeaconManager.triggerProcessQueue()
-
             // Publish last: a concurrent initialize() that observed the volatile flag as true
             // is guaranteed to see all of the above writes (lateinit store/appContext etc.).
             initialized = true
         }
 
-        // SDK-init beacon, now that telemetry is installed (no-op when telemetry is disabled). Only
-        // the first valid initialize reaches here — a redundant call returns inside the lock above.
-        // Best-effort: the config summary carries no PII and never throws into the host.
-        val initMs = (System.nanoTime() - startNanos) / 1_000_000
-        val configSummary = runCatching {
-            val c = SimulaPrivacy.current
-            "dev=$devMode tel=$telemetryEnabled consent=${c.hasPrivacyConsent} " +
-                "coppa=${c.coppaApplies} adid=${c.advertisingId != null} ctx=${adContext != null}"
-        }.getOrNull()
-        Telemetry.recordOperation(
-            name = "sdk_init",
-            durationMs = initMs,
-            success = true,
-            breadcrumb = configSummary,
-        )
+        // Deferred startup, OFF the calling thread (typically the main thread when the host
+        // initializes from Application.onCreate): the remaining steps do disk I/O
+        // (SharedPreferences first access, SQLite open/migration) or heavy one-time work
+        // (Chromium provider bring-up) that used to run inline on the caller. Ordering is
+        // preserved — IAB attach → telemetry install → beacon queue → WebView prewarm →
+        // session warm-up — so the first /session/create is built with attached consent and
+        // captured by telemetry, exactly as before.
+        SimulaScope.launch {
+            // Wire IAB-standard CMP auto-read (default-SharedPreferences first access = disk).
+            SimulaPrivacy.attach(appContext)
 
-        // SDK-upgrade beacon: compare the last-seen version to the current one. A first install just
-        // records the version (no event); a changed version emits sdk_upgrade. Best-effort, off-host.
-        runCatching {
-            val vPrefs = appContext.getSharedPreferences("simula_ad_sdk_version_prefs", Context.MODE_PRIVATE)
-            val last = vPrefs.getString("last_seen_sdk_version", null)
-            val current = ad.simula.ad.sdk.telemetry.SIMULA_SDK_VERSION
-            if (last != null && last != current) {
-                Telemetry.recordOperation(name = "sdk_upgrade", durationMs = 0, success = true, breadcrumb = "from=$last;to=$current")
+            // Install telemetry before the session warm-up so the /session/create call (and every
+            // subsequent SDK request) is captured. The PPID is read live from the session store so a
+            // mid-session updatePrimaryUserID is honored.
+            Telemetry.initialize(
+                context = appContext,
+                apiKey = apiKey,
+                devMode = devMode,
+                enabled = telemetryEnabled,
+                sessionIdProvider = { store.sessionId },
+                primaryUserIdProvider = { store.effectiveUserID },
+            )
+
+            // Durable impression/click beacon queue: build it and drain any beacons a prior process
+            // left undelivered (offline/killed). Off the telemetry pipeline; off the critical path.
+            AdBeaconManager.init(appContext, apiKey)
+            AdBeaconManager.triggerProcessQueue()
+
+            // Prewarm a WebView so the first ad/menu/native slot never pays the Chromium provider
+            // bring-up cold inside a feed layout or ad show. WebView creation must stay on the
+            // main thread; queued from here it runs after the caller's launch-critical work.
+            withContext(Dispatchers.Main) {
+                runCatching { WebViewPool.prewarm(appContext) }
             }
-            if (last != current) vPrefs.edit().putString("last_seen_sdk_version", current).apply()
+
+            // Warm the session before the first load() so it's off the ad critical path.
+            store.ensureSession()
+
+            // SDK-init beacon, now that telemetry is installed (no-op when telemetry is disabled).
+            // Best-effort: the config summary carries no PII and never throws into the host.
+            val initMs = (System.nanoTime() - startNanos) / 1_000_000
+            val configSummary = runCatching {
+                val c = SimulaPrivacy.current
+                "dev=$devMode tel=$telemetryEnabled consent=${c.hasPrivacyConsent} " +
+                    "coppa=${c.coppaApplies} adid=${c.advertisingId != null} ctx=${adContext != null}"
+            }.getOrNull()
+            Telemetry.recordOperation(
+                name = "sdk_init",
+                durationMs = initMs,
+                success = true,
+                breadcrumb = configSummary,
+            )
+
+            // SDK-upgrade beacon: compare the last-seen version to the current one. A first install
+            // just records the version (no event); a changed version emits sdk_upgrade. Best-effort.
+            runCatching {
+                val vPrefs = appContext.getSharedPreferences("simula_ad_sdk_version_prefs", Context.MODE_PRIVATE)
+                val last = vPrefs.getString("last_seen_sdk_version", null)
+                val current = ad.simula.ad.sdk.telemetry.SIMULA_SDK_VERSION
+                if (last != null && last != current) {
+                    Telemetry.recordOperation(name = "sdk_upgrade", durationMs = 0, success = true, breadcrumb = "from=$last;to=$current")
+                }
+                if (last != current) vPrefs.edit().putString("last_seen_sdk_version", current).apply()
+            }
         }
     }
 

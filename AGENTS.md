@@ -91,7 +91,8 @@ SimulaScope.launch { queue.processPending() }
 
 ## Non-negotiable behaviors
 
-- **Provider/imperative parity**: `SimulaProvider` and `SimulaAds.initialize` must perform identical priming (`SimulaUserAgent.build`, `SimulaDeviceId.prime`, `SimulaConnectionType.prime`), privacy resolution, session setup, and telemetry install. A change to one is a change to both.
+- **Provider/imperative parity**: `SimulaProvider` and `SimulaAds.initialize` must perform identical priming (`SimulaUserAgent.build`, `SimulaDeviceId.prime`, `SimulaConnectionType.prime`), privacy resolution, session setup, and telemetry install. A change to one is a change to both. Timing may differ (both defer I/O off the critical path: `SimulaAds.initialize` via its `SimulaScope` startup, the composable via `LaunchedEffect`), but the ordered outcome — consent applied and telemetry installed before the first request — must not.
+- **Deferred startup**: `SimulaAds.initialize` keeps the calling thread (usually main, from `Application.onCreate`) free of disk I/O — `SimulaPrivacy.attach`, `Telemetry.initialize` (SQLite), the beacon-queue build, `WebViewPool.prewarm`, and the session warm-up run in the `SimulaScope` startup block in that order. Keep heavy one-time work there, not inline in `initialize`.
 - **Uninitialized SDK**: return null / render blank / log one warning. `require()` only at documented init boundaries.
 - **WebView render-process death**: absorb and report (`webview:render_gone`); returning "unhandled" kills the host process.
 - **Durable work** (beacons, reward verification, telemetry): serializable item + persistent store + backoff (drop permanent 4xx, retry transient) + `triggerProcessQueue()` on init for process recovery.
