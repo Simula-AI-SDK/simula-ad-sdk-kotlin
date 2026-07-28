@@ -172,27 +172,31 @@ object SimulaAds {
         // exactly as before. Each step fails open independently: telemetry/consent
         // infrastructure must never break ads.
         SimulaScope.launch {
-            // Wire IAB-standard CMP auto-read (default-SharedPreferences first access = disk).
-            runCatching { SimulaPrivacy.attach(appContext) }
+            try {
+                // Wire IAB-standard CMP auto-read (default-SharedPreferences first access = disk).
+                runCatching { SimulaPrivacy.attach(appContext) }
 
-            // Install telemetry before the session warm-up so the /session/create call (and every
-            // subsequent SDK request) is captured. The PPID is read live from the session store so a
-            // mid-session updatePrimaryUserID is honored.
-            runCatching {
-                Telemetry.initialize(
-                    context = appContext,
-                    apiKey = apiKey,
-                    devMode = devMode,
-                    enabled = telemetryEnabled,
-                    sessionIdProvider = { store.sessionId },
-                    primaryUserIdProvider = { store.effectiveUserID },
-                )
+                // Install telemetry before the session warm-up so the /session/create call (and every
+                // subsequent SDK request) is captured. The PPID is read live from the session store so a
+                // mid-session updatePrimaryUserID is honored.
+                runCatching {
+                    Telemetry.initialize(
+                        context = appContext,
+                        apiKey = apiKey,
+                        devMode = devMode,
+                        enabled = telemetryEnabled,
+                        sessionIdProvider = { store.sessionId },
+                        primaryUserIdProvider = { store.effectiveUserID },
+                    )
+                }
+            } finally {
+                // Release session waiters (see SimulaSessionStore.startupGate) no matter what —
+                // a dead/cancelled startup coroutine must never leave ensureSession callers
+                // blocked forever. Consent and telemetry are now in place (or failed open —
+                // never worth breaking ads over). MUST precede the warm-up below, which awaits
+                // this same gate.
+                gate.complete(Unit)
             }
-
-            // Release session waiters (see SimulaSessionStore.startupGate): consent and telemetry
-            // are now in place (or failed open — never worth breaking ads over). MUST precede the
-            // warm-up below, which awaits this same gate.
-            gate.complete(Unit)
 
             // Capture uncaught SDK crashes (+ ANR / native-renderer process exits on Android 11+)
             // into telemetry. AFTER Telemetry.initialize: install replays any prior-process crash
@@ -207,25 +211,17 @@ object SimulaAds {
             // crash/kill before a verify could land) so their server-side SSV postbacks fire
             // without waiting for the next rewarded play. After the IAB attach so recovery
             // requests carry current consent headers.
-            RewardVerificationManager.triggerProcessQueue(appContext)
+            runCatching { RewardVerificationManager.triggerProcessQueue(appContext) }
 
             // Durable impression/click beacon queue: build it and drain any beacons a prior process
             // left undelivered (offline/killed). Off the telemetry pipeline; off the critical path.
-            AdBeaconManager.init(appContext, apiKey)
+            runCatching { AdBeaconManager.init(appContext, apiKey) }
             AdBeaconManager.triggerProcessQueue()
 
-            // Prewarm a WebView so the first ad/menu/native slot never pays the Chromium provider
-            // bring-up cold inside a feed layout or ad show. WebView creation must stay on the
-            // main thread; queued from here it runs after the caller's launch-critical work.
-            withContext(Dispatchers.Main) {
-                runCatching { WebViewPool.prewarm(appContext) }
-            }
-
-            // Warm the session before the first load() so it's off the ad critical path.
-            store.ensureSession()
-
-            // SDK-init beacon, now that telemetry is installed (no-op when telemetry is disabled).
-            // Best-effort: the config summary carries no PII and never throws into the host.
+            // SDK-init + SDK-upgrade beacons BEFORE the WebView prewarm and the session warm-up,
+            // so sdk_init measures startup work only — not the Web Content process bring-up or
+            // the /session/create network round-trip (parity with iOS, which records both beacons
+            // ahead of session warm-up).
             val initMs = (System.nanoTime() - startNanos) / 1_000_000
             val configSummary = runCatching {
                 val c = SimulaPrivacy.current
@@ -238,9 +234,6 @@ object SimulaAds {
                 success = true,
                 breadcrumb = configSummary,
             )
-
-            // SDK-upgrade beacon: compare the last-seen version to the current one. A first install
-            // just records the version (no event); a changed version emits sdk_upgrade. Best-effort.
             runCatching {
                 val vPrefs = appContext.getSharedPreferences("simula_ad_sdk_version_prefs", Context.MODE_PRIVATE)
                 val last = vPrefs.getString("last_seen_sdk_version", null)
@@ -250,6 +243,16 @@ object SimulaAds {
                 }
                 if (last != current) vPrefs.edit().putString("last_seen_sdk_version", current).apply()
             }
+
+            // Prewarm a WebView so the first ad/menu/native slot never pays the Chromium provider
+            // bring-up cold inside a feed layout or ad show. WebView creation must stay on the
+            // main thread; queued from here it runs after the caller's launch-critical work.
+            withContext(Dispatchers.Main) {
+                runCatching { WebViewPool.prewarm(appContext) }
+            }
+
+            // Warm the session before the first load() so it's off the ad critical path.
+            store.ensureSession()
         }
     }
 
