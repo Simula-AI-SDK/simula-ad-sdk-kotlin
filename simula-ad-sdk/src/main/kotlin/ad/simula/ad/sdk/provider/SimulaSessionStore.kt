@@ -59,12 +59,11 @@ internal class SimulaSessionStore(
 
     /**
      * Optional startup gate, awaited once per [ensureSession] call before any session work.
-     * Set only by `SimulaAds.initialize`, which defers its disk/telemetry startup off the
-     * calling thread: the gate guarantees the documented "consent attached + telemetry
-     * installed before the first request" ordering for a host that fires an ad load
-     * immediately after `initialize` returns. Null for the declarative path (which does
-     * its own priming) and completed before the startup's own session warm-up, so neither
-     * can deadlock. Completed even on startup failure (fail-open to the pre-gate behavior).
+     * Wired from `SimulaAds.startupGate` (see its doc): by `SimulaAds.initialize` for the
+     * imperative store, and by the declarative `SimulaProvider` for its own store — so no
+     * entry path can fire a request ahead of consent attach + telemetry install. Null for
+     * declarative-only hosts and completed before the startup's own session warm-up, so
+     * neither can deadlock. Completed even on startup failure (fail-open).
      */
     var startupGate: CompletableDeferred<Unit>? = null
 

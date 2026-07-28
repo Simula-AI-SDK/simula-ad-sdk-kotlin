@@ -57,6 +57,16 @@ object SimulaAds {
     internal lateinit var store: SimulaSessionStore
         private set
 
+    /**
+     * The deferred-startup gate of the current [initialize] run — completes once consent
+     * (IAB attach) and telemetry are in place, and always before the startup's own session
+     * warm-up. Null before [initialize] (e.g. declarative-only hosts). The declarative
+     * `SimulaProvider` wires it into its own [SimulaSessionStore] so a session created from
+     * composition can't race ahead of the imperative startup either.
+     */
+    internal var startupGate: CompletableDeferred<Unit>? = null
+        private set
+
     // Character context is no longer global: pass charId/charName/charImage/charDesc
     // to each `SimulaInterstitialAd.load()` / `SimulaRewardedAd.load()` call instead.
 
@@ -154,6 +164,7 @@ object SimulaAds {
 
         store = SimulaSessionStore(apiKey, devMode, primaryUserID)
         store.startupGate = gate
+        this.startupGate = gate
 
         registerActivityTracking()
 

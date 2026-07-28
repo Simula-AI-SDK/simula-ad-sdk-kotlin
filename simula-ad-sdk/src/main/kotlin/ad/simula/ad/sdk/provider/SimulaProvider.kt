@@ -265,7 +265,13 @@ fun SimulaProvider(
     // the session and the backend sees current signals. Coalesces concurrent
     // creation, retryable on failure.
     val sessionStore = remember(apiKey, devMode, sessionConsent) {
-        SimulaSessionStore(apiKey, devMode, effectiveUserID)
+        SimulaSessionStore(apiKey, devMode, effectiveUserID).apply {
+            // A host that also called SimulaAds.initialize: hold this store's first session
+            // until the imperative startup has attached IAB consent AND installed telemetry
+            // (the same ordering SimulaAds.store gets). Null for declarative-only hosts —
+            // no gate, matching the pre-existing behavior.
+            startupGate = SimulaAds.startupGate
+        }
     }
 
     // Delegate cache + context construction to the shared builder. The imperative
@@ -301,8 +307,13 @@ internal fun ProvideSimulaContext(
     val heightCache = remember { boundedLruMap<String, Float>(MAX_AD_CACHE_ENTRIES) }
     val noFillSet = remember { boundedLruSet(MAX_AD_CACHE_ENTRIES) }
 
-    // Kick off session creation off the critical path (idempotent / coalesced).
+    // Kick off session creation off the critical path (idempotent / coalesced). The IAB
+    // attach runs first IN THE SAME coroutine: it's idempotent (cheap once any entry path
+    // already attached) and guarantees consent headers are merged before the first
+    // /session/create — the two independent LaunchedEffects could otherwise race.
+    val context = LocalContext.current
     LaunchedEffect(store) {
+        SimulaPrivacy.attach(context)
         store.ensureSession()
     }
 
