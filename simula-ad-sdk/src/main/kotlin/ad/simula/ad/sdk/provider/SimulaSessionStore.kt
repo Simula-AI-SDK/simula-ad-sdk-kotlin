@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.telemetry.Telemetry
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
@@ -55,6 +56,17 @@ internal class SimulaSessionStore(
 
     private val mutex = Mutex()
     private var sessionDeferred: Deferred<String?>? = null
+
+    /**
+     * Optional startup gate, awaited once per [ensureSession] call before any session work.
+     * Set only by `SimulaAds.initialize`, which defers its disk/telemetry startup off the
+     * calling thread: the gate guarantees the documented "consent attached + telemetry
+     * installed before the first request" ordering for a host that fires an ad load
+     * immediately after `initialize` returns. Null for the declarative path (which does
+     * its own priming) and completed before the startup's own session warm-up, so neither
+     * can deadlock. Completed even on startup failure (fail-open to the pre-gate behavior).
+     */
+    var startupGate: CompletableDeferred<Unit>? = null
 
     // Serializes PPID reconciliation so at most one PATCH is ever in flight. The server then applies
     // updates in submission order (no reordering), which is what lets [sessionUserID] be advanced
@@ -121,6 +133,11 @@ internal class SimulaSessionStore(
 
     suspend fun ensureSession(): String? {
         sessionId?.takeIf { it.isNotBlank() }?.let { return it }
+
+        // See the property doc: a host load fired right after SimulaAds.initialize waits here
+        // until consent (IAB) is attached and telemetry is installed. Already-complete for the
+        // startup's own warm-up and in steady state, so this is free on the hot path.
+        startupGate?.await()
 
         val deferred = mutex.withLock {
             sessionId?.let { if (it.isNotBlank()) return it }

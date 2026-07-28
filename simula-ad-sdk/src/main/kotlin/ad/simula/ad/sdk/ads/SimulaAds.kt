@@ -24,6 +24,7 @@ import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Bundle
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -113,6 +114,11 @@ object SimulaAds {
         // Double-checked under a lock so two concurrent initialize() calls can't both run the body
         // and double-init (e.g. two session warm-ups, two activity-tracking registrations). The
         // require() above stays outside the lock so a blank key still fails fast on every call.
+        //
+        // Gate released once the deferred startup has attached consent + installed telemetry
+        // (see SimulaSessionStore.startupGate) — a host ad-load fired immediately after this
+        // call returns still can't race a request out ahead of them.
+        val gate = CompletableDeferred<Unit>()
         synchronized(this) {
             if (initialized) return
 
@@ -147,21 +153,9 @@ object SimulaAds {
         SimulaPrivacy.apply(resolved)
 
         store = SimulaSessionStore(apiKey, devMode, primaryUserID)
-
-        // Capture uncaught SDK crashes (+ ANR / native-renderer process exits on Android 11+) into
-        // telemetry. Gated by the same telemetry opt-out; chains to the host's existing crash handler
-        // and only reports crashes that involve SDK code. Kept synchronous: it is cheap (handler
-        // swap; the replay runs on IO) and installing it early maximizes the capture window.
-        SimulaCrashGuard.install(appContext, enabled = telemetryEnabled)
+        store.startupGate = gate
 
         registerActivityTracking()
-
-        // Independently of session warm-up (each queued verification carries its own
-        // session), drain any reward verifications a prior process left pending (e.g. a
-        // crash/kill before a verify could land) so their server-side SSV postbacks fire
-        // without waiting for the next rewarded play. triggerProcessQueue launches its
-        // own coroutine, so a slow/failed session create can't delay or skip recovery.
-        RewardVerificationManager.triggerProcessQueue(appContext)
 
             // Publish last: a concurrent initialize() that observed the volatile flag as true
             // is guaranteed to see all of the above writes (lateinit store/appContext etc.).
@@ -172,24 +166,48 @@ object SimulaAds {
         // initializes from Application.onCreate): the remaining steps do disk I/O
         // (SharedPreferences first access, SQLite open/migration) or heavy one-time work
         // (Chromium provider bring-up) that used to run inline on the caller. Ordering is
-        // preserved — IAB attach → telemetry install → beacon queue → WebView prewarm →
-        // session warm-up — so the first /session/create is built with attached consent and
-        // captured by telemetry, exactly as before.
+        // preserved — IAB attach → telemetry install → crash-guard install (its replay records
+        // into telemetry) → recovery/beacon drains → WebView prewarm → session warm-up — so
+        // the first /session/create is built with attached consent and captured by telemetry,
+        // exactly as before. Each step fails open independently: telemetry/consent
+        // infrastructure must never break ads.
         SimulaScope.launch {
             // Wire IAB-standard CMP auto-read (default-SharedPreferences first access = disk).
-            SimulaPrivacy.attach(appContext)
+            runCatching { SimulaPrivacy.attach(appContext) }
 
             // Install telemetry before the session warm-up so the /session/create call (and every
             // subsequent SDK request) is captured. The PPID is read live from the session store so a
             // mid-session updatePrimaryUserID is honored.
-            Telemetry.initialize(
-                context = appContext,
-                apiKey = apiKey,
-                devMode = devMode,
-                enabled = telemetryEnabled,
-                sessionIdProvider = { store.sessionId },
-                primaryUserIdProvider = { store.effectiveUserID },
-            )
+            runCatching {
+                Telemetry.initialize(
+                    context = appContext,
+                    apiKey = apiKey,
+                    devMode = devMode,
+                    enabled = telemetryEnabled,
+                    sessionIdProvider = { store.sessionId },
+                    primaryUserIdProvider = { store.effectiveUserID },
+                )
+            }
+
+            // Release session waiters (see SimulaSessionStore.startupGate): consent and telemetry
+            // are now in place (or failed open — never worth breaking ads over). MUST precede the
+            // warm-up below, which awaits this same gate.
+            gate.complete(Unit)
+
+            // Capture uncaught SDK crashes (+ ANR / native-renderer process exits on Android 11+)
+            // into telemetry. AFTER Telemetry.initialize: install replays any prior-process crash
+            // records into the pipeline, and a record landing before the manager exists would be
+            // permanently dropped (the ordering SimulaCrashGuard.install documents).
+            withContext(Dispatchers.Main) {
+                runCatching { SimulaCrashGuard.install(appContext, enabled = telemetryEnabled) }
+            }
+
+            // Independently of session warm-up (each queued verification carries its own
+            // session), drain any reward verifications a prior process left pending (e.g. a
+            // crash/kill before a verify could land) so their server-side SSV postbacks fire
+            // without waiting for the next rewarded play. After the IAB attach so recovery
+            // requests carry current consent headers.
+            RewardVerificationManager.triggerProcessQueue(appContext)
 
             // Durable impression/click beacon queue: build it and drain any beacons a prior process
             // left undelivered (offline/killed). Off the telemetry pipeline; off the critical path.
