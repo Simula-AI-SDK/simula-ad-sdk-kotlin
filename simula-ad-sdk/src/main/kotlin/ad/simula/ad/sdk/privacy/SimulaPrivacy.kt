@@ -1,12 +1,16 @@
 package ad.simula.ad.sdk.privacy
 
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.lang.reflect.InvocationTargetException
 
 /**
  * Process-wide consent store and source of truth for the SDK's privacy signals.
@@ -50,6 +54,12 @@ object SimulaPrivacy {
     // The collection-enabled gate (enableAdvertisingId && !coppaApplies) used for the last refresh,
     // so a consent change forces an immediate re-read regardless of the TTL. null = never refreshed.
     @Volatile private var lastGaidEnabled: Boolean? = null
+
+    // Serializes concurrent refresh triggers (startup + ON_RESUME + provider effects can overlap):
+    // the winner reads from Play Services while the others WAIT for it — a caller returning from
+    // [refreshAdvertisingId] must find the GAID state settled (sequenced callers, e.g. a session
+    // create that follows, rely on that).
+    private val gaidRefreshMutex = Mutex()
 
     private const val ZERO_GAID = "00000000-0000-0000-0000-000000000000"
 
@@ -160,6 +170,11 @@ object SimulaPrivacy {
      * because the Play Services call blocks; safe to call from a `LaunchedEffect`.
      * Gracefully no-ops (id stays null) when Play Services is absent or ad
      * personalization is limited.
+     *
+     * Returns with the GAID state settled: concurrent callers coalesce onto the
+     * in-flight read (double-checked under [gaidRefreshMutex]) instead of racing a
+     * second one, so a caller that sequences work after this function (e.g. a
+     * `/session/create`) sees the refreshed value.
      */
     suspend fun refreshAdvertisingId() {
         val enabled: Boolean
@@ -169,19 +184,22 @@ object SimulaPrivacy {
             ctx = appContext
         }
 
-        // Throttle the reflective Play Services lookup. The first call always proceeds
-        // (lastGaidEnabled == null), and any change to the collection gate forces an immediate
-        // re-read; otherwise honor the TTL so a frequently-foregrounded app doesn't re-read on
-        // every ON_RESUME (the id is stable within the window). When collection is disabled we
-        // still fall through to null out the id below — that path doesn't touch Play Services.
+        // Throttle the reflective Play Services lookup (see shouldReadGaidNow): the first
+        // call always proceeds, any change to the collection gate forces an immediate
+        // re-read, and the disabled path always falls through to null out the id below —
+        // that path doesn't touch Play Services.
         val now = System.currentTimeMillis()
-        val gateChanged = lastGaidEnabled != enabled
-        if (enabled && !gateChanged && now - lastGaidRefreshAt < GAID_REFRESH_TTL_MS) return
+        if (!shouldReadGaidNow(enabled, lastGaidEnabled, lastGaidRefreshAt, now, GAID_REFRESH_TTL_MS)) return
 
-        val id = if (enabled && ctx != null) withContext(Dispatchers.IO) { readGaid(ctx) } else null
-        synchronized(lock) { collectedAdvertisingId = id }
-        lastGaidEnabled = enabled
-        lastGaidRefreshAt = now
+        gaidRefreshMutex.withLock {
+            // Double-checked under the mutex: a concurrent caller that just finished already
+            // refreshed, so skip the duplicate binder read but still return after its write.
+            if (!shouldReadGaidNow(enabled, lastGaidEnabled, lastGaidRefreshAt, now, GAID_REFRESH_TTL_MS)) return
+            val id = if (enabled && ctx != null) withContext(Dispatchers.IO) { readGaid(ctx) } else null
+            synchronized(lock) { collectedAdvertisingId = id }
+            lastGaidEnabled = enabled
+            lastGaidRefreshAt = now
+        }
         recompute()
     }
 
@@ -268,11 +286,42 @@ object SimulaPrivacy {
             if (limited) return null
             (infoClass.getMethod("getId").invoke(info) as? String)
                 ?.takeIf { it.isNotEmpty() && it != ZERO_GAID }
-        } catch (_: Throwable) {
+        } catch (_: ClassNotFoundException) {
+            // play-services-ads-identifier genuinely absent from the host — an expected,
+            // supported configuration (the dependency is optional), so stay silent.
+            null
+        } catch (t: Throwable) {
+            // Anything else is unexpected: Play Services is present but the call failed
+            // (transient binder failure), or a minified host build renamed the reflectively
+            // read members. Record so the failure is visible in the field instead of
+            // silently degrading to a null GAID; deduped by signature in the pipeline.
+            // Unwrap the reflection wrapper so the real cause is what gets reported.
+            val cause = (t as? InvocationTargetException)?.targetException ?: t
+            Telemetry.recordError(
+                signature = "privacy:gaid_read_failed",
+                errorCode = cause::class.java.simpleName,
+                message = cause.message,
+            )
             null
         }
     }
 }
+
+/**
+ * The GAID refresh gate (pure, JVM-testable). Returns true when a Play Services re-read
+ * should happen now: on the first call ([lastEnabled] null), whenever the collection
+ * gate flipped (consent/COPPA change forces an immediate re-read regardless of TTL),
+ * once the TTL has expired — and always when collection is disabled, so the caller
+ * falls through and clears any previously collected id (that path never touches Play
+ * Services).
+ */
+internal fun shouldReadGaidNow(
+    enabled: Boolean,
+    lastEnabled: Boolean?,
+    lastRefreshAtMs: Long,
+    nowMs: Long,
+    ttlMs: Long,
+): Boolean = !enabled || lastEnabled != enabled || nowMs - lastRefreshAtMs >= ttlMs
 
 /**
  * Normalizes `IABGPP_GppSID` to a comma-separated string of section IDs across the

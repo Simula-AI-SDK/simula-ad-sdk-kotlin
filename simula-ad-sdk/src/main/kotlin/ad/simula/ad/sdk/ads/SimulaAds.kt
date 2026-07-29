@@ -132,41 +132,41 @@ object SimulaAds {
         synchronized(this) {
             if (initialized) return
 
-        appContext = context.applicationContext
-        this.apiKey = apiKey
-        this.devMode = devMode
+            appContext = context.applicationContext
+            this.apiKey = apiKey
+            this.devMode = devMode
 
-        // Seed the process-wide native-ad targeting context so every POST /load/native carries it.
-        NativeAdContextStore.set(adContext)
+            // Seed the process-wide native-ad targeting context so every POST /load/native carries it.
+            NativeAdContextStore.set(adContext)
 
-        // Build the custom User-Agent once (cheap, Build statics); SimulaHttp stamps it on every
-        // request. The device id is a synchronous ContentProvider read, so it's resolved off the
-        // main thread via prime() to keep it off the app-start critical path.
-        SimulaUserAgent.build(appContext)
-        SimulaDeviceId.prime(appContext)
-        // Independent of telemetryEnabled: the X-Connection-Type header is a first-party-request
-        // signal, not a telemetry one, so it must work even when telemetry is disabled.
-        SimulaConnectionType.prime(appContext)
-        // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
-        // request. Also a first-party-request signal, primed off the critical path.
-        SimulaDeviceSignals.prime(appContext)
+            // Build the custom User-Agent once (cheap, Build statics); SimulaHttp stamps it on every
+            // request. The device id is a synchronous ContentProvider read, so it's resolved off the
+            // main thread via prime() to keep it off the app-start critical path.
+            SimulaUserAgent.build(appContext)
+            SimulaDeviceId.prime(appContext)
+            // Independent of telemetryEnabled: the X-Connection-Type header is a first-party-request
+            // signal, not a telemetry one, so it must work even when telemetry is disabled.
+            SimulaConnectionType.prime(appContext)
+            // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
+            // request. Also a first-party-request signal, primed off the critical path.
+            SimulaDeviceSignals.prime(appContext)
 
-        // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
-        // seeds it — identical resolution to SimulaProvider, so the imperative and
-        // declarative entry points present the same consent signals.
-        val resolved = privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
+            // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
+            // seeds it — identical resolution to SimulaProvider, so the imperative and
+            // declarative entry points present the same consent signals.
+            val resolved = privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
 
-        // Seed the process-wide privacy store so the imperative path honors consent:
-        // SimulaApiClient reads SimulaPrivacy.current for the /session/create body and
-        // per-request consent headers. Kept synchronous (in-memory) so consent ordering
-        // is guaranteed; the IAB auto-read (disk) is deferred to the startup below.
-        SimulaPrivacy.apply(resolved)
+            // Seed the process-wide privacy store so the imperative path honors consent:
+            // SimulaApiClient reads SimulaPrivacy.current for the /session/create body and
+            // per-request consent headers. Kept synchronous (in-memory) so consent ordering
+            // is guaranteed; the IAB auto-read (disk) is deferred to the startup below.
+            SimulaPrivacy.apply(resolved)
 
-        store = SimulaSessionStore(apiKey, devMode, primaryUserID)
-        store.startupGate = gate
-        this.startupGate = gate
+            store = SimulaSessionStore(apiKey, devMode, primaryUserID)
+            store.startupGate = gate
+            this.startupGate = gate
 
-        registerActivityTracking()
+            registerActivityTracking()
 
             // Publish last: a concurrent initialize() that observed the volatile flag as true
             // is guaranteed to see all of the above writes (lateinit store/appContext etc.).
@@ -177,25 +177,20 @@ object SimulaAds {
         // initializes from Application.onCreate): the remaining steps do disk I/O
         // (SharedPreferences first access, SQLite open/migration) or heavy one-time work
         // (Chromium provider bring-up) that used to run inline on the caller. Ordering is
-        // preserved — IAB attach → telemetry install → crash-guard install (its replay records
-        // into telemetry) → recovery/beacon drains → WebView prewarm → session warm-up — so
-        // the first /session/create is built with attached consent and captured by telemetry,
-        // exactly as before. Each step fails open independently: telemetry/consent
-        // infrastructure must never break ads.
+        // preserved — IAB attach → telemetry install → initial GAID read → crash-guard
+        // install (its replay records into telemetry) → recovery/beacon drains → WebView
+        // prewarm → session warm-up — so the first /session/create is built with attached
+        // consent + collected GAID and captured by telemetry, exactly as before. Each step
+        // fails open independently: telemetry/consent infrastructure must never break ads.
         SimulaScope.launch {
             try {
                 // Wire IAB-standard CMP auto-read (default-SharedPreferences first access = disk).
                 runCatching { SimulaPrivacy.attach(appContext) }
 
-                // Initial GAID read (throttled internally; no-op when the host didn't opt in
-                // via enableAdvertisingId, when the user limits ad tracking, or when the
-                // play-services-ads-identifier dep is absent). Mirrors the SimulaProvider
-                // path — without this the imperative entry point never collects a GAID.
-                runCatching { SimulaPrivacy.refreshAdvertisingId() }
-
-                // Install telemetry before the session warm-up so the /session/create call (and every
-                // subsequent SDK request) is captured. The PPID is read live from the session store so a
-                // mid-session updatePrimaryUserID is honored.
+                // Install telemetry before the GAID read and the session warm-up: the read can
+                // then report a failure (privacy:gaid_read_failed), and /session/create (and
+                // every subsequent SDK request) is captured. The PPID is read live from the
+                // session store so a mid-session updatePrimaryUserID is honored.
                 runCatching {
                     Telemetry.initialize(
                         context = appContext,
@@ -206,6 +201,13 @@ object SimulaAds {
                         primaryUserIdProvider = { store.effectiveUserID },
                     )
                 }
+
+                // Initial GAID read (coalesced + throttled internally; no-op when the host
+                // didn't opt in via enableAdvertisingId, when the user limits ad tracking, or
+                // when the play-services-ads-identifier dep is absent). Returns with the GAID
+                // state settled, so the session warm-up below (and any gated host load) carries
+                // the id on the first /session/create.
+                runCatching { SimulaPrivacy.refreshAdvertisingId() }
             } finally {
                 // Release session waiters (see SimulaSessionStore.startupGate) no matter what —
                 // a dead/cancelled startup coroutine must never leave ensureSession callers
@@ -233,7 +235,7 @@ object SimulaAds {
             // Durable impression/click beacon queue: build it and drain any beacons a prior process
             // left undelivered (offline/killed). Off the telemetry pipeline; off the critical path.
             runCatching { AdBeaconManager.init(appContext, apiKey) }
-            AdBeaconManager.triggerProcessQueue()
+            runCatching { AdBeaconManager.triggerProcessQueue() }
 
             // SDK-init + SDK-upgrade beacons BEFORE the WebView prewarm and the session warm-up,
             // so sdk_init measures startup work only — not the Web Content process bring-up or

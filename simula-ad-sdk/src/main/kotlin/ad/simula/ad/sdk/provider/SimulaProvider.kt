@@ -228,12 +228,24 @@ fun SimulaProvider(
     // Seed the store synchronously during composition so the FIRST session
     // reflects the explicit config (correct ppid gating) rather than the default
     // snapshot — avoids an initial consent-less /session/create.
+    //
+    // Mixed hosts (SimulaAds.initialize + SimulaProvider): a provider WITHOUT an
+    // explicit privacy config must not re-seed defaults over the imperative config —
+    // apply() replaces the store wholesale, which would wipe enableAdvertisingId and
+    // any GAID the imperative startup already collected. An explicit provider config
+    // always wins (deliberate host choice); declarative-only hosts always seed.
     remember(resolvedConfig) {
-        SimulaPrivacy.apply(resolvedConfig)
+        if (privacy != null || !SimulaAds.isInitialized) {
+            SimulaPrivacy.apply(resolvedConfig)
+        }
         resolvedConfig
     }
 
-    // Attach for IAB auto-read and (re)read the GAID — off the first frame.
+    // Attach for IAB auto-read and re-read the GAID whenever the resolved config changes —
+    // off the first frame. The initial-composition read ALSO runs inside ProvideSimulaContext
+    // (sequenced ahead of the first /session/create); this effect additionally covers config
+    // changes that don't alter the consent snapshot (e.g. an enableAdvertisingId toggle is
+    // not a ConsentSnapshot field), which wouldn't retrigger that effect.
     LaunchedEffect(context, resolvedConfig) {
         SimulaPrivacy.attach(context)
         SimulaPrivacy.refreshAdvertisingId()
@@ -308,12 +320,15 @@ internal fun ProvideSimulaContext(
     val noFillSet = remember { boundedLruSet(MAX_AD_CACHE_ENTRIES) }
 
     // Kick off session creation off the critical path (idempotent / coalesced). The IAB
-    // attach runs first IN THE SAME coroutine: it's idempotent (cheap once any entry path
-    // already attached) and guarantees consent headers are merged before the first
-    // /session/create — the two independent LaunchedEffects could otherwise race.
+    // attach and the initial GAID read run first IN THE SAME coroutine: both are idempotent
+    // (cheap once any entry path already ran them) and guarantee consent headers AND the
+    // collected advertising id are merged before the first /session/create snapshots the
+    // privacy block — independent LaunchedEffects could otherwise fire the session ahead of
+    // the GAID read, and the backend ties the privacy block to the session at creation.
     val context = LocalContext.current
     LaunchedEffect(store) {
         SimulaPrivacy.attach(context)
+        SimulaPrivacy.refreshAdvertisingId()
         store.ensureSession()
     }
 
