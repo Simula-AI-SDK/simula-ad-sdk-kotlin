@@ -175,6 +175,11 @@ object SimulaPrivacy {
      * in-flight read (double-checked under [gaidRefreshMutex]) instead of racing a
      * second one, so a caller that sequences work after this function (e.g. a
      * `/session/create`) sees the refreshed value.
+     *
+     * When collection is enabled but [attach] hasn't supplied a context yet (e.g. an
+     * ON_RESUME fired ahead of the deferred startup attach), the call is a no-op that
+     * deliberately does NOT consume the freshness stamp — the next trigger retries,
+     * instead of the first real read being throttled away for the full TTL.
      */
     suspend fun refreshAdvertisingId() {
         val enabled: Boolean
@@ -189,12 +194,12 @@ object SimulaPrivacy {
         // re-read, and the disabled path always falls through to null out the id below —
         // that path doesn't touch Play Services.
         val now = System.currentTimeMillis()
-        if (!shouldReadGaidNow(enabled, lastGaidEnabled, lastGaidRefreshAt, now, GAID_REFRESH_TTL_MS)) return
+        if (!shouldReadGaidNow(enabled, ctx != null, lastGaidEnabled, lastGaidRefreshAt, now, GAID_REFRESH_TTL_MS)) return
 
         gaidRefreshMutex.withLock {
             // Double-checked under the mutex: a concurrent caller that just finished already
             // refreshed, so skip the duplicate binder read but still return after its write.
-            if (!shouldReadGaidNow(enabled, lastGaidEnabled, lastGaidRefreshAt, now, GAID_REFRESH_TTL_MS)) return
+            if (!shouldReadGaidNow(enabled, ctx != null, lastGaidEnabled, lastGaidRefreshAt, now, GAID_REFRESH_TTL_MS)) return
             val id = if (enabled && ctx != null) withContext(Dispatchers.IO) { readGaid(ctx) } else null
             synchronized(lock) { collectedAdvertisingId = id }
             lastGaidEnabled = enabled
@@ -314,14 +319,24 @@ object SimulaPrivacy {
  * once the TTL has expired — and always when collection is disabled, so the caller
  * falls through and clears any previously collected id (that path never touches Play
  * Services).
+ *
+ * Enabled but [contextAttached] false (attach() is deferred past `initialize`, so an
+ * early ON_RESUME can arrive first) returns false WITHOUT consuming the gate/TTL: the
+ * caller skips the read and the next trigger retries. Proceeding here would record a
+ * null id and stamp the freshness window, throttling the first real read away for the
+ * full TTL — and the first `/session/create` would carry no GAID.
  */
 internal fun shouldReadGaidNow(
     enabled: Boolean,
+    contextAttached: Boolean,
     lastEnabled: Boolean?,
     lastRefreshAtMs: Long,
     nowMs: Long,
     ttlMs: Long,
-): Boolean = !enabled || lastEnabled != enabled || nowMs - lastRefreshAtMs >= ttlMs
+): Boolean {
+    if (enabled && !contextAttached) return false
+    return !enabled || lastEnabled != enabled || nowMs - lastRefreshAtMs >= ttlMs
+}
 
 /**
  * Normalizes `IABGPP_GppSID` to a comma-separated string of section IDs across the
