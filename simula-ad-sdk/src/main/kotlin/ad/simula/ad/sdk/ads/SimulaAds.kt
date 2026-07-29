@@ -187,6 +187,12 @@ object SimulaAds {
                 // Wire IAB-standard CMP auto-read (default-SharedPreferences first access = disk).
                 runCatching { SimulaPrivacy.attach(appContext) }
 
+                // Initial GAID read (throttled internally; no-op when the host didn't opt in
+                // via enableAdvertisingId, when the user limits ad tracking, or when the
+                // play-services-ads-identifier dep is absent). Mirrors the SimulaProvider
+                // path — without this the imperative entry point never collects a GAID.
+                runCatching { SimulaPrivacy.refreshAdvertisingId() }
+
                 // Install telemetry before the session warm-up so the /session/create call (and every
                 // subsequent SDK request) is captured. The PPID is read live from the session store so a
                 // mid-session updatePrimaryUserID is honored.
@@ -423,6 +429,10 @@ object SimulaAds {
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 currentActivityRef = WeakReference(activity)
+                // Re-read the GAID on foreground: ad-tracking permission or the GAID itself
+                // can change while the app is backgrounded. Internally throttled (4h TTL), so
+                // this is cheap on every resume. Mirrors the SimulaProvider ON_RESUME hook.
+                SimulaScope.launch { runCatching { SimulaPrivacy.refreshAdvertisingId() } }
             }
 
             // Keep the reference while merely paused — a paused Activity is still a
