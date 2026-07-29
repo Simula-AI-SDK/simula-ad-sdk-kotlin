@@ -204,8 +204,12 @@ object SimulaPrivacy {
             synchronized(lock) { collectedAdvertisingId = id }
             lastGaidEnabled = enabled
             lastGaidRefreshAt = now
+            // Publish INSIDE the mutex: a coalesced waiter returns from the double-check above
+            // the instant this lock is released, so the snapshot must already carry the new id
+            // by then — otherwise a sequenced /session/create can still read the stale
+            // (GAID-less) snapshot in the gap before a post-release recompute().
+            recompute()
         }
-        recompute()
     }
 
     // ── Snapshot building ─────────────────────────────────────────────────────
