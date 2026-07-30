@@ -59,13 +59,13 @@ object SimulaAds {
 
     /**
      * The deferred-startup gate of the current [initialize] run — completes once consent
-     * (IAB attach) and telemetry are in place, and always before the startup's own session
-     * warm-up. Null before [initialize] (e.g. declarative-only hosts). The declarative
-     * `SimulaProvider` reads it LIVE from its own [SimulaSessionStore] gate provider (a
-     * provider can be composed — and its store remembered — before this is published), so
-     * a session created from composition can't race ahead of the imperative startup either.
-     * `@Volatile` because that live read happens on [SimulaScope] coroutines while the
-     * write happens on [initialize]'s calling thread.
+     * (IAB attach), telemetry, and the durable beacon queue are in place, and always before
+     * the startup's own session warm-up. Null before [initialize] (e.g. declarative-only
+     * hosts). The declarative `SimulaProvider` reads it LIVE from its own [SimulaSessionStore]
+     * gate provider (a provider can be composed — and its store remembered — before this is
+     * published), so a session created from composition can't race ahead of the imperative
+     * startup either. `@Volatile` because that live read happens on [SimulaScope] coroutines
+     * while the write happens on [initialize]'s calling thread.
      */
     @Volatile
     internal var startupGate: CompletableDeferred<Unit>? = null
@@ -181,11 +181,12 @@ object SimulaAds {
         // initializes from Application.onCreate): the remaining steps do disk I/O
         // (SharedPreferences first access, SQLite open/migration) or heavy one-time work
         // (Chromium provider bring-up) that used to run inline on the caller. Ordering is
-        // preserved — IAB attach → telemetry install → initial GAID read → crash-guard
-        // install (its replay records into telemetry) → recovery/beacon drains → WebView
-        // prewarm → session warm-up — so the first /session/create is built with attached
-        // consent + collected GAID and captured by telemetry, exactly as before. Each step
-        // fails open independently: telemetry/consent infrastructure must never break ads.
+        // preserved — IAB attach → telemetry install → initial GAID read → beacon-queue
+        // build → crash-guard install (its replay records into telemetry) → recovery/beacon
+        // drains → WebView prewarm → session warm-up — so the first /session/create is
+        // built with attached consent + collected GAID and captured by telemetry, exactly
+        // as before. Each step fails open independently: telemetry/consent infrastructure
+        // must never break ads.
         SimulaScope.launch {
             try {
                 // Wire IAB-standard CMP auto-read (default-SharedPreferences first access = disk).
@@ -212,12 +213,21 @@ object SimulaAds {
                 // state settled, so the session warm-up below (and any gated host load) carries
                 // the id on the first /session/create.
                 runCatching { SimulaPrivacy.refreshAdvertisingId() }
+
+                // Build the durable impression/click beacon queue BEFORE the gate releases:
+                // a host load awaiting the gate can show an ad (and fire billing beacons) the
+                // moment it proceeds, and AdBeaconManager.enqueue is a silent no-op until the
+                // engine exists — building it here closes that drop window. Construction is
+                // allocation-only (the SharedPreferences read happens lazily inside the queue),
+                // so this adds no disk I/O to the gated section. The prior-process DRAIN stays
+                // after the gate: those beacons are already persisted and self-contained.
+                runCatching { AdBeaconManager.init(appContext, apiKey) }
             } finally {
                 // Release session waiters (see SimulaSessionStore.startupGate) no matter what —
                 // a dead/cancelled startup coroutine must never leave ensureSession callers
-                // blocked forever. Consent and telemetry are now in place (or failed open —
-                // never worth breaking ads over). MUST precede the warm-up below, which awaits
-                // this same gate.
+                // blocked forever. Consent, telemetry, and the beacon queue are now in place
+                // (or failed open — never worth breaking ads over). MUST precede the warm-up
+                // below, which awaits this same gate.
                 gate.complete(Unit)
             }
 
@@ -236,9 +246,10 @@ object SimulaAds {
             // requests carry current consent headers.
             runCatching { RewardVerificationManager.triggerProcessQueue(appContext) }
 
-            // Durable impression/click beacon queue: build it and drain any beacons a prior process
-            // left undelivered (offline/killed). Off the telemetry pipeline; off the critical path.
-            runCatching { AdBeaconManager.init(appContext, apiKey) }
+            // Drain any impression/click beacons a prior process left undelivered
+            // (offline/killed). The queue was built inside the gated section above — any
+            // gated load can fire billing beacons the moment it releases — while these
+            // already-persisted entries can drain off the gated path.
             runCatching { AdBeaconManager.triggerProcessQueue() }
 
             // SDK-init + SDK-upgrade beacons BEFORE the WebView prewarm and the session warm-up,

@@ -61,7 +61,8 @@ internal class SimulaSessionStore(
      * Optional startup gate, resolved per [ensureSession] call and awaited before any
      * session work. Wired from `SimulaAds.startupGate` (see its doc): by `SimulaAds.initialize`
      * for the imperative store, and by the declarative `SimulaProvider` for its own store —
-     * so no entry path can fire a request ahead of consent attach + telemetry install.
+     * so no entry path can fire a request ahead of consent attach + telemetry install + the
+     * beacon-queue build.
      *
      * A provider lambda rather than a plain reference because a mixed host can compose
      * `SimulaProvider` BEFORE `SimulaAds.initialize` publishes the gate: a value copied at
