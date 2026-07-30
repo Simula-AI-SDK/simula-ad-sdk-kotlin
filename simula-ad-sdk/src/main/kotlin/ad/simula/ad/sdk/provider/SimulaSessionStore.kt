@@ -138,14 +138,17 @@ internal class SimulaSessionStore(
     }
 
     suspend fun ensureSession(): String? {
-        sessionId?.takeIf { it.isNotBlank() }?.let { return it }
-
-        // See the property doc: a host load fired right after SimulaAds.initialize waits here
-        // until consent (IAB) is attached and telemetry is installed. Resolved per call (not
-        // cached) so a store created before initialize() published the gate still honors it.
-        // Already-complete for the startup's own warm-up and in steady state, so this is
-        // free on the hot path.
+        // See the property doc: a host load fired right after SimulaAds.initialize waits
+        // here until consent (IAB) is attached, telemetry is installed, and the beacon
+        // queue is built. Resolved per call (not cached) so a store created before
+        // initialize() published the gate still honors it — and awaited BEFORE the
+        // cached-id return, so a session minted while the gate was still null (provider
+        // composed before initialize) can't let later calls skip the deferred imperative
+        // startup either. Already-complete for the startup's own warm-up and in steady
+        // state, so this is free on the hot path and can't deadlock.
         startupGate()?.await()
+
+        sessionId?.takeIf { it.isNotBlank() }?.let { return it }
 
         val deferred = mutex.withLock {
             sessionId?.let { if (it.isNotBlank()) return it }
