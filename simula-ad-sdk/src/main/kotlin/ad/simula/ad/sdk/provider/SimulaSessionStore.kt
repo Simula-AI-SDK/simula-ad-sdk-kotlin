@@ -58,14 +58,20 @@ internal class SimulaSessionStore(
     private var sessionDeferred: Deferred<String?>? = null
 
     /**
-     * Optional startup gate, awaited once per [ensureSession] call before any session work.
-     * Wired from `SimulaAds.startupGate` (see its doc): by `SimulaAds.initialize` for the
-     * imperative store, and by the declarative `SimulaProvider` for its own store — so no
-     * entry path can fire a request ahead of consent attach + telemetry install. Null for
-     * declarative-only hosts and completed before the startup's own session warm-up, so
-     * neither can deadlock. Completed even on startup failure (fail-open).
+     * Optional startup gate, resolved per [ensureSession] call and awaited before any
+     * session work. Wired from `SimulaAds.startupGate` (see its doc): by `SimulaAds.initialize`
+     * for the imperative store, and by the declarative `SimulaProvider` for its own store —
+     * so no entry path can fire a request ahead of consent attach + telemetry install.
+     *
+     * A provider lambda rather than a plain reference because a mixed host can compose
+     * `SimulaProvider` BEFORE `SimulaAds.initialize` publishes the gate: a value copied at
+     * composition would stay null on that remembered store forever, letting its sessions
+     * race the deferred startup. Resolving at call time picks the gate up whenever it
+     * appears. Returns null for declarative-only hosts and the gate completes before the
+     * startup's own session warm-up, so neither can deadlock. Completed even on startup
+     * failure (fail-open).
      */
-    var startupGate: CompletableDeferred<Unit>? = null
+    var startupGate: () -> CompletableDeferred<Unit>? = { null }
 
     // Serializes PPID reconciliation so at most one PATCH is ever in flight. The server then applies
     // updates in submission order (no reordering), which is what lets [sessionUserID] be advanced
@@ -134,9 +140,11 @@ internal class SimulaSessionStore(
         sessionId?.takeIf { it.isNotBlank() }?.let { return it }
 
         // See the property doc: a host load fired right after SimulaAds.initialize waits here
-        // until consent (IAB) is attached and telemetry is installed. Already-complete for the
-        // startup's own warm-up and in steady state, so this is free on the hot path.
-        startupGate?.await()
+        // until consent (IAB) is attached and telemetry is installed. Resolved per call (not
+        // cached) so a store created before initialize() published the gate still honors it.
+        // Already-complete for the startup's own warm-up and in steady state, so this is
+        // free on the hot path.
+        startupGate()?.await()
 
         val deferred = mutex.withLock {
             sessionId?.let { if (it.isNotBlank()) return it }

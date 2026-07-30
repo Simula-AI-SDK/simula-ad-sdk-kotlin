@@ -61,9 +61,13 @@ object SimulaAds {
      * The deferred-startup gate of the current [initialize] run — completes once consent
      * (IAB attach) and telemetry are in place, and always before the startup's own session
      * warm-up. Null before [initialize] (e.g. declarative-only hosts). The declarative
-     * `SimulaProvider` wires it into its own [SimulaSessionStore] so a session created from
-     * composition can't race ahead of the imperative startup either.
+     * `SimulaProvider` reads it LIVE from its own [SimulaSessionStore] gate provider (a
+     * provider can be composed — and its store remembered — before this is published), so
+     * a session created from composition can't race ahead of the imperative startup either.
+     * `@Volatile` because that live read happens on [SimulaScope] coroutines while the
+     * write happens on [initialize]'s calling thread.
      */
+    @Volatile
     internal var startupGate: CompletableDeferred<Unit>? = null
         private set
 
@@ -163,7 +167,7 @@ object SimulaAds {
             SimulaPrivacy.apply(resolved)
 
             store = SimulaSessionStore(apiKey, devMode, primaryUserID)
-            store.startupGate = gate
+            store.startupGate = { gate }
             this.startupGate = gate
 
             registerActivityTracking()

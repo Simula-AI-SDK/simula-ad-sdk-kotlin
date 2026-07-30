@@ -280,9 +280,12 @@ fun SimulaProvider(
         SimulaSessionStore(apiKey, devMode, effectiveUserID).apply {
             // A host that also called SimulaAds.initialize: hold this store's first session
             // until the imperative startup has attached IAB consent AND installed telemetry
-            // (the same ordering SimulaAds.store gets). Null for declarative-only hosts —
-            // no gate, matching the pre-existing behavior.
-            startupGate = SimulaAds.startupGate
+            // (the same ordering SimulaAds.store gets). Read LIVE at ensureSession time —
+            // a mixed host can compose this provider before initialize() publishes the
+            // gate, and a value copied here would stay null on this remembered store
+            // forever (remember doesn't re-run when the gate appears). Null for
+            // declarative-only hosts — no gate, matching the pre-existing behavior.
+            startupGate = { SimulaAds.startupGate }
         }
     }
 
