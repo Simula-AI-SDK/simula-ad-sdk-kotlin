@@ -18,3 +18,10 @@
 -keepclassmembers class ad.simula.ad.sdk.** {
     @android.webkit.JavascriptInterface <methods>;
 }
+
+# GAID (advertising id): SimulaPrivacy.readGaid accesses AdvertisingIdClient ONLY via
+# reflection (Class.forName + getMethod) so play-services-ads-identifier stays an optional,
+# host-supplied dependency. That AAR ships no proguard.txt of its own, so without this rule
+# the consumer's R8 renames/strips the reflectively-invoked members in release builds and
+# the lookup fails silently (caught → null GAID). A no-op for hosts without the dependency.
+-keep class com.google.android.gms.ads.identifier.** { *; }
