@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.telemetry.Telemetry
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
@@ -55,6 +56,23 @@ internal class SimulaSessionStore(
 
     private val mutex = Mutex()
     private var sessionDeferred: Deferred<String?>? = null
+
+    /**
+     * Optional startup gate, resolved per [ensureSession] call and awaited before any
+     * session work. Wired from `SimulaAds.startupGate` (see its doc): by `SimulaAds.initialize`
+     * for the imperative store, and by the declarative `SimulaProvider` for its own store —
+     * so no entry path can fire a request ahead of consent attach + telemetry install + the
+     * beacon-queue build.
+     *
+     * A provider lambda rather than a plain reference because a mixed host can compose
+     * `SimulaProvider` BEFORE `SimulaAds.initialize` publishes the gate: a value copied at
+     * composition would stay null on that remembered store forever, letting its sessions
+     * race the deferred startup. Resolving at call time picks the gate up whenever it
+     * appears. Returns null for declarative-only hosts and the gate completes before the
+     * startup's own session warm-up, so neither can deadlock. Completed even on startup
+     * failure (fail-open).
+     */
+    var startupGate: () -> CompletableDeferred<Unit>? = { null }
 
     // Serializes PPID reconciliation so at most one PATCH is ever in flight. The server then applies
     // updates in submission order (no reordering), which is what lets [sessionUserID] be advanced
@@ -120,6 +138,16 @@ internal class SimulaSessionStore(
     }
 
     suspend fun ensureSession(): String? {
+        // See the property doc: a host load fired right after SimulaAds.initialize waits
+        // here until consent (IAB) is attached, telemetry is installed, and the beacon
+        // queue is built. Resolved per call (not cached) so a store created before
+        // initialize() published the gate still honors it — and awaited BEFORE the
+        // cached-id return, so a session minted while the gate was still null (provider
+        // composed before initialize) can't let later calls skip the deferred imperative
+        // startup either. Already-complete for the startup's own warm-up and in steady
+        // state, so this is free on the hot path and can't deadlock.
+        startupGate()?.await()
+
         sessionId?.takeIf { it.isNotBlank() }?.let { return it }
 
         val deferred = mutex.withLock {
