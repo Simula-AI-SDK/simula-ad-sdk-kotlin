@@ -273,6 +273,13 @@ class SimulaInterstitialAd(val adUnitId: String) {
             }
         ) return
 
+        // Mirrors the rewarded twin: a pre-init preview would launch the ad Activity, whose
+        // setContent reads the not-yet-initialized session store and crashes the host.
+        if (!SimulaAds.isInitialized) {
+            failShow(SimulaAdError.NotInitialized)
+            return
+        }
+
         if (state == State.Showing) {
             failShow(SimulaAdError.AlreadyShowing)
             return

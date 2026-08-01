@@ -338,6 +338,10 @@ internal object NativeAdWebViewStore {
         // The over-budget blank from attach() is a zero-cost plain View — nothing to detach,
         // recycle, or count (it was never marked attached).
         if (released !is WebView) return
+        // Drop the composition's callbacks: a retained (or recycled) view must never invoke
+        // closures from a composition that may be gone. The next recomposition re-points them
+        // (cheap @Volatile hot-swap in the slot).
+        session.wiring.clearCallbacks()
         // A render-dead current view must be destroyed, never recycled to the pool — a dead view in the
         // pool would hand the next consumer a permanently-blank WebView. (This fires when the slot
         // remounts after onRenderProcessGone: the dead view is disposed here, attach() rebuilds.)
@@ -512,6 +516,18 @@ internal class NativeAdWiring(
     @Volatile var onHeightPx: (Float) -> Unit = {}
     @Volatile var onAdClick: () -> Unit = {}
     @Volatile var onLoadError: () -> Unit = {}
+
+    /** Clears the composition-owned callbacks on scroll-out/dispose (the wiring itself and its
+     * flags survive for reattach, where the next recomposition re-points them — the hot-swap
+     * above). A retained or recycled view must never invoke closures from a composition that
+     * may be gone. */
+    fun clearCallbacks() {
+        onHeightPx = {}
+        onAdClick = {}
+        onLoadError = {}
+        onRenderGone = {}
+        onPageReady = {}
+    }
     // Render-process-death recovery. The client flags [renderGone] when this creative's WebView loses
     // its render process (it then draws blank and is unusable); the store destroys it — never recycles
     // a dead view to the pool — and rebuilds the creative on the next attach, while [onRenderGone] asks

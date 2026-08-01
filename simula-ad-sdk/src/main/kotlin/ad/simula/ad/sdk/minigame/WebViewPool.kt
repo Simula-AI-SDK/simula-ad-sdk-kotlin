@@ -43,6 +43,17 @@ import androidx.annotation.MainThread
  */
 internal fun shouldSkipStartupPrewarm(isLowRamDevice: Boolean?): Boolean = isLowRamDevice == true
 
+/**
+ * Idle-pool trim policy: trim on real pressure signals (RUNNING_LOW and worse, BACKGROUND,
+ * MODERATE, COMPLETE) but NOT on TRIM_MEMORY_UI_HIDDEN, which fires on EVERY backgrounding —
+ * trimming there destroys the warm pool each time the host goes to background, defeating
+ * prewarm across the exact window it exists for (the native-ad store consciously preserves
+ * its attached views on that same callback). Top-level so it's unit-testable without
+ * triggering pool/WebView initialization.
+ */
+internal fun shouldTrimIdlePool(level: Int): Boolean =
+    level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW && level != ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN
+
 internal object WebViewPool {
 
     private const val MAX_IDLE = 2
@@ -156,7 +167,7 @@ internal object WebViewPool {
         if (callbacksRegistered) return
         context.applicationContext.registerComponentCallbacks(object : ComponentCallbacks2 {
             override fun onTrimMemory(level: Int) {
-                if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) trimIdle()
+                if (shouldTrimIdlePool(level)) trimIdle()
             }
 
             @Deprecated("Deprecated in Java")

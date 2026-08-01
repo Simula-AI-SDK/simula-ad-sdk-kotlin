@@ -119,4 +119,12 @@ class ConsentSnapshotTest {
         assertNull(normalizeGppSid(""))
         assertNull(normalizeGppSid(emptySet<String>()))
     }
+
+    @Test
+    fun privacyPreferenceListener_recomputesOnlyForIabKeysOrBulkChanges() {
+        assertTrue(shouldRecomputePrivacy(null))
+        for (key in IAB_KEYS) assertTrue("IAB key must trigger: $key", shouldRecomputePrivacy(key))
+        assertFalse(shouldRecomputePrivacy("host_theme"))
+        assertFalse(shouldRecomputePrivacy("simula_pending_beacons"))
+    }
 }

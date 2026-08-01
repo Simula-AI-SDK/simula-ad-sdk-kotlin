@@ -56,6 +56,17 @@ internal object Telemetry {
         enabled: Boolean,
         identityProvider: () -> TelemetryIdentity,
     ) {
+        // Report uncaught SimulaScope task failures into the pipeline: the scope's handler
+        // terminally consumes them (the host's crash handler never sees one), so without this
+        // hook they were invisible — logcat-only. Wired unconditionally; a no-op while the
+        // manager is null (host opt-out or pre-init).
+        ad.simula.ad.sdk.core.uncaughtExceptionReporter = { t ->
+            recordError(
+                signature = "scope:uncaught",
+                errorCode = t::class.java.simpleName,
+                message = t.message,
+            )
+        }
         if (!enabled) {
             manager = null
             return

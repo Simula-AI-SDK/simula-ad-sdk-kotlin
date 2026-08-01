@@ -55,7 +55,7 @@ internal class SqliteBeaconStore(
             db.beginTransaction()
             try {
                 // Row-level delete of entries removed since the last save (delivered/dropped).
-                val keepKeys = queue.mapTo(HashSet()) { "${it.impressionId}${it.action}" }
+                val keepKeys = queue.mapTo(HashSet()) { it.impressionId to it.action }
                 val existing = ArrayList<Pair<String, String>>()
                 db.query(TABLE, arrayOf(COL_IMPRESSION, COL_ACTION), null, null, null, null, null).use { c ->
                     val iIdx = c.getColumnIndexOrThrow(COL_IMPRESSION)
@@ -63,7 +63,7 @@ internal class SqliteBeaconStore(
                     while (c.moveToNext()) existing.add(c.getString(iIdx) to c.getString(aIdx))
                 }
                 for ((imp, act) in existing) {
-                    if ("$imp$act" !in keepKeys) {
+                    if ((imp to act) !in keepKeys) {
                         db.delete(TABLE, "$COL_IMPRESSION = ? AND $COL_ACTION = ?", arrayOf(imp, act))
                     }
                 }

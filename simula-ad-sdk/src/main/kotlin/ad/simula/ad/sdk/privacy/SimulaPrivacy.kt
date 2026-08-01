@@ -76,8 +76,13 @@ object SimulaPrivacy {
     // the WebViewPool/ImageCache ComponentCallbacks2, and ActivityLifecycleCallbacks are likewise
     // process-scoped). The SDK does not support runtime teardown / dynamic-feature unload by design —
     // process death reclaims everything; there is deliberately no SimulaAds.shutdown().
+    //
+    // Key-filtered: the host's default prefs file can be written constantly by non-SDK code;
+    // only an IAB-key (or bulk/null) change can alter the consent snapshot.
     private val prefsListener =
-        SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> recompute() }
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (shouldRecomputePrivacy(key)) recompute()
+        }
 
     /**
      * Attach an application context so IAB keys can be auto-read. Idempotent —
@@ -348,6 +353,21 @@ internal fun shouldReadGaidNow(
 
 /** Hard bound on one Play Services GAID read (see [raceGaidRead]). */
 internal const val GAID_READ_TIMEOUT_MS = 8_000L
+
+/** The IAB CMP keys the consent snapshot reads. The prefs-change listener recomputes ONLY on
+ * these (or a bulk/null key) — the host's default prefs file can be written constantly by
+ * non-SDK code, and every write used to trigger a full recompute. */
+internal val IAB_KEYS = setOf(
+    "IABTCF_TCString",
+    "IABUSPrivacy_String",
+    "IABGPP_HDR_GppString",
+    "IABGPP_GppSID",
+    "IABTCF_gdprApplies",
+    "IABTCF_PurposeConsents",
+)
+
+/** True only for an IAB-key update (or a bulk/null callback). Pure and JVM-testable. */
+internal fun shouldRecomputePrivacy(key: String?): Boolean = key == null || key in IAB_KEYS
 
 /**
  * Races one GAID read against [timeoutMs]. The Play Services bind is a blocking call with no

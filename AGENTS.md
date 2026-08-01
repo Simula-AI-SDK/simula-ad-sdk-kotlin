@@ -48,7 +48,7 @@ Never introduce:
 - `clearCache()` on WebView pool release
 - New dangerous permissions in the SDK manifest
 - Query strings, tokens, or PII in telemetry `message`/`breadcrumb`/paths
-- New console logging (`Log.*`) — operational signals go to telemetry (`Telemetry.recordOperation`/`recordError`); the dev-mode Logcat mirror is the only sanctioned console output
+- Console logging (`Log.*`) — operational signals go to telemetry (`Telemetry.recordOperation`/`recordError`); the dev-mode Logcat mirror is the only sanctioned console output
 - Telemetry wire fields or semantics not defined in `docs/TELEMETRY_CONTRACT_V3.md`; keep that contract and its golden fixture byte-identical across the Swift, Kotlin, and React Native repositories
 
 ## Copy an existing pattern (golden examples)

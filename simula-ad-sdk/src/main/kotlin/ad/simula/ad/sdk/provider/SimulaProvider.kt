@@ -1,6 +1,5 @@
 package ad.simula.ad.sdk.provider
 
-import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -103,10 +102,11 @@ internal fun globalSimulaContext(): SimulaContextValue {
     if (!SimulaAds.isInitialized) {
         if (!emptyContextWarned) {
             emptyContextWarned = true
-            Log.w(
-                "SimulaAdSDK",
-                "NativeAdSlot used before SimulaAds.initialize() and outside a SimulaProvider — " +
-                    "rendering a blank slot. Initialize the SDK or wrap the slot in a SimulaProvider.",
+            Telemetry.recordError(
+                signature = "provider:missing_context",
+                errorCode = "not_initialized",
+                message = "NativeAdSlot used before init/outside provider; rendering blank",
+                breadcrumb = "surface=native_ad",
             )
         }
         return emptySimulaContext()
