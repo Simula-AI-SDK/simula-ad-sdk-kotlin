@@ -49,7 +49,23 @@ internal class CreativeBridge(
         val type = root.str("type") ?: return
         val requestId = root["requestId"] // preserved verbatim so the reply echoes its JSON type
         val payload = root["payload"] as? JsonObject
-        mainDispatch { process(type, requestId, payload, reply) }
+        // The one unguarded @JavascriptInterface dispatch path: any throw from a `host.*` call
+        // (framework quirk, OEM bug) would otherwise be an uncaught main-thread exception that
+        // kills the host. Mirror the native-ad bridge's defensive posture — absorb + report.
+        mainDispatch {
+            try {
+                process(type, requestId, payload, reply)
+            } catch (t: Throwable) {
+                runCatching {
+                    Telemetry.recordError(
+                        signature = "bridge:creative_dispatch",
+                        errorCode = t.javaClass.simpleName,
+                        message = "creative bridge dispatch failed",
+                        breadcrumb = "type=$type",
+                    )
+                }
+            }
+        }
     }
 
     private fun process(type: String, requestId: JsonElement?, payload: JsonObject?, reply: (String) -> Unit) {

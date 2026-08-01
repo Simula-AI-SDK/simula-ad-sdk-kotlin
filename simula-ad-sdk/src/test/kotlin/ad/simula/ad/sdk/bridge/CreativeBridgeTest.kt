@@ -107,4 +107,19 @@ class CreativeBridgeTest {
         val json = raw.removePrefix("window.postMessage(").removeSuffix(", '*');")
         return Json.parseToJsonElement(json).jsonObject
     }
+
+    @Test
+    fun aThrowingHostCallIsAbsorbedByTheDispatch() {
+        // Regression (API-26 orientation crash class): a `host.*` sink throwing a framework
+        // exception must be absorbed + reported — never escape as an uncaught main-thread throw.
+        val host = object : BridgeHost by FakeHost() {
+            override fun setOrientation(orientation: String) {
+                throw IllegalStateException("Only fullscreen opaque activities can request orientation")
+            }
+        }
+        var completed = false
+        bridge(host).handle("""{"type":"SET_ORIENTATION","payload":{"orientation":"landscape"}}""") {}
+        completed = true
+        assertTrue("dispatch must absorb host failures", completed)
+    }
 }

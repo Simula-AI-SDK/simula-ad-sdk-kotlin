@@ -48,12 +48,18 @@ internal class AndroidBridgeHost(
 
     override fun setOrientation(orientation: String) {
         val activity = activityProvider() ?: return
-        activity.requestedOrientation = when (orientation) {
+        val value = when (orientation) {
             "portrait" -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             "landscape" -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
             "auto" -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             else -> return
         }
+        // API 26 (8.0) throws IllegalStateException when a translucent activity requests an
+        // orientation — and both SDK ad activities are translucent — so the call would always
+        // throw there; skip it. Everywhere else, runCatching: a creative is untrusted
+        // third-party content and must never kill the host through this sink.
+        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.O) return
+        runCatching { activity.requestedOrientation = value }
     }
 
     override fun deviceContext(): JsonObject {
