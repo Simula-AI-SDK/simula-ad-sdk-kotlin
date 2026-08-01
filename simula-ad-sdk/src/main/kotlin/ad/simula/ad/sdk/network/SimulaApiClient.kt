@@ -931,7 +931,7 @@ internal object SimulaApiClient {
     // ── Telemetry ───────────────────────────────────────────────────────────
 
     /**
-     * Deliver a telemetry batch (`POST /v1/telemetry/events`), reusing the auth + consent
+     * Deliver a telemetry batch (`POST /telemetry/events`), reusing the auth + consent
      * headers so it inherits the same privacy posture as tracking. Returns the HTTP status
      * (or -1 on a connectivity failure) for the caller to map to accept/drop/retry. Passes
      * `instrument = false` so this request is never itself recorded as a network event.

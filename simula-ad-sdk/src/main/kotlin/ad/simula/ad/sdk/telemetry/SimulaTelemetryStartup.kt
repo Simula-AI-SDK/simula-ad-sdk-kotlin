@@ -19,10 +19,17 @@ internal data class TelemetryIdentityProviders(
  * separate from construction so Compose callers can commit it from an effect rather than from
  * speculative composition. Later registrations retain the first config and atomically replace the
  * live identity-provider pair only when their priority is at least the current provider's.
+ *
+ * [runStartup] is the gated section: [ready] completes only when it finishes, and both entry
+ * paths await that before releasing ad requests. [runUngated] is launched right after the gated
+ * section finishes (so it can rely on the telemetry manager being installed) but as a sibling
+ * job that [ready] never awaits — for work that must not hold the ad-request gate (e.g. a
+ * main-thread install: a stalled main looper would otherwise freeze every ad load).
  */
 internal class TelemetryStartupEngine<C>(
     private val scope: CoroutineScope,
     private val runStartup: suspend (C, () -> TelemetryIdentityProviders) -> Unit,
+    private val runUngated: (suspend (C) -> Unit)? = null,
 ) {
     private data class Registration<C>(val config: C)
 
@@ -58,7 +65,14 @@ internal class TelemetryStartupEngine<C>(
         }
         try {
             val job = scope.launch { runCatching { runStartup(config) { identityProviders } } }
-            job.invokeOnCompletion { ready.complete(Unit) }
+            job.invokeOnCompletion {
+                ready.complete(Unit)
+                // Ungated follow-up (crash-guard install): strictly after the gated section —
+                // its replay records into the telemetry manager, so it must follow
+                // Telemetry.initialize — but never awaited by `ready`, so a stalled main
+                // thread cannot hold the ad-request gate.
+                runUngated?.let { ungated -> scope.launch { runCatching { ungated(config) } } }
+            }
         } catch (_: Exception) {
             ready.complete(Unit)
         }
@@ -74,23 +88,33 @@ internal object SimulaTelemetryStartup {
         val enabled: Boolean,
     )
 
-    private val engine = TelemetryStartupEngine<Config>(SimulaScope) { config, currentProviders ->
-        runCatching {
-            Telemetry.initialize(
-                context = config.context,
-                apiKey = config.apiKey,
-                devMode = config.devMode,
-                enabled = config.enabled,
-                identityProvider = {
-                    val providers = currentProviders()
-                    TelemetryIdentity(providers.sessionId(), providers.primaryUserId())
-                },
-            )
-        }
-        withContext(Dispatchers.Main) {
-            runCatching { SimulaCrashGuard.install(config.context, config.enabled) }
-        }
-    }
+    private val engine = TelemetryStartupEngine<Config>(
+        scope = SimulaScope,
+        runStartup = { config, currentProviders ->
+            runCatching {
+                Telemetry.initialize(
+                    context = config.context,
+                    apiKey = config.apiKey,
+                    devMode = config.devMode,
+                    enabled = config.enabled,
+                    identityProvider = {
+                        val providers = currentProviders()
+                        TelemetryIdentity(providers.sessionId(), providers.primaryUserId())
+                    },
+                )
+            }
+        },
+        runUngated = { config ->
+            // The crash guard needs the main thread, but ad requests must never wait on
+            // main-thread health — so this install runs as an ungated follow-up (strictly
+            // after telemetry install, which its crash replay records into) instead of inside
+            // the gated startup. Swift mirrors this with a fire-and-forget
+            // DispatchQueue.main.async in SimulaCrashGuard.install.
+            withContext(Dispatchers.Main) {
+                runCatching { SimulaCrashGuard.install(config.context, config.enabled) }
+            }
+        },
+    )
 
     /**
      * Commits configuration for the process. Imperative initialization calls this directly; Compose

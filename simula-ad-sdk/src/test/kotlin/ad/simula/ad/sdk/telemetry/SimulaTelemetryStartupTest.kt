@@ -10,9 +10,15 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
+import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -24,11 +30,11 @@ class SimulaTelemetryStartupTest {
     fun `first config wins while latest provider pair is published together`() = runTest {
         var observedConfig: String? = null
         var observedIdentity: Pair<String?, String?>? = null
-        val engine = TelemetryStartupEngine<String>(this) { config, currentProviders ->
+        val engine = TelemetryStartupEngine<String>(this, runStartup = { config, currentProviders ->
             observedConfig = config
             val providers = currentProviders()
             observedIdentity = providers.sessionId() to providers.primaryUserId()
-        }
+        })
 
         val firstReady = engine.register("first", providers("session-a", "user-a"))
         val secondReady = engine.register("second", providers("session-b", "user-b"))
@@ -46,10 +52,10 @@ class SimulaTelemetryStartupTest {
         try {
             val starts = AtomicInteger(0)
             val entered = CountDownLatch(1)
-            val engine = TelemetryStartupEngine<String>(scope) { _, _ ->
+            val engine = TelemetryStartupEngine<String>(scope, runStartup = { _, _ ->
                 starts.incrementAndGet()
                 entered.countDown()
-            }
+            })
             val ready = engine.register("winner", providers("session", "user"))
 
             val callers = List(24) {
@@ -68,9 +74,9 @@ class SimulaTelemetryStartupTest {
     @Test
     fun `provider lookup remains live after startup`() = runTest {
         val lookup = AtomicReference<(() -> TelemetryIdentityProviders)?>(null)
-        val engine = TelemetryStartupEngine<String>(this) { _, currentProviders ->
+        val engine = TelemetryStartupEngine<String>(this, runStartup = { _, currentProviders ->
             lookup.set(currentProviders)
-        }
+        })
         engine.register("first", providers("session-a", "user-a"))
         engine.start()
         runCurrent()
@@ -86,10 +92,10 @@ class SimulaTelemetryStartupTest {
     @Test
     fun `higher priority identity pair cannot be replaced by a later lower priority pair`() = runTest {
         var observed: Pair<String?, String?>? = null
-        val engine = TelemetryStartupEngine<String>(this) { _, currentProviders ->
+        val engine = TelemetryStartupEngine<String>(this, runStartup = { _, currentProviders ->
             val providers = currentProviders()
             observed = providers.sessionId() to providers.primaryUserId()
-        }
+        })
         engine.register("provider-config", providers("provider-session", "provider-user"))
         engine.register(
             "ignored-imperative-config",
@@ -102,6 +108,34 @@ class SimulaTelemetryStartupTest {
         runCurrent()
 
         assertEquals("imperative-session" to "imperative-user", observed)
+    }
+
+    @Test
+    fun `ungated work is fired as a sibling but never awaited by the gate`() = runTest {
+        // Regression test for the crash-guard decoupling: ungated work suspends on a main
+        // dispatcher that never drains (a stalled main looper) — the ad-request gate must
+        // still release once the gated startup section finishes.
+        val stalledMain = StandardTestDispatcher(TestCoroutineScheduler())
+        Dispatchers.setMain(stalledMain)
+        try {
+            var gatedRan = false
+            var ungatedRan = false
+            val engine = TelemetryStartupEngine<String>(
+                scope = backgroundScope, // auto-cancelled by runTest; the stalled job must not hang the test
+                runStartup = { _, _ -> gatedRan = true },
+                runUngated = { withContext(Dispatchers.Main) { ungatedRan = true } },
+            )
+
+            val ready = engine.register("config", providers("session", "user"))
+            engine.start()
+            runCurrent() // drains the gated startup; stalledMain is a separate scheduler
+
+            assertTrue(gatedRan)
+            assertTrue(ready.isCompleted)
+            assertFalse(ungatedRan)
+        } finally {
+            Dispatchers.resetMain()
+        }
     }
 
     private fun providers(sessionId: String, primaryUserId: String) =

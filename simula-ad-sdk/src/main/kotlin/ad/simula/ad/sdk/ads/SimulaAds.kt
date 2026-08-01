@@ -104,8 +104,11 @@ object SimulaAds {
      *                the SDK seeds a config from [hasPrivacyConsent] and still auto-reads IAB CMP
      *                keys. Mirrors `SimulaProvider`'s `privacy` parameter.
      * @param telemetryEnabled Opt out of in-house SDK telemetry (handled-error + performance
-     *                metrics sent to Simula). Default true. PII in telemetry is consent-gated
-     *                exactly like ad tracking; set false to disable the pipeline entirely.
+     *                metrics sent to Simula). Default true. PII providers in telemetry are
+     *                re-read live at flush but are not consent-gated today (consent/COPPA gate
+     *                the advertising id — see [SimulaPrivacy]); set false to disable the
+     *                pipeline entirely. First-registration-wins: in mixed integrations the
+     *                first entry point to register fixes this value for the process.
      */
     fun initialize(
         context: Context,
@@ -207,8 +210,10 @@ object SimulaAds {
                 // Wire IAB-standard CMP auto-read (default-SharedPreferences first access = disk).
                 runCatching { SimulaPrivacy.attach(appContext) }
 
-                // Install the one shared telemetry manager + crash guard before the GAID read and
-                // session warm-up. Provider and imperative callers await the same single flight.
+                // Install the one shared telemetry manager before the GAID read and session
+                // warm-up. Provider and imperative callers await the same single flight. The
+                // crash-guard install needs the main thread, so the engine fires it ungated —
+                // ad requests must never wait on main-thread health.
                 SimulaTelemetryStartup.start()
                 telemetryGate.await()
 

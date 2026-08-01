@@ -20,7 +20,7 @@ internal fun interface TelemetrySender {
 }
 
 /**
- * Production sender: posts to `POST /v1/telemetry/events` via [SimulaApiClient], reusing
+ * Production sender: posts to `POST /telemetry/events` via [SimulaApiClient], reusing
  * its auth + consent headers. The request is **not** self-instrumented (recursion guard).
  */
 internal class ApiTelemetrySender(private val apiKey: String) : TelemetrySender {

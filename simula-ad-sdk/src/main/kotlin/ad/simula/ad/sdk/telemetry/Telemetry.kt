@@ -43,7 +43,11 @@ internal object Telemetry {
     /**
      * Install the telemetry pipeline. Called once by [SimulaTelemetryStartup]. When [enabled]
      * is false nothing is created (host opt-out). [identityProvider] is read live on every flush
-     * so a mid-session `updatePrimaryUserID` is honored, and PPID remains gated by live consent.
+     * so a mid-session `updatePrimaryUserID` is honored. Note the PPID is NOT consent-gated in
+     * the telemetry pipeline today — consent/COPPA gating applies to the advertising id only
+     * (see [SimulaPrivacy]); `SimulaPrivacyConfig.allowsPrimaryUserID` exists but is not yet
+     * wired into the pipeline (a pending product/privacy decision, since it would also have to
+     * cover `/session/create` and the ppid PATCH).
      */
     fun initialize(
         context: Context,
@@ -74,7 +78,7 @@ internal object Telemetry {
             ctx = ctx,
             store = SqliteTelemetryStore(appCtx, json),
             sender = ApiTelemetrySender(apiKey),
-            // Resolve session + consent-gated PPID from one provider generation per flush.
+            // Resolve session + PPID from one provider generation per flush.
             identityProvider = identityProvider,
             advertisingIdProvider = { SimulaPrivacy.current.advertisingId },
             // Reads SimulaConnectionType's cached value (kept fresh by its own network callback —

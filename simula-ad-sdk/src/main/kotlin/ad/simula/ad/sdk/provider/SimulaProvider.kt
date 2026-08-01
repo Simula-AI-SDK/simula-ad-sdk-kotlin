@@ -193,6 +193,9 @@ private data class ProviderSessionStartup(
  *                      (search term, tags, category, …). Updating it replaces the value in full;
  *                      can also be set at runtime via [ad.simula.ad.sdk.ads.SimulaAds.updateContext].
  * @param telemetryEnabled Opt out of in-house SDK telemetry and crash diagnostics. Default true.
+ *                      First-registration-wins: in mixed integrations (or when [SimulaAds.initialize]
+ *                      ran first), the first entry point to register fixes this value for the
+ *                      process, and changing it at runtime has no effect.
  * @param content       Child composable tree.
  */
 @OptIn(FlowPreview::class) // Flow.debounce — stable in practice, contained to this module.
@@ -277,7 +280,10 @@ fun SimulaProvider(
     val sessionConsent by remember { SimulaPrivacy.snapshot.debounce(300L) }
         .collectAsState(initial = SimulaPrivacy.current)
 
-    // ppid is suppressed without consent and additionally under COPPA.
+    // ppid is attached as provided: consent/COPPA currently gate the advertising id (see
+    // SimulaPrivacy), not the PPID — `SimulaPrivacyConfig.allowsPrimaryUserID` exists but is
+    // not yet wired into the pipeline (pending product/privacy decision; it would also have
+    // to cover /session/create and the ppid PATCH).
     val effectiveUserID = primaryUserID
 
     // Session holder — keyed on the (debounced) consent so a CMP refresh recreates
@@ -295,12 +301,16 @@ fun SimulaProvider(
 
     // Commit process-wide first-wins configuration only after this composition commits. The actual
     // prerequisites run in SimulaScope so disposing the composition cannot strand this store's fixed
-    // gate. Every provider request waits for privacy attach, shared telemetry/crash readiness, GAID,
-    // and the durable beacon manager. Recovery draining starts only after manager initialization and
-    // is safe to duplicate with imperative startup (AdBeaconQueue serializes drains internally).
+    // gate. Every provider request waits for privacy attach, shared telemetry readiness, GAID,
+    // and the durable beacon manager. (Crash-guard install is fired ungated by the engine — it
+    // needs the main thread and ads must never wait on main-thread health.) Recovery draining
+    // starts only after manager initialization and is safe to duplicate with imperative startup
+    // (AdBeaconQueue serializes drains internally).
     LaunchedEffect(providerStartup, context, telemetryEnabled) {
+        // Hoisted so the long-lived startup job never retains an Activity context.
+        val appContext = context.applicationContext
         val telemetryReady = SimulaTelemetryStartup.register(
-            context = context.applicationContext,
+            context = appContext,
             apiKey = apiKey,
             devMode = devMode,
             enabled = telemetryEnabled,
@@ -311,12 +321,12 @@ fun SimulaProvider(
             val startupJob = SimulaScope.launch {
                 var beaconManagerReady = false
                 try {
-                    runCatching { SimulaPrivacy.attach(context.applicationContext) }
+                    runCatching { SimulaPrivacy.attach(appContext) }
                     SimulaTelemetryStartup.start()
                     telemetryReady.await()
                     runCatching { SimulaPrivacy.refreshAdvertisingId() }
                     beaconManagerReady = runCatching {
-                        AdBeaconManager.init(context.applicationContext, apiKey)
+                        AdBeaconManager.init(appContext, apiKey)
                     }.isSuccess
                 } finally {
                     providerStartup.ready.complete(Unit)

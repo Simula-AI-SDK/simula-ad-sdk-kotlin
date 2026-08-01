@@ -456,7 +456,9 @@ internal class TelemetryManager(
             hostAppId = ctx.hostAppId,
             devMode = ctx.devMode,
             sessionId = identity.sessionId,
-            // PII providers are already consent-gated by the facade (re-checked at send time).
+            // PII providers are re-read live at flush time (a mid-session updatePrimaryUserID
+            // is honored). They are not consent-gated here: consent/COPPA gate the advertising
+            // id upstream in SimulaPrivacy, not the PPID.
             primaryUserId = identity.primaryUserId,
             advertisingId = advertisingIdProvider(),
             connectionType = connectionTypeProvider(),
