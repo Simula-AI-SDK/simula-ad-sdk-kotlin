@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.shouldSkipStartupPrewarm
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
@@ -20,10 +21,12 @@ import ad.simula.ad.sdk.provider.SimulaSessionStore
 import ad.simula.ad.sdk.telemetry.SimulaTelemetryStartup
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Bundle
+import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -44,6 +47,8 @@ import java.lang.ref.WeakReference
  * `Application.onCreate` adds no meaningful main-thread cost.
  */
 object SimulaAds {
+
+    private const val LOG_TAG = "SimulaAds"
 
     @Volatile
     private var initialized = false
@@ -283,8 +288,15 @@ object SimulaAds {
             // Prewarm a WebView so the first ad/menu/native slot never pays the Chromium provider
             // bring-up cold inside a feed layout or ad show. WebView creation must stay on the
             // main thread; queued from here it runs after the caller's launch-critical work.
-            withContext(Dispatchers.Main) {
-                runCatching { WebViewPool.prewarm(appContext) }
+            // Skipped on low-RAM devices (the warm view would compete with the host for scarce
+            // memory before any ad exists) — pooling after an ad request is unaffected.
+            val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            if (shouldSkipStartupPrewarm(activityManager?.isLowRamDevice)) {
+                Log.d(LOG_TAG, "WebView startup prewarm skipped: low-RAM device")
+            } else {
+                withContext(Dispatchers.Main) {
+                    runCatching { WebViewPool.prewarm(appContext) }
+                }
             }
 
             // Warm the session before the first load() so it's off the ad critical path.

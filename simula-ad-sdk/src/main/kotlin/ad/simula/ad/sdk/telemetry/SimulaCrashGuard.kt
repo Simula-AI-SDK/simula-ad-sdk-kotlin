@@ -197,39 +197,47 @@ internal object SimulaCrashGuard {
     private fun sweepExitInfo(app: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         val am = app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
+        // A failed list read is transient: return with the watermark untouched so the next
+        // launch retries (the platform retains exit records for a while).
         val infos = runCatching { am.getHistoricalProcessExitReasons(app.packageName, 0, 0) }.getOrNull()
         if (infos.isNullOrEmpty()) return
         val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val lastTs = prefs.getLong(KEY_LAST_EXIT_TS, 0L)
-        var newestTs = lastTs
         // getHistoricalProcessExitReasons returns most-recent-first.
-        for (info in infos) {
-            val ts = info.timestamp
-            if (ts <= lastTs) break // sorted desc → everything below is already swept
-            if (ts > newestTs) newestTs = ts
-            runCatching { recordExitInfo(info) }
-        }
-        if (newestTs != lastTs) prefs.edit().putLong(KEY_LAST_EXIT_TS, newestTs).apply()
+        val newTs = sweepWithWatermark(
+            lastTs = lastTs,
+            itemsNewestFirst = infos,
+            tsOf = { it.timestamp },
+            // An unexpected processing error is treated as transient: retry, never lose.
+            process = { info -> runCatching { recordExitInfo(info) }.getOrDefault(ExitSweepOutcome.RETRY) },
+        )
+        if (newTs != lastTs) prefs.edit().putLong(KEY_LAST_EXIT_TS, newTs).apply()
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
-    private fun recordExitInfo(info: ApplicationExitInfo) {
+    private fun recordExitInfo(info: ApplicationExitInfo): ExitSweepOutcome {
         val kind = when (info.reason) {
             ApplicationExitInfo.REASON_ANR -> "anr"
             ApplicationExitInfo.REASON_CRASH_NATIVE -> "native_crash"
             // REASON_CRASH (JVM) is already covered, with full detail, by the uncaught handler;
             // low-memory kills and other reasons are host-level and not attributable to the SDK.
-            else -> return
+            else -> return ExitSweepOutcome.SKIPPED
         }
-        val trace = readTrace(info)
-        if (trace == null) return
+        // A missing trace stream is permanent (the platform captured none) — skip, never retry.
+        // A failing one is transient — the watermark must hold so the next launch retries it.
+        val stream = try {
+            info.traceInputStream
+        } catch (_: Exception) {
+            return ExitSweepOutcome.RETRY
+        } ?: return ExitSweepOutcome.SKIPPED
+        val trace = readTrace(stream) ?: return ExitSweepOutcome.RETRY
         // Attribute conservatively so we never exfiltrate the host's own crashes/ANRs:
         // - ANR: the dump lists EVERY thread, and the SDK always has idle worker threads in it, so a
         //   whole-dump `contains` would match almost any host ANR. An ANR is about the MAIN thread
         //   being blocked → only attribute when the SDK is on the main thread's stack.
         // - Native crash: the faulting thread can be any thread, so a whole-trace match is right.
         val attributed = if (kind == "anr") anrMainThreadInvolvesSdk(trace) else trace.contains(SDK_PACKAGE)
-        if (!attributed) return
+        if (!attributed) return ExitSweepOutcome.SKIPPED
         Telemetry.recordError(
             signature = "exit:$kind",
             errorCode = "exit_reason_${info.reason}",
@@ -237,16 +245,16 @@ internal object SimulaCrashGuard {
             breadcrumb = "fatal=$kind;desc=${info.description?.take(40)}",
             stack = sdkFrames(trace).ifEmpty { null },
         )
+        return ExitSweepOutcome.RECORDED
     }
 
-    @RequiresApi(Build.VERSION_CODES.R)
-    private fun readTrace(info: ApplicationExitInfo): String? = runCatching {
-        info.traceInputStream?.use { stream ->
+    private fun readTrace(stream: java.io.InputStream): String? = runCatching {
+        stream.use { input ->
             val out = ByteArrayOutputStream()
             val chunk = ByteArray(8 * 1024)
             var total = 0
             while (total < MAX_TRACE_BYTES) {
-                val n = stream.read(chunk)
+                val n = input.read(chunk)
                 if (n < 0) break
                 out.write(chunk, 0, minOf(n, MAX_TRACE_BYTES - total))
                 total += n
@@ -280,4 +288,40 @@ internal object SimulaCrashGuard {
         val lines = sdkFrames(trace)
         return if (lines.isNotEmpty()) lines.joinToString(" <- ") else trace
     }
+}
+
+/** Outcome of processing one historical exit record, for watermark advancement. */
+internal enum class ExitSweepOutcome {
+    /** Fully handled (recorded into telemetry). */
+    RECORDED,
+
+    /** Permanently not reportable (untracked reason, no captured trace, or not SDK-attributed). */
+    SKIPPED,
+
+    /** Transient failure — must be retried on a later sweep, so the watermark holds. */
+    RETRY,
+}
+
+/**
+ * Pure watermark policy for the `ApplicationExitInfo` sweep. Items arrive newest-first; anything
+ * at or before [lastTs] was swept by a prior launch. The watermark advances to the newest
+ * resolved item — but a single [ExitSweepOutcome.RETRY] holds it at [lastTs] and stops the
+ * sweep: no single watermark value can keep the failed record retryable without also
+ * re-covering newer resolved records, and re-recording those next launch is harmless (identical
+ * error signatures aggregate in telemetry) while silently losing the failed one is not.
+ */
+internal fun <T> sweepWithWatermark(
+    lastTs: Long,
+    itemsNewestFirst: List<T>,
+    tsOf: (T) -> Long,
+    process: (T) -> ExitSweepOutcome,
+): Long {
+    var newest = lastTs
+    for (item in itemsNewestFirst) {
+        val ts = tsOf(item)
+        if (ts <= lastTs) break // sorted desc → everything below is already swept
+        if (process(item) == ExitSweepOutcome.RETRY) return lastTs
+        if (ts > newest) newest = ts
+    }
+    return newest
 }

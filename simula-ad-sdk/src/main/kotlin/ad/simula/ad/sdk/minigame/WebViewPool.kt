@@ -33,6 +33,16 @@ import androidx.annotation.MainThread
  * All methods must run on the main thread — Android WebView is main-thread-only,
  * so the [idle] deque needs no synchronization.
  */
+/**
+ * Startup-prewarm policy: skip only when the platform reports a low-RAM device
+ * (`ActivityManager.isLowRamDevice`) — a warm WebView holds tens of MB before any ad
+ * exists, a poor trade at app launch there. Null (service unavailable) means don't skip.
+ * Normal pooling after an ad request is never gated: by then an ad exists and wants the
+ * warm view. Top-level (not on [WebViewPool]) so evaluating the policy never triggers
+ * pool/WebView initialization.
+ */
+internal fun shouldSkipStartupPrewarm(isLowRamDevice: Boolean?): Boolean = isLowRamDevice == true
+
 internal object WebViewPool {
 
     private const val MAX_IDLE = 2
