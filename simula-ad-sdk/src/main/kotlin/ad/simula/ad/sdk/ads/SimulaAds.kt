@@ -17,7 +17,7 @@ import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.provider.SimulaSessionStore
-import ad.simula.ad.sdk.telemetry.SimulaCrashGuard
+import ad.simula.ad.sdk.telemetry.SimulaTelemetryStartup
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
 import android.app.Application
@@ -61,11 +61,9 @@ object SimulaAds {
      * The deferred-startup gate of the current [initialize] run — completes once consent
      * (IAB attach), telemetry, and the durable beacon queue are in place, and always before
      * the startup's own session warm-up. Null before [initialize] (e.g. declarative-only
-     * hosts). The declarative `SimulaProvider` reads it LIVE from its own [SimulaSessionStore]
-     * gate provider (a provider can be composed — and its store remembered — before this is
-     * published), so a session created from composition can't race ahead of the imperative
-     * startup either. `@Volatile` because that live read happens on [SimulaScope] coroutines
-     * while the write happens on [initialize]'s calling thread.
+     * hosts). Provider stores own independent fixed gates covering the same request
+     * prerequisites; this gate is never substituted into an already-created provider store.
+     * `@Volatile` keeps background readers consistent with initialization publication.
      */
     @Volatile
     internal var startupGate: CompletableDeferred<Unit>? = null
@@ -133,7 +131,7 @@ object SimulaAds {
         // (see SimulaSessionStore.startupGate) — a host ad-load fired immediately after this
         // call returns still can't race a request out ahead of them.
         val gate = CompletableDeferred<Unit>()
-        synchronized(this) {
+        val telemetryGate = synchronized(this) {
             if (initialized) return
 
             appContext = context.applicationContext
@@ -167,14 +165,31 @@ object SimulaAds {
             SimulaPrivacy.apply(resolved)
 
             store = SimulaSessionStore(apiKey, devMode, primaryUserID)
-            store.startupGate = { gate }
+            store.startupGate = gate
             this.startupGate = gate
+
+            // Register the shared telemetry/crash startup while still under the winning-init lock.
+            // This is allocation-only: SQLite and crash replay remain in deferred startup. Registering
+            // here also guarantees a provider composed concurrently cannot replace this first entry's
+            // immutable telemetry configuration before initialized is published.
+            val registeredTelemetryGate = SimulaTelemetryStartup.register(
+                context = appContext,
+                apiKey = apiKey,
+                devMode = devMode,
+                enabled = telemetryEnabled,
+                sessionIdProvider = { store.sessionId },
+                primaryUserIdProvider = { store.effectiveUserID },
+                // In mixed integrations the imperative/global session remains the telemetry owner;
+                // later provider effects cannot switch the two identity callbacks back separately.
+                identityPriority = 1,
+            )
 
             registerActivityTracking()
 
             // Publish last: a concurrent initialize() that observed the volatile flag as true
             // is guaranteed to see all of the above writes (lateinit store/appContext etc.).
             initialized = true
+            registeredTelemetryGate
         }
 
         // Deferred startup, OFF the calling thread (typically the main thread when the host
@@ -192,20 +207,10 @@ object SimulaAds {
                 // Wire IAB-standard CMP auto-read (default-SharedPreferences first access = disk).
                 runCatching { SimulaPrivacy.attach(appContext) }
 
-                // Install telemetry before the GAID read and the session warm-up: the read can
-                // then report a failure (privacy:gaid_read_failed), and /session/create (and
-                // every subsequent SDK request) is captured. The PPID is read live from the
-                // session store so a mid-session updatePrimaryUserID is honored.
-                runCatching {
-                    Telemetry.initialize(
-                        context = appContext,
-                        apiKey = apiKey,
-                        devMode = devMode,
-                        enabled = telemetryEnabled,
-                        sessionIdProvider = { store.sessionId },
-                        primaryUserIdProvider = { store.effectiveUserID },
-                    )
-                }
+                // Install the one shared telemetry manager + crash guard before the GAID read and
+                // session warm-up. Provider and imperative callers await the same single flight.
+                SimulaTelemetryStartup.start()
+                telemetryGate.await()
 
                 // Initial GAID read (coalesced + throttled internally; no-op when the host
                 // didn't opt in via enableAdvertisingId, when the user limits ad tracking, or
@@ -229,14 +234,6 @@ object SimulaAds {
                 // (or failed open — never worth breaking ads over). MUST precede the warm-up
                 // below, which awaits this same gate.
                 gate.complete(Unit)
-            }
-
-            // Capture uncaught SDK crashes (+ ANR / native-renderer process exits on Android 11+)
-            // into telemetry. AFTER Telemetry.initialize: install replays any prior-process crash
-            // records into the pipeline, and a record landing before the manager exists would be
-            // permanently dropped (the ordering SimulaCrashGuard.install documents).
-            withContext(Dispatchers.Main) {
-                runCatching { SimulaCrashGuard.install(appContext, enabled = telemetryEnabled) }
             }
 
             // Independently of session warm-up (each queued verification carries its own

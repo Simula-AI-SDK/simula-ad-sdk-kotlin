@@ -15,16 +15,21 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.ads.SimulaAds
+import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.model.SimulaContextValue
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
+import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
+import ad.simula.ad.sdk.telemetry.SimulaTelemetryStartup
+import ad.simula.ad.sdk.telemetry.Telemetry
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
@@ -164,6 +169,12 @@ internal fun useSimula(): SimulaContextValue = LocalSimulaContext.current
  */
 private fun getCacheKey(slot: String, position: Int): String = "$slot:$position"
 
+/** One provider session and the immutable prerequisite gate every request from it awaits. */
+private data class ProviderSessionStartup(
+    val store: SimulaSessionStore,
+    val ready: CompletableDeferred<Unit>,
+)
+
 /**
  * Root provider for the Simula Ad SDK.
  * Wraps content with a CompositionLocal that provides session, API key, and ad caching.
@@ -181,6 +192,7 @@ private fun getCacheKey(slot: String, position: Int): String = "$slot:$position"
  * @param adContext     Native-ad targeting context auto-attached to every `POST /load/native`
  *                      (search term, tags, category, …). Updating it replaces the value in full;
  *                      can also be set at runtime via [ad.simula.ad.sdk.ads.SimulaAds.updateContext].
+ * @param telemetryEnabled Opt out of in-house SDK telemetry and crash diagnostics. Default true.
  * @param content       Child composable tree.
  */
 @OptIn(FlowPreview::class) // Flow.debounce — stable in practice, contained to this module.
@@ -192,6 +204,7 @@ fun SimulaProvider(
     hasPrivacyConsent: Boolean = true,
     privacy: SimulaPrivacyConfig? = null,
     adContext: SimulaAdContext? = null,
+    telemetryEnabled: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     // Validate props early (matches React's validateSimulaProviderProps)
@@ -241,24 +254,18 @@ fun SimulaProvider(
         resolvedConfig
     }
 
-    // Attach for IAB auto-read and re-read the GAID whenever the resolved config changes —
-    // off the first frame. The initial-composition read ALSO runs inside ProvideSimulaContext
-    // (sequenced ahead of the first /session/create); this effect additionally covers config
-    // changes that don't alter the consent snapshot (e.g. an enableAdvertisingId toggle is
-    // not a ConsentSnapshot field), which wouldn't retrigger that effect.
-    LaunchedEffect(context, resolvedConfig) {
-        SimulaPrivacy.attach(context)
-        SimulaPrivacy.refreshAdvertisingId()
-    }
-
     // Re-read the GAID on foreground: ad-tracking permission or the GAID itself
     // can change while the app is backgrounded.
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                scope.launch { SimulaPrivacy.refreshAdvertisingId() }
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> scope.launch { SimulaPrivacy.refreshAdvertisingId() }
+                // Declarative-only apps do not install SimulaAds' ActivityLifecycleCallbacks.
+                // Flush here too so buffered telemetry is persisted as the host backgrounds.
+                Lifecycle.Event.ON_STOP -> Telemetry.flush()
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -276,16 +283,50 @@ fun SimulaProvider(
     // Session holder — keyed on the (debounced) consent so a CMP refresh recreates
     // the session and the backend sees current signals. Coalesces concurrent
     // creation, retryable on failure.
-    val sessionStore = remember(apiKey, devMode, sessionConsent) {
-        SimulaSessionStore(apiKey, devMode, effectiveUserID).apply {
-            // A host that also called SimulaAds.initialize: hold this store's first session
-            // until the imperative startup has attached IAB consent AND installed telemetry
-            // (the same ordering SimulaAds.store gets). Read LIVE at ensureSession time —
-            // a mixed host can compose this provider before initialize() publishes the
-            // gate, and a value copied here would stay null on this remembered store
-            // forever (remember doesn't re-run when the gate appears). Null for
-            // declarative-only hosts — no gate, matching the pre-existing behavior.
-            startupGate = { SimulaAds.startupGate }
+    val providerStartup = remember(apiKey, devMode, effectiveUserID, sessionConsent) {
+        val gate = CompletableDeferred<Unit>()
+        val store = SimulaSessionStore(apiKey, devMode, effectiveUserID).apply {
+            // Fixed for this store's lifetime. It never switches to a later imperative gate.
+            startupGate = gate
+        }
+        ProviderSessionStartup(store, gate)
+    }
+    val sessionStore = providerStartup.store
+
+    // Commit process-wide first-wins configuration only after this composition commits. The actual
+    // prerequisites run in SimulaScope so disposing the composition cannot strand this store's fixed
+    // gate. Every provider request waits for privacy attach, shared telemetry/crash readiness, GAID,
+    // and the durable beacon manager. Recovery draining starts only after manager initialization and
+    // is safe to duplicate with imperative startup (AdBeaconQueue serializes drains internally).
+    LaunchedEffect(providerStartup, context, telemetryEnabled) {
+        val telemetryReady = SimulaTelemetryStartup.register(
+            context = context.applicationContext,
+            apiKey = apiKey,
+            devMode = devMode,
+            enabled = telemetryEnabled,
+            sessionIdProvider = { sessionStore.sessionId },
+            primaryUserIdProvider = { sessionStore.effectiveUserID },
+        )
+        try {
+            val startupJob = SimulaScope.launch {
+                var beaconManagerReady = false
+                try {
+                    runCatching { SimulaPrivacy.attach(context.applicationContext) }
+                    SimulaTelemetryStartup.start()
+                    telemetryReady.await()
+                    runCatching { SimulaPrivacy.refreshAdvertisingId() }
+                    beaconManagerReady = runCatching {
+                        AdBeaconManager.init(context.applicationContext, apiKey)
+                    }.isSuccess
+                } finally {
+                    providerStartup.ready.complete(Unit)
+                }
+                if (beaconManagerReady) runCatching { AdBeaconManager.triggerProcessQueue() }
+            }
+            // Also covers cancellation before the coroutine body gets a chance to enter its finally.
+            startupJob.invokeOnCompletion { providerStartup.ready.complete(Unit) }
+        } catch (_: Exception) {
+            providerStartup.ready.complete(Unit)
         }
     }
 
@@ -293,6 +334,30 @@ fun SimulaProvider(
     // interstitial Activity uses the same path with a session warmed by SimulaAds,
     // so the two entry points stay in lock-step.
     ProvideSimulaContext(sessionStore, apiKey, devMode, content)
+}
+
+/** Binary bridge for clients compiled against the pre-1.1.6 provider descriptor. */
+@Deprecated("Binary compatibility bridge", level = DeprecationLevel.HIDDEN)
+@Composable
+fun SimulaProvider(
+    apiKey: String,
+    devMode: Boolean = false,
+    primaryUserID: String? = null,
+    hasPrivacyConsent: Boolean = true,
+    privacy: SimulaPrivacyConfig? = null,
+    adContext: SimulaAdContext? = null,
+    content: @Composable () -> Unit,
+) {
+    SimulaProvider(
+        apiKey = apiKey,
+        devMode = devMode,
+        primaryUserID = primaryUserID,
+        hasPrivacyConsent = hasPrivacyConsent,
+        privacy = privacy,
+        adContext = adContext,
+        telemetryEnabled = true,
+        content = content,
+    )
 }
 
 /**
@@ -322,16 +387,9 @@ internal fun ProvideSimulaContext(
     val heightCache = remember { boundedLruMap<String, Float>(MAX_AD_CACHE_ENTRIES) }
     val noFillSet = remember { boundedLruSet(MAX_AD_CACHE_ENTRIES) }
 
-    // Kick off session creation off the critical path (idempotent / coalesced). The IAB
-    // attach and the initial GAID read run first IN THE SAME coroutine: both are idempotent
-    // (cheap once any entry path already ran them) and guarantee consent headers AND the
-    // collected advertising id are merged before the first /session/create snapshots the
-    // privacy block — independent LaunchedEffects could otherwise fire the session ahead of
-    // the GAID read, and the backend ties the privacy block to the session at creation.
-    val context = LocalContext.current
+    // Kick off session creation off the critical path. The store's startup gate sequences privacy,
+    // telemetry, crash guard, and GAID before this request for both public entry paths.
     LaunchedEffect(store) {
-        SimulaPrivacy.attach(context)
-        SimulaPrivacy.refreshAdvertisingId()
         store.ensureSession()
     }
 

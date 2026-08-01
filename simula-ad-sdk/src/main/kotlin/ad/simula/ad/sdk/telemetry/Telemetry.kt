@@ -20,7 +20,7 @@ import kotlinx.serialization.json.Json
  * SDK version stamped on every telemetry batch. Keep in sync with the `coordinates(...)`
  * version in `simula-ad-sdk/build.gradle.kts`.
  */
-internal const val SIMULA_SDK_VERSION = "1.1.5"
+internal const val SIMULA_SDK_VERSION = "1.1.6"
 
 /** logcat tag for the dev-mode telemetry mirror. */
 private const val LOG_TAG = "SimulaTelemetry"
@@ -41,18 +41,16 @@ internal object Telemetry {
     private var manager: TelemetryManager? = null
 
     /**
-     * Install the telemetry pipeline. Call once from `SimulaAds.initialize`. When [enabled]
-     * is false nothing is created (host opt-out). [primaryUserIdProvider] is read live on every
-     * flush so a mid-session `updatePrimaryUserID` is honored, and it is additionally gated by
-     * the live consent snapshot.
+     * Install the telemetry pipeline. Called once by [SimulaTelemetryStartup]. When [enabled]
+     * is false nothing is created (host opt-out). [identityProvider] is read live on every flush
+     * so a mid-session `updatePrimaryUserID` is honored, and PPID remains gated by live consent.
      */
     fun initialize(
         context: Context,
         apiKey: String,
         devMode: Boolean,
         enabled: Boolean,
-        sessionIdProvider: () -> String?,
-        primaryUserIdProvider: () -> String?,
+        identityProvider: () -> TelemetryIdentity,
     ) {
         if (!enabled) {
             manager = null
@@ -76,10 +74,8 @@ internal object Telemetry {
             ctx = ctx,
             store = SqliteTelemetryStore(appCtx, json),
             sender = ApiTelemetrySender(apiKey),
-            sessionIdProvider = sessionIdProvider,
-            // Re-gate on every flush: ppid only with consent (& not under COPPA); the
-            // advertising id is already nulled by the snapshot when not collectible.
-            primaryUserIdProvider = primaryUserIdProvider,
+            // Resolve session + consent-gated PPID from one provider generation per flush.
+            identityProvider = identityProvider,
             advertisingIdProvider = { SimulaPrivacy.current.advertisingId },
             // Reads SimulaConnectionType's cached value (kept fresh by its own network callback —
             // see SimulaConnectionType.prime) instead of a fresh binder call per flush.

@@ -66,7 +66,7 @@ internal object SimulaCrashGuard {
     /**
      * Install the handler (synchronously, so a crash during the backgrounded replay/sweep is still
      * caught) and harvest anything left by a prior process. Idempotent; a no-op when [enabled] is
-     * false. Call once from `SimulaAds.initialize`, after [Telemetry.initialize].
+     * false. Called once by [SimulaTelemetryStartup], after [Telemetry.initialize].
      */
     @MainThread
     fun install(appContext: Context, enabled: Boolean) {

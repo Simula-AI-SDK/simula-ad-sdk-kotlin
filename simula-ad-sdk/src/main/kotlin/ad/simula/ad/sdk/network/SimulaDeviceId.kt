@@ -4,6 +4,7 @@ import ad.simula.ad.sdk.core.SimulaScope
 import android.content.Context
 import android.provider.Settings
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 /**
@@ -16,13 +17,15 @@ import kotlinx.coroutines.launch
  */
 internal object SimulaDeviceId {
 
-    /** The resolved device id, or null until [build] has run / the platform supplied none. */
-    @Volatile
-    var value: String? = null
-        private set
+    private val primer = DeviceIdPrimer<Context>(SimulaScope) { context ->
+        Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+    }
 
-    /** Ensures resolution is kicked off at most once. */
-    private val priming = AtomicBoolean(false)
+    @Volatile
+    private var appContext: Context? = null
+
+    /** The resolved device id, or null until priming succeeds with a non-blank value. */
+    val value: String? get() = primer.value
 
     /**
      * Kick off (idempotent) resolution off the main thread. `Settings.Secure.getString` is a
@@ -32,19 +35,58 @@ internal object SimulaDeviceId {
      * it, which the contract already allows.
      */
     fun prime(context: Context) {
-        if (value != null || !priming.compareAndSet(false, true)) return
-        val appContext = context.applicationContext
-        SimulaScope.launch { build(appContext) }
+        val app = context.applicationContext
+        appContext = app
+        primer.prime(app)
     }
 
-    /** Resolve (idempotently) from the application context. The first non-blank value wins. Performs a
-     * binder call, so callers should go through [prime]; exposed for tests / synchronous reuse. */
-    fun build(context: Context): String? {
-        value?.let { return it }
-        val id = runCatching {
-            Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-        }.getOrNull()?.takeIf { it.isNotBlank() }
-        value = id
-        return id
+    /**
+     * Request-path retry trigger. Header construction calls this before reading [value], so a blank
+     * or failed startup resolution gets another real production attempt. It only schedules the
+     * existing single flight on [SimulaScope]; it never performs the binder read inline.
+     */
+    fun retryIfNeeded() {
+        if (value != null) return
+        appContext?.let { primer.prime(it) }
+    }
+}
+
+/**
+ * Testable single-flight engine behind [SimulaDeviceId]. Resolution always runs in [scope], never
+ * inline in [prime]. A blank value or exception releases the flight so a later call can retry;
+ * the first non-blank value is retained only in memory for the process lifetime.
+ */
+internal class DeviceIdPrimer<T>(
+    private val scope: CoroutineScope,
+    private val retryDelayMs: Long = 30_000L,
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val resolve: suspend (T) -> String?,
+) {
+    @Volatile
+    var value: String? = null
+        private set
+
+    private val priming = AtomicBoolean(false)
+    @Volatile private var nextAttemptAtMs = 0L
+
+    fun prime(input: T) {
+        if (value != null || nowMs() < nextAttemptAtMs || !priming.compareAndSet(false, true)) return
+        try {
+            val job = scope.launch {
+                val resolved = runCatching { resolve(input) }
+                    .getOrNull()
+                    ?.takeIf { it.isNotBlank() }
+                if (resolved != null) value = resolved
+            }
+            // Completion also covers cancellation before the coroutine body starts (for example,
+            // an injected/test scope that was already cancelled), so no failed launch can wedge it.
+            job.invokeOnCompletion {
+                if (value == null) nextAttemptAtMs = nowMs() + retryDelayMs
+                priming.set(false)
+            }
+        } catch (_: Exception) {
+            nextAttemptAtMs = nowMs() + retryDelayMs
+            priming.set(false)
+        }
     }
 }

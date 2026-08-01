@@ -71,27 +71,17 @@ internal object SimulaHttp {
             val raw = LimitedInputStream(decode(conn, stream), MAX_JSON_BYTES).use { it.readBytes() }
             val text = String(raw, Charsets.UTF_8)
             if (instrument) {
-                Telemetry.recordNetwork(
-                    path = pathOf(url),
-                    method = method,
-                    statusCode = code,
-                    durationMs = elapsedMs(started),
-                    requestBytes = (reqBytes?.size ?: 0).toLong(),
-                    responseBytes = raw.size.toLong(),
-                    failureClass = httpFailureClass(code),
+                recordFirstPartyNetwork(
+                    url, method, code, elapsedMs(started), (reqBytes?.size ?: 0).toLong(),
+                    raw.size.toLong(), httpFailureClass(code),
                 )
             }
             Response(code, text)
         } catch (e: Exception) {
             if (instrument) {
-                Telemetry.recordNetwork(
-                    path = pathOf(url),
-                    method = method,
-                    statusCode = null,
-                    durationMs = elapsedMs(started),
-                    requestBytes = (reqBytes?.size ?: 0).toLong(),
-                    responseBytes = 0L,
-                    failureClass = failureClassOf(e),
+                recordFirstPartyNetwork(
+                    url, method, null, elapsedMs(started), (reqBytes?.size ?: 0).toLong(),
+                    0L, failureClassOf(e),
                 )
             }
             throw e
@@ -110,17 +100,17 @@ internal object SimulaHttp {
             if (code !in 200..299) {
                 // Drain + close the error body so the connection can be reused.
                 conn.errorStream?.use { it.readBytes() }
-                Telemetry.recordNetwork(hostOf(url), "GET", code, elapsedMs(started), 0L, 0L, httpFailureClass(code))
+                Telemetry.recordNetwork(assetTelemetryLabel(url), "GET", code, elapsedMs(started), 0L, 0L, httpFailureClass(code))
                 throw HttpStatusException(code, url)
             }
             val bytes = LimitedInputStream(decode(conn, conn.inputStream), MAX_IMAGE_BYTES).use { it.readBytes() }
-            Telemetry.recordNetwork(hostOf(url), "GET", code, elapsedMs(started), 0L, bytes.size.toLong(), null)
+            Telemetry.recordNetwork(assetTelemetryLabel(url), "GET", code, elapsedMs(started), 0L, bytes.size.toLong(), null)
             bytes
         } catch (e: Exception) {
             // The non-2xx branch above already recorded its HTTP event; only record genuine
             // connectivity failures here so a single request yields a single network event.
             if (e !is HttpStatusException) {
-                Telemetry.recordNetwork(hostOf(url), "GET", null, elapsedMs(started), 0L, 0L, failureClassOf(e))
+                Telemetry.recordNetwork(assetTelemetryLabel(url), "GET", null, elapsedMs(started), 0L, 0L, failureClassOf(e))
             }
             throw e
         }
@@ -131,13 +121,48 @@ internal object SimulaHttp {
 
     private fun elapsedMs(startNanos: Long): Long = (System.nanoTime() - startNanos) / 1_000_000
 
-    /** Request path only (no scheme/host/query) so telemetry carries no PII-bearing query params. */
-    private fun pathOf(url: String): String =
-        try { URI(url).path?.takeIf { it.isNotEmpty() } ?: url } catch (_: Exception) { url }
+    private fun recordFirstPartyNetwork(
+        url: String,
+        method: String,
+        statusCode: Int?,
+        durationMs: Long,
+        requestBytes: Long,
+        responseBytes: Long,
+        failureClass: String?,
+    ) {
+        val route = normalizeFirstPartyRoute(url) ?: return
+        Telemetry.recordNetwork(route, method, statusCode, durationMs, requestBytes, responseBytes, failureClass)
+    }
 
-    /** Host of a CDN/asset URL — avoids the high-cardinality per-asset path. */
-    private fun hostOf(url: String): String =
-        try { URI(url).host ?: "cdn" } catch (_: Exception) { "cdn" }
+    /**
+     * Contract-v3 first-party route normalization. Only registered static routes and the approved
+     * dynamic templates are emitted. Telemetry delivery and PPID updates are omitted; every other
+     * path becomes a fixed `/unknown`, so malformed/new routes can never leak identifiers.
+     */
+    internal fun normalizeFirstPartyRoute(url: String): String? {
+        val path = runCatching { URI(url).path }
+            .getOrNull()
+            ?.takeIf { it.startsWith('/') }
+            ?: return "/unknown"
+        val segments = path.split('/').filter { it.isNotEmpty() }
+
+        if (segments.firstOrNull() == "telemetry" ||
+            (segments.size >= 2 && segments[0] == "v1" && segments[1] == "telemetry")
+        ) return null
+        if ("ppid" in segments) return null
+
+        if (path in REGISTERED_STATIC_ROUTES) return path
+        if (segments.size == 3 && segments[0] == "impressions" &&
+            segments[1].isNotBlank() && segments[2] in REGISTERED_IMPRESSION_ACTIONS
+        ) return "/impressions/:id/${segments[2]}"
+        if (segments.size == 3 && segments[0] == "load" && segments[1] == "fallbacks" &&
+            segments[2].isNotBlank()
+        ) return "/load/fallbacks/:id"
+        return "/unknown"
+    }
+
+    /** Asset requests retain one approved low-cardinality CDN label, never a path or host. */
+    internal fun assetTelemetryLabel(@Suppress("UNUSED_PARAMETER") url: String): String = "cdn"
 
     private fun httpFailureClass(code: Int): String? = if (code in 200..399) null else "http_$code"
 
@@ -148,6 +173,21 @@ internal object SimulaHttp {
         is IOException -> "connection"
         else -> "unknown"
     }
+
+    private val REGISTERED_STATIC_ROUTES = setOf(
+        "/session/create",
+        "/frequency-cap/status",
+        "/minigames/catalog",
+        "/character-selector",
+        "/minigames/init",
+        "/load/interstitial",
+        "/load/native",
+        "/load/rewarded",
+        "/minigames/verify-reward",
+        "/minigames/menu/track/click",
+    )
+
+    private val REGISTERED_IMPRESSION_ACTIONS = setOf("shown", "seen", "click", "interest", "report")
 
     private fun open(url: String, method: String, headers: Map<String, String>): HttpURLConnection =
         (URL(url).openConnection() as? HttpURLConnection
@@ -163,6 +203,7 @@ internal object SimulaHttp {
             // Custom UA + device id on every native request. Set before caller headers so a
             // caller could still override them; null (pre-init / unavailable) is simply omitted.
             SimulaUserAgent.value?.let { setRequestProperty("User-Agent", it) }
+            SimulaDeviceId.retryIfNeeded()
             SimulaDeviceId.value?.let { setRequestProperty("X-Device-Id", it) }
             // Read live on every call (never cached at init) — a session begun on Wi-Fi can hand
             // off to cellular mid-flight, and SimulaConnectionType's cached value updates on that

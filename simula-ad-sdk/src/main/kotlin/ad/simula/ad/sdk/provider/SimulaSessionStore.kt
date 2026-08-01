@@ -58,21 +58,13 @@ internal class SimulaSessionStore(
     private var sessionDeferred: Deferred<String?>? = null
 
     /**
-     * Optional startup gate, resolved per [ensureSession] call and awaited before any
-     * session work. Wired from `SimulaAds.startupGate` (see its doc): by `SimulaAds.initialize`
-     * for the imperative store, and by the declarative `SimulaProvider` for its own store —
-     * so no entry path can fire a request ahead of consent attach + telemetry install + the
-     * beacon-queue build.
-     *
-     * A provider lambda rather than a plain reference because a mixed host can compose
-     * `SimulaProvider` BEFORE `SimulaAds.initialize` publishes the gate: a value copied at
-     * composition would stay null on that remembered store forever, letting its sessions
-     * race the deferred startup. Resolving at call time picks the gate up whenever it
-     * appears. Returns null for declarative-only hosts and the gate completes before the
-     * startup's own session warm-up, so neither can deadlock. Completed even on startup
-     * failure (fail-open).
+     * Optional fixed startup gate awaited before any session work. Each public entry path assigns
+     * the gate owned by that store: imperative stores wait for imperative prerequisites, while a
+     * provider store waits for its own privacy, telemetry/crash, GAID, and beacon-manager startup.
+     * A later entry path never replaces a gate that callers may already be awaiting. Every startup
+     * completes its gate on failure as well, so ads fail open rather than deadlocking.
      */
-    var startupGate: () -> CompletableDeferred<Unit>? = { null }
+    var startupGate: CompletableDeferred<Unit>? = null
 
     // Serializes PPID reconciliation so at most one PATCH is ever in flight. The server then applies
     // updates in submission order (no reordering), which is what lets [sessionUserID] be advanced
@@ -138,15 +130,9 @@ internal class SimulaSessionStore(
     }
 
     suspend fun ensureSession(): String? {
-        // See the property doc: a host load fired right after SimulaAds.initialize waits
-        // here until consent (IAB) is attached, telemetry is installed, and the beacon
-        // queue is built. Resolved per call (not cached) so a store created before
-        // initialize() published the gate still honors it — and awaited BEFORE the
-        // cached-id return, so a session minted while the gate was still null (provider
-        // composed before initialize) can't let later calls skip the deferred imperative
-        // startup either. Already-complete for the startup's own warm-up and in steady
-        // state, so this is free on the hot path and can't deadlock.
-        startupGate()?.await()
+        // Await before the cached-id return too: every request through this store observes the same
+        // immutable prerequisite gate, including sessions created by a concurrent first caller.
+        startupGate?.await()
 
         sessionId?.takeIf { it.isNotBlank() }?.let { return it }
 

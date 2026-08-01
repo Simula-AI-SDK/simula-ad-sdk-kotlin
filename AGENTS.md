@@ -48,6 +48,7 @@ Never introduce:
 - `clearCache()` on WebView pool release
 - New dangerous permissions in the SDK manifest
 - Query strings, tokens, or PII in telemetry `message`/`breadcrumb`/paths
+- Telemetry wire fields or semantics not defined in `docs/TELEMETRY_CONTRACT_V3.md`; keep that contract and its golden fixture byte-identical across the Swift, Kotlin, and React Native repositories
 
 ## Copy an existing pattern (golden examples)
 
