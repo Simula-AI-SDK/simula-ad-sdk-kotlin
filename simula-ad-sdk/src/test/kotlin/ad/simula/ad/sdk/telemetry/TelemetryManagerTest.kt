@@ -27,8 +27,9 @@ class TelemetryManagerTest {
 
     private class FakeStore(initial: List<TelemetryEvent> = emptyList()) : TelemetryStore {
         var data: List<TelemetryEvent> = initial.toList()
+        var saveCount = 0
         override fun load(): List<TelemetryEvent> = data
-        override fun save(events: List<TelemetryEvent>) { data = events.toList() }
+        override fun save(events: List<TelemetryEvent>) { saveCount++; data = events.toList() }
     }
 
     /** Records decoded batches; replays queued acks then falls back to [defaultAck]. Optional
@@ -135,6 +136,32 @@ class TelemetryManagerTest {
         m.recordError("api:fatal", "fatal", "x")
         advanceUntilIdle()
         assertTrue(sender.batches.allEvents().any { it.type == TYPE_ERROR && it.name == "api:fatal" })
+    }
+
+    @Test
+    fun `a repeat error signature skips the durable save and the eager flush`() = runTest {
+        val store = FakeStore()
+        val sender = FakeSender().apply { gateFirst() } // hold the first send so the agg survives
+        val m = build(this, store, sender)
+
+        m.recordError("api:decode", "decode", "one")
+        advanceUntilIdle() // first record persisted + its eager flush parked on the gate
+        val savesAfterFirst = store.saveCount
+        val batchesAfterFirst = sender.batches.size
+
+        m.recordError("api:decode", "decode", "two")
+        m.recordError("api:decode", "decode", "three")
+        advanceUntilIdle()
+
+        assertEquals("no durable save for a repeat signature", savesAfterFirst, store.saveCount)
+        assertEquals("no eager flush for a repeat signature", batchesAfterFirst, sender.batches.size)
+
+        sender.release()
+        advanceUntilIdle()
+        val counts = sender.batches.allEvents()
+            .filter { it.type == TYPE_ERROR && it.name == "api:decode" }
+            .sumOf { it.count ?: 0 }
+        assertEquals("every occurrence still accounted for", 3, counts)
     }
 
     // ── Durability + recovery ──────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -31,7 +32,12 @@ internal data class PendingVerification(
     // Sent to verify-reward so the SSV callback resolves the ad unit. Defaulted + last so queue
     // entries persisted before this field existed still decode (with adUnitId = "").
     val adUnitId: String = "",
+    /** Enqueue time, for the store's TTL prune. 0 on rows migrated from the legacy blob. */
+    val createdAt: Long = 0L,
 )
+
+/** Hard cap on the durable verification queue (see [RewardVerificationQueue.queue]). */
+internal const val MAX_PENDING_VERIFICATIONS = 200
 
 /** Persists the pending-verification queue. Abstracted so the queue engine can be unit-tested. */
 internal interface VerificationStore {
@@ -123,6 +129,14 @@ internal class RewardVerificationQueue(
             mutex.withLock {
                 val list = store.load().toMutableList()
                 if (list.none { it.serveId == serveId }) {
+                    if (list.size >= MAX_PENDING_VERIFICATIONS) {
+                        list.removeAt(0) // drop oldest: bounded queue > an unbounded ANR backlog
+                        Telemetry.recordError(
+                            signature = "reward:queue_overflow",
+                            errorCode = "queue_full",
+                            message = "pending verification queue at cap ($MAX_PENDING_VERIFICATIONS) — dropped oldest",
+                        )
+                    }
                     list.add(
                         PendingVerification(
                             serveId = serveId,
@@ -131,6 +145,7 @@ internal class RewardVerificationQueue(
                             retryCount = 0,
                             lastAttemptTimestamp = 0L,
                             adUnitId = adUnitId,
+                            createdAt = System.currentTimeMillis(),
                         ),
                     )
                     store.save(list)
@@ -270,8 +285,6 @@ internal class RewardVerificationQueue(
  * is also called at SDK init to recover verifications left pending by a prior process.
  */
 internal object RewardVerificationManager {
-    private const val PREFS_NAME = "simula_ad_sdk_verification_prefs"
-    private const val KEY_PENDING_QUEUE = "pending_reward_verifications"
     private val json = Json { ignoreUnknownKeys = true }
 
     @Volatile
@@ -280,7 +293,7 @@ internal object RewardVerificationManager {
     private fun engine(context: Context): RewardVerificationQueue {
         return engine ?: synchronized(this) {
             engine ?: RewardVerificationQueue(
-                store = SharedPrefsVerificationStore(context.applicationContext, json, PREFS_NAME, KEY_PENDING_QUEUE),
+                store = SqliteVerificationStore(context.applicationContext, json),
                 verifier = ApiRewardVerifier,
             ).also { engine = it }
         }
@@ -306,27 +319,4 @@ internal object RewardVerificationManager {
 private object ApiRewardVerifier : RewardVerifier {
     override suspend fun verify(serveId: String, sessionId: String, elapsedPlayTime: Double, adUnitId: String): String? =
         SimulaApiClient.verifyReward(serveId, sessionId, elapsedPlayTime, adUnitId).token
-}
-
-/** Real store: a single `SharedPreferences` entry holding the JSON-encoded queue. */
-private class SharedPrefsVerificationStore(
-    private val context: Context,
-    private val json: Json,
-    private val prefsName: String,
-    private val key: String,
-) : VerificationStore {
-    override fun load(): List<PendingVerification> {
-        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        val jsonStr = prefs.getString(key, null) ?: return emptyList()
-        return try {
-            json.decodeFromString<List<PendingVerification>>(jsonStr)
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
-    override fun save(queue: List<PendingVerification>) {
-        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        prefs.edit().putString(key, json.encodeToString(queue)).apply()
-    }
 }

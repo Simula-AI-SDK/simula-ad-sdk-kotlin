@@ -16,6 +16,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
@@ -197,6 +198,31 @@ internal object NativeAdWebViewStore {
     /** Retained-view cap on a low-RAM / small-heap device, where 3 retained views are too costly. */
     private const val MAX_RETAINED_LOW_RAM = 1
 
+    /**
+     * Process-wide cap on CONCURRENTLY-ATTACHED native WebViews (one per visible slot,
+     * ~20-30 MB each). A lazy feed stays at 2-3; a non-lazy column / multi-column grid / big
+     * prefetch window would otherwise escalate to OOM/LMK. Past the cap a slot renders blank
+     * (blank UI, never a crash) — see [attach].
+     */
+    private const val MAX_ATTACHED_NATIVE_WEBVIEWS = 8
+
+    /** Live attached count, main-thread only (every transition runs through [attach]/[release]). */
+    private var attachedCount = 0
+
+    private fun markAttached(session: Session) {
+        if (!session.attached) {
+            session.attached = true
+            attachedCount++
+        }
+    }
+
+    private fun markDetached(session: Session) {
+        if (session.attached) {
+            session.attached = false
+            attachedCount--
+        }
+    }
+
     /** Heaps below this are treated as low-end (small Dalvik heap ⇒ retain fewer views). */
     private const val LOW_HEAP_THRESHOLD_BYTES = 128L * 1024 * 1024
 
@@ -245,9 +271,21 @@ internal object NativeAdWebViewStore {
         return session
     }
 
-    /** Return the view to mount: the retained one (already loaded → no reload) or a freshly built one. */
+    /** Return the view to mount: the retained one (already loaded → no reload) or a freshly built one.
+     * Over the attached budget ([MAX_ATTACHED_NATIVE_WEBVIEWS]) returns a zero-cost blank [View]
+     * instead — a slot past the cap renders blank rather than adding another ~25 MB WebView to a
+     * pressured heap (OOM/LMK on small devices). The blank flows through [release] untouched. */
     @MainThread
-    fun attach(session: Session, hostContext: Context, iframeUrl: String?, renderedHtml: String?): WebView {
+    fun attach(session: Session, hostContext: Context, iframeUrl: String?, renderedHtml: String?): View {
+        if (!session.attached && attachedCount >= MAX_ATTACHED_NATIVE_WEBVIEWS) {
+            // Count aggregates by signature in the pipeline — one error, N occurrences.
+            Telemetry.recordError(
+                signature = "nativead:attached_budget",
+                errorCode = "budget_exceeded",
+                message = "attached native WebView budget ($MAX_ATTACHED_NATIVE_WEBVIEWS) exceeded — rendering blank",
+            )
+            return View(hostContext)
+        }
         val creativeKey = creativeKey(iframeUrl, renderedHtml)
         val retained = session.webView
         // Reuse the retained view only if it is alive (render process intact), actually holds this
@@ -259,7 +297,7 @@ internal object NativeAdWebViewStore {
             (retained.context as? MutableContextWrapper)?.baseContext = hostContext // re-home for theming
             (retained.parent as? ViewGroup)?.removeView(retained)                   // clear any stale parent
             retained.onResume()
-            session.attached = true
+            markAttached(session)
             session.wiring.webView = retained // visibility pushes target the live view
             retained.repaintOnNextFrame() // repaint the stale hardware layer (avoid a black/blank frame)
             return retained
@@ -284,7 +322,7 @@ internal object NativeAdWebViewStore {
             session.webView?.takeIf { it !== fresh }?.let { uninstallBridge(it); WebViewPool.release(it) }
             session.webView = fresh
             session.loadedKey = creativeKey
-            session.attached = true
+            markAttached(session)
             session.wiring.webView = fresh
             // [loadFailed] described the view just discarded, not this fresh retry. Left sticky,
             // release() would recycle the healthy mid-load view on scroll-out instead of retaining
@@ -296,12 +334,15 @@ internal object NativeAdWebViewStore {
 
     /** Scroll-out / dispose: retain (detach + pause) the loaded view, or recycle an ephemeral/orphan. */
     @MainThread
-    fun release(session: Session, released: WebView) {
+    fun release(session: Session, released: View) {
+        // The over-budget blank from attach() is a zero-cost plain View — nothing to detach,
+        // recycle, or count (it was never marked attached).
+        if (released !is WebView) return
         // A render-dead current view must be destroyed, never recycled to the pool — a dead view in the
         // pool would hand the next consumer a permanently-blank WebView. (This fires when the slot
         // remounts after onRenderProcessGone: the dead view is disposed here, attach() rebuilds.)
         if (released === session.webView && session.wiring.renderGone) {
-            session.attached = false
+            markDetached(session)
             discardDeadView(session)
             return
         }
@@ -319,10 +360,10 @@ internal object NativeAdWebViewStore {
                 // (healthy, mid-load) retry too. Mirrors discardDeadView clearing renderGone.
                 session.wiring.loadFailed = false
             }
-            session.attached = false
+            markDetached(session)
             return
         }
-        session.attached = false
+        markDetached(session)
         (released.parent as? ViewGroup)?.removeView(released)
         released.onPause() // suspend the creative's JS/rendering while off-screen (per-instance; no global timers)
         // Drop the Activity reference so a retained, off-screen view can't leak it.
@@ -407,7 +448,7 @@ internal object NativeAdWebViewStore {
         }
         session.webView = null
         session.loadedKey = null
-        session.attached = false
+        markDetached(session)
         session.wiring.webView = null
         session.wiring.renderGone = false
         session.wiring.loadFailed = false

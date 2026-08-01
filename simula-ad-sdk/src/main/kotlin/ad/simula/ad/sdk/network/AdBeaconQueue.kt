@@ -27,6 +27,8 @@ internal data class PendingBeacon(
     val action: String,
     var retryCount: Int = 0,
     var lastAttemptTimestamp: Long = 0L,
+    /** Enqueue time, for the store's TTL prune. 0 on rows migrated from the legacy blob. */
+    val createdAt: Long = 0L,
 )
 
 /** Persists the pending-beacon queue. Abstracted so the queue engine is unit-testable. */
@@ -40,6 +42,9 @@ internal interface BeaconSender {
     suspend fun send(impressionId: String, action: String): Int
 }
 
+/** Hard cap on the durable queue (see [AdBeaconQueue.queue]). */
+internal const val MAX_PENDING_BEACONS = 200
+
 /**
  * Thread-safe, persistent queue that delivers impression beacons (`/shown`, `/seen`, `/click`)
  * reliably and off the UI path — the same durable, conflict-free design as
@@ -51,6 +56,12 @@ internal interface BeaconSender {
  *   `/click` increments a counter, so a lost-response retry carries a small over-count risk —
  *   acceptable vs. today's silent loss, and removable once the endpoint takes an idempotency key.)
  * - **Durable**: persisted via [BeaconStore]; survives process death, recovered on the next trigger.
+ * - **Bounded**: at most [MAX_PENDING_BEACONS] entries — on overflow the oldest is dropped (and
+ *   recorded), so a stuck endpoint + nonstop ads can never grow the durable blob unboundedly.
+ * - **Batched**: the queue lives in memory after one initial load; each drain pass persists ONCE
+ *   (per-mutation load+save was O(n²) on a backlog). A crash mid-drain re-sends already-accepted
+ *   beacons on the next launch — safe: `/seen` is deduped server-side, `/click` over-count is the
+ *   same small risk the retry path already accepts.
  * - **Backed off**: failed attempts retry with the shared exponential backoff (5s → 60s cap).
  *
  * Collaborators are injected so the draining logic is unit-testable with fakes.
@@ -64,14 +75,29 @@ internal class AdBeaconQueue(
     private val mutex = Mutex()
     private var isProcessing = false
 
+    /** In-memory queue, loaded lazily on first use (disk I/O stays off init). Guarded by [mutex]. */
+    private var cache: MutableList<PendingBeacon>? = null
+
+    /** The live queue. MUST only be called inside `mutex.withLock`. */
+    private fun pendingLocked(): MutableList<PendingBeacon> =
+        cache ?: store.load().toMutableList().also { cache = it }
+
     /** Enqueue a beacon and start draining. Safe to call repeatedly — duplicates are ignored. */
     fun queue(impressionId: String, action: String) {
         if (impressionId.isBlank()) return
         scope.launch {
             mutex.withLock {
-                val list = store.load().toMutableList()
+                val list = pendingLocked()
                 if (list.none { it.impressionId == impressionId && it.action == action }) {
-                    list.add(PendingBeacon(impressionId, action))
+                    if (list.size >= MAX_PENDING_BEACONS) {
+                        list.removeAt(0) // drop oldest: bounded queue > an unbounded ANR backlog
+                        Telemetry.recordError(
+                            signature = "beacon:queue_overflow",
+                            errorCode = "queue_full",
+                            message = "pending beacon queue at cap ($MAX_PENDING_BEACONS) — dropped oldest",
+                        )
+                    }
+                    list.add(PendingBeacon(impressionId, action, createdAt = clock()))
                     store.save(list)
                 }
             }
@@ -94,7 +120,7 @@ internal class AdBeaconQueue(
             while (true) {
                 val task = mutex.withLock {
                     val now = clock()
-                    store.load().firstOrNull {
+                    pendingLocked().firstOrNull {
                         now - it.lastAttemptTimestamp >= rewardVerificationBackoffMs(it.retryCount)
                     }
                 } ?: break
@@ -110,13 +136,22 @@ internal class AdBeaconQueue(
                     false // connectivity failure → retry (server never received it)
                 }
 
-                if (delivered) {
-                    removeTask(task)
-                } else {
-                    recordAttempt(task)
-                    bailedForBackoff = true
+                // In-memory mutation only — the pass persists once, in the finally below.
+                mutex.withLock {
+                    val list = pendingLocked()
+                    val idx = list.indexOfFirst { it.impressionId == task.impressionId && it.action == task.action }
+                    if (idx != -1) {
+                        if (delivered) list.removeAt(idx)
+                        else list[idx] = list[idx].copy(
+                            retryCount = list[idx].retryCount + 1,
+                            lastAttemptTimestamp = clock(),
+                        )
+                    }
                 }
-                if (bailedForBackoff) break
+                if (!delivered) {
+                    bailedForBackoff = true
+                    break
+                }
             }
         } finally {
             // Clear the claim and decide re-drain under the same lock (closes the enqueue-just-as-
@@ -124,45 +159,28 @@ internal class AdBeaconQueue(
             val reDrain = withContext(NonCancellable) {
                 mutex.withLock {
                     isProcessing = false
+                    store.save(pendingLocked()) // ONE persist per drain pass (was per mutation)
                     if (bailedForBackoff) {
                         false
                     } else {
                         val now = clock()
-                        store.load().any { now - it.lastAttemptTimestamp >= rewardVerificationBackoffMs(it.retryCount) }
+                        pendingLocked().any { now - it.lastAttemptTimestamp >= rewardVerificationBackoffMs(it.retryCount) }
                     }
                 }
             }
             if (reDrain) trigger()
         }
     }
-
-    private suspend fun removeTask(task: PendingBeacon) = mutex.withLock {
-        store.save(store.load().filterNot { it.impressionId == task.impressionId && it.action == task.action })
-    }
-
-    private suspend fun recordAttempt(task: PendingBeacon) = mutex.withLock {
-        val queue = store.load().toMutableList()
-        val idx = queue.indexOfFirst { it.impressionId == task.impressionId && it.action == task.action }
-        if (idx != -1) {
-            queue[idx] = queue[idx].copy(
-                retryCount = queue[idx].retryCount + 1,
-                lastAttemptTimestamp = clock(),
-            )
-            store.save(queue)
-        }
-    }
 }
 
 /**
- * Process-wide [AdBeaconQueue] wired to the real `SharedPreferences` store + `SimulaApiClient`.
+ * Process-wide [AdBeaconQueue] wired to the real SQLite store + `SimulaApiClient`.
  * Built once from [init] at SDK init (which has the app context + api key); ad surfaces then call
  * [enqueue] with no context/key threading. Kept OFF the telemetry pipeline (its batching/sampling/
  * event cap are wrong for billing); the diagnostic `impression_fired`/`click_fired` events emitted
  * here are interim visibility into beacon firing, separate from the durable beacon itself.
  */
 internal object AdBeaconManager {
-    private const val PREFS_NAME = "simula_ad_sdk_beacon_prefs"
-    private const val KEY_PENDING_QUEUE = "pending_beacons"
     private val json = Json { ignoreUnknownKeys = true }
 
     @Volatile
@@ -174,7 +192,7 @@ internal object AdBeaconManager {
         synchronized(this) {
             if (engine != null) return
             engine = AdBeaconQueue(
-                store = SharedPrefsBeaconStore(appContext, json, PREFS_NAME, KEY_PENDING_QUEUE),
+                store = SqliteBeaconStore(appContext, json),
                 sender = ApiBeaconSender(apiKey),
             )
         }
@@ -208,27 +226,4 @@ internal object AdBeaconManager {
 private class ApiBeaconSender(private val apiKey: String) : BeaconSender {
     override suspend fun send(impressionId: String, action: String): Int =
         SimulaApiClient.sendImpressionBeacon(impressionId, action, apiKey)
-}
-
-/** Real store: a single `SharedPreferences` entry holding the JSON-encoded queue. */
-private class SharedPrefsBeaconStore(
-    private val context: Context,
-    private val json: Json,
-    private val prefsName: String,
-    private val key: String,
-) : BeaconStore {
-    override fun load(): List<PendingBeacon> {
-        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        val jsonStr = prefs.getString(key, null) ?: return emptyList()
-        return try {
-            json.decodeFromString<List<PendingBeacon>>(jsonStr)
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
-    override fun save(queue: List<PendingBeacon>) {
-        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        prefs.edit().putString(key, json.encodeToString(queue)).apply()
-    }
 }

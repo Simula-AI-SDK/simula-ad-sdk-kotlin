@@ -17,8 +17,9 @@ class AdBeaconQueueTest {
 
     private class FakeStore(initial: List<PendingBeacon> = emptyList()) : BeaconStore {
         var data: List<PendingBeacon> = initial.toList()
+        var saveCount = 0
         override fun load(): List<PendingBeacon> = data
-        override fun save(queue: List<PendingBeacon>) { data = queue.toList() }
+        override fun save(queue: List<PendingBeacon>) { saveCount++; data = queue.toList() }
     }
 
     /** Programmable sender: per-`impressionId:action` status code, or a thrown connectivity error. */
@@ -164,5 +165,43 @@ class AdBeaconQueueTest {
 
         assertTrue(store.data.isEmpty())
         assertTrue(sender.callCounts.isEmpty())
+    }
+
+    @Test
+    fun `the queue is capped and drops the oldest on overflow`() = runTest {
+        // 5xx for everything so entries stay queued and accumulate to the cap.
+        val store = FakeStore()
+        val sender = FakeSender()
+        val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
+
+        repeat(MAX_PENDING_BEACONS) { sender.codes["imp_$it:seen"] = 503 }
+        repeat(MAX_PENDING_BEACONS) { engine.queue("imp_$it", "seen") }
+        advanceUntilIdle()
+        assertEquals(MAX_PENDING_BEACONS, store.data.size)
+
+        sender.codes["newest:seen"] = 503
+        engine.queue("newest", "seen")
+        advanceUntilIdle()
+
+        assertEquals("cap holds", MAX_PENDING_BEACONS, store.data.size)
+        assertTrue("the newest entry is never the one dropped", store.data.any { it.impressionId == "newest" })
+        assertTrue("the oldest was dropped", store.data.none { it.impressionId == "imp_0" })
+    }
+
+    @Test
+    fun `a drain pass persists once, not per delivered beacon`() = runTest {
+        val store = FakeStore((0 until 5).map { PendingBeacon("imp_$it", "seen") })
+        val sender = FakeSender() // default 200 → everything delivers
+        val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
+
+        engine.trigger()
+        advanceUntilIdle()
+
+        assertTrue(store.data.isEmpty())
+        assertEquals(
+            "one batched persist for a 5-beacon drain pass (was one per removal — the O(n²) shape)",
+            1,
+            store.saveCount,
+        )
     }
 }

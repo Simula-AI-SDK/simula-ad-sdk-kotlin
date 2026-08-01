@@ -282,4 +282,25 @@ class RewardVerificationQueueTest {
         assertEquals("ineligible wake must not loop", 1, verifier.callCounts["A"])
         assertEquals(1, store.data.size)
     }
+
+    @Test
+    fun `the queue is capped and drops the oldest on overflow`() = runTest {
+        val store = FakeStore()
+        val verifier = FakeVerifier().apply {
+            repeat(MAX_PENDING_VERIFICATIONS + 1) { errors["srv_$it"] = Exception("HTTP error! status: 500") }
+        }
+        val engine = RewardVerificationQueue(store, verifier, clock = { 0L }, scope = this)
+
+        repeat(MAX_PENDING_VERIFICATIONS) { engine.queue("srv_$it", "sess", 5.0) }
+        advanceUntilIdle()
+        assertEquals(MAX_PENDING_VERIFICATIONS, store.data.size)
+
+        verifier.errors["newest"] = Exception("HTTP error! status: 500")
+        engine.queue("newest", "sess", 5.0)
+        advanceUntilIdle()
+
+        assertEquals("cap holds", MAX_PENDING_VERIFICATIONS, store.data.size)
+        assertTrue("the newest entry is never the one dropped", store.data.any { it.serveId == "newest" })
+        assertTrue("the oldest was dropped", store.data.none { it.serveId == "srv_0" })
+    }
 }

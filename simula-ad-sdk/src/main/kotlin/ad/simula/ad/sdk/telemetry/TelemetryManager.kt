@@ -250,16 +250,25 @@ internal class TelemetryManager(
         )
         debugLog?.invoke(formatForLog(event))
         scope.launch {
-            mutex.withLock {
+            // A repeat of an already-aggregated signature just bumps the count in memory —
+            // skipping the per-error full-buffer upsert + eager flush, so an error-spewing
+            // creative can't drive ~60 transactions/s plus a back-to-back upload chain
+            // (AND-10). The aggregate is delivered by the next normal/background flush.
+            // First-seen signatures (and drops past the signature cap) still persist
+            // eagerly + flush — a novel error may immediately precede a crash/kill.
+            val persistAndFlush = mutex.withLock {
                 val existing = errorAgg[signature]
                 when {
-                    existing != null -> existing.count = (existing.count ?: 1) + 1
-                    errorAgg.size < MAX_ERROR_SIGNATURES -> errorAgg[signature] = event
-                    else -> droppedCount++
+                    existing != null -> { existing.count = (existing.count ?: 1) + 1; false }
+                    errorAgg.size < MAX_ERROR_SIGNATURES -> {
+                        errorAgg[signature] = event
+                        store.save(snapshot()) // errors are durable immediately
+                        true
+                    }
+                    else -> { droppedCount++; false }
                 }
-                store.save(snapshot()) // errors are durable immediately
             }
-            flush() // eager — an error may immediately precede a crash/kill
+            if (persistAndFlush) flush() // eager — a novel error may immediately precede a crash/kill
         }
     }
 
