@@ -42,6 +42,11 @@ internal class InterstitialPresentation(
      * the app pauses the countdown. Lives here (not in the Activity) so a config-change recreation
      * resumes the remaining dwell instead of restarting it. `0L` until the gate first ticks. */
     var accumulatedGateTimeMs = 0L
+
+    /** Set by the Activity in `onCreate` when it claims this presentation. The launch watchdog
+     * (see [SimulaInterstitialAd.present]) disposes of the handoff when no claim ever arrives —
+     * the silently-dropped background-start case. */
+    var launchClaimed = false
 }
 
 /**

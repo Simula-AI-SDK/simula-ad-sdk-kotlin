@@ -80,6 +80,11 @@ internal class RewardedPresentation(
      * `verify-reward`.
      */
     var accumulatedPlayTimeMs = 0L
+
+    /** Set by the Activity in `onCreate` when it claims this presentation. The launch watchdog
+     * (see [SimulaRewardedAd.present]) disposes of the handoff when no claim ever arrives —
+     * the silently-dropped background-start case. */
+    var launchClaimed = false
 }
 
 /**

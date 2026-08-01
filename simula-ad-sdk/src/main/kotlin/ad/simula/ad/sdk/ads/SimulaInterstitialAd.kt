@@ -344,7 +344,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
     // ── Internals ────────────────────────────────────────────────────────────
 
     private fun present(activity: Activity?) {
-        val ad = when (val current = state) {
+        val ready = when (val current = state) {
             State.Showing -> {
                 failShow(SimulaAdError.AlreadyShowing)
                 return
@@ -361,9 +361,10 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     failShow(SimulaAdError.Stale)
                     return
                 }
-                current.ad
+                current
             }
         }
+        val ad = ready.ad
         // A foreground Activity is required to present — matching Swift's
         // "no presentation context" semantics and the standard show(activity) entry point. A
         // background activity-start from the app context can be silently dropped
@@ -375,14 +376,12 @@ class SimulaInterstitialAd(val adUnitId: String) {
 
         val token = UUID.randomUUID().toString()
         showStartNanos = System.nanoTime()
-        InterstitialHandoff.put(
-            token,
-            InterstitialPresentation(
-                ad = ad,
-                apiKey = SimulaAds.apiKey,
-                callbacks = bridge(ad.impressionId),
-            ),
+        val presentation = InterstitialPresentation(
+            ad = ad,
+            apiKey = SimulaAds.apiKey,
+            callbacks = bridge(ad.impressionId),
         )
+        InterstitialHandoff.put(token, presentation)
 
         if (!launchActivity(token, activity)) {
             InterstitialHandoff.remove(token) // clean up the unused handoff
@@ -390,6 +389,20 @@ class SimulaInterstitialAd(val adUnitId: String) {
             return
         }
         state = State.Showing
+        // A background activity start can be silently DROPPED (no throw) on Android 10+: the
+        // Activity then never claims the handoff, and without a watchdog the ad would sit in
+        // Showing forever (load() no-ops, show() → AlreadyShowing) while the presentation —
+        // which retains the host's listener — leaks in the handoff. Unclaimed in time →
+        // restore Ready (the ad never displayed), drop the handoff, and report the failure.
+        SimulaScope.armLaunchWatchdog(LAUNCH_WATCHDOG_MS, isClaimed = { presentation.launchClaimed }) {
+            withContext(Dispatchers.Main) {
+                if (state == State.Showing) {
+                    InterstitialHandoff.remove(token)
+                    state = ready
+                    failShow(SimulaAdError.NoPresentationContext)
+                }
+            }
+        }
     }
 
     private fun bridge(adId: String): InterstitialCallbacks = object : InterstitialCallbacks {

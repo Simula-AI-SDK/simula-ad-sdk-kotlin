@@ -3,6 +3,7 @@ package ad.simula.ad.sdk.privacy
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import android.content.SharedPreferences
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -10,6 +11,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.lang.reflect.InvocationTargetException
 
 /**
@@ -200,8 +202,10 @@ object SimulaPrivacy {
             // Double-checked under the mutex: a concurrent caller that just finished already
             // refreshed, so skip the duplicate binder read but still return after its write.
             if (!shouldReadGaidNow(enabled, ctx != null, lastGaidEnabled, lastGaidRefreshAt, now, GAID_REFRESH_TTL_MS)) return
-            val id = if (enabled && ctx != null) withContext(Dispatchers.IO) { readGaid(ctx) } else null
+            val id = if (enabled && ctx != null) raceGaidRead({ readGaid(ctx) }, GAID_READ_TIMEOUT_MS) else null
             synchronized(lock) { collectedAdvertisingId = id }
+            // Stamp even a timed-out read: the TTL then throttles retries instead of every
+            // ON_RESUME firing a fresh binder call on a wedged device.
             lastGaidEnabled = enabled
             lastGaidRefreshAt = now
             // Publish INSIDE the mutex: a coalesced waiter returns from the double-check above
@@ -340,6 +344,34 @@ internal fun shouldReadGaidNow(
 ): Boolean {
     if (enabled && !contextAttached) return false
     return !enabled || lastEnabled != enabled || nowMs - lastRefreshAtMs >= ttlMs
+}
+
+/** Hard bound on one Play Services GAID read (see [raceGaidRead]). */
+internal const val GAID_READ_TIMEOUT_MS = 8_000L
+
+/**
+ * Races one GAID read against [timeoutMs]. The Play Services bind is a blocking call with no
+ * platform timeout, and a wedged bind must never park the startup gate or `gaidRefreshMutex`
+ * forever: the read runs on [dispatcher] (IO in production) while the CALLER's suspension
+ * (which is cancellable) carries the timeout — on expiry the caller proceeds with null and a
+ * telemetry note; the wedged binder thread is left behind, bounded to one per wedged process
+ * (the caller stamps the freshness window, so the TTL throttles retries). JVM-testable with
+ * an injected reader and dispatcher.
+ */
+internal suspend fun raceGaidRead(
+    reader: suspend () -> String?,
+    timeoutMs: Long,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+): String? {
+    val result = withTimeoutOrNull(timeoutMs) { withContext(dispatcher) { reader() } }
+    if (result == null) {
+        Telemetry.recordError(
+            signature = "privacy:gaid_read_timeout",
+            errorCode = "timeout",
+            message = "GAID read exceeded $timeoutMs ms",
+        )
+    }
+    return result
 }
 
 /**

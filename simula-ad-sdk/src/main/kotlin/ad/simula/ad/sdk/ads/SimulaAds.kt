@@ -26,7 +26,6 @@ import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Bundle
-import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -47,8 +46,6 @@ import java.lang.ref.WeakReference
  * `Application.onCreate` adds no meaningful main-thread cost.
  */
 object SimulaAds {
-
-    private const val LOG_TAG = "SimulaAds"
 
     @Volatile
     private var initialized = false
@@ -292,7 +289,14 @@ object SimulaAds {
             // memory before any ad exists) — pooling after an ad request is unaffected.
             val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
             if (shouldSkipStartupPrewarm(activityManager?.isLowRamDevice)) {
-                Log.d(LOG_TAG, "WebView startup prewarm skipped: low-RAM device")
+                // Telemetry, not console (rule): contract event name, outcome in the
+                // existing breadcrumb field — no new envelope fields.
+                Telemetry.recordOperation(
+                    name = "webview_prewarm",
+                    durationMs = 0L,
+                    success = true,
+                    breadcrumb = "outcome=skipped;reason=low_ram_device",
+                )
             } else {
                 withContext(Dispatchers.Main) {
                     runCatching { WebViewPool.prewarm(appContext) }

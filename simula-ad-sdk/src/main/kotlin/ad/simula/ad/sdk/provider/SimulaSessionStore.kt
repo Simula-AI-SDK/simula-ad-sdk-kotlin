@@ -13,6 +13,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Holds the server session and coalesces concurrent session-creation calls.
@@ -132,7 +133,7 @@ internal class SimulaSessionStore(
     suspend fun ensureSession(): String? {
         // Await before the cached-id return too: every request through this store observes the same
         // immutable prerequisite gate, including sessions created by a concurrent first caller.
-        startupGate?.await()
+        awaitStartupGate(startupGate)
 
         sessionId?.takeIf { it.isNotBlank() }?.let { return it }
 
@@ -195,4 +196,28 @@ internal class SimulaSessionStore(
         }
         return id
     }
+}
+
+/** Hard bound on awaiting the startup gate (see [awaitStartupGate]). */
+internal const val STARTUP_GATE_TIMEOUT_MS = 15_000L
+
+/**
+ * Awaits [gate] with a hard bound. Startup completes its gate on failure as well (ads fail
+ * open), but that relies on the startup coroutine actually finishing — a wedged third-party
+ * call (e.g. a Play Services bind that never returns) would otherwise park every ad load
+ * behind it forever. On timeout: proceed without the gate (privacy/telemetry ordering is
+ * best-effort, never worth an ad outage) and leave a telemetry note. Returns false on timeout.
+ */
+internal suspend fun awaitStartupGate(gate: CompletableDeferred<Unit>?, timeoutMs: Long = STARTUP_GATE_TIMEOUT_MS): Boolean {
+    if (gate == null) return true
+    val completed = withTimeoutOrNull(timeoutMs) { gate.await() }
+    if (completed == null) {
+        Telemetry.recordError(
+            signature = "session:startup_gate_timeout",
+            errorCode = "timeout",
+            message = "startup gate did not complete within $timeoutMs ms — proceeding (fail open)",
+        )
+        return false
+    }
+    return true
 }

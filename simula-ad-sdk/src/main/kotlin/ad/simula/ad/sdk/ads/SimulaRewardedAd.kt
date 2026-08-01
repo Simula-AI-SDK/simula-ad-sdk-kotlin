@@ -332,7 +332,7 @@ class SimulaRewardedAd(val adUnitId: String) {
     // ── Internals ────────────────────────────────────────────────────────────
 
     private fun present(activity: Activity?) {
-        val ad = when (val current = state) {
+        val ready = when (val current = state) {
             State.Showing -> {
                 failShow(SimulaAdError.AlreadyShowing)
                 return
@@ -349,9 +349,10 @@ class SimulaRewardedAd(val adUnitId: String) {
                     failShow(SimulaAdError.Stale)
                     return
                 }
-                current.ad
+                current
             }
         }
+        val ad = ready.ad
         if (activity == null) {
             failShow(SimulaAdError.NoPresentationContext)
             return
@@ -359,21 +360,19 @@ class SimulaRewardedAd(val adUnitId: String) {
 
         val token = UUID.randomUUID().toString()
         showStartNanos = System.nanoTime()
-        RewardedHandoff.put(
-            token,
-            RewardedPresentation(
-                iframeUrl = ad.iframeUrl,
-                renderedHtml = ad.renderedHtml,
-                impressionId = ad.impressionId,
-                apiKey = SimulaAds.apiKey,
-                callbacks = bridge(ad.impressionId),
-                adBehavior = ad.adBehavior,
-                trackingUrl = ad.trackingUrl,
-                destination = ad.destination,
-                androidStoreUrl = ad.androidStoreUrl,
-                adValue = ad.adValue,
-            ),
+        val presentation = RewardedPresentation(
+            iframeUrl = ad.iframeUrl,
+            renderedHtml = ad.renderedHtml,
+            impressionId = ad.impressionId,
+            apiKey = SimulaAds.apiKey,
+            callbacks = bridge(ad.impressionId),
+            adBehavior = ad.adBehavior,
+            trackingUrl = ad.trackingUrl,
+            destination = ad.destination,
+            androidStoreUrl = ad.androidStoreUrl,
+            adValue = ad.adValue,
         )
+        RewardedHandoff.put(token, presentation)
 
         if (!launchActivity(token, activity)) {
             RewardedHandoff.remove(token)
@@ -381,6 +380,20 @@ class SimulaRewardedAd(val adUnitId: String) {
             return
         }
         state = State.Showing
+        // A background activity start can be silently DROPPED (no throw) on Android 10+: the
+        // Activity then never claims the handoff, and without a watchdog the ad would sit in
+        // Showing forever (load() no-ops, show() → AlreadyShowing) while the presentation —
+        // which retains the host's listener — leaks in the handoff. Unclaimed in time →
+        // restore Ready (the ad never displayed), drop the handoff, and report the failure.
+        SimulaScope.armLaunchWatchdog(LAUNCH_WATCHDOG_MS, isClaimed = { presentation.launchClaimed }) {
+            withContext(Dispatchers.Main) {
+                if (state == State.Showing) {
+                    RewardedHandoff.remove(token)
+                    state = ready
+                    failShow(SimulaAdError.NoPresentationContext)
+                }
+            }
+        }
     }
 
     private fun bridge(adId: String): RewardedCallbacks = object : RewardedCallbacks {

@@ -99,6 +99,9 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             return
         }
         presentation = p
+        // Claim the handoff: tells the launch watchdog this startActivity was NOT silently
+        // dropped (background starts are discarded without throwing on Android 10+).
+        p.launchClaimed = true
         storeExit = StoreExitTracker(
             adId = p.impressionId.takeIf { it.isNotBlank() },
             adFormat = "rewarded",
