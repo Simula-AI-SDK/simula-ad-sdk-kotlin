@@ -187,17 +187,19 @@ class TelemetryManagerTest {
     // ── Sampling + kill-switch ──────────────────────────────────────────────────
 
     @Test
-    fun `sampling drops perf but never errors`() = runTest {
+    fun `sampling drops network and operation events but never errors`() = runTest {
         val sender = FakeSender()
         // random() 0.9 >= sampleRate 0.5 → this session is NOT sampled in for perf.
         val m = build(this, FakeStore(), sender, sampleRate = 0.5, random = { 0.9 })
 
         m.recordNetwork("/load", "POST", 200, 5, 0, 10, null)
+        m.recordOperation("extra_parameters_invalid", 0, success = false)
         m.recordError("api:err", "err", "x")
         advanceUntilIdle()
 
         val events = sender.batches.allEvents()
-        assertTrue("perf suppressed by sampling", events.none { it.type == TYPE_NETWORK })
+        assertTrue("network suppressed by sampling", events.none { it.type == TYPE_NETWORK })
+        assertTrue("operations suppressed by sampling", events.none { it.type == TYPE_OPERATION })
         assertTrue("errors always sent", events.any { it.type == TYPE_ERROR })
     }
 
@@ -209,11 +211,13 @@ class TelemetryManagerTest {
         val m = build(this, FakeStore(), FakeSender(), debugLog = { lines.add(it) })
 
         m.recordNetwork("/load/interstitial", "POST", 200, durationMs = 12, requestBytes = 0, responseBytes = 100, failureClass = null)
+        m.recordOperation("extra_parameters_invalid", 0, success = false)
         m.recordError("api:x", "x", "boom")
         advanceUntilIdle()
 
-        assertEquals(2, lines.size)
+        assertEquals(3, lines.size)
         assertTrue(lines.any { it.startsWith("network POST /load/interstitial") })
+        assertTrue(lines.any { it.startsWith("operation extra_parameters_invalid") })
         assertTrue(lines.any { it.startsWith("error api:x") })
     }
 

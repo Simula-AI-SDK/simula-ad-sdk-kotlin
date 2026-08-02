@@ -1,6 +1,6 @@
 package ad.simula.ad.sdk.model
 
-import android.util.Log
+import ad.simula.ad.sdk.telemetry.Telemetry
 import java.util.Collections
 import java.util.LinkedHashMap
 
@@ -8,18 +8,18 @@ internal const val MAX_EXTRA_PARAMETER_ENTRIES = 10
 internal const val MAX_EXTRA_PARAMETER_KEY_LENGTH = 64
 internal const val MAX_EXTRA_PARAMETER_VALUE_LENGTH = 256
 
-private const val EXTRA_PARAMETERS_LOG_TAG = "SimulaAdMetadata"
-private const val EXTRA_PARAMETERS_WARNING =
-    "Some extraParameters entries were ignored because they are invalid or exceed SDK limits."
-
-private fun logExtraParametersWarning() {
-    Log.w(EXTRA_PARAMETERS_LOG_TAG, EXTRA_PARAMETERS_WARNING)
-}
+private fun recordExtraParametersWarning() =
+    Telemetry.recordOperation(
+        name = "extra_parameters_invalid",
+        durationMs = 0L,
+        success = false,
+        failureClass = "invalid_or_over_limit",
+    )
 
 /** Validates publisher metadata and returns an immutable wire snapshot, or null when none survives. */
 internal fun normalizeExtraParameters(
     parameters: Map<String, String>,
-    warn: () -> Unit = ::logExtraParametersWarning,
+    warn: () -> Unit = ::recordExtraParametersWarning,
 ): Map<String, String>? {
     val entries = runCatching { parameters.entries.map { it.key to it.value } }.getOrElse {
         warn()
@@ -45,7 +45,7 @@ internal fun normalizeExtraParameters(
 
 /** Lock-guarded publisher metadata used by imperative full-screen ad instances. */
 internal class ExtraParametersStore(
-    private val warn: () -> Unit = ::logExtraParametersWarning,
+    private val warn: () -> Unit = ::recordExtraParametersWarning,
 ) {
     private val lock = Any()
     private var parameters: Map<String, String> = emptyMap()

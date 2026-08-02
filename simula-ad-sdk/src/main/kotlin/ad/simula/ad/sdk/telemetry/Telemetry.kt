@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.telemetry
 
+import ad.simula.ad.sdk.core.installSimulaScopeFailureReporter
 import ad.simula.ad.sdk.image.ImageCache
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaConnectionType
@@ -56,6 +57,7 @@ internal object Telemetry {
     ) {
         if (!enabled) {
             manager = null
+            installSimulaScopeFailureReporter(null)
             return
         }
         val appCtx = context.applicationContext
@@ -90,6 +92,12 @@ internal object Telemetry {
             // In dev mode, mirror every (redacted) event to logcat for local verification.
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
         ).also { it.start() }
+        installSimulaScopeFailureReporter { throwable ->
+            recordError(
+                signature = "scope:uncaught",
+                errorCode = throwable.javaClass.simpleName,
+            )
+        }
     }
 
     /** Apply a server-side directive (kill-switch / sampling) from `/session/create`. */

@@ -1,6 +1,5 @@
 package ad.simula.ad.sdk.network
 
-import android.util.Log
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.AdValue
@@ -144,10 +143,6 @@ internal object SimulaApiClient {
                 body = body,
             )
 
-            if (response.code == 401) {
-                Log.e("SimulaAdSDK", "Invalid API key (please check dashboard or contact Simula team for a valid API key)")
-                return@withContext null
-            }
             if (!response.isSuccessful) return@withContext null
 
             val data = json.decodeFromString<SessionResponse>(response.body)
