@@ -138,6 +138,41 @@ class SimulaTelemetryStartupTest {
         }
     }
 
+    @Test
+    fun `a non-completing shared ready is abandoned without cancellation`() = runTest {
+        val ready = kotlinx.coroutines.CompletableDeferred<Unit>()
+
+        assertFalse(awaitTelemetryReady(ready))
+        assertEquals(TELEMETRY_READY_TIMEOUT_MS, testScheduler.currentTime)
+        assertFalse("the shared startup must remain available to other waiters", ready.isCancelled)
+        assertFalse(ready.isCompleted)
+
+        // A late completion remains observable, proving the timeout cancelled only its waiter.
+        ready.complete(Unit)
+        assertTrue(awaitTelemetryReady(ready, timeoutMs = 5_000))
+    }
+
+    @Test
+    fun `ready completes only after suspend startup publishes`() = runTest {
+        val recoveryFinished = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var published = false
+        val engine = TelemetryStartupEngine<String>(this, runStartup = { _, _ ->
+            recoveryFinished.await()
+            published = true
+        })
+        val ready = engine.register("config", providers("session", "user"))
+
+        engine.start()
+        runCurrent()
+        assertFalse(published)
+        assertFalse(ready.isCompleted)
+
+        recoveryFinished.complete(Unit)
+        runCurrent()
+        assertTrue(published)
+        assertTrue(ready.isCompleted)
+    }
+
     private fun providers(sessionId: String, primaryUserId: String) =
         TelemetryIdentityProviders(sessionId = { sessionId }, primaryUserId = { primaryUserId })
 }

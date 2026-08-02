@@ -26,10 +26,10 @@ class TelemetryManagerTest {
     // ── Fakes ────────────────────────────────────────────────────────────────
 
     private class FakeStore(initial: List<TelemetryEvent> = emptyList()) : TelemetryStore {
-        var data: List<TelemetryEvent> = initial.toList()
+        var data: List<TelemetryEvent> = initial.map { it.copy() }
         var saveCount = 0
-        override fun load(): List<TelemetryEvent> = data
-        override fun save(events: List<TelemetryEvent>) { saveCount++; data = events.toList() }
+        override fun load(): List<TelemetryEvent> = data.map { it.copy() }
+        override fun save(events: List<TelemetryEvent>) { saveCount++; data = events.map { it.copy() } }
     }
 
     /** Records decoded batches; replays queued acks then falls back to [defaultAck]. Optional
@@ -177,6 +177,50 @@ class TelemetryManagerTest {
         advanceUntilIdle()
 
         assertTrue(sender.batches.allEvents().any { it.eventId == "id-prev" })
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `before-publication recovery merges late missing-context state without loss or duplicate rows`() = runTest {
+        val recoveredPerf = TelemetryEvent(
+            type = TYPE_NETWORK,
+            name = "GET /catalog",
+            eventId = "recovered-perf",
+            timestamp = 1L,
+        )
+        val recoveredMissingContext = TelemetryEvent(
+            type = TYPE_ERROR,
+            name = "provider:missing_context",
+            eventId = "recovered-error",
+            timestamp = 2L,
+            count = 2,
+        )
+        val store = FakeStore(listOf(recoveredPerf, recoveredMissingContext))
+        val sender = FakeSender()
+        val manager = build(this, store, sender)
+
+        manager.recoverBeforePublication()
+        manager.recoverBeforePublication() // idempotent: durable rows must not merge twice
+        manager.recordErrorBeforePublication(
+            signature = "provider:missing_context",
+            errorCode = "not_initialized",
+        )
+
+        assertTrue("network must not start before publication", sender.batches.isEmpty())
+        assertEquals(1, store.data.count { it.eventId == "recovered-perf" })
+        val durableBeforePublication = store.data.single {
+            it.type == TYPE_ERROR && it.name == "provider:missing_context"
+        }
+        assertEquals("late state is not persisted by the private manager", 2, durableBeforePublication.count)
+
+        manager.launchRecoveredFlush()
+        advanceUntilIdle()
+
+        val sent = sender.batches.allEvents()
+        assertEquals(1, sent.count { it.eventId == "recovered-perf" })
+        val sentErrors = sent.filter { it.type == TYPE_ERROR && it.name == "provider:missing_context" }
+        assertEquals(1, sentErrors.size)
+        assertEquals(3, sentErrors.single().count)
         assertTrue(store.data.isEmpty())
     }
 

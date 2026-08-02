@@ -92,6 +92,7 @@ internal class TelemetryManager(
     private var isFlushing = false
     private var flushScheduled = false
     private var retryCount = 0
+    private var recoveryCompleted = false
 
     @Volatile private var isEnabled: Boolean = enabled
     @Volatile private var perfSampledIn: Boolean = enabled && random() < sampleRate
@@ -109,14 +110,44 @@ internal class TelemetryManager(
     /** Recover any buffer left by a prior process, then attempt a flush. */
     fun start() {
         scope.launch {
-            mutex.withLock {
-                for (e in store.load()) {
-                    if (e.type == TYPE_ERROR && e.name.isNotEmpty()) errorAgg[e.name] = e
-                    else buffer.addLast(e)
-                }
-            }
-            flush()
+            recoverBeforePublication()
+            persistRecoveredThenFlush()
         }
+    }
+
+    /**
+     * Loads and merges durable state exactly once. Telemetry's production initializer awaits this
+     * before publishing the manager, so no live record can persist a snapshot ahead of recovery.
+     */
+    internal suspend fun recoverBeforePublication() {
+        mutex.withLock {
+            if (recoveryCompleted) return
+            val recovered = runCatching { store.load() }.getOrDefault(emptyList())
+            for (event in recovered) mergeRecoveredLocked(event)
+            recoveryCompleted = true
+        }
+    }
+
+    /** Persists the merged snapshot and starts network delivery after manager publication. */
+    internal fun launchRecoveredFlush() {
+        scope.launch { persistRecoveredThenFlush() }
+    }
+
+    /**
+     * Merges one startup error after recovery and before publication. No persistence, coroutine, or
+     * network work is launched; valid only while the manager is still private to the initializer.
+     */
+    internal fun recordErrorBeforePublication(
+        signature: String,
+        errorCode: String? = null,
+        message: String? = null,
+        breadcrumb: String? = null,
+        stack: List<String>? = null,
+    ) {
+        if (!isEnabled || !recoveryCompleted) return
+        val event = errorEvent(signature, errorCode, message, breadcrumb, stack)
+        debugLog?.invoke(formatForLog(event))
+        mergeErrorLocked(signature, event)
     }
 
     /**
@@ -237,17 +268,7 @@ internal class TelemetryManager(
         stack: List<String>? = null,
     ) {
         if (!isEnabled) return
-        val event = newEvent(TYPE_ERROR, name = signature).copy(
-            errorCode = errorCode,
-            // Sanitize at the source so secrets are stripped from BOTH the dev log and the
-            // payload sent to the backend (exception text can embed URLs/tokens).
-            message = redact(message),
-            breadcrumb = breadcrumb,
-            // Frames are structural (Class.method(File:line) / SDK trace lines) — no free text,
-            // so unlike `message` they carry no URLs/tokens/PII and need no redaction.
-            stack = stack,
-            count = 1,
-        )
+        val event = errorEvent(signature, errorCode, message, breadcrumb, stack)
         debugLog?.invoke(formatForLog(event))
         scope.launch {
             // A repeat of an already-aggregated signature just bumps the count in memory —
@@ -257,16 +278,9 @@ internal class TelemetryManager(
             // First-seen signatures (and drops past the signature cap) still persist
             // eagerly + flush — a novel error may immediately precede a crash/kill.
             val persistAndFlush = mutex.withLock {
-                val existing = errorAgg[signature]
-                when {
-                    existing != null -> { existing.count = (existing.count ?: 1) + 1; false }
-                    errorAgg.size < MAX_ERROR_SIGNATURES -> {
-                        errorAgg[signature] = event
-                        store.save(snapshot()) // errors are durable immediately
-                        true
-                    }
-                    else -> { droppedCount++; false }
-                }
+                val firstSeen = mergeErrorLocked(signature, event)
+                if (firstSeen) store.save(snapshot()) // errors are durable immediately
+                firstSeen
             }
             if (persistAndFlush) flush() // eager — a novel error may immediately precede a crash/kill
         }
@@ -314,6 +328,49 @@ internal class TelemetryManager(
 
     private fun newEvent(type: String, name: String) =
         TelemetryEvent(type = type, name = name, eventId = UUID.randomUUID().toString(), timestamp = clock())
+
+    private fun errorEvent(
+        signature: String,
+        errorCode: String?,
+        message: String?,
+        breadcrumb: String?,
+        stack: List<String>?,
+    ) = newEvent(TYPE_ERROR, name = signature).copy(
+        errorCode = errorCode,
+        // Sanitize at the source so secrets are stripped from BOTH the dev log and payload.
+        message = redact(message),
+        breadcrumb = breadcrumb,
+        // Frames are structural (Class.method(File:line) / SDK trace lines), not free text.
+        stack = stack,
+        count = 1,
+    )
+
+    /** Returns true only when a new signature was inserted and should persist/flush eagerly. */
+    private fun mergeErrorLocked(signature: String, event: TelemetryEvent): Boolean {
+        val existing = errorAgg[signature]
+        return when {
+            existing != null -> {
+                existing.count = (existing.count ?: 1) + (event.count ?: 1)
+                false
+            }
+            errorAgg.size < MAX_ERROR_SIGNATURES -> {
+                errorAgg[signature] = event
+                true
+            }
+            else -> {
+                droppedCount += event.count ?: 1
+                false
+            }
+        }
+    }
+
+    private fun mergeRecoveredLocked(event: TelemetryEvent) {
+        if (event.type == TYPE_ERROR && event.name.isNotEmpty()) {
+            mergeErrorLocked(event.name, event)
+        } else {
+            buffer.addLast(event)
+        }
+    }
 
     /** Compact one-line view for the dev console. Carries only non-sensitive event fields —
      * never the envelope's apiKey/ppid/advertising-id — and the message is already redacted. */
@@ -364,6 +421,11 @@ internal class TelemetryManager(
 
     /** Buffer + aggregated errors as one list for persistence / recovery. */
     private fun snapshot(): List<TelemetryEvent> = buffer.toList() + errorAgg.values.toList()
+
+    private suspend fun persistRecoveredThenFlush() {
+        mutex.withLock { runCatching { store.save(snapshot()) } }
+        flush()
+    }
 
     private suspend fun flush() {
         val pendingBuffer: List<TelemetryEvent>

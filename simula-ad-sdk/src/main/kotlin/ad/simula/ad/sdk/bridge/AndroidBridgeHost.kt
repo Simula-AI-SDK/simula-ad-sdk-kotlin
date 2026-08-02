@@ -31,7 +31,11 @@ internal fun androidCreativeBridge(
     val main = Handler(Looper.getMainLooper())
     val host = AndroidBridgeHost(appContext.applicationContext, activityProvider, onEarlyComplete)
     return CreativeBridge(host) { block ->
-        if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post { block() }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+        } else if (!main.post { block() }) {
+            throw IllegalStateException("main looper rejected creative bridge dispatch")
+        }
     }
 }
 

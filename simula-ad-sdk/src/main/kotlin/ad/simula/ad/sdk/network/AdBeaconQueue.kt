@@ -29,6 +29,8 @@ internal data class PendingBeacon(
     var lastAttemptTimestamp: Long = 0L,
     /** Enqueue time, for the store's TTL prune. 0 on rows migrated from the legacy blob. */
     val createdAt: Long = 0L,
+    /** Key that owns this impression. Default keeps entries written by older SDKs decodable. */
+    val apiKey: String = "",
 )
 
 /** Persists the pending-beacon queue. Abstracted so the queue engine is unit-testable. */
@@ -39,7 +41,7 @@ internal interface BeaconStore {
 
 /** Sends one impression-action beacon; returns the HTTP status, or throws on a connectivity failure. */
 internal interface BeaconSender {
-    suspend fun send(impressionId: String, action: String): Int
+    suspend fun send(apiKey: String, impressionId: String, action: String): Int
 }
 
 /** Hard cap on the durable queue (see [AdBeaconQueue.queue]). */
@@ -83,12 +85,12 @@ internal class AdBeaconQueue(
         cache ?: store.load().toMutableList().also { cache = it }
 
     /** Enqueue a beacon and start draining. Safe to call repeatedly — duplicates are ignored. */
-    fun queue(impressionId: String, action: String) {
-        if (impressionId.isBlank()) return
+    fun queue(apiKey: String, impressionId: String, action: String) {
+        if (apiKey.isBlank() || impressionId.isBlank()) return
         scope.launch {
             mutex.withLock {
                 val list = pendingLocked()
-                if (list.none { it.impressionId == impressionId && it.action == action }) {
+                if (list.none { it.apiKey == apiKey && it.impressionId == impressionId && it.action == action }) {
                     if (list.size >= MAX_PENDING_BEACONS) {
                         list.removeAt(0) // drop oldest: bounded queue > an unbounded ANR backlog
                         Telemetry.recordError(
@@ -97,7 +99,7 @@ internal class AdBeaconQueue(
                             message = "pending beacon queue at cap ($MAX_PENDING_BEACONS) — dropped oldest",
                         )
                     }
-                    list.add(PendingBeacon(impressionId, action, createdAt = clock()))
+                    list.add(PendingBeacon(impressionId, action, createdAt = clock(), apiKey = apiKey))
                     store.save(list)
                 }
             }
@@ -126,7 +128,7 @@ internal class AdBeaconQueue(
                 } ?: break
 
                 val delivered = try {
-                    val code = sender.send(task.impressionId, task.action)
+                    val code = sender.send(task.apiKey, task.impressionId, task.action)
                     when {
                         code in 200..299 -> true // accepted
                         code in 400..499 && code != 408 && code != 429 -> true // permanent client error → drop
@@ -139,7 +141,9 @@ internal class AdBeaconQueue(
                 // In-memory mutation only — the pass persists once, in the finally below.
                 mutex.withLock {
                     val list = pendingLocked()
-                    val idx = list.indexOfFirst { it.impressionId == task.impressionId && it.action == task.action }
+                    val idx = list.indexOfFirst {
+                        it.apiKey == task.apiKey && it.impressionId == task.impressionId && it.action == task.action
+                    }
                     if (idx != -1) {
                         if (delivered) list.removeAt(idx)
                         else list[idx] = list[idx].copy(
@@ -175,8 +179,9 @@ internal class AdBeaconQueue(
 
 /**
  * Process-wide [AdBeaconQueue] wired to the real SQLite store + `SimulaApiClient`.
- * Built once from [init] at SDK init (which has the app context + api key); ad surfaces then call
- * [enqueue] with no context/key threading. Kept OFF the telemetry pipeline (its batching/sampling/
+ * Built once from [init] at SDK init; ad surfaces pass the key that owns each impression so mixed
+ * provider/imperative integrations cannot send through whichever key initialized first. Kept OFF
+ * the telemetry pipeline (its batching/sampling/
  * event cap are wrong for billing); the diagnostic `impression_fired`/`click_fired` events emitted
  * here are interim visibility into beacon firing, separate from the durable beacon itself.
  */
@@ -186,14 +191,16 @@ internal object AdBeaconManager {
     @Volatile
     private var engine: AdBeaconQueue? = null
 
-    /** Build the queue (idempotent). Call once from `SimulaAds.initialize`. */
+    /** Build the queue (idempotent). The first key is only a fallback for persisted legacy rows. */
     fun init(appContext: Context, apiKey: String) {
         if (engine != null) return
         synchronized(this) {
             if (engine != null) return
             engine = AdBeaconQueue(
-                store = SqliteBeaconStore(appContext, json),
-                sender = ApiBeaconSender(apiKey),
+                // The first key is used only to adopt rows persisted by older SDKs. Every new row
+                // carries its owning key and the sender reads that payload at delivery time.
+                store = SqliteBeaconStore(appContext, json, fallbackApiKey = apiKey),
+                sender = ApiBeaconSender,
             )
         }
     }
@@ -208,8 +215,8 @@ internal object AdBeaconManager {
      * diagnostic lifecycle event for the billing-relevant ones. A no-op before [init] (beacons only
      * fire while an ad is showing, which requires init).
      */
-    fun enqueue(impressionId: String, action: String, adFormat: String? = null, adUnitId: String? = null) {
-        if (impressionId.isBlank()) return
+    fun enqueue(apiKey: String, impressionId: String, action: String, adFormat: String? = null, adUnitId: String? = null) {
+        if (apiKey.isBlank() || impressionId.isBlank()) return
         when (action) {
             "seen" -> Telemetry.recordLifecycle(
                 stage = "impression_fired", adFormat = adFormat, adUnitId = adUnitId, adId = impressionId,
@@ -218,12 +225,12 @@ internal object AdBeaconManager {
                 stage = "click_fired", adFormat = adFormat, adUnitId = adUnitId, adId = impressionId,
             )
         }
-        engine?.queue(impressionId, action)
+        engine?.queue(apiKey, impressionId, action)
     }
 }
 
 /** Real sender: a no-body impression beacon, surfacing the HTTP status so the queue can retry/drop. */
-private class ApiBeaconSender(private val apiKey: String) : BeaconSender {
-    override suspend fun send(impressionId: String, action: String): Int =
+private object ApiBeaconSender : BeaconSender {
+    override suspend fun send(apiKey: String, impressionId: String, action: String): Int =
         SimulaApiClient.sendImpressionBeacon(impressionId, action, apiKey)
 }

@@ -27,6 +27,7 @@ import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.telemetry.SimulaTelemetryStartup
+import ad.simula.ad.sdk.telemetry.awaitTelemetryReady
 import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.FlowPreview
@@ -76,10 +77,8 @@ private val globalNoFillSet: MutableSet<String> = boundedLruSet(MAX_AD_CACHE_ENT
 // synchronization is needed.
 private var cachedGlobalContext: SimulaContextValue? = null
 
-// Inert fallback (built once) for the not-yet-initialized case, plus a one-shot log guard so a
-// misintegrated host is warned once rather than on every composition.
+// Inert fallback (built once) for the not-yet-initialized case.
 private var cachedEmptyContext: SimulaContextValue? = null
-private var emptyContextWarned = false
 
 /**
  * Builds (once) a [SimulaContextValue] backed by the global session that
@@ -100,15 +99,9 @@ internal fun globalSimulaContext(): SimulaContextValue {
     // factory; return an inert (empty) context so the slot renders blank instead of throwing
     // IllegalStateException into the host's composition.
     if (!SimulaAds.isInitialized) {
-        if (!emptyContextWarned) {
-            emptyContextWarned = true
-            Telemetry.recordError(
-                signature = "provider:missing_context",
-                errorCode = "not_initialized",
-                message = "NativeAdSlot used before init/outside provider; rendering blank",
-                breadcrumb = "surface=native_ad",
-            )
-        }
+        // Telemetry may not exist yet; its facade buffers this one-shot and consumes it after
+        // either provider or imperative startup publishes the telemetry manager.
+        Telemetry.recordProviderMissingContext()
         return emptySimulaContext()
     }
     cachedGlobalContext?.let { return it }
@@ -333,7 +326,9 @@ fun SimulaProvider(
                 try {
                     runCatching { SimulaPrivacy.attach(appContext) }
                     SimulaTelemetryStartup.start()
-                    telemetryReady.await()
+                    // Abandon only this wait on timeout. The process-wide startup keeps running,
+                    // while this provider's gate is completed in finally and stays fail-open.
+                    awaitTelemetryReady(telemetryReady)
                     // The beacon build has no dependency on the GAID read — ordered first so a
                     // wedged Play Services bind can never starve billing-beacon delivery.
                     beaconManagerReady = runCatching {

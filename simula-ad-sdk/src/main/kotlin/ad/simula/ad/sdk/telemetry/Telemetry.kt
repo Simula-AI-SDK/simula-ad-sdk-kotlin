@@ -37,6 +37,9 @@ private const val LOG_TAG = "SimulaTelemetry"
  */
 internal object Telemetry {
 
+    private val publicationLock = Any()
+    private val lateInitBuffer = TelemetryLateInitBuffer()
+
     @Volatile
     private var manager: TelemetryManager? = null
 
@@ -49,7 +52,7 @@ internal object Telemetry {
      * wired into the pipeline (a pending product/privacy decision, since it would also have to
      * cover `/session/create` and the ppid PATCH).
      */
-    fun initialize(
+    suspend fun initialize(
         context: Context,
         apiKey: String,
         devMode: Boolean,
@@ -68,7 +71,7 @@ internal object Telemetry {
             )
         }
         if (!enabled) {
-            manager = null
+            synchronized(publicationLock) { manager = null }
             return
         }
         val appCtx = context.applicationContext
@@ -85,7 +88,7 @@ internal object Telemetry {
             deviceRamMb = resolveRamMb(appCtx),
             buildType = if ((appCtx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) "debug" else "release",
         )
-        manager = TelemetryManager(
+        val newManager = TelemetryManager(
             ctx = ctx,
             store = SqliteTelemetryStore(appCtx, json),
             sender = ApiTelemetrySender(apiKey),
@@ -100,13 +103,60 @@ internal object Telemetry {
             carrierProvider = { resolveCarrier(appCtx) },
             // In dev mode, mirror every (redacted) event to logcat for local verification.
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
-        ).also { it.start() }
+        )
+        // SQLite recovery is synchronous I/O behind a non-suspending store API, but this initializer
+        // itself runs on SimulaScope's IO dispatcher. Await the merge before the manager can be seen.
+        newManager.recoverBeforePublication()
+        synchronized(publicationLock) {
+            // Calls racing recovery block here, then either join this final snapshot or observe the
+            // published manager. Nothing can land in the late-init buffer between drain + publish.
+            val pending = lateInitBuffer.drainForInitialization()
+            pending.serverDirective?.let {
+                newManager.applyServerConfig(it.enabled, it.sampleRate)
+            }
+            if (pending.reportMissingProviderContext) recordMissingProviderContextBeforePublication(newManager)
+            manager = newManager
+        }
+        // Network delivery starts only after the recovered/late-state manager is visible.
+        newManager.launchRecoveredFlush()
     }
 
     /** Apply a server-side directive (kill-switch / sampling) from `/session/create`. */
     fun applyServerConfig(enabled: Boolean, sampleRate: Double) {
-        manager?.applyServerConfig(enabled, sampleRate)
+        val current = synchronized(publicationLock) {
+            manager ?: run {
+                // Session creation can fail open past telemetry startup. Preserve only the latest
+                // server directive so late initialization starts in the backend-requested state.
+                lateInitBuffer.updateServerDirective(enabled, sampleRate)
+                null
+            }
+        }
+        current?.applyServerConfig(enabled, sampleRate)
     }
+
+    /** Buffer/emit the required one-shot missing-provider-context diagnostic. */
+    fun recordProviderMissingContext() {
+        val current = synchronized(publicationLock) {
+            lateInitBuffer.requestMissingProviderContext()
+            manager?.takeIf { lateInitBuffer.consumeMissingProviderContext() }
+        }
+        current?.let(::recordMissingProviderContext)
+    }
+
+    private fun recordMissingProviderContext(target: TelemetryManager) = target.recordError(
+        signature = "provider:missing_context",
+        errorCode = "not_initialized",
+        message = "NativeAdSlot used before init/outside provider; rendering blank",
+        breadcrumb = "surface=native_ad",
+    )
+
+    private fun recordMissingProviderContextBeforePublication(target: TelemetryManager) =
+        target.recordErrorBeforePublication(
+            signature = "provider:missing_context",
+            errorCode = "not_initialized",
+            message = "NativeAdSlot used before init/outside provider; rendering blank",
+            breadcrumb = "surface=native_ad",
+        )
 
     fun recordNetwork(
         path: String,

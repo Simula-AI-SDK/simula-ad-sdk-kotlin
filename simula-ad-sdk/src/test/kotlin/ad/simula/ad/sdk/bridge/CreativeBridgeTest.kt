@@ -63,12 +63,106 @@ class CreativeBridgeTest {
     fun malformedAndUnknownIgnored() {
         val host = FakeHost()
         var replied = false
-        val b = bridge(host)
+        var dispatches = 0
+        val b = CreativeBridge(host, mainDispatch = { dispatches++; it() })
         b.handle("not json") { replied = true }
         b.handle("""{"noType":1}""") { replied = true }
         b.handle("""{"type":"NOPE","requestId":"1"}""") { replied = true }
         assertFalse(replied)
         assertEquals(0, host.earlyCompletes)
+        assertEquals("unknown types must be rejected before main dispatch", 0, dispatches)
+    }
+
+    @Test
+    fun oversizedMessagesAreRejectedBeforeParsingOrDispatch() {
+        val message = """{"type":"AD_EARLY_COMPLETE"}"""
+        val host = FakeHost()
+        var dispatches = 0
+        val b = CreativeBridge(
+            host = host,
+            mainDispatch = { dispatches++; it() },
+            limits = CreativeBridgeLimits(maxMessageChars = message.length - 1),
+        )
+
+        b.handle(message) {}
+
+        assertEquals(0, dispatches)
+        assertEquals(0, host.earlyCompletes)
+    }
+
+    @Test
+    fun floodIsBoundedByRateAndPendingMainWork() {
+        val host = FakeHost()
+        val pending = mutableListOf<() -> Unit>()
+        var now = 100L
+        val b = CreativeBridge(
+            host = host,
+            mainDispatch = { pending += it },
+            limits = CreativeBridgeLimits(
+                maxDispatchesPerWindow = 3,
+                windowMs = 1_000L,
+                maxPendingDispatches = 2,
+            ),
+            clock = { now },
+        )
+
+        repeat(100) { b.handle("""{"type":"AD_EARLY_COMPLETE"}""") {} }
+        assertEquals("a stalled main looper can hold only the configured pending work", 2, pending.size)
+
+        pending.removeAt(0).invoke()
+        b.handle("""{"type":"AD_EARLY_COMPLETE"}""") {}
+        assertEquals("the per-window cap still applies after a permit is released", 2, pending.size)
+
+        pending.forEach { it() }
+        pending.clear()
+        now += 1_000L
+        repeat(10) { b.handle("""{"type":"AD_EARLY_COMPLETE"}""") {} }
+        assertEquals(2, pending.size)
+    }
+
+    @Test
+    fun overloadedGetIsExplicitlyRejectedWithoutEnqueueingAnUnboundedReply() {
+        val pending = mutableListOf<() -> Unit>()
+        var replies = 0
+        val b = CreativeBridge(
+            host = FakeHost(),
+            mainDispatch = { pending += it },
+            limits = CreativeBridgeLimits(maxDispatchesPerWindow = 10, maxPendingDispatches = 1),
+        )
+
+        val accepted = b.handle("""{"type":"GET_AUDIO_STATE","requestId":"first"}""") { replies += 1 }
+        val overloaded = b.handle("""{"type":"GET_AUDIO_STATE","requestId":"second"}""") { replies += 1 }
+
+        assertEquals(CreativeBridgeHandleResult.DISPATCHED, accepted)
+        assertEquals(CreativeBridgeHandleResult.OVERLOADED, overloaded)
+        assertEquals("rejected GET must not create a second main-loop post", 1, pending.size)
+        assertEquals(0, replies)
+
+        pending.single().invoke()
+        assertEquals("the accepted GET still replies normally", 1, replies)
+    }
+
+    @Test
+    fun dispatcherFailureAndLateExecutionReleaseOnePermitOnly() {
+        val pending = mutableListOf<() -> Unit>()
+        var dispatches = 0
+        val b = CreativeBridge(
+            host = FakeHost(),
+            mainDispatch = {
+                dispatches += 1
+                pending += it
+                if (dispatches == 2) throw IllegalStateException("post failed after enqueue")
+            },
+            limits = CreativeBridgeLimits(maxDispatchesPerWindow = 10, maxPendingDispatches = 2),
+        )
+
+        b.handle("""{"type":"AD_EARLY_COMPLETE"}""") {}
+        b.handle("""{"type":"AD_EARLY_COMPLETE"}""") {}
+        pending[1].invoke() // malformed dispatcher executes a block it already reported as failed
+        b.handle("""{"type":"AD_EARLY_COMPLETE"}""") {}
+        b.handle("""{"type":"AD_EARLY_COMPLETE"}""") {}
+
+        assertEquals("the fourth dispatch must still see two genuinely pending messages", 3, dispatches)
     }
 
     @Test

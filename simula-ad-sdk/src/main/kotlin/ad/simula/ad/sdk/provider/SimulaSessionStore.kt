@@ -200,6 +200,7 @@ internal class SimulaSessionStore(
 
 /** Hard bound on awaiting the startup gate (see [awaitStartupGate]). */
 internal const val STARTUP_GATE_TIMEOUT_MS = 15_000L
+internal const val MIN_STARTUP_GATE_HEADROOM_MS = 2_000L
 
 /**
  * Awaits [gate] with a hard bound. Startup completes its gate on failure as well (ads fail

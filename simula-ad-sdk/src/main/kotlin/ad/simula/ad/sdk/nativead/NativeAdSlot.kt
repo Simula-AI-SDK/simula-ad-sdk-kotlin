@@ -363,6 +363,7 @@ fun NativeAdSlot(
                                 currentOnPaid(result.adValue)
                                 // Durable impression beacon (was a fire-and-forget trackImpression).
                                 AdBeaconManager.enqueue(
+                                    ctx.apiKey,
                                     result.impressionId,
                                     "seen",
                                     adFormat = result.adFormat,

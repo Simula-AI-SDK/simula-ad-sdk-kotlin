@@ -36,11 +36,14 @@ internal class SqliteVerificationStore(
         val db = helper.writableDatabase
         db.delete(TABLE, "$COL_TS > 0 AND $COL_TS < ?", arrayOf((clock() - maxAgeMs).toString()))
         val out = ArrayList<PendingVerification>()
-        db.query(TABLE, arrayOf(COL_JSON), null, null, null, null, "$COL_TS ASC").use { c ->
-            val idx = c.getColumnIndexOrThrow(COL_JSON)
+        db.query(TABLE, arrayOf(COL_JSON, COL_TS), null, null, null, null, "$COL_TS ASC").use { c ->
+            val jsonIdx = c.getColumnIndexOrThrow(COL_JSON)
+            val tsIdx = c.getColumnIndexOrThrow(COL_TS)
             while (c.moveToNext()) {
-                val s = c.getString(idx) ?: continue
-                runCatching { json.decodeFromString<PendingVerification>(s) }.getOrNull()?.let { out.add(it) }
+                val s = c.getString(jsonIdx) ?: continue
+                runCatching { json.decodeFromString<PendingVerification>(s) }.getOrNull()?.let {
+                    out.add(normalizeMigratedVerification(it, c.getLong(tsIdx)))
+                }
             }
         }
         out
@@ -84,13 +87,15 @@ internal class SqliteVerificationStore(
             try {
                 val values = ContentValues()
                 for (v in legacy) {
+                    val normalized = normalizeMigratedVerification(v, now)
                     values.clear()
-                    values.put(COL_SERVE, v.serveId)
-                    // Legacy rows carry no createdAt — TTL baseline = last attempt (or now when
-                    // never attempted), so genuinely old rows expire on the first load.
-                    values.put(COL_TS, if (v.createdAt > 0) v.createdAt else (v.lastAttemptTimestamp.takeIf { it > 0 } ?: now))
-                    values.put(COL_JSON, json.encodeToString(v))
-                    db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+                    values.put(COL_SERVE, normalized.serveId)
+                    values.put(COL_TS, normalized.createdAt)
+                    values.put(COL_JSON, json.encodeToString(normalized))
+                    val inserted = db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+                    if (!migrationRowPersisted(inserted) { rowExists(db, normalized.serveId) }) {
+                        error("legacy verification row was not persisted")
+                    }
                 }
                 db.setTransactionSuccessful()
             } finally {
@@ -103,6 +108,18 @@ internal class SqliteVerificationStore(
             prefs.edit().remove(LEGACY_KEY).apply()
         }
     }
+
+    private fun rowExists(db: SQLiteDatabase, serveId: String): Boolean =
+        db.query(
+            TABLE,
+            arrayOf(COL_SERVE),
+            "$COL_SERVE = ?",
+            arrayOf(serveId),
+            null,
+            null,
+            null,
+            "1",
+        ).use { it.moveToFirst() }
 
     private class Helper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
         init {

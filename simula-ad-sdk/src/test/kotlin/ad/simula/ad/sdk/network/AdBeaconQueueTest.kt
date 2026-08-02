@@ -27,10 +27,12 @@ class AdBeaconQueueTest {
         val codes = mutableMapOf<String, Int>()
         val errors = mutableMapOf<String, Throwable>()
         val callCounts = mutableMapOf<String, Int>()
+        val apiKeys = mutableMapOf<String, String>()
         private fun key(id: String, action: String) = "$id:$action"
-        override suspend fun send(impressionId: String, action: String): Int {
+        override suspend fun send(apiKey: String, impressionId: String, action: String): Int {
             val k = key(impressionId, action)
             callCounts[k] = (callCounts[k] ?: 0) + 1
+            apiKeys[k] = apiKey
             errors[k]?.let { throw it }
             return codes[k] ?: 200
         }
@@ -42,7 +44,7 @@ class AdBeaconQueueTest {
         val sender = FakeSender().apply { codes["imp:seen"] = 200 }
         val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
 
-        engine.queue("imp", "seen")
+        engine.queue("key", "imp", "seen")
         advanceUntilIdle()
 
         assertTrue("delivered beacon must be dropped", store.data.isEmpty())
@@ -55,7 +57,7 @@ class AdBeaconQueueTest {
         val sender = FakeSender().apply { codes["imp:click"] = 400 }
         val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
 
-        engine.queue("imp", "click")
+        engine.queue("key", "imp", "click")
         advanceUntilIdle()
 
         assertTrue("4xx (except 408/429) is permanent → drop", store.data.isEmpty())
@@ -68,7 +70,7 @@ class AdBeaconQueueTest {
         val sender = FakeSender().apply { codes["imp:seen"] = 503 }
         val engine = AdBeaconQueue(store, sender, clock = { 1_000L }, scope = this)
 
-        engine.queue("imp", "seen")
+        engine.queue("key", "imp", "seen")
         advanceUntilIdle()
 
         assertEquals(1, store.data.size)
@@ -83,7 +85,7 @@ class AdBeaconQueueTest {
         val sender = FakeSender().apply { errors["imp:seen"] = RuntimeException("offline") }
         val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
 
-        engine.queue("imp", "seen")
+        engine.queue("key", "imp", "seen")
         advanceUntilIdle()
 
         assertEquals(1, store.data.size)
@@ -95,8 +97,8 @@ class AdBeaconQueueTest {
         val sender = FakeSender().apply { codes["imp:seen"] = 503 } // keep it queued
         val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
 
-        engine.queue("imp", "seen")
-        engine.queue("imp", "seen") // duplicate
+        engine.queue("key", "imp", "seen")
+        engine.queue("key", "imp", "seen") // duplicate
         advanceUntilIdle()
 
         assertEquals("same (impressionId, action) deduped", 1, store.data.size)
@@ -108,8 +110,8 @@ class AdBeaconQueueTest {
         val sender = FakeSender().apply { codes["imp:seen"] = 200; codes["imp:click"] = 200 }
         val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
 
-        engine.queue("imp", "seen")
-        engine.queue("imp", "click")
+        engine.queue("key", "imp", "seen")
+        engine.queue("key", "imp", "click")
         advanceUntilIdle()
 
         assertTrue(store.data.isEmpty())
@@ -119,7 +121,9 @@ class AdBeaconQueueTest {
 
     @Test
     fun `trigger drains a beacon left by a prior session`() = runTest {
-        val store = FakeStore(listOf(PendingBeacon("imp", "seen", retryCount = 0, lastAttemptTimestamp = 0L)))
+        val store = FakeStore(
+            listOf(PendingBeacon("imp", "seen", retryCount = 0, lastAttemptTimestamp = 0L, apiKey = "key")),
+        )
         val sender = FakeSender().apply { codes["imp:seen"] = 200 }
         val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
 
@@ -137,7 +141,7 @@ class AdBeaconQueueTest {
         val sender = FakeSender().apply { codes["imp:seen"] = 503 }
         val engine = AdBeaconQueue(store, sender, clock = { now }, scope = this)
 
-        engine.queue("imp", "seen")
+        engine.queue("key", "imp", "seen")
         advanceUntilIdle()
         assertEquals(1, store.data[0].retryCount) // attempt at now=0; backoff(1)=5000ms
 
@@ -160,7 +164,7 @@ class AdBeaconQueueTest {
         val sender = FakeSender()
         val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
 
-        engine.queue("", "seen")
+        engine.queue("key", "", "seen")
         advanceUntilIdle()
 
         assertTrue(store.data.isEmpty())
@@ -175,12 +179,12 @@ class AdBeaconQueueTest {
         val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
 
         repeat(MAX_PENDING_BEACONS) { sender.codes["imp_$it:seen"] = 503 }
-        repeat(MAX_PENDING_BEACONS) { engine.queue("imp_$it", "seen") }
+        repeat(MAX_PENDING_BEACONS) { engine.queue("key", "imp_$it", "seen") }
         advanceUntilIdle()
         assertEquals(MAX_PENDING_BEACONS, store.data.size)
 
         sender.codes["newest:seen"] = 503
-        engine.queue("newest", "seen")
+        engine.queue("key", "newest", "seen")
         advanceUntilIdle()
 
         assertEquals("cap holds", MAX_PENDING_BEACONS, store.data.size)
@@ -190,7 +194,7 @@ class AdBeaconQueueTest {
 
     @Test
     fun `a drain pass persists once, not per delivered beacon`() = runTest {
-        val store = FakeStore((0 until 5).map { PendingBeacon("imp_$it", "seen") })
+        val store = FakeStore((0 until 5).map { PendingBeacon("imp_$it", "seen", apiKey = "key") })
         val sender = FakeSender() // default 200 → everything delivers
         val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
 
@@ -203,5 +207,33 @@ class AdBeaconQueueTest {
             1,
             store.saveCount,
         )
+    }
+
+    @Test
+    fun `each beacon is sent with the api key that enqueued it`() = runTest {
+        val store = FakeStore()
+        val sender = FakeSender()
+        val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
+
+        engine.queue("provider-key", "provider-imp", "seen")
+        engine.queue("imperative-key", "imperative-imp", "seen")
+        advanceUntilIdle()
+
+        assertEquals("provider-key", sender.apiKeys["provider-imp:seen"])
+        assertEquals("imperative-key", sender.apiKeys["imperative-imp:seen"])
+    }
+
+    @Test
+    fun `same impression and action under different api keys remain distinct`() = runTest {
+        val store = FakeStore()
+        val sender = FakeSender().apply { codes["shared:seen"] = 503 }
+        val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
+
+        engine.queue("provider-key", "shared", "seen")
+        engine.queue("imperative-key", "shared", "seen")
+        advanceUntilIdle()
+
+        assertEquals(2, store.data.size)
+        assertEquals(2, store.data.map(PendingBeacon::persistenceKey).toSet().size)
     }
 }

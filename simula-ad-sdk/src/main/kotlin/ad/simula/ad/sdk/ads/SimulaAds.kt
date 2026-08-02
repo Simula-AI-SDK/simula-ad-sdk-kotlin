@@ -19,6 +19,7 @@ import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.provider.SimulaSessionStore
 import ad.simula.ad.sdk.telemetry.SimulaTelemetryStartup
+import ad.simula.ad.sdk.telemetry.awaitTelemetryReady
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
 import android.app.ActivityManager
@@ -217,7 +218,10 @@ object SimulaAds {
                 // crash-guard install needs the main thread, so the engine fires it ungated —
                 // ad requests must never wait on main-thread health.
                 SimulaTelemetryStartup.start()
-                telemetryGate.await()
+                // A first-registration startup can itself wedge inside platform/SQLite code. Stop
+                // waiting without cancelling that shared single flight, then release this store's
+                // gate permanently so later loads do not each pay the 15 s session-gate timeout.
+                awaitTelemetryReady(telemetryGate)
 
                 // Build the durable impression/click beacon queue BEFORE the GAID read and the
                 // gate release: a host load awaiting the gate can show an ad (and fire billing

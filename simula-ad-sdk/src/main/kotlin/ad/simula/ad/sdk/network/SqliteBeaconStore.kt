@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit
  * SharedPreferences re-serializes the **whole** queue on every save and flushes through
  * `QueuedWork.waitToFinish()` on background/process death — an ANR risk under a backlog (the
  * hazard that already moved telemetry to SQLite; see `SqliteTelemetryStore`). SQLite instead
- * does **row-level** upsert/delete keyed by `(impression_id, action)`, has no QueuedWork flush
+ * does **row-level** upsert/delete keyed by `(api_key, impression_id, action)`, has no QueuedWork flush
  * path, and prunes rows older than [maxAgeMs] on load (a beacon older than the attribution
  * window is not worth retrying).
  *
@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit
 internal class SqliteBeaconStore(
     context: Context,
     private val json: Json,
+    private val fallbackApiKey: String,
     private val maxAgeMs: Long = TimeUnit.HOURS.toMillis(24),
     private val clock: () -> Long = System::currentTimeMillis,
 ) : BeaconStore {
@@ -39,11 +40,18 @@ internal class SqliteBeaconStore(
         // Built-in expiry: drop stale rows before reading (ts == 0 is exempt: pre-TTL rows).
         db.delete(TABLE, "$COL_TS > 0 AND $COL_TS < ?", arrayOf((clock() - maxAgeMs).toString()))
         val out = ArrayList<PendingBeacon>()
-        db.query(TABLE, arrayOf(COL_JSON), null, null, null, null, "$COL_TS ASC").use { c ->
-            val idx = c.getColumnIndexOrThrow(COL_JSON)
+        db.query(TABLE, arrayOf(COL_API_KEY, COL_JSON, COL_TS), null, null, null, null, "$COL_TS ASC").use { c ->
+            val apiKeyIdx = c.getColumnIndexOrThrow(COL_API_KEY)
+            val jsonIdx = c.getColumnIndexOrThrow(COL_JSON)
+            val tsIdx = c.getColumnIndexOrThrow(COL_TS)
             while (c.moveToNext()) {
-                val s = c.getString(idx) ?: continue
-                runCatching { json.decodeFromString<PendingBeacon>(s) }.getOrNull()?.let { out.add(it) }
+                val s = c.getString(jsonIdx) ?: continue
+                runCatching { json.decodeFromString<PendingBeacon>(s) }.getOrNull()?.let {
+                    // Repairs rows written by the first SQLite migration, whose column had a TTL
+                    // baseline but whose JSON still carried createdAt=0.
+                    val storedApiKey = c.getString(apiKeyIdx).orEmpty().ifBlank { fallbackApiKey }
+                    out.add(normalizeMigratedBeacon(it, c.getLong(tsIdx), storedApiKey))
+                }
             }
         }
         out
@@ -55,22 +63,30 @@ internal class SqliteBeaconStore(
             db.beginTransaction()
             try {
                 // Row-level delete of entries removed since the last save (delivered/dropped).
-                val keepKeys = queue.mapTo(HashSet()) { it.impressionId to it.action }
-                val existing = ArrayList<Pair<String, String>>()
-                db.query(TABLE, arrayOf(COL_IMPRESSION, COL_ACTION), null, null, null, null, null).use { c ->
+                val keepKeys = queue.mapTo(HashSet(), PendingBeacon::persistenceKey)
+                val existing = ArrayList<BeaconPersistenceKey>()
+                db.query(TABLE, arrayOf(COL_API_KEY, COL_IMPRESSION, COL_ACTION), null, null, null, null, null).use { c ->
+                    val kIdx = c.getColumnIndexOrThrow(COL_API_KEY)
                     val iIdx = c.getColumnIndexOrThrow(COL_IMPRESSION)
                     val aIdx = c.getColumnIndexOrThrow(COL_ACTION)
-                    while (c.moveToNext()) existing.add(c.getString(iIdx) to c.getString(aIdx))
+                    while (c.moveToNext()) {
+                        existing.add(BeaconPersistenceKey(c.getString(kIdx), c.getString(iIdx), c.getString(aIdx)))
+                    }
                 }
-                for ((imp, act) in existing) {
-                    if ((imp to act) !in keepKeys) {
-                        db.delete(TABLE, "$COL_IMPRESSION = ? AND $COL_ACTION = ?", arrayOf(imp, act))
+                for (key in existing) {
+                    if (key !in keepKeys) {
+                        db.delete(
+                            TABLE,
+                            "$COL_API_KEY = ? AND $COL_IMPRESSION = ? AND $COL_ACTION = ?",
+                            arrayOf(key.apiKey, key.impressionId, key.action),
+                        )
                     }
                 }
                 // Upsert the current entries (per row — never a single whole-queue blob).
                 val values = ContentValues()
                 for (b in queue) {
                     values.clear()
+                    values.put(COL_API_KEY, b.apiKey)
                     values.put(COL_IMPRESSION, b.impressionId)
                     values.put(COL_ACTION, b.action)
                     values.put(COL_TS, b.createdAt)
@@ -95,16 +111,23 @@ internal class SqliteBeaconStore(
             try {
                 val values = ContentValues()
                 for (b in legacy) {
+                    val normalized = normalizeMigratedBeacon(b, now, fallbackApiKey)
                     values.clear()
-                    values.put(COL_IMPRESSION, b.impressionId)
-                    values.put(COL_ACTION, b.action)
-                    // Legacy rows carry no createdAt — give them a TTL baseline of their last
-                    // attempt (falling back to now when never attempted), so genuinely old
-                    // rows expire on the first load instead of retrying forever.
-                    values.put(COL_TS, if (b.createdAt > 0) b.createdAt else (b.lastAttemptTimestamp.takeIf { it > 0 } ?: now))
-                    values.put(COL_JSON, json.encodeToString(b))
+                    values.put(COL_API_KEY, normalized.apiKey)
+                    values.put(COL_IMPRESSION, normalized.impressionId)
+                    values.put(COL_ACTION, normalized.action)
+                    values.put(COL_TS, normalized.createdAt)
+                    // Persist the normalized baseline in the payload too. A later load/save must
+                    // not overwrite the TTL column with the legacy createdAt=0 value.
+                    values.put(COL_JSON, json.encodeToString(normalized))
                     // IGNORE (not REPLACE) so a migration can never clobber rows already in SQLite.
-                    db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+                    val inserted = db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+                    if (!migrationRowPersisted(inserted) {
+                            rowExists(db, normalized.persistenceKey())
+                        }
+                    ) {
+                        error("legacy beacon row was not persisted")
+                    }
                 }
                 db.setTransactionSuccessful()
             } finally {
@@ -118,6 +141,18 @@ internal class SqliteBeaconStore(
         }
     }
 
+    private fun rowExists(db: SQLiteDatabase, key: BeaconPersistenceKey): Boolean =
+        db.query(
+            TABLE,
+            arrayOf(COL_IMPRESSION),
+            "$COL_API_KEY = ? AND $COL_IMPRESSION = ? AND $COL_ACTION = ?",
+            arrayOf(key.apiKey, key.impressionId, key.action),
+            null,
+            null,
+            null,
+            "1",
+        ).use { it.moveToFirst() }
+
     private class Helper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
         init {
             setWriteAheadLoggingEnabled(true)
@@ -126,25 +161,37 @@ internal class SqliteBeaconStore(
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL(
                 "CREATE TABLE IF NOT EXISTS $TABLE (" +
-                    "$COL_IMPRESSION TEXT NOT NULL, $COL_ACTION TEXT NOT NULL, " +
+                    "$COL_API_KEY TEXT NOT NULL, $COL_IMPRESSION TEXT NOT NULL, $COL_ACTION TEXT NOT NULL, " +
                     "$COL_TS INTEGER NOT NULL DEFAULT 0, $COL_JSON TEXT NOT NULL, " +
-                    "PRIMARY KEY ($COL_IMPRESSION, $COL_ACTION))",
+                    "PRIMARY KEY ($BEACON_PRIMARY_KEY_SQL))",
             )
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_${TABLE}_ts ON $TABLE($COL_TS)")
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            // Billing beacons are best-effort — a schema bump drops the old table rather than
-            // risking a botched in-place migration of money-bearing rows.
-            db.execSQL("DROP TABLE IF EXISTS $TABLE")
-            onCreate(db)
+            if (oldVersion < 2) {
+                // Preserve every v1 row. Its key is recovered from JSON on load when present, or
+                // from the current initialization key for truly legacy payloads; the next save
+                // rewrites the temporary blank column with that resolved key.
+                db.execSQL("ALTER TABLE $TABLE RENAME TO $LEGACY_TABLE")
+                db.execSQL("DROP INDEX IF EXISTS idx_${TABLE}_ts")
+                onCreate(db)
+                db.execSQL(
+                    "INSERT OR IGNORE INTO $TABLE " +
+                        "($COL_API_KEY, $COL_IMPRESSION, $COL_ACTION, $COL_TS, $COL_JSON) " +
+                        "SELECT '', $COL_IMPRESSION, $COL_ACTION, $COL_TS, $COL_JSON FROM $LEGACY_TABLE",
+                )
+                db.execSQL("DROP TABLE $LEGACY_TABLE")
+            }
         }
     }
 
     private companion object {
         const val DB_NAME = "simula_ad_sdk_beacons.db"
-        const val DB_VERSION = 1
+        const val DB_VERSION = 2
         const val TABLE = "pending_beacons"
+        const val LEGACY_TABLE = "pending_beacons_v1"
+        const val COL_API_KEY = "api_key"
         const val COL_IMPRESSION = "impression_id"
         const val COL_ACTION = "action"
         const val COL_TS = "created_ts"

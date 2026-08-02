@@ -362,7 +362,7 @@ private fun RewardedMinigame(
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
             // Durable beacon (was a fire-and-forget trackShown).
-            AdBeaconManager.enqueue(presentation.impressionId, "shown", adFormat = "rewarded")
+            AdBeaconManager.enqueue(presentation.apiKey, presentation.impressionId, "shown", adFormat = "rewarded")
         }
     }
 
@@ -381,7 +381,7 @@ private fun RewardedMinigame(
             presentation.callbacks.onImpression()
             presentation.callbacks.onPaid(presentation.adValue)
             // Durable billable-impression beacon (was a fire-and-forget trackImpression).
-            AdBeaconManager.enqueue(presentation.impressionId, "seen", adFormat = "rewarded")
+            AdBeaconManager.enqueue(presentation.apiKey, presentation.impressionId, "seen", adFormat = "rewarded")
         }
 
         if (presentation.accumulatedImpressionTimeMs >= FULLSCREEN_IMPRESSION_DELAY_MS) {
@@ -568,7 +568,7 @@ private fun RewardedMinigame(
                     // Surface the click to the publisher first (parity with the interstitial), then
                     // the durable click beacon — only on a real user tap (not auto_store_redirect).
                     presentation.callbacks.onClicked()
-                    AdBeaconManager.enqueue(presentation.impressionId, "click", adFormat = "rewarded")
+                    AdBeaconManager.enqueue(presentation.apiKey, presentation.impressionId, "click", adFormat = "rewarded")
                     recordStoreOpen("store_prompt")
                     CreativeCtaRouter.open(
                         context.applicationContext,

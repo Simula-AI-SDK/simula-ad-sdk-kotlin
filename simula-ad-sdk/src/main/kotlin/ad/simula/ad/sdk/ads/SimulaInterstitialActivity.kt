@@ -425,7 +425,7 @@ private fun CreativeInterstitial(
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
             // Durable beacon (was a fire-and-forget trackShown).
-            AdBeaconManager.enqueue(ad.impressionId, "shown", adFormat = "interstitial")
+            AdBeaconManager.enqueue(presentation.apiKey, ad.impressionId, "shown", adFormat = "interstitial")
         }
     }
 
@@ -444,7 +444,7 @@ private fun CreativeInterstitial(
             presentation.callbacks.onImpression()
             presentation.callbacks.onPaid(ad.adValue)
             // Durable billable-impression beacon (was a fire-and-forget trackImpression).
-            AdBeaconManager.enqueue(ad.impressionId, "seen", adFormat = "interstitial")
+            AdBeaconManager.enqueue(presentation.apiKey, ad.impressionId, "seen", adFormat = "interstitial")
         }
 
         if (presentation.accumulatedImpressionTimeMs >= FULLSCREEN_IMPRESSION_DELAY_MS) {
@@ -537,7 +537,7 @@ private fun CreativeInterstitial(
                     // openDestination is reused by auto_store_redirect (no tap), so the click
                     // signal lives here on the badge, not in openDestination.
                     presentation.callbacks.onClicked()
-                    AdBeaconManager.enqueue(ad.impressionId, "click", adFormat = "interstitial")
+                    AdBeaconManager.enqueue(presentation.apiKey, ad.impressionId, "click", adFormat = "interstitial")
                     recordStoreOpen("store_prompt")
                     openDestination(ad)
                 },
@@ -553,7 +553,7 @@ private fun CreativeInterstitial(
                     // A user tap on the install banner opens the primary ad's store — surface the click
                     // (parity with the store-prompt badge / creative CTA) plus the durable click beacon.
                     presentation.callbacks.onClicked()
-                    AdBeaconManager.enqueue(ad.impressionId, "click", adFormat = "interstitial")
+                    AdBeaconManager.enqueue(presentation.apiKey, ad.impressionId, "click", adFormat = "interstitial")
                     recordStoreOpen("store_prompt")
                     openDestination(ad)
                 },

@@ -4,15 +4,29 @@ import ad.simula.ad.sdk.core.SimulaScope
 import android.content.Context
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Session identity callbacks are published as one volatile value so readers never see a torn pair. */
 internal data class TelemetryIdentityProviders(
     val sessionId: () -> String?,
     val primaryUserId: () -> String?,
 )
+
+/** 4 s telemetry + 8 s GAID leaves 3 s before the outer 15 s startup gate. */
+internal const val TELEMETRY_READY_TIMEOUT_MS = 4_000L
+
+/**
+ * Waits for the process-wide telemetry startup without transferring cancellation to its shared
+ * deferred. A wedged first registration must not strand either entry point's local startup gate.
+ */
+internal suspend fun awaitTelemetryReady(
+    ready: Deferred<Unit>,
+    timeoutMs: Long = TELEMETRY_READY_TIMEOUT_MS,
+): Boolean = withTimeoutOrNull(timeoutMs) { ready.await(); true } ?: false
 
 /**
  * Testable first-registration-wins, single-flight startup engine. Registration is intentionally
