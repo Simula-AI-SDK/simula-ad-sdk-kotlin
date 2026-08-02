@@ -4,8 +4,10 @@ import ad.simula.ad.sdk.model.SimulaAdContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -71,6 +73,35 @@ class NativeAdParsingTest {
         val body = NativeAdRequestBody(position = 1, sessionId = "s", theme = "light")
         val decoded = json.decodeFromString<NativeAdRequestBody>(json.encodeToString(body))
         assertEquals("light", decoded.theme)
+    }
+
+    @Test
+    fun `request encodes metadata under the exact top-level wire key`() {
+        val root = json.parseToJsonElement(
+            json.encodeToString(
+                NativeAdRequestBody(
+                    position = 2,
+                    sessionId = "s",
+                    metadata = mapOf("placement" to "feed", "mood" to "café"),
+                ),
+            ),
+        ).jsonObject
+
+        assertEquals(
+            JsonObject(mapOf("placement" to JsonPrimitive("feed"), "mood" to JsonPrimitive("café"))),
+            root["metadata"],
+        )
+        assertFalse(root.containsKey("extraParameters"))
+        assertFalse(root.containsKey("extra_parameters"))
+    }
+
+    @Test
+    fun `request represents empty metadata as omitted or null`() {
+        val root = json.parseToJsonElement(
+            json.encodeToString(NativeAdRequestBody(position = 0, sessionId = "s", metadata = null)),
+        ).jsonObject
+
+        assertTrue(root["metadata"] == null || root["metadata"] == JsonNull)
     }
 
     @Test

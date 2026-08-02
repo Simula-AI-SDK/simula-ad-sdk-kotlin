@@ -3,6 +3,11 @@ package ad.simula.ad.sdk.network
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -42,6 +47,34 @@ class RewardedParsingTest {
         val body = RewardedInitRequestBody(adUnitId = "unit_1")
         val decoded = json.decodeFromString<RewardedInitRequestBody>(json.encodeToString(body))
         assertEquals("", decoded.sessionId)
+    }
+
+    @Test
+    fun `init request encodes metadata under the exact top-level wire key`() {
+        val root = json.parseToJsonElement(
+            json.encodeToString(
+                RewardedInitRequestBody(
+                    adUnitId = "unit_1",
+                    metadata = mapOf("placement" to "reward", "locale" to "pt-BR"),
+                ),
+            ),
+        ).jsonObject
+
+        assertEquals(
+            JsonObject(mapOf("placement" to JsonPrimitive("reward"), "locale" to JsonPrimitive("pt-BR"))),
+            root["metadata"],
+        )
+        assertFalse(root.containsKey("extraParameters"))
+        assertFalse(root.containsKey("extra_parameters"))
+    }
+
+    @Test
+    fun `init request represents empty metadata as omitted or null`() {
+        val root = json.parseToJsonElement(
+            json.encodeToString(RewardedInitRequestBody(adUnitId = "unit_1", metadata = null)),
+        ).jsonObject
+
+        assertTrue(root["metadata"] == null || root["metadata"] == JsonNull)
     }
 
     // ── Init response ───────────────────────────────────────────────────────────
