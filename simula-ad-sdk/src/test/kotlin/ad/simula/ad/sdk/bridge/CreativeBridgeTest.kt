@@ -79,6 +79,63 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun exactUtf16CapIsAdmitted() {
+        val host = FakeHost()
+        var dispatches = 0
+        val errors = mutableListOf<String>()
+        val message = messageOfLength("AD_EARLY_COMPLETE", CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS)
+
+        CreativeBridge(host, { dispatches++; it() }, { errors += it }).handle(message) {}
+
+        assertEquals(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS, message.length)
+        assertEquals(1, dispatches)
+        assertEquals(1, host.earlyCompletes)
+        assertTrue(errors.isEmpty())
+    }
+
+    @Test
+    fun oversizedMessageIsRejectedBeforeDispatchWithoutTelemetryCallback() {
+        val host = FakeHost()
+        var dispatches = 0
+        var replied = false
+        val errors = mutableListOf<String>()
+        val message = messageOfLength("AD_EARLY_COMPLETE", CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS) + " "
+
+        CreativeBridge(host, { dispatches++; it() }, { errors += it }).handle(message) { replied = true }
+
+        assertEquals(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS + 1, message.length)
+        assertEquals(0, dispatches)
+        assertEquals(0, host.earlyCompletes)
+        assertFalse(replied)
+        assertTrue(errors.isEmpty())
+    }
+
+    @Test
+    fun unknownAndMalformedMessagesNeverDispatchOrReport() {
+        var dispatches = 0
+        var replied = false
+        val errors = mutableListOf<String>()
+        val bridge = CreativeBridge(FakeHost(), { dispatches++; it() }, { errors += it })
+
+        bridge.handle("""{"type":"UNKNOWN"}""") { replied = true }
+        bridge.handle("not json") { replied = true }
+
+        assertEquals(0, dispatches)
+        assertFalse(replied)
+        assertTrue(errors.isEmpty())
+    }
+
+    @Test
+    fun nativeMessageTypesUseTheSameAdmissionProtection() {
+        val exact = messageOfLength("SIMULA_AD_HEIGHT", CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS)
+
+        assertTrue(parseKnownCreativeBridgeMessage(exact, NATIVE_AD_BRIDGE_MESSAGE_TYPES) != null)
+        assertNull(parseKnownCreativeBridgeMessage("$exact ", NATIVE_AD_BRIDGE_MESSAGE_TYPES))
+        assertNull(parseKnownCreativeBridgeMessage("""{"type":"NOT_NATIVE"}""", NATIVE_AD_BRIDGE_MESSAGE_TYPES))
+        assertNull(parseKnownCreativeBridgeMessage("malformed", NATIVE_AD_BRIDGE_MESSAGE_TYPES))
+    }
+
+    @Test
     fun getAudioStateReplyShape() {
         val reply = capture("""{"type":"GET_AUDIO_STATE","requestId":"42"}""")
         assertEquals("GET_AUDIO_STATE", reply["type"]!!.jsonPrimitive.content)
@@ -151,5 +208,12 @@ class CreativeBridgeTest {
         val raw = requireNotNull(js) { "no reply for: $message" }
         val json = raw.removePrefix("window.postMessage(").removeSuffix(", '*');")
         return Json.parseToJsonElement(json).jsonObject
+    }
+
+    private fun messageOfLength(type: String, length: Int): String {
+        val prefix = "{\"type\":\"$type\",\"padding\":\""
+        val suffix = "\"}"
+        require(length >= prefix.length + suffix.length)
+        return prefix + "x".repeat(length - prefix.length - suffix.length) + suffix
     }
 }

@@ -3,7 +3,8 @@ package ad.simula.ad.sdk.nativead
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
-import ad.simula.ad.sdk.telemetry.Telemetry
+import ad.simula.ad.sdk.bridge.NATIVE_AD_BRIDGE_MESSAGE_TYPES
+import ad.simula.ad.sdk.bridge.parseKnownCreativeBridgeMessage
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.minigame.repaintOnNextFrame
@@ -45,11 +46,9 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
-import kotlinx.serialization.json.jsonObject
 import java.util.WeakHashMap
 
 /**
@@ -507,8 +506,6 @@ internal class NativeAdWiring(
     @Volatile var webView: WebView? = null
 
     private val main = Handler(Looper.getMainLooper())
-    private val json = Json { ignoreUnknownKeys = true }
-
     /**
      * Forward the slot's live visible fraction (0..1) to the creative via `window.onVisibility`, called
      * on every scroll frame by the viewability tracker. Guarded so it's a no-op until the creative
@@ -532,14 +529,9 @@ internal class NativeAdWiring(
         webView?.evaluateJavascript("window.onAppForeground&&window.onAppForeground()", null)
     }
 
-    /** Called off-main from the JS interface. Parses and dispatches on the main thread. */
+    /** Called off-main from the JS interface. Admits known bounded messages before main dispatch. */
     fun handleMessage(raw: String) {
-        val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: run {
-            // Malformed JSON / non-object from the creative bridge — dropped, but counted so a broken
-            // or hostile creative is visible rather than silent. Aggregated by signature (bounded).
-            Telemetry.recordError(signature = "native:bridge_parse_failed", breadcrumb = "NativeAdWebView.handleMessage")
-            return
-        }
+        val obj = parseKnownCreativeBridgeMessage(raw, NATIVE_AD_BRIDGE_MESSAGE_TYPES) ?: return
         // `as? JsonPrimitive` (not `.jsonPrimitive`, which throws IllegalArgumentException on a
         // non-primitive) so a creative sending an object/array for type/height/value can't crash the
         // WebView's JS thread with an uncaught exception.
@@ -552,7 +544,6 @@ internal class NativeAdWiring(
                 val value = (obj["value"] as? JsonPrimitive)?.contentOrNull ?: return
                 main.post { handleFeedback(value) }
             }
-            else -> Unit
         }
     }
 
