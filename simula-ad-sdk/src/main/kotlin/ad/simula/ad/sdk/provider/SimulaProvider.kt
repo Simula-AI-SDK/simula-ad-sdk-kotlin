@@ -25,9 +25,11 @@ import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * CompositionLocal providing the Simula context to child composables.
@@ -247,7 +249,7 @@ fun SimulaProvider(
     // changes that don't alter the consent snapshot (e.g. an enableAdvertisingId toggle is
     // not a ConsentSnapshot field), which wouldn't retrigger that effect.
     LaunchedEffect(context, resolvedConfig) {
-        SimulaPrivacy.attach(context)
+        withContext(Dispatchers.IO) { SimulaPrivacy.attach(context) }
         SimulaPrivacy.refreshAdvertisingId()
     }
 
@@ -330,7 +332,7 @@ internal fun ProvideSimulaContext(
     // the GAID read, and the backend ties the privacy block to the session at creation.
     val context = LocalContext.current
     LaunchedEffect(store) {
-        SimulaPrivacy.attach(context)
+        withContext(Dispatchers.IO) { SimulaPrivacy.attach(context) }
         SimulaPrivacy.refreshAdvertisingId()
         store.ensureSession()
     }

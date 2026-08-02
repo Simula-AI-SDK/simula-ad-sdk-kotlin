@@ -37,6 +37,12 @@ internal interface BridgeHost {
 internal class CreativeBridge(
     private val host: BridgeHost,
     private val mainDispatch: (block: () -> Unit) -> Unit,
+    private val recordDispatchError: (errorCode: String) -> Unit = { errorCode ->
+        Telemetry.recordError(
+            signature = "bridge:creative_dispatch",
+            errorCode = errorCode,
+        )
+    },
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -49,7 +55,23 @@ internal class CreativeBridge(
         val type = root.str("type") ?: return
         val requestId = root["requestId"] // preserved verbatim so the reply echoes its JSON type
         val payload = root["payload"] as? JsonObject
-        mainDispatch { process(type, requestId, payload, reply) }
+        try {
+            mainDispatch {
+                try {
+                    process(type, requestId, payload, reply)
+                } catch (error: Throwable) {
+                    reportDispatchError(error)
+                    // The current bridge protocol has no error-reply envelope. In particular,
+                    // failed GET_* requests stay silent rather than inventing a wire contract.
+                }
+            }
+        } catch (error: Throwable) {
+            reportDispatchError(error)
+        }
+    }
+
+    private fun reportDispatchError(error: Throwable) {
+        runCatching { recordDispatchError(error::class.java.simpleName) }
     }
 
     private fun process(type: String, requestId: JsonElement?, payload: JsonObject?, reply: (String) -> Unit) {

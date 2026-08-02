@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -36,7 +37,13 @@ class CreativeBridgeTest {
     }
 
     /** Bridge with a synchronous main dispatcher so `handle` resolves inline. */
-    private fun bridge(host: BridgeHost) = CreativeBridge(host) { it() }
+    private fun bridge(host: BridgeHost) = CreativeBridge(host, mainDispatch = { it() })
+
+    private class HostFailure : RuntimeException("must not be reported")
+
+    private class ReplyFailure : RuntimeException("must not be reported")
+
+    private class DispatchFailure : RuntimeException("must not be reported")
 
     @Test
     fun earlyCompleteRoutesAndDoesNotReply() {
@@ -97,6 +104,44 @@ class CreativeBridgeTest {
         assertTrue(payload["darkMode"]!!.jsonPrimitive.boolean)
         assertEquals("en-US", payload["locale"]!!.jsonPrimitive.content)
         assertEquals("14", payload["osVersion"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun hostFailureIsAbsorbedAndRecordedOnceWithoutQueryReply() {
+        val errorCodes = mutableListOf<String>()
+        val host = object : BridgeHost by FakeHost() {
+            override fun deviceContext(): JsonObject = throw HostFailure()
+        }
+        var reply: String? = null
+
+        CreativeBridge(host, { it() }, { errorCodes += it }).handle(
+            """{"type":"GET_DEVICE_CONTEXT","requestId":"private-id"}""",
+        ) { reply = it }
+
+        assertNull(reply)
+        assertEquals(listOf("HostFailure"), errorCodes)
+    }
+
+    @Test
+    fun replyFailureIsAbsorbedAndRecordedOnce() {
+        val errorCodes = mutableListOf<String>()
+
+        CreativeBridge(FakeHost(), { it() }, { errorCodes += it }).handle(
+            """{"type":"GET_AUDIO_STATE","requestId":7}""",
+        ) { throw ReplyFailure() }
+
+        assertEquals(listOf("ReplyFailure"), errorCodes)
+    }
+
+    @Test
+    fun dispatcherFailureIsAbsorbedAndRecordedOnce() {
+        val errorCodes = mutableListOf<String>()
+
+        CreativeBridge(FakeHost(), { throw DispatchFailure() }, { errorCodes += it }).handle(
+            """{"type":"AD_EARLY_COMPLETE"}""",
+        ) {}
+
+        assertEquals(listOf("DispatchFailure"), errorCodes)
     }
 
     /** Drives a query and parses the `window.postMessage(<json>, '*');` reply into a [JsonObject]. */
