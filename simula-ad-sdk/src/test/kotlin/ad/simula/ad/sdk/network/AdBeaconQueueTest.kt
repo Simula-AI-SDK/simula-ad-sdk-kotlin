@@ -1,7 +1,9 @@
 package ad.simula.ad.sdk.network
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -45,6 +47,25 @@ class AdBeaconQueueTest {
             sentMetadata[k] = metadata
             errors[k]?.let { throw it }
             return codes[k] ?: 200
+        }
+    }
+
+    private class BlockingSender : BeaconSender {
+        val firstCallStarted = CompletableDeferred<Unit>()
+        val releaseFirstCall = CompletableDeferred<Unit>()
+        val metadataSnapshots = mutableListOf<Map<String, String>?>()
+
+        override suspend fun send(
+            impressionId: String,
+            action: String,
+            metadata: Map<String, String>?,
+        ): Int {
+            metadataSnapshots += metadata
+            if (metadataSnapshots.size == 1) {
+                firstCallStarted.complete(Unit)
+                releaseFirstCall.await()
+            }
+            return 200
         }
     }
 
@@ -214,6 +235,31 @@ class AdBeaconQueueTest {
         assertEquals(2, store.data[0].retryCount)
         assertEquals(1_000L, store.data[0].lastAttemptTimestamp)
         assertTrue(sender.callCounts.isEmpty())
+    }
+
+    @Test
+    fun `metadata merged during successful send is delivered then queue drains`() = runTest {
+        val store = FakeStore()
+        val sender = BlockingSender()
+        val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
+
+        engine.queue("imp", "seen", mapOf("page_name" to "Search"))
+        sender.firstCallStarted.await()
+        engine.queue("imp", "seen", mapOf("surface" to "chat"))
+        runCurrent()
+        assertEquals(mapOf("page_name" to "Search", "surface" to "chat"), store.data.single().metadata)
+
+        sender.releaseFirstCall.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf(
+                mapOf("page_name" to "Search"),
+                mapOf("page_name" to "Search", "surface" to "chat"),
+            ),
+            sender.metadataSnapshots,
+        )
+        assertTrue(store.data.isEmpty())
     }
 
     @Test

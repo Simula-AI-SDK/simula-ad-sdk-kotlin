@@ -146,6 +146,9 @@ internal class AdBeaconQueue(
     }
 
     private suspend fun removeTask(task: PendingBeacon) = mutex.withLock {
+        // Remove only the snapshot that was sent. If metadata was merged while this request was in
+        // flight, the newer snapshot must stay queued for one more idempotent `/seen`; removing by
+        // `(impressionId, action)` alone would silently discard metadata the server never received.
         store.save(store.load().filterNot {
             it.impressionId == task.impressionId &&
                 it.action == task.action &&
