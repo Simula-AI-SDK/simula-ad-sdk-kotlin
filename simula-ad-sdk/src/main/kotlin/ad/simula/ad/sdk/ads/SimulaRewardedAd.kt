@@ -6,7 +6,6 @@ import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
-import ad.simula.ad.sdk.model.ExtraParametersStore
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
@@ -56,7 +55,6 @@ class SimulaRewardedAd(val adUnitId: String) {
     // Confined to the main thread (all reads/writes happen there).
     private var state: State = State.Idle
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val extraParameters = ExtraParametersStore()
 
     // Captured at load so verification can run after the Ready state is cleared on close.
     // `impressionId` is the verify-reward handle (the wire body still names it `serve_id`).
@@ -84,16 +82,6 @@ class SimulaRewardedAd(val adUnitId: String) {
     private var loadStartNanos = 0L
     private var showStartNanos = 0L
 
-    /** Upsert one metadata entry for future loads. Invalid entries are ignored safely. */
-    fun setExtraParameter(key: String, value: String) {
-        extraParameters.set(key, value)
-    }
-
-    /** Replace metadata for future loads. Passing an empty map clears it. */
-    fun setExtraParameters(parameters: Map<String, String>) {
-        extraParameters.replace(parameters)
-    }
-
     /**
      * Preload a rewarded minigame for the given character context.
      *
@@ -117,17 +105,7 @@ class SimulaRewardedAd(val adUnitId: String) {
         charImage: String? = null,
         charDesc: String? = null,
     ) {
-        loadOnMain(charId, charName, charImage, charDesc, extraParameters.snapshot())
-    }
-
-    private fun loadOnMain(
-        charId: String?,
-        charName: String?,
-        charImage: String?,
-        charDesc: String?,
-        metadata: Map<String, String>?,
-    ) {
-        if (!confineToMain { loadOnMain(charId, charName, charImage, charDesc, metadata) }) return
+        if (!confineToMain { load(charId, charName, charImage, charDesc) }) return
 
         if (!SimulaAds.isInitialized) {
             failLoad(SimulaAdError.NotInitialized)
@@ -190,7 +168,6 @@ class SimulaRewardedAd(val adUnitId: String) {
                     // AdContext (contextual targeting) now rides on the rewarded request too, read from
                     // the same provider-level store the native surface uses.
                     context = NativeAdContextStore.current,
-                    metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
                 // A rewarded ad with no iframe to render is a no-fill.

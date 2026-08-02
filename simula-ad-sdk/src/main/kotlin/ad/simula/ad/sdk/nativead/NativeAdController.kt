@@ -26,7 +26,6 @@ internal object NativeAdController {
         adUnitId: String?,
         position: Int,
         theme: String? = null,
-        metadata: Map<String, String>? = null,
     ): SimulaApiClient.NativeAdResult {
         // Distinguish "SDK never initialized" from "session creation failed" — both leave the session
         // null, but the publisher's fix differs (call initialize() vs. check key/network).
@@ -41,7 +40,6 @@ internal object NativeAdController {
                 adUnitId = adUnitId,
                 context = NativeAdContextStore.current,
                 theme = theme,
-                metadata = metadata,
             )
         } catch (e: CancellationException) {
             throw e

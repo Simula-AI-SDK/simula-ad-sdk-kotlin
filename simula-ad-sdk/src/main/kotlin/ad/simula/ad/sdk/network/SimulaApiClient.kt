@@ -495,7 +495,6 @@ internal object SimulaApiClient {
         charImage: String? = null,
         charDesc: String? = null,
         context: ad.simula.ad.sdk.model.SimulaAdContext? = null,
-        metadata: Map<String, String>? = null,
     ): AdLoadResult = withContext(Dispatchers.IO) {
         val requestBody = AdLoadRequestBody(
             adUnitId = adUnitId,
@@ -505,7 +504,6 @@ internal object SimulaApiClient {
             charImage = charImage,
             charDesc = charDesc,
             context = context?.toBody(),
-            metadata = metadata?.takeIf { it.isNotEmpty() },
             capabilities = currentDeviceCapabilities(),
         )
 
@@ -579,7 +577,6 @@ internal object SimulaApiClient {
         charId: String? = null,
         charName: String? = null,
         charDesc: String? = null,
-        metadata: Map<String, String>? = null,
     ): NativeAdResult = withContext(Dispatchers.IO) {
         val requestBody = NativeAdRequestBody(
             position = position,
@@ -591,7 +588,6 @@ internal object SimulaApiClient {
             charId = charId,
             charName = charName,
             charDesc = charDesc,
-            metadata = metadata?.takeIf { it.isNotEmpty() },
         )
 
         val response = SimulaHttp.request(
@@ -657,7 +653,6 @@ internal object SimulaApiClient {
         charImage: String? = null,
         charDesc: String? = null,
         context: ad.simula.ad.sdk.model.SimulaAdContext? = null,
-        metadata: Map<String, String>? = null,
     ): RewardedInitResult = withContext(Dispatchers.IO) {
         val requestBody = RewardedInitRequestBody(
             adUnitId = adUnitId,
@@ -667,7 +662,6 @@ internal object SimulaApiClient {
             charImage = charImage,
             charDesc = charDesc,
             context = context?.toBody(),
-            metadata = metadata?.takeIf { it.isNotEmpty() },
         )
         val response = SimulaHttp.request(
             url = "$API_BASE_URL/load/rewarded",
@@ -864,7 +858,7 @@ internal object SimulaApiClient {
     }
 
     /**
-     * Send an impression-action beacon (`POST /impressions/{impressionId}/{action}`, where
+     * Send a no-body impression-action beacon (`POST /impressions/{impressionId}/{action}`, where
      * [action] is `shown` / `seen` / `click`) and return the HTTP status. Unlike the best-effort
      * `track*` helpers, this surfaces the outcome — connectivity failures propagate as exceptions —
      * so the durable [AdBeaconQueue] can decide retry vs. drop. Not for direct call-site use; ad
@@ -874,14 +868,11 @@ internal object SimulaApiClient {
         impressionId: String,
         action: String,
         apiKey: String,
-        metadata: Map<String, String>? = null,
     ): Int = withContext(Dispatchers.IO) {
-        val body = impressionMetadataRequestBody(action, metadata)?.let { json.encodeToString(it) }
         SimulaHttp.request(
             url = "$API_BASE_URL/impressions/$impressionId/$action",
             method = "POST",
             headers = authHeaders(apiKey),
-            body = body,
         ).code
     }
 
