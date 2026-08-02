@@ -322,30 +322,38 @@ class SimulaInterstitialAd(val adUnitId: String) {
         )
 
         val token = UUID.randomUUID().toString()
-        InterstitialHandoff.put(
-            token,
-            InterstitialPresentation(
-                ad = ad,
-                apiKey = SimulaAds.apiKey,
-                // Preview is local-only: report lifecycle but do NOT auto-preload a real ad on close.
-                callbacks = object : InterstitialCallbacks {
-                    override fun onDisplayed() { listener?.onAdDisplayed(this@SimulaInterstitialAd) }
-                    override fun onImpression() { listener?.onAdImpression(this@SimulaInterstitialAd) }
-                    override fun onPaid(adValue: AdValue) { listener?.onAdPaid(this@SimulaInterstitialAd, adValue) }
-                    override fun onClicked() { listener?.onAdClicked(this@SimulaInterstitialAd) }
-                    override fun onClosed() {
-                        state = State.Idle
-                        listener?.onAdClosed(this@SimulaInterstitialAd)
-                    }
-                },
-            ),
+        val presentation = InterstitialPresentation(
+            ad = ad,
+            apiKey = SimulaAds.apiKey,
+            // Preview is local-only: report lifecycle but do NOT auto-preload a real ad on close.
+            callbacks = object : InterstitialCallbacks {
+                override fun onDisplayed() { listener?.onAdDisplayed(this@SimulaInterstitialAd) }
+                override fun onImpression() { listener?.onAdImpression(this@SimulaInterstitialAd) }
+                override fun onPaid(adValue: AdValue) { listener?.onAdPaid(this@SimulaInterstitialAd, adValue) }
+                override fun onClicked() { listener?.onAdClicked(this@SimulaInterstitialAd) }
+                override fun onClosed() {
+                    state = State.Idle
+                    listener?.onAdClosed(this@SimulaInterstitialAd)
+                }
+            },
         )
+        InterstitialHandoff.put(token, presentation)
         if (!launchActivity(token, activity)) {
             InterstitialHandoff.remove(token)
             failShow(SimulaAdError.NoPresentationContext)
             return
         }
         state = State.Showing
+        // Same dropped-launch protection as present(): a silently-dropped background start
+        // would otherwise strand the preview in Showing and leak the handoff. Preview has no
+        // Ready payload to restore — the terminal state is Idle.
+        SimulaScope.armLaunchWatchdog(LAUNCH_WATCHDOG_MS, isClaimed = { presentation.launchClaimed }) {
+            if (state == State.Showing) {
+                InterstitialHandoff.remove(token)
+                state = State.Idle
+                failShow(SimulaAdError.NoPresentationContext)
+            }
+        }
     }
 
     // ── Internals ────────────────────────────────────────────────────────────
@@ -401,13 +409,12 @@ class SimulaInterstitialAd(val adUnitId: String) {
         // Showing forever (load() no-ops, show() → AlreadyShowing) while the presentation —
         // which retains the host's listener — leaks in the handoff. Unclaimed in time →
         // restore Ready (the ad never displayed), drop the handoff, and report the failure.
+        // Runs on the main thread with the claim re-checked (see armLaunchWatchdog).
         SimulaScope.armLaunchWatchdog(LAUNCH_WATCHDOG_MS, isClaimed = { presentation.launchClaimed }) {
-            withContext(Dispatchers.Main) {
-                if (state == State.Showing) {
-                    InterstitialHandoff.remove(token)
-                    state = ready
-                    failShow(SimulaAdError.NoPresentationContext)
-                }
+            if (state == State.Showing) {
+                InterstitialHandoff.remove(token)
+                state = ready
+                failShow(SimulaAdError.NoPresentationContext)
             }
         }
     }

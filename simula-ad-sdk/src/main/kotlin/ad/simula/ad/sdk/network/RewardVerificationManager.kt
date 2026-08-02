@@ -39,6 +39,12 @@ internal data class PendingVerification(
 /** Hard cap on the durable verification queue (see [RewardVerificationQueue.queue]). */
 internal const val MAX_PENDING_VERIFICATIONS = 200
 
+/** Delivered to the registered callback of a pending verification that was dropped at the
+ * queue cap (oldest-out overflow) before its first attempt — so the host's reward flow gets
+ * a terminal signal instead of hanging on a result that can never arrive. */
+internal class VerificationDroppedException :
+    Exception("pending verification dropped: queue at cap before first attempt")
+
 /** Persists the pending-verification queue. Abstracted so the queue engine can be unit-tested. */
 internal interface VerificationStore {
     fun load(): List<PendingVerification>
@@ -126,11 +132,12 @@ internal class RewardVerificationQueue(
             activeCallbacks[serveId] = onResult
         }
         scope.launch {
+            var droppedServeId: String? = null
             mutex.withLock {
                 val list = store.load().toMutableList()
                 if (list.none { it.serveId == serveId }) {
                     if (list.size >= MAX_PENDING_VERIFICATIONS) {
-                        list.removeAt(0) // drop oldest: bounded queue > an unbounded ANR backlog
+                        droppedServeId = list.removeAt(0).serveId // drop oldest: bounded queue > an unbounded ANR backlog
                         Telemetry.recordError(
                             signature = "reward:queue_overflow",
                             errorCode = "queue_full",
@@ -149,6 +156,16 @@ internal class RewardVerificationQueue(
                         ),
                     )
                     store.save(list)
+                }
+            }
+            // The dropped play's one-shot must still fire — otherwise its registered callback
+            // leaks in activeCallbacks and the host's reward flow hangs on a result that can
+            // never arrive. Delivered outside the mutex, like every other outcome.
+            droppedServeId?.let { dropped ->
+                try {
+                    activeCallbacks.remove(dropped)?.invoke(Result.failure(VerificationDroppedException()))
+                } catch (_: Exception) {
+                    // A listener that throws must not break queue draining.
                 }
             }
             processQueue()

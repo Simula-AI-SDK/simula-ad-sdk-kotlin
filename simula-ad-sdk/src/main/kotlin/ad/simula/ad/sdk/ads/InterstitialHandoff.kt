@@ -45,7 +45,9 @@ internal class InterstitialPresentation(
 
     /** Set by the Activity in `onCreate` when it claims this presentation. The launch watchdog
      * (see [SimulaInterstitialAd.present]) disposes of the handoff when no claim ever arrives —
-     * the silently-dropped background-start case. */
+     * the silently-dropped background-start case. `@Volatile` because the watchdog's first
+     * (fast-path) check reads it off the main thread; the decisive re-check runs on main. */
+    @Volatile
     var launchClaimed = false
 }
 

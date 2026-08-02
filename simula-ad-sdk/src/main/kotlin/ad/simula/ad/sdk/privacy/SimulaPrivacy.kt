@@ -377,22 +377,34 @@ internal fun shouldRecomputePrivacy(key: String?): Boolean = key == null || key 
  * telemetry note; the wedged binder thread is left behind, bounded to one per wedged process
  * (the caller stamps the freshness window, so the TTL throttles retries). JVM-testable with
  * an injected reader and dispatcher.
+ *
+ * Only a REAL timeout fires [onTimeout]: the finished-read box keeps a legitimate null
+ * result (user opt-out, missing Play Services) distinguishable from `withTimeoutOrNull`'s
+ * null-on-timeout — otherwise every opted-out device would emit false
+ * `privacy:gaid_read_timeout` errors once per refresh window.
  */
 internal suspend fun raceGaidRead(
     reader: suspend () -> String?,
     timeoutMs: Long,
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
-): String? {
-    val result = withTimeoutOrNull(timeoutMs) { withContext(dispatcher) { reader() } }
-    if (result == null) {
+    onTimeout: (Long) -> Unit = { ms ->
         Telemetry.recordError(
             signature = "privacy:gaid_read_timeout",
             errorCode = "timeout",
-            message = "GAID read exceeded $timeoutMs ms",
+            message = "GAID read exceeded $ms ms",
         )
+    },
+): String? {
+    val completed = withTimeoutOrNull(timeoutMs) { withContext(dispatcher) { FinishedGaidRead(reader()) } }
+    if (completed == null) {
+        onTimeout(timeoutMs)
+        return null
     }
-    return result
+    return completed.value
 }
+
+/** Boxes a finished GAID read so its (possibly null) value is never confused with a timeout. */
+private class FinishedGaidRead(val value: String?)
 
 /**
  * Normalizes `IABGPP_GppSID` to a comma-separated string of section IDs across the

@@ -122,4 +122,37 @@ class CreativeBridgeTest {
         completed = true
         assertTrue("dispatch must absorb host failures", completed)
     }
+
+    @Test
+    fun aThrowingGetHandlerStillReplies() {
+        // Regression: a GET_* query whose host call throws must STILL reply — the creative
+        // holds a pending promise on the requestId and would otherwise hang for the page's
+        // lifetime. The error payload resolves it so the creative uses its own defaults.
+        val host = object : BridgeHost by FakeHost() {
+            override fun deviceContext(): JsonObject {
+                throw IllegalStateException("framework blew up")
+            }
+        }
+        var js: String? = null
+        bridge(host).handle("""{"type":"GET_DEVICE_CONTEXT","requestId":"ctx1"}""") { js = it }
+        val raw = requireNotNull(js) { "a failed GET_* query must still reply" }
+        val reply = Json.parseToJsonElement(raw.removePrefix("window.postMessage(").removeSuffix(", '*');")).jsonObject
+        assertEquals("GET_DEVICE_CONTEXT", reply["type"]!!.jsonPrimitive.content)
+        assertEquals("ctx1", reply["requestId"]!!.jsonPrimitive.content)
+        assertTrue(reply["__simulaSdkResponse"]!!.jsonPrimitive.boolean)
+        assertEquals("native_dispatch_failed", reply["payload"]!!.jsonObject["error"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun aThrowingCommandDoesNotReply() {
+        // Events/commands have no pending promise — replying would just echo noise into the page.
+        val host = object : BridgeHost by FakeHost() {
+            override fun haptic(style: String) {
+                throw IllegalStateException("no vibrator")
+            }
+        }
+        var replied = false
+        bridge(host).handle("""{"type":"TRIGGER_HAPTIC","payload":{"style":"success"}}""") { replied = true }
+        assertFalse("commands must not reply even on failure", replied)
+    }
 }

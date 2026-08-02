@@ -280,53 +280,61 @@ class SimulaRewardedAd(val adUnitId: String) {
         }
 
         val token = UUID.randomUUID().toString()
-        RewardedHandoff.put(
-            token,
-            RewardedPresentation(
-                iframeUrl = PREVIEW_MINIGAME_DATA_URL,
-                impressionId = "", // empty → no impression tracked
-                apiKey = SimulaAds.apiKey,
-                // Preview is local-only: report lifecycle but do NOT verify a reward or auto-preload.
-                callbacks = object : RewardedCallbacks {
-                    override fun onDisplayed() {
-                        listener?.onAdDisplayed(this@SimulaRewardedAd)
-                    }
+        val presentation = RewardedPresentation(
+            iframeUrl = PREVIEW_MINIGAME_DATA_URL,
+            impressionId = "", // empty → no impression tracked
+            apiKey = SimulaAds.apiKey,
+            // Preview is local-only: report lifecycle but do NOT verify a reward or auto-preload.
+            callbacks = object : RewardedCallbacks {
+                override fun onDisplayed() {
+                    listener?.onAdDisplayed(this@SimulaRewardedAd)
+                }
 
-                    override fun onImpression() {
-                        listener?.onAdImpression(this@SimulaRewardedAd)
-                    }
+                override fun onImpression() {
+                    listener?.onAdImpression(this@SimulaRewardedAd)
+                }
 
-                    override fun onPaid(adValue: AdValue) {
-                        listener?.onAdPaid(this@SimulaRewardedAd, adValue)
-                    }
+                override fun onPaid(adValue: AdValue) {
+                    listener?.onAdPaid(this@SimulaRewardedAd, adValue)
+                }
 
-                    // Preview is local-only: surface the click callback, no telemetry.
-                    override fun onClicked() {
-                        listener?.onAdClicked(this@SimulaRewardedAd)
-                    }
+                // Preview is local-only: surface the click callback, no telemetry.
+                override fun onClicked() {
+                    listener?.onAdClicked(this@SimulaRewardedAd)
+                }
 
-                    override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
-                        state = State.Idle
-                        listener?.onAdClosed(this@SimulaRewardedAd)
-                    }
+                override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+                    state = State.Idle
+                    listener?.onAdClosed(this@SimulaRewardedAd)
+                }
 
-                    // Preview is local-only: no verification — just signal the earned reward once the
-                    // whole (screen-less) unit completes, mirroring the live onRewardCompleted timing.
-                    override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
-                        if (earned) listener?.onAdEarnedReward(this@SimulaRewardedAd)
-                    }
-                },
-                adBehavior = behavior,
-                trackingUrl = PREVIEW_TRACKING_URL,
-                destination = "appstore",
-            ),
+                // Preview is local-only: no verification — just signal the earned reward once the
+                // whole (screen-less) unit completes, mirroring the live onRewardCompleted timing.
+                override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+                    if (earned) listener?.onAdEarnedReward(this@SimulaRewardedAd)
+                }
+            },
+            adBehavior = behavior,
+            trackingUrl = PREVIEW_TRACKING_URL,
+            destination = "appstore",
         )
+        RewardedHandoff.put(token, presentation)
         if (!launchActivity(token, activity)) {
             RewardedHandoff.remove(token)
             failShow(SimulaAdError.NoPresentationContext)
             return
         }
         state = State.Showing
+        // Same dropped-launch protection as present(): a silently-dropped background start
+        // would otherwise strand the preview in Showing and leak the handoff. Preview has no
+        // Ready payload to restore — the terminal state is Idle.
+        SimulaScope.armLaunchWatchdog(LAUNCH_WATCHDOG_MS, isClaimed = { presentation.launchClaimed }) {
+            if (state == State.Showing) {
+                RewardedHandoff.remove(token)
+                state = State.Idle
+                failShow(SimulaAdError.NoPresentationContext)
+            }
+        }
     }
 
     // ── Internals ────────────────────────────────────────────────────────────
@@ -385,13 +393,12 @@ class SimulaRewardedAd(val adUnitId: String) {
         // Showing forever (load() no-ops, show() → AlreadyShowing) while the presentation —
         // which retains the host's listener — leaks in the handoff. Unclaimed in time →
         // restore Ready (the ad never displayed), drop the handoff, and report the failure.
+        // Runs on the main thread with the claim re-checked (see armLaunchWatchdog).
         SimulaScope.armLaunchWatchdog(LAUNCH_WATCHDOG_MS, isClaimed = { presentation.launchClaimed }) {
-            withContext(Dispatchers.Main) {
-                if (state == State.Showing) {
-                    RewardedHandoff.remove(token)
-                    state = ready
-                    failShow(SimulaAdError.NoPresentationContext)
-                }
+            if (state == State.Showing) {
+                RewardedHandoff.remove(token)
+                state = ready
+                failShow(SimulaAdError.NoPresentationContext)
             }
         }
     }

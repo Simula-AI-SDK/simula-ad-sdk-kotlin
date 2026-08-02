@@ -257,6 +257,16 @@ fun SimulaProvider(
         resolvedConfig
     }
 
+    // Re-read the GAID when the applied privacy config changes at runtime (host flips
+    // enableAdvertisingId, CMP consent arrives) — not only on startup / ON_RESUME, or ads
+    // and session creation keep using a stale advertising id until the next foregrounding.
+    // Safe before attach (a no-op that doesn't consume the freshness stamp) and self-gated
+    // (consent gate + TTL + coalescing), so an unchanged config costs nothing. Disabling
+    // collection needs no trigger: apply()/update() clear the collected id synchronously.
+    LaunchedEffect(resolvedConfig) {
+        SimulaPrivacy.refreshAdvertisingId()
+    }
+
     // Re-read the GAID on foreground: ad-tracking permission or the GAID itself
     // can change while the app is backgrounded.
     val lifecycleOwner = LocalLifecycleOwner.current

@@ -64,6 +64,14 @@ internal class CreativeBridge(
                         breadcrumb = "type=$type",
                     )
                 }
+                // A failed GET_* must still reply: the creative holds a pending promise on
+                // this requestId and would otherwise hang for the page's lifetime. The error
+                // payload resolves it so the creative falls back to its own defaults.
+                if (type.startsWith("GET_")) {
+                    runCatching {
+                        reply(buildReply(type, requestId, buildJsonObject { put("error", "native_dispatch_failed") }))
+                    }
+                }
             }
         }
     }

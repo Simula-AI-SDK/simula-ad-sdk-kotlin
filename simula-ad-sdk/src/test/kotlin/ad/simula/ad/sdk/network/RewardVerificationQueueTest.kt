@@ -303,4 +303,40 @@ class RewardVerificationQueueTest {
         assertTrue("the newest entry is never the one dropped", store.data.any { it.serveId == "newest" })
         assertTrue("the oldest was dropped", store.data.none { it.serveId == "srv_0" })
     }
+
+    @Test
+    fun `an overflow-dropped play still has its callback delivered (as a failure)`() = runTest {
+        // Regression: the drop used to remove only the store row, leaving the serveId's
+        // callback registered forever — the host's reward flow hung on a result that could
+        // never arrive. The one-shot must fire (failure) and the registration must go.
+        // Preloaded rows are backed off (ineligible at the frozen clock), so no drain ever
+        // attempts them and their callbacks stay pending — the exact stranding setup.
+        val preloaded = (0 until MAX_PENDING_VERIFICATIONS).map { i ->
+            PendingVerification(
+                serveId = "srv_$i",
+                sessionId = "sess",
+                elapsedPlayTime = 5.0,
+                retryCount = 1,
+                lastAttemptTimestamp = 0L,
+                adUnitId = "",
+                createdAt = 0L,
+            )
+        }
+        val store = FakeStore(preloaded)
+        val engine = RewardVerificationQueue(store, FakeVerifier(), clock = { 0L }, scope = this)
+
+        var stranded: Result<String?>? = null
+        engine.queue("srv_0", "sess", 5.0) { stranded = it } // dedup: registers the callback only
+        advanceUntilIdle()
+        assertEquals(MAX_PENDING_VERIFICATIONS, store.data.size)
+        assertNull("srv_0 is backed off, not attempted — no result yet", stranded)
+
+        engine.queue("newest", "sess", 5.0)
+        advanceUntilIdle()
+
+        assertTrue("srv_0 was overflow-dropped", store.data.none { it.serveId == "srv_0" })
+        val result = requireNotNull(stranded) { "the dropped play's callback must still fire" }
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is VerificationDroppedException)
+    }
 }
