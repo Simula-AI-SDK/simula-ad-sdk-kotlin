@@ -76,7 +76,7 @@ internal class SqliteVerificationStore(
     private fun migrateFromSharedPrefs(context: Context) {
         val prefs = context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
         val jsonStr = prefs.getString(LEGACY_KEY, null) ?: return
-        runCatching {
+        val migrated = runCatching {
             val legacy = json.decodeFromString<List<PendingVerification>>(jsonStr)
             val now = clock()
             val db = helper.writableDatabase
@@ -97,7 +97,11 @@ internal class SqliteVerificationStore(
                 db.endTransaction()
             }
         }
-        prefs.edit().remove(LEGACY_KEY).apply()
+        // Only retire the legacy blob after a SUCCESSFUL migration — deleting it after a failed
+        // one would lose pending reward verifications the retry could have recovered.
+        if (migrated.isSuccess) {
+            prefs.edit().remove(LEGACY_KEY).apply()
+        }
     }
 
     private class Helper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {

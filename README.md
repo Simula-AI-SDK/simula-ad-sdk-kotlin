@@ -43,7 +43,6 @@ the process, and changing it at runtime has no effect.
 ## Support
 
 - Documentation: [docs.simula.ad](https://docs.simula.ad)
-- Telemetry wire contract: [docs/TELEMETRY_CONTRACT_V3.md](docs/TELEMETRY_CONTRACT_V3.md)
 - Email: admin@simula.ad
 - Website: [simula.ad](https://simula.ad)
 

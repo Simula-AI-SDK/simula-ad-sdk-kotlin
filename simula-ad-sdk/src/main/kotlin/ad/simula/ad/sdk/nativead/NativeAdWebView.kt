@@ -113,6 +113,15 @@ internal fun NativeAdWebView(
     session.wiring.destination = destination
     session.wiring.storeUrl = storeUrl
 
+    // Clear the composition-owned callbacks only when this slot REALLY leaves the composition
+    // (scroll-out dispose, host teardown) — a retained or recycled view must never invoke
+    // closures from a composition that may be gone. Crucially NOT keyed on `generation`: a
+    // render-death remount disposes only the AndroidView, and clearing there raced the
+    // re-point above (the wipe won), leaving the rebuilt creative's CTA/height callbacks dead.
+    DisposableEffect(session) {
+        onDispose { session.wiring.clearCallbacks() }
+    }
+
     // Route the live visible fraction (from the viewability tracker) into this slot's WebView while it
     // is mounted; unbind on dispose so a retained, off-screen creative receives no further onVisibility.
     DisposableEffect(session, visibilityRelay) {
@@ -338,10 +347,11 @@ internal object NativeAdWebViewStore {
         // The over-budget blank from attach() is a zero-cost plain View — nothing to detach,
         // recycle, or count (it was never marked attached).
         if (released !is WebView) return
-        // Drop the composition's callbacks: a retained (or recycled) view must never invoke
-        // closures from a composition that may be gone. The next recomposition re-points them
-        // (cheap @Volatile hot-swap in the slot).
-        session.wiring.clearCallbacks()
+        // NOTE: the wiring callbacks are deliberately NOT cleared here. This runs on EVERY
+        // remount — including the render-death recovery, where the same frame's recomposition
+        // has just re-pointed them; wiping here (the old behavior) undid that re-point and left
+        // the rebuilt creative with dead CTA/height callbacks. Clearing happens only on real
+        // disposal of the composing slot (DisposableEffect onDispose in NativeAdWebView).
         // A render-dead current view must be destroyed, never recycled to the pool — a dead view in the
         // pool would hand the next consumer a permanently-blank WebView. (This fires when the slot
         // remounts after onRenderProcessGone: the dead view is disposed here, attach() rebuilds.)

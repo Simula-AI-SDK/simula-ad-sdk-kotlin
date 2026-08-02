@@ -334,10 +334,12 @@ fun SimulaProvider(
                     runCatching { SimulaPrivacy.attach(appContext) }
                     SimulaTelemetryStartup.start()
                     telemetryReady.await()
-                    runCatching { SimulaPrivacy.refreshAdvertisingId() }
+                    // The beacon build has no dependency on the GAID read — ordered first so a
+                    // wedged Play Services bind can never starve billing-beacon delivery.
                     beaconManagerReady = runCatching {
                         AdBeaconManager.init(appContext, apiKey)
                     }.isSuccess
+                    runCatching { SimulaPrivacy.refreshAdvertisingId() }
                 } finally {
                     providerStartup.ready.complete(Unit)
                 }

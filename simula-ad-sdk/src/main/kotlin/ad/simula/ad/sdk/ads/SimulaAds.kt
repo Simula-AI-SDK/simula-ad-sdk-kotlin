@@ -219,21 +219,23 @@ object SimulaAds {
                 SimulaTelemetryStartup.start()
                 telemetryGate.await()
 
+                // Build the durable impression/click beacon queue BEFORE the GAID read and the
+                // gate release: a host load awaiting the gate can show an ad (and fire billing
+                // beacons) the moment it proceeds, and AdBeaconManager.enqueue is a silent no-op
+                // until the engine exists. The beacon build has NO dependency on the GAID read —
+                // ordered first so a wedged Play Services bind (GAID read parks up to its 8 s
+                // abandon-timeout) can never delay or starve billing-beacon delivery. Construction
+                // is allocation-only (the store opens lazily inside the queue), so this adds no
+                // disk I/O to the gated section. The prior-process DRAIN stays after the gate:
+                // those beacons are already persisted and self-contained.
+                runCatching { AdBeaconManager.init(appContext, apiKey) }
+
                 // Initial GAID read (coalesced + throttled internally; no-op when the host
                 // didn't opt in via enableAdvertisingId, when the user limits ad tracking, or
                 // when the play-services-ads-identifier dep is absent). Returns with the GAID
                 // state settled, so the session warm-up below (and any gated host load) carries
-                // the id on the first /session/create.
+                // the id on the first /session/create. Bounded by raceGaidRead's abandon-timeout.
                 runCatching { SimulaPrivacy.refreshAdvertisingId() }
-
-                // Build the durable impression/click beacon queue BEFORE the gate releases:
-                // a host load awaiting the gate can show an ad (and fire billing beacons) the
-                // moment it proceeds, and AdBeaconManager.enqueue is a silent no-op until the
-                // engine exists — building it here closes that drop window. Construction is
-                // allocation-only (the SharedPreferences read happens lazily inside the queue),
-                // so this adds no disk I/O to the gated section. The prior-process DRAIN stays
-                // after the gate: those beacons are already persisted and self-contained.
-                runCatching { AdBeaconManager.init(appContext, apiKey) }
             } finally {
                 // Release session waiters (see SimulaSessionStore.startupGate) no matter what —
                 // a dead/cancelled startup coroutine must never leave ensureSession callers

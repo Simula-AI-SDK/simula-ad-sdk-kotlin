@@ -1,16 +1,18 @@
 package ad.simula.ad.sdk.privacy
 
+import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.lang.reflect.InvocationTargetException
 
@@ -97,6 +99,12 @@ object SimulaPrivacy {
         // must not hold a lock across I/O. Android caches the instance, so a concurrent/repeat call
         // is cheap and idempotent.
         val p = app.getSharedPreferences("${app.packageName}_preferences", Context.MODE_PRIVATE)
+        // Pre-touch OUTSIDE any lock: getSharedPreferences() only STARTS the async disk load —
+        // the first actual read blocks in awaitLoadedLocked() until it lands. Without this,
+        // the first recompute() holds the privacy lock across that blocking read, and any
+        // main-thread contender (ON_RESUME refreshAdvertisingId, a CMP apply at cold start)
+        // stalls behind it.
+        p.contains("IABTCF_TCString")
         synchronized(lock) {
             if (appContext != null) return@attach
             appContext = app
@@ -370,13 +378,17 @@ internal val IAB_KEYS = setOf(
 internal fun shouldRecomputePrivacy(key: String?): Boolean = key == null || key in IAB_KEYS
 
 /**
- * Races one GAID read against [timeoutMs]. The Play Services bind is a blocking call with no
+ * Races one GAID read against [timeoutMs]. The Play Services bind is a BLOCKING call with no
  * platform timeout, and a wedged bind must never park the startup gate or `gaidRefreshMutex`
- * forever: the read runs on [dispatcher] (IO in production) while the CALLER's suspension
- * (which is cancellable) carries the timeout — on expiry the caller proceeds with null and a
- * telemetry note; the wedged binder thread is left behind, bounded to one per wedged process
- * (the caller stamps the freshness window, so the TTL throttles retries). JVM-testable with
- * an injected reader and dispatcher.
+ * forever. The read therefore runs as an ABANDONABLE ORPHAN on [orphanScope]: the caller only
+ * suspends on `await()` (a cancellable point), so the timeout fires even when the binder
+ * thread is wedged in a non-cancellable blocking call. `withTimeoutOrNull { withContext { …
+ * blocking … } }` would NOT work here — cancellation is cooperative, so the coroutine would
+ * resume only after the blocking call returned (i.e. never, on a wedged device); that shape
+ * also passes unit tests (a cancellable fake times out fine) while being inert in production.
+ * The orphan left behind is bounded to one per wedged process: the caller stamps the
+ * freshness window, so the TTL throttles retries. JVM-testable with an injected reader,
+ * dispatcher, scope, and timeout sink.
  *
  * Only a REAL timeout fires [onTimeout]: the finished-read box keeps a legitimate null
  * result (user opt-out, missing Play Services) distinguishable from `withTimeoutOrNull`'s
@@ -387,6 +399,7 @@ internal suspend fun raceGaidRead(
     reader: suspend () -> String?,
     timeoutMs: Long,
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    orphanScope: CoroutineScope = SimulaScope,
     onTimeout: (Long) -> Unit = { ms ->
         Telemetry.recordError(
             signature = "privacy:gaid_read_timeout",
@@ -395,7 +408,9 @@ internal suspend fun raceGaidRead(
         )
     },
 ): String? {
-    val completed = withTimeoutOrNull(timeoutMs) { withContext(dispatcher) { FinishedGaidRead(reader()) } }
+    // NOT a child of the caller: the timeout must be able to leave the read running.
+    val orphan = orphanScope.async(dispatcher) { FinishedGaidRead(reader()) }
+    val completed = withTimeoutOrNull(timeoutMs) { orphan.await() }
     if (completed == null) {
         onTimeout(timeoutMs)
         return null
