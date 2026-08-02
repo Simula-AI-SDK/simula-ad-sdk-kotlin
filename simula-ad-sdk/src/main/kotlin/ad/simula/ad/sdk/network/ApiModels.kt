@@ -132,7 +132,6 @@ internal data class AdLoadRequestBody(
     // native surface sends, now extended to the full-screen formats so they get character-aware
     // targeting too. Null omits the key (the backend treats it as no context).
     val context: NativeContextBody? = null,
-    val metadata: Map<String, String>? = null,
     // Device capability snapshot so the backend never assigns an unsupported variant. Defaults to a
     // neutral value (no framework access) so pure-JVM tests can construct this; the ad path injects
     // the real values via `currentDeviceCapabilities()`.
@@ -322,7 +321,6 @@ internal data class RewardedInitRequestBody(
     // Contextual targeting signals — see [AdLoadRequestBody.context]. Extended to rewarded so the
     // full-screen formats target the same way native does.
     val context: NativeContextBody? = null,
-    val metadata: Map<String, String>? = null,
 )
 
 @Serializable
@@ -379,20 +377,7 @@ internal data class NativeAdRequestBody(
     @SerialName("char_id") val charId: String? = null,
     @SerialName("char_name") val charName: String? = null,
     @SerialName("char_desc") val charDesc: String? = null,
-    val metadata: Map<String, String>? = null,
 )
-
-@Serializable
-internal data class ImpressionMetadataRequestBody(
-    val metadata: Map<String, String>,
-)
-
-internal fun impressionMetadataRequestBody(
-    action: String,
-    metadata: Map<String, String>?,
-): ImpressionMetadataRequestBody? = metadata
-    ?.takeIf { action == "seen" && it.isNotEmpty() }
-    ?.let(::ImpressionMetadataRequestBody)
 
 /** The wire `NativeContext` object — camelCase keys (unlike the rest of the snake_case API). */
 @Serializable
