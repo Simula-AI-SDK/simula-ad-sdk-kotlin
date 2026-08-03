@@ -29,6 +29,35 @@ Full integration guides, API references, and examples are available at:
 - [Interstitial Ad](https://docs.simula.ad/kotlin-sdk/interstitial-ad) -- full-screen ad
 - [Rewarded Ad](https://docs.simula.ad/kotlin-sdk/rewarded-ad) -- rewarded ad with server-side verification
 
+## Publisher Metadata
+
+Attach non-sensitive string metadata to ad loads for reporting and attribution:
+
+```kotlin
+val interstitial = SimulaInterstitialAd("ad-unit-id").apply {
+    setExtraParameters(mapOf("placement" to "home", "experiment" to "hero_v2"))
+}
+interstitial.load()
+
+NativeAdSlot(
+    adUnitId = "native-unit-id",
+    extraParameters = mapOf("placement" to "feed"),
+)
+```
+
+`SimulaRewardedAd` supports the same `setExtraParameter` and `setExtraParameters` methods. Metadata
+is snapshotted when a load starts; changing parameters later affects future loads, not one already in
+flight. Native cached/preloaded fills keep the snapshot used when the slot consumes them for the
+durable `/seen` beacon.
+
+Metadata is limited to 10 entries. Keys must be non-empty, at most 64 Unicode code points, must not
+start with `$`, and must not contain `.`. Values are limited to 256 Unicode code points. Invalid or
+over-limit entries are ignored safely and reported in Logcat and SDK telemetry. Do not include PII,
+credentials, tokens, or other secrets.
+
+Initial advertising-ID collection is best effort. Session startup waits at most 2.5 seconds for the
+first lookup, then proceeds without the ID; a late lookup can still enrich later requests.
+
 ## Dashboard
 
 Create and manage ad units, view analytics, and configure server-side verification at [publisher.simula.ad](https://publisher.simula.ad).

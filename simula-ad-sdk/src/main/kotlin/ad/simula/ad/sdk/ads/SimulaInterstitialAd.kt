@@ -52,7 +52,11 @@ class SimulaInterstitialAd(val adUnitId: String) {
         object Idle : State
         object Loading : State
         /** [loadedAtMs] is `elapsedRealtime()` at the moment the creative became ready (for staleness). */
-        class Ready(val ad: SimulaApiClient.AdLoadResult, val loadedAtMs: Long) : State
+        class Ready(
+            val ad: SimulaApiClient.AdLoadResult,
+            val metadata: Map<String, String>?,
+            val loadedAtMs: Long,
+        ) : State
         object Showing : State
     }
 
@@ -210,7 +214,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 )
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
-                    state = State.Ready(ad, SystemClock.elapsedRealtime())
+                    state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
                     listener?.onAdLoaded(this@SimulaInterstitialAd)
                 }
             } catch (e: Exception) {
@@ -371,7 +375,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
     // ── Internals ────────────────────────────────────────────────────────────
 
     private fun present(activity: Activity?) {
-        val ad = when (val current = state) {
+        val ready = when (val current = state) {
             State.Showing -> {
                 failShow(SimulaAdError.AlreadyShowing)
                 return
@@ -388,9 +392,10 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     failShow(SimulaAdError.Stale)
                     return
                 }
-                current.ad
+                current
             }
         }
+        val ad = ready.ad
         // A foreground Activity is required to present — matching Swift's
         // "no presentation context" semantics and the standard show(activity) entry point. A
         // background activity-start from the app context can be silently dropped
@@ -408,6 +413,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 ad = ad,
                 apiKey = SimulaAds.apiKey,
                 callbacks = bridge(ad.impressionId),
+                metadata = ready.metadata,
             ),
         )
 

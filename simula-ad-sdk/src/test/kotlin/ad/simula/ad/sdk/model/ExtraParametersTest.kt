@@ -40,6 +40,7 @@ class ExtraParametersTest {
         val result = normalizeExtraParameters(
             mapOf(
                 "valid" to "ok",
+                "" to "empty key",
                 "k".repeat(65) to "too long",
                 "long-value" to "v".repeat(257),
                 "${'$'}reserved" to "x",

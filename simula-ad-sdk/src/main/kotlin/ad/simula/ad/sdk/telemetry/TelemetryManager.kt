@@ -435,6 +435,10 @@ internal class TelemetryManager(
                         store.save(snapshot())
                         retryCount++
                         isFlushing = false
+                        // Carry an explicit background/manual request across the failed attempt.
+                        // The scheduled retry will consume it; dropping it here loses the caller's
+                        // request if newer work lands around that retry's in-flight snapshot.
+                        flushRequested = requestedWhileSending
                         false
                     }
                 }

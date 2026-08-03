@@ -5,6 +5,7 @@ import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
+import ad.simula.ad.sdk.model.MAX_SK_OVERLAY_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.OverlayTiming
 import ad.simula.ad.sdk.model.StorePromptPlatform
@@ -411,7 +412,18 @@ class AdLoadParsingTest {
             """{"ad_behavior":{"skoverlay":{"delay_seconds":600}}}""",
         ).adBehavior.toDomain()!!.skoverlay!!
 
-        assertEquals(MAX_CLOSE_DELAY_SECONDS, overlay.delaySeconds)
+        assertEquals(MAX_SK_OVERLAY_DELAY_SECONDS, overlay.delaySeconds)
+    }
+
+    @Test
+    fun `skoverlay delay clamp records out of range input only`() {
+        var clamps = 0
+
+        assertEquals(0, clampSkOverlayDelaySeconds(-1) { clamps++ })
+        assertEquals(MAX_SK_OVERLAY_DELAY_SECONDS, clampSkOverlayDelaySeconds(600) { clamps++ })
+        assertEquals(12, clampSkOverlayDelaySeconds(12) { clamps++ })
+        assertEquals(60, clampSkOverlayDelaySeconds(60) { clamps++ })
+        assertEquals(2, clamps)
     }
 
     @Test

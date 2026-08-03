@@ -378,7 +378,12 @@ private fun RewardedMinigame(
             presentation.callbacks.onImpression()
             presentation.callbacks.onPaid(presentation.adValue)
             // Durable billable-impression beacon (was a fire-and-forget trackImpression).
-            AdBeaconManager.enqueue(presentation.impressionId, "seen", adFormat = "rewarded")
+            AdBeaconManager.enqueue(
+                presentation.impressionId,
+                "seen",
+                adFormat = "rewarded",
+                metadata = presentation.metadata,
+            )
         }
 
         if (presentation.accumulatedImpressionTimeMs >= FULLSCREEN_IMPRESSION_DELAY_MS) {
@@ -509,7 +514,7 @@ private fun RewardedMinigame(
                         }
                     },
                 ).apply {
-                    webChromeClient = CreativeTelemetryWebChromeClient("rewarded") // capture JS console errors
+                    webChromeClient = CreativeTelemetryWebChromeClient("rewarded", SimulaAds.devMode)
                     BridgeWebViewInstaller.install(this, bridge)
                     // Prefer the server-rendered HTML when present (parity with the interstitial,
                     // which fills the surface); fall back to the iframe URL.

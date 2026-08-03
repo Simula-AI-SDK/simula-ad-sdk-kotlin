@@ -1,7 +1,6 @@
 package ad.simula.ad.sdk.bridge
 
 import android.content.pm.ActivityInfo
-import android.os.Build
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -9,26 +8,32 @@ import org.junit.Test
 class AndroidBridgeHostTest {
 
     @Test
-    fun orientationAssignmentIsSkippedOnExactlyApi26() {
-        assertNull(requestedOrientationFor("portrait", Build.VERSION_CODES.O))
-        assertNull(requestedOrientationFor("landscape", Build.VERSION_CODES.O))
-        assertNull(requestedOrientationFor("auto", Build.VERSION_CODES.O))
-    }
-
-    @Test
-    fun orientationMappingIsPreservedOnOtherVersions() {
+    fun orientationMappingIsPreserved() {
         assertEquals(
             ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
-            requestedOrientationFor("portrait", Build.VERSION_CODES.O - 1),
+            requestedOrientationFor("portrait"),
         )
         assertEquals(
             ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
-            requestedOrientationFor("landscape", Build.VERSION_CODES.O + 1),
+            requestedOrientationFor("landscape"),
         )
         assertEquals(
             ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED,
-            requestedOrientationFor("auto", Build.VERSION_CODES.O + 1),
+            requestedOrientationFor("auto"),
         )
-        assertNull(requestedOrientationFor("invalid", Build.VERSION_CODES.O + 1))
+        assertNull(requestedOrientationFor("invalid"))
+    }
+
+    @Test
+    fun orientationAssignmentFailureIsAbsorbedAndReported() {
+        val failures = mutableListOf<String>()
+
+        applyRequestedOrientation(
+            orientation = "portrait",
+            assign = { throw IllegalStateException("translucent API 26 activity") },
+            recordFailure = { failures += it },
+        )
+
+        assertEquals(listOf("IllegalStateException"), failures)
     }
 }

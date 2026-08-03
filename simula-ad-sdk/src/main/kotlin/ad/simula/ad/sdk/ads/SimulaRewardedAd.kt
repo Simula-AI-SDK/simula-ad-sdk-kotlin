@@ -49,7 +49,11 @@ class SimulaRewardedAd(val adUnitId: String) {
         object Idle : State
         object Loading : State
         /** [loadedAtMs] is `elapsedRealtime()` at the moment the ad became ready (for staleness). */
-        class Ready(val ad: SimulaApiClient.RewardedInitResult, val loadedAtMs: Long) : State
+        class Ready(
+            val ad: SimulaApiClient.RewardedInitResult,
+            val metadata: Map<String, String>?,
+            val loadedAtMs: Long,
+        ) : State
         object Showing : State
     }
 
@@ -213,7 +217,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     impressionId = ad.impressionId
                     // Warm a WebView so show() doesn't pay cold-start on the critical path.
                     WebViewPool.prewarm(SimulaAds.appContext)
-                    state = State.Ready(ad, SystemClock.elapsedRealtime())
+                    state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
                     listener?.onAdLoaded(this@SimulaRewardedAd)
                 }
             } catch (e: Exception) {
@@ -355,7 +359,7 @@ class SimulaRewardedAd(val adUnitId: String) {
     // ── Internals ────────────────────────────────────────────────────────────
 
     private fun present(activity: Activity?) {
-        val ad = when (val current = state) {
+        val ready = when (val current = state) {
             State.Showing -> {
                 failShow(SimulaAdError.AlreadyShowing)
                 return
@@ -372,9 +376,10 @@ class SimulaRewardedAd(val adUnitId: String) {
                     failShow(SimulaAdError.Stale)
                     return
                 }
-                current.ad
+                current
             }
         }
+        val ad = ready.ad
         if (activity == null) {
             failShow(SimulaAdError.NoPresentationContext)
             return
@@ -395,6 +400,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                 destination = ad.destination,
                 androidStoreUrl = ad.androidStoreUrl,
                 adValue = ad.adValue,
+                metadata = ready.metadata,
             ),
         )
 

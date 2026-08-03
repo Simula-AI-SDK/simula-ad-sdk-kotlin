@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.model
 
 import ad.simula.ad.sdk.telemetry.Telemetry
+import android.util.Log
 import java.util.Collections
 import java.util.LinkedHashMap
 
@@ -8,13 +9,19 @@ internal const val MAX_EXTRA_PARAMETER_ENTRIES = 10
 internal const val MAX_EXTRA_PARAMETER_KEY_LENGTH = 64
 internal const val MAX_EXTRA_PARAMETER_VALUE_LENGTH = 256
 
-private fun recordExtraParametersWarning() =
+private const val EXTRA_PARAMETERS_LOG_TAG = "SimulaAdMetadata"
+private const val EXTRA_PARAMETERS_WARNING =
+    "Some extraParameters entries were ignored because they are invalid or exceed SDK limits."
+
+private fun recordExtraParametersWarning() {
+    Log.w(EXTRA_PARAMETERS_LOG_TAG, EXTRA_PARAMETERS_WARNING)
     Telemetry.recordOperation(
         name = "extra_parameters_invalid",
         durationMs = 0L,
         success = false,
         failureClass = "invalid_or_over_limit",
     )
+}
 
 /** Validates publisher metadata and returns an immutable wire snapshot, or null when none survives. */
 internal fun normalizeExtraParameters(
@@ -28,7 +35,8 @@ internal fun normalizeExtraParameters(
     val valid = entries
         .asSequence()
         .filter { (key, value) ->
-            key.codePointCount(0, key.length) <= MAX_EXTRA_PARAMETER_KEY_LENGTH &&
+            key.isNotEmpty() &&
+                key.codePointCount(0, key.length) <= MAX_EXTRA_PARAMETER_KEY_LENGTH &&
                 value.codePointCount(0, value.length) <= MAX_EXTRA_PARAMETER_VALUE_LENGTH &&
                 !key.startsWith('$') &&
                 '.' !in key

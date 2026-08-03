@@ -24,6 +24,7 @@ internal class InterstitialPresentation(
     val ad: SimulaApiClient.AdLoadResult,
     val apiKey: String,
     val callbacks: InterstitialCallbacks,
+    val metadata: Map<String, String>? = null,
 ) {
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */
     var displayedReported = false

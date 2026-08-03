@@ -78,6 +78,7 @@ internal fun NativeAdWebView(
     iframeUrl: String?,
     renderedHtml: String?,
     apiKey: String,
+    devMode: Boolean,
     impressionId: String,
     heightDp: Float,
     onHeightPx: (Float) -> Unit,
@@ -164,7 +165,7 @@ internal fun NativeAdWebView(
                 // collapses to a sliver — the slot keeps a shimmer over this until the height arrives.
                 .height(if (heightDp > 0f) heightDp.dp else NATIVE_AD_PROVISIONAL_HEIGHT_DP.dp),
             // Reattaches the retained WebView (no reload) or builds + loads a fresh one on first mount.
-            factory = { NativeAdWebViewStore.attach(session, context, iframeUrl, renderedHtml) },
+            factory = { NativeAdWebViewStore.attach(session, context, iframeUrl, renderedHtml, devMode) },
             // Scroll-out: detach + pause + keep the loaded DOM (retained ids); recycle ephemerals/orphans.
             onRelease = { released -> NativeAdWebViewStore.release(session, released) },
         )
@@ -246,7 +247,13 @@ internal object NativeAdWebViewStore {
 
     /** Return the view to mount: the retained one (already loaded → no reload) or a freshly built one. */
     @MainThread
-    fun attach(session: Session, hostContext: Context, iframeUrl: String?, renderedHtml: String?): WebView {
+    fun attach(
+        session: Session,
+        hostContext: Context,
+        iframeUrl: String?,
+        renderedHtml: String?,
+        devMode: Boolean,
+    ): WebView {
         val creativeKey = creativeKey(iframeUrl, renderedHtml)
         val retained = session.webView
         // Reuse the retained view only if it is alive (render process intact), actually holds this
@@ -257,6 +264,7 @@ internal object NativeAdWebViewStore {
         ) {
             (retained.context as? MutableContextWrapper)?.baseContext = hostContext // re-home for theming
             (retained.parent as? ViewGroup)?.removeView(retained)                   // clear any stale parent
+            retained.webChromeClient = CreativeTelemetryWebChromeClient("character_ad", devMode)
             retained.onResume()
             session.attached = true
             session.wiring.webView = retained // visibility pushes target the live view
@@ -277,7 +285,7 @@ internal object NativeAdWebViewStore {
             session.loadedKey = null
             session.wiring.webView = null
         }
-        val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml)
+        val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml, devMode)
         // Adopt as the retained instance only if the slot isn't already showing one (don't orphan it).
         if (!session.attached) {
             session.webView?.takeIf { it !== fresh }?.let { uninstallBridge(it); WebViewPool.release(it) }
@@ -373,10 +381,16 @@ internal object NativeAdWebViewStore {
     }
 
     @MainThread
-    private fun buildWebView(wiring: NativeAdWiring, hostContext: Context, iframeUrl: String?, renderedHtml: String?): WebView {
+    private fun buildWebView(
+        wiring: NativeAdWiring,
+        hostContext: Context,
+        iframeUrl: String?,
+        renderedHtml: String?,
+        devMode: Boolean,
+    ): WebView {
         val docStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         val webView = WebViewPool.acquire(hostContext, NativeAdWebViewClient(wiring, docStart))
-        webView.webChromeClient = CreativeTelemetryWebChromeClient("character_ad") // capture JS console errors
+        webView.webChromeClient = CreativeTelemetryWebChromeClient("character_ad", devMode)
         webView.setBackgroundColor(Color.TRANSPARENT)
         // A native ad sizes to content and must never scroll (parity with iOS, where the scroll
         // view is disabled): no scrollbars, no overscroll glow. The BRIDGE_SCRIPT additionally

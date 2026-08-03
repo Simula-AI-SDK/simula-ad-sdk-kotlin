@@ -94,28 +94,32 @@ class CreativeBridgeTest {
     }
 
     @Test
-    fun oversizedMessageIsRejectedBeforeDispatchWithoutTelemetryCallback() {
+    fun oversizedMessageIsRejectedBeforeDispatchAndRecorded() {
         val host = FakeHost()
         var dispatches = 0
         var replied = false
         val errors = mutableListOf<String>()
+        val rejections = mutableListOf<String>()
         val message = messageOfLength("AD_EARLY_COMPLETE", CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS) + " "
 
-        CreativeBridge(host, { dispatches++; it() }, { errors += it }).handle(message) { replied = true }
+        CreativeBridge(host, { dispatches++; it() }, { errors += it }, { rejections += it })
+            .handle(message) { replied = true }
 
         assertEquals(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS + 1, message.length)
         assertEquals(0, dispatches)
         assertEquals(0, host.earlyCompletes)
         assertFalse(replied)
         assertTrue(errors.isEmpty())
+        assertEquals(listOf("too_large"), rejections)
     }
 
     @Test
-    fun unknownAndMalformedMessagesNeverDispatchOrReport() {
+    fun unknownAndMalformedMessagesNeverDispatchAndRecordRejections() {
         var dispatches = 0
         var replied = false
         val errors = mutableListOf<String>()
-        val bridge = CreativeBridge(FakeHost(), { dispatches++; it() }, { errors += it })
+        val rejections = mutableListOf<String>()
+        val bridge = CreativeBridge(FakeHost(), { dispatches++; it() }, { errors += it }, { rejections += it })
 
         bridge.handle("""{"type":"UNKNOWN"}""") { replied = true }
         bridge.handle("not json") { replied = true }
@@ -123,16 +127,19 @@ class CreativeBridgeTest {
         assertEquals(0, dispatches)
         assertFalse(replied)
         assertTrue(errors.isEmpty())
+        assertEquals(listOf("unknown_type", "malformed"), rejections)
     }
 
     @Test
     fun nativeMessageTypesUseTheSameAdmissionProtection() {
         val exact = messageOfLength("SIMULA_AD_HEIGHT", CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS)
+        val rejections = mutableListOf<String>()
 
-        assertTrue(parseKnownCreativeBridgeMessage(exact, NATIVE_AD_BRIDGE_MESSAGE_TYPES) != null)
-        assertNull(parseKnownCreativeBridgeMessage("$exact ", NATIVE_AD_BRIDGE_MESSAGE_TYPES))
-        assertNull(parseKnownCreativeBridgeMessage("""{"type":"NOT_NATIVE"}""", NATIVE_AD_BRIDGE_MESSAGE_TYPES))
-        assertNull(parseKnownCreativeBridgeMessage("malformed", NATIVE_AD_BRIDGE_MESSAGE_TYPES))
+        assertTrue(parseKnownCreativeBridgeMessage(exact, NATIVE_AD_BRIDGE_MESSAGE_TYPES) { rejections += it } != null)
+        assertNull(parseKnownCreativeBridgeMessage("$exact ", NATIVE_AD_BRIDGE_MESSAGE_TYPES) { rejections += it })
+        assertNull(parseKnownCreativeBridgeMessage("""{"type":"NOT_NATIVE"}""", NATIVE_AD_BRIDGE_MESSAGE_TYPES) { rejections += it })
+        assertNull(parseKnownCreativeBridgeMessage("malformed", NATIVE_AD_BRIDGE_MESSAGE_TYPES) { rejections += it })
+        assertEquals(listOf("too_large", "unknown_type", "malformed"), rejections)
     }
 
     @Test

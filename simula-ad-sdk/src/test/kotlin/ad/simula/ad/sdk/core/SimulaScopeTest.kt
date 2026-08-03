@@ -6,26 +6,27 @@ import org.junit.Test
 class SimulaScopeTest {
 
     @Test
-    fun `failure hook reports at most once`() {
+    fun `failure hook reports once per signature`() {
         var reports = 0
-        var reportedType: Class<out Throwable>? = null
+        val reportedTypes = mutableListOf<Class<out Throwable>>()
         val hook = SimulaScopeFailureHook().apply {
-            install {
+            install { _, throwable ->
                 reports++
-                reportedType = it.javaClass
+                reportedTypes += throwable.javaClass
             }
         }
 
         hook.report(IllegalStateException())
+        hook.report(IllegalStateException())
         hook.report(IllegalArgumentException())
 
-        assertEquals(1, reports)
-        assertEquals(IllegalStateException::class.java, reportedType)
+        assertEquals(2, reports)
+        assertEquals(listOf(IllegalStateException::class.java, IllegalArgumentException::class.java), reportedTypes)
     }
 
     @Test
     fun `failure hook swallows reporter failures`() {
-        val hook = SimulaScopeFailureHook().apply { install { error("telemetry failed") } }
+        val hook = SimulaScopeFailureHook().apply { install { _, _ -> error("telemetry failed") } }
 
         hook.report(IllegalStateException())
     }

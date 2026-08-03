@@ -28,12 +28,31 @@ internal val NATIVE_AD_BRIDGE_MESSAGE_TYPES = setOf(
 
 private val creativeBridgeJson = Json { ignoreUnknownKeys = true }
 
+private fun recordBridgeMessageRejected(reason: String) {
+    Telemetry.recordOperation(
+        name = "bridge_message_rejected",
+        durationMs = 0L,
+        success = false,
+        failureClass = reason,
+    )
+}
+
 /** Rejects oversized, malformed, non-object, missing-type, and unknown-type messages off-main. */
-internal fun parseKnownCreativeBridgeMessage(message: String, knownTypes: Set<String>): JsonObject? {
-    if (message.length > CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS) return null
-    val root = runCatching { creativeBridgeJson.parseToJsonElement(message) as? JsonObject }.getOrNull() ?: return null
-    val type = (root["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
-    return root.takeIf { type in knownTypes }
+internal fun parseKnownCreativeBridgeMessage(
+    message: String,
+    knownTypes: Set<String>,
+    recordRejected: (String) -> Unit = ::recordBridgeMessageRejected,
+): JsonObject? {
+    fun reject(reason: String): JsonObject? {
+        runCatching { recordRejected(reason) }
+        return null
+    }
+    if (message.length > CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS) return reject("too_large")
+    val root = runCatching { creativeBridgeJson.parseToJsonElement(message) as? JsonObject }.getOrNull()
+        ?: return reject("malformed")
+    val type = (root["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        ?: return reject("missing_type")
+    return if (type in knownTypes) root else reject("unknown_type")
 }
 
 /**
@@ -71,13 +90,18 @@ internal class CreativeBridge(
             errorCode = errorCode,
         )
     },
+    private val recordRejectedMessage: (reason: String) -> Unit = ::recordBridgeMessageRejected,
 ) {
     /**
      * Handle one envelope. [reply] delivers a JS string back into the page (the installer binds it
-     * to `webView.evaluateJavascript`). No-ops silently on malformed input or an unknown `type`.
+     * to `webView.evaluateJavascript`). Rejects malformed input or an unknown `type` with telemetry.
      */
     fun handle(message: String, reply: (String) -> Unit) {
-        val root = parseKnownCreativeBridgeMessage(message, FULL_SCREEN_BRIDGE_MESSAGE_TYPES) ?: return
+        val root = parseKnownCreativeBridgeMessage(
+            message,
+            FULL_SCREEN_BRIDGE_MESSAGE_TYPES,
+            recordRejectedMessage,
+        ) ?: return
         val type = root.str("type") ?: return
         val requestId = root["requestId"] // preserved verbatim so the reply echoes its JSON type
         val payload = root["payload"] as? JsonObject

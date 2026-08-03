@@ -92,9 +92,9 @@ internal object Telemetry {
             // In dev mode, mirror every (redacted) event to logcat for local verification.
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
         ).also { it.start() }
-        installSimulaScopeFailureReporter { throwable ->
+        installSimulaScopeFailureReporter { failureSignature, throwable ->
             recordError(
-                signature = "scope:uncaught",
+                signature = "scope:uncaught:$failureSignature",
                 errorCode = throwable.javaClass.simpleName,
             )
         }

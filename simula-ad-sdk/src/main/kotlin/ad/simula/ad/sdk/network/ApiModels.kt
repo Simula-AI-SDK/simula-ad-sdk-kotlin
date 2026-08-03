@@ -10,6 +10,7 @@ import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
+import ad.simula.ad.sdk.model.MAX_SK_OVERLAY_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.OverlayTiming
 import ad.simula.ad.sdk.model.SkOverlayConfig
@@ -17,6 +18,7 @@ import ad.simula.ad.sdk.model.StoreOpen
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
+import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -294,10 +296,26 @@ internal fun ApiSkOverlay?.toDomain(): SkOverlayConfig? {
     return SkOverlayConfig(
         enabled = enabled,
         timing = OverlayTiming.from(timing),
-        delaySeconds = delaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS),
+        delaySeconds = clampSkOverlayDelaySeconds(delaySeconds),
         position = OverlayPosition.from(position),
         dismissible = dismissible,
     )
+}
+
+internal fun clampSkOverlayDelaySeconds(
+    delaySeconds: Int,
+    recordClamp: () -> Unit = {
+        Telemetry.recordOperation(
+            name = "skoverlay_delay_clamped",
+            durationMs = 0L,
+            success = false,
+            failureClass = "out_of_range",
+        )
+    },
+): Int {
+    val clamped = delaySeconds.coerceIn(0, MAX_SK_OVERLAY_DELAY_SECONDS)
+    if (clamped != delaySeconds) runCatching(recordClamp)
+    return clamped
 }
 
 internal fun ApiAutoStoreRedirect?.toDomain(): AutoStoreRedirect? {

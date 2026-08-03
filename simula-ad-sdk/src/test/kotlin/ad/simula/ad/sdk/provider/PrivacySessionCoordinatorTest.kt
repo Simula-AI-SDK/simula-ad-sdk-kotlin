@@ -7,6 +7,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -17,7 +18,9 @@ class PrivacySessionCoordinatorTest {
 
     @Test
     fun `child cannot create a session before privacy readiness`() = runTest {
-        val coordinator = PrivacySessionCoordinator()
+        val coordinator = PrivacySessionCoordinator(
+            startAdvertisingIdRefresh = { refresh -> backgroundScope.async { runCatching { refresh() }; Unit } },
+        )
         val attachEntered = CompletableDeferred<Unit>()
         val releaseAttach = CompletableDeferred<Unit>()
         var refreshFinished = false
@@ -52,7 +55,9 @@ class PrivacySessionCoordinatorTest {
 
     @Test
     fun `concurrent child callers release after readiness`() = runTest {
-        val coordinator = PrivacySessionCoordinator()
+        val coordinator = PrivacySessionCoordinator(
+            startAdvertisingIdRefresh = { refresh -> backgroundScope.async { runCatching { refresh() }; Unit } },
+        )
         val refreshEntered = CompletableDeferred<Unit>()
         val releaseRefresh = CompletableDeferred<Unit>()
         var sessionCalls = 0
@@ -87,7 +92,9 @@ class PrivacySessionCoordinatorTest {
 
     @Test
     fun `attach and refresh failures complete readiness fail open`() = runTest {
-        val coordinator = PrivacySessionCoordinator()
+        val coordinator = PrivacySessionCoordinator(
+            startAdvertisingIdRefresh = { refresh -> backgroundScope.async { runCatching { refresh() }; Unit } },
+        )
         val settledSteps = mutableListOf<String>()
 
         coordinator.preparePrivacy(
@@ -109,7 +116,9 @@ class PrivacySessionCoordinatorTest {
 
     @Test
     fun `initializer cancellation completes readiness fail open`() = runTest {
-        val coordinator = PrivacySessionCoordinator()
+        val coordinator = PrivacySessionCoordinator(
+            startAdvertisingIdRefresh = { refresh -> backgroundScope.async { runCatching { refresh() }; Unit } },
+        )
         val attachEntered = CompletableDeferred<Unit>()
         var sessionCalls = 0
 
@@ -139,5 +148,45 @@ class PrivacySessionCoordinatorTest {
         assertTrue(initializer.isCancelled)
         assertEquals("session", child.await())
         assertEquals(1, sessionCalls)
+    }
+
+    @Test
+    fun `advertising id timeout releases session and records timeout`() = runTest {
+        var timeoutOperations = 0
+        var sessionCalls = 0
+        val refreshEntered = CompletableDeferred<Unit>()
+        val coordinator = PrivacySessionCoordinator(
+            advertisingIdTimeoutMs = 2_500L,
+            startAdvertisingIdRefresh = { refresh -> backgroundScope.async { runCatching { refresh() }; Unit } },
+            recordAdvertisingIdTimeout = { timeoutOperations++ },
+        )
+
+        launch {
+            coordinator.preparePrivacy(
+                attach = {},
+                refreshAdvertisingId = {
+                    refreshEntered.complete(Unit)
+                    awaitCancellation()
+                },
+            )
+        }
+        refreshEntered.await()
+        val child = async {
+            coordinator.ensureSession {
+                sessionCalls++
+                "session"
+            }
+        }
+
+        advanceTimeBy(2_499L)
+        runCurrent()
+        assertEquals(0, sessionCalls)
+        assertEquals(0, timeoutOperations)
+
+        advanceTimeBy(1L)
+        runCurrent()
+        assertEquals("session", child.await())
+        assertEquals(1, sessionCalls)
+        assertEquals(1, timeoutOperations)
     }
 }

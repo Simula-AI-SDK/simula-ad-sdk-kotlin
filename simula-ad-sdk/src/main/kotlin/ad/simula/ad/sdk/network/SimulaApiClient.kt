@@ -11,6 +11,7 @@ import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.telemetry.Telemetry
+import android.util.Log
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -143,6 +144,15 @@ internal object SimulaApiClient {
                 body = body,
             )
 
+            if (response.code == 401) {
+                Log.e("SimulaAdSDK", "Invalid API key. Check the publisher dashboard or contact Simula support.")
+                Telemetry.recordError(
+                    signature = "api:invalid_key",
+                    errorCode = "http_401",
+                    message = "invalid API key",
+                )
+                return@withContext null
+            }
             if (!response.isSuccessful) return@withContext null
 
             val data = json.decodeFromString<SessionResponse>(response.body)
