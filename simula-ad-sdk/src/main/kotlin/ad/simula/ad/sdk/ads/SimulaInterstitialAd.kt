@@ -63,7 +63,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
     // Confined to the main thread (all reads/writes happen there).
     private var state: State = State.Idle
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val extraParameters = ExtraParametersStore()
+    private val metadataStore = ExtraParametersStore()
 
     // Dedup: the (ad unit, character, session) key of the load currently in flight or
     // ready, and when that load was initiated. Re-loads of the same key are blocked for
@@ -87,13 +87,13 @@ class SimulaInterstitialAd(val adUnitId: String) {
     private var showStartNanos = 0L
 
     /** Upsert one metadata entry for future loads. Invalid entries are ignored safely. */
-    fun setExtraParameter(key: String, value: String) {
-        extraParameters.set(key, value)
+    fun setMetadata(key: String, value: String) {
+        metadataStore.set(key, value)
     }
 
     /** Replace metadata for future loads. Passing an empty map clears it. */
-    fun setExtraParameters(parameters: Map<String, String>) {
-        extraParameters.replace(parameters)
+    fun setMetadata(metadata: Map<String, String>) {
+        metadataStore.replace(metadata)
     }
 
     /**
@@ -119,7 +119,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
         charImage: String? = null,
         charDesc: String? = null,
     ) {
-        loadOnMain(charId, charName, charImage, charDesc, extraParameters.snapshot())
+        loadOnMain(charId, charName, charImage, charDesc, metadataStore.snapshot())
     }
 
     private fun loadOnMain(

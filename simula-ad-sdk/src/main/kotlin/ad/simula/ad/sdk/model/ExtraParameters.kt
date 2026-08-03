@@ -11,7 +11,7 @@ internal const val MAX_EXTRA_PARAMETER_VALUE_LENGTH = 256
 
 private const val EXTRA_PARAMETERS_LOG_TAG = "SimulaAdMetadata"
 private const val EXTRA_PARAMETERS_WARNING =
-    "Some extraParameters entries were ignored because they are invalid or exceed SDK limits."
+    "Some metadata entries were ignored because they are invalid or exceed SDK limits."
 
 private fun recordExtraParametersWarning() {
     Log.w(EXTRA_PARAMETERS_LOG_TAG, EXTRA_PARAMETERS_WARNING)

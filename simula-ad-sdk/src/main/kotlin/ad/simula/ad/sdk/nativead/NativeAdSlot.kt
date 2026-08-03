@@ -86,7 +86,7 @@ import kotlinx.coroutines.launch
  * @param previewHtml   Debug/QA only: render this HTML creative directly through the full pipeline
  *                      (WebView + height sizing + viewability + AD-badge feedback bridge) with no
  *                      network call. Mirrors the imperative ads' `showPreview`.
- * @param extraParameters Per-impression publisher metadata. Invalid entries are dropped safely.
+ * @param metadata Per-impression publisher metadata. Invalid entries are dropped safely.
  */
 @Composable
 fun NativeAdSlot(
@@ -101,14 +101,14 @@ fun NativeAdSlot(
     onError: (NativeAdError) -> Unit = {},
     onClick: () -> Unit = {},
     previewHtml: String? = null,
-    extraParameters: Map<String, String> = emptyMap(),
+    metadata: Map<String, String> = emptyMap(),
 ) {
     val ctx = LocalSimulaContext.current
     val currentOnImpression by rememberUpdatedState(onImpression)
     val currentOnPaid by rememberUpdatedState(onPaid)
     val currentOnError by rememberUpdatedState(onError)
     val currentOnClick by rememberUpdatedState(onClick)
-    val normalizedExtraParameters = remember(extraParameters) { normalizeExtraParameters(extraParameters) }
+    val normalizedMetadata = remember(metadata) { normalizeExtraParameters(metadata) }
     val resolvedTheme = resolveAdTheme(theme)
     // Surface a native failure to the publisher and record it for telemetry (errorCode parity with the
     // imperative ads). Reused by the load, no-fill, and creative-render-failure paths.
@@ -199,7 +199,7 @@ fun NativeAdSlot(
                 // A live request owns the current load-time snapshot. Preloaded fills have no
                 // metadata because the preload API accepts none; never attach mount-time values
                 // retroactively to an already loaded impression.
-                val seenMetadata = normalizedExtraParameters.takeIf { source == "network" }
+                val seenMetadata = normalizedMetadata.takeIf { source == "network" }
                 NativeAdCache.putFill(adUnitId, position, result, seenMetadata)
                 heightDp = 0f
                 impressionFired = false
@@ -209,7 +209,7 @@ fun NativeAdSlot(
                     renderStartNanos = System.nanoTime()
                     renderTimeRecorded = false
                 }
-                // Freeze metadata with this fill. A recomposition that changes extraParameters after
+                // Freeze metadata with this fill. A recomposition that changes metadata after
                 // the request/consume must not rewrite the eventual billable `/seen` attribution.
                 state = NativeAdSlotState.Filled(
                     result,
@@ -249,7 +249,7 @@ fun NativeAdSlot(
                 adUnitId,
                 position,
                 resolvedTheme,
-                metadata = normalizedExtraParameters,
+                metadata = normalizedMetadata,
             )
             apply(result, source = "network", durationMs = (System.nanoTime() - loadStartNanos) / 1_000_000)
         } catch (e: SimulaAdError) {
@@ -450,7 +450,7 @@ fun NativeAdSlotBinaryCompatibility(
         onError = onError,
         onClick = onClick,
         previewHtml = previewHtml,
-        extraParameters = emptyMap(),
+        metadata = emptyMap(),
     )
 }
 

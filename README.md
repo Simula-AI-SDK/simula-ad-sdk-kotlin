@@ -35,20 +35,21 @@ Attach non-sensitive string metadata to ad loads for reporting and attribution:
 
 ```kotlin
 val interstitial = SimulaInterstitialAd("ad-unit-id").apply {
-    setExtraParameters(mapOf("placement" to "home", "experiment" to "hero_v2"))
+    setMetadata(mapOf("placement" to "home", "experiment" to "hero_v2"))
 }
 interstitial.load()
 
 NativeAdSlot(
     adUnitId = "native-unit-id",
-    extraParameters = mapOf("placement" to "feed"),
+    metadata = mapOf("placement" to "feed"),
 )
 ```
 
-`SimulaRewardedAd` supports the same `setExtraParameter` and `setExtraParameters` methods. Metadata
-is snapshotted when a load starts; changing parameters later affects future loads, not one already in
-flight. Native cached/preloaded fills keep the snapshot used when the slot consumes them for the
-durable `/seen` beacon.
+`SimulaRewardedAd` supports the same `setMetadata` overloads. Metadata is snapshotted when a load
+starts; changing metadata later affects future loads, not one already in flight. Fullscreen and live
+native loads send that same snapshot on the durable `/seen` beacon. Native cache entries preserve
+the original snapshot. Imperatively preloaded native ads carry no metadata because the preload API
+does not accept it; mounting one never retrofits the slot's current metadata onto that impression.
 
 Metadata is limited to 10 entries. Keys must be non-empty, at most 64 Unicode code points, must not
 start with `$`, and must not contain `.`. Values are limited to 256 Unicode code points. Invalid or

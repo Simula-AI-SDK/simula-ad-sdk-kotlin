@@ -85,7 +85,13 @@ class ExtraParametersTest {
         val store = ExtraParametersStore { warnings++ }
 
         store.set("placement", "feed")
+        val loadSnapshot = store.snapshot()
         store.set("placement", "detail")
+        assertEquals(
+            "load-time snapshots are not rewritten by later setters",
+            mapOf("placement" to "feed"),
+            loadSnapshot,
+        )
         assertEquals(mapOf("placement" to "detail"), store.snapshot())
 
         val replacement = mutableMapOf("screen" to "reward")
