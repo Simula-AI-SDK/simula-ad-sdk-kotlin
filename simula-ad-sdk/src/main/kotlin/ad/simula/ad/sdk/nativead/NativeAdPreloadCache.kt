@@ -9,6 +9,8 @@ import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -94,9 +96,12 @@ internal object NativeAdPreloadCache {
             if (!entries.remove(id, entry)) return null
             PreloadedNativeAd(result, entry.metadata)
         } catch (e: CancellationException) {
-            // The slot was recycled while the process-scoped preload continued. Keep the entry so
-            // a remount can consume the same request and metadata snapshot instead of loading twice.
-            throw e
+            // Caller cancellation means the slot was recycled: preserve the process-scoped preload
+            // for remount. A still-active caller means destroy() or the loader cancelled the deferred;
+            // consume that terminal entry and fail open to the slot's live-load fallback.
+            currentCoroutineContext().ensureActive()
+            entries.remove(id, entry)
+            null
         } catch (_: Exception) {
             entries.remove(id, entry)
             null

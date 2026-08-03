@@ -2,12 +2,15 @@ package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.network.SimulaApiClient
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class NativeAdPreloadCacheTest {
@@ -75,6 +78,25 @@ class NativeAdPreloadCacheTest {
 
             assertEquals(mapOf("screen" to "search"), remounted?.metadata)
         }
+    }
+
+    @Test
+    fun `destroyed preload returns null to an active consumer for live fallback`() = runBlocking {
+        val loadStarted = CompletableDeferred<Unit>()
+        val id = NativeAdPreloadCache.preload(
+            adUnitId = "feed",
+            position = 4,
+            load = {
+                loadStarted.complete(Unit)
+                awaitCancellation()
+            },
+        ) ?: error("missing preload id")
+        val consumer = async(start = CoroutineStart.UNDISPATCHED) { NativeAdPreloadCache.consume(id) }
+        loadStarted.await()
+
+        NativeAdPreloadCache.destroy(id)
+
+        assertNull(consumer.await())
     }
 
     private fun nativeResult() = SimulaApiClient.NativeAdResult(
