@@ -28,27 +28,32 @@ internal fun normalizeExtraParameters(
     parameters: Map<String, String>,
     warn: () -> Unit = ::recordExtraParametersWarning,
 ): Map<String, String>? {
-    val entries = runCatching { parameters.entries.map { it.key to it.value } }.getOrElse {
-        warn()
-        return null
+    fun warnSafely() {
+        runCatching(warn)
     }
-    val valid = entries
-        .asSequence()
-        .filter { (key, value) ->
-            key.isNotEmpty() &&
-                key.codePointCount(0, key.length) <= MAX_EXTRA_PARAMETER_KEY_LENGTH &&
-                value.codePointCount(0, value.length) <= MAX_EXTRA_PARAMETER_VALUE_LENGTH &&
-                !key.startsWith('$') &&
-                '.' !in key
-        }
-        .sortedBy { it.first }
-        .toList()
-    if (valid.size != entries.size || valid.size > MAX_EXTRA_PARAMETER_ENTRIES) warn()
+    return runCatching {
+        val entries = parameters.entries.map { it.key to it.value }
+        val valid = entries
+            .asSequence()
+            .filter { (key, value) ->
+                key.isNotEmpty() &&
+                    key.codePointCount(0, key.length) <= MAX_EXTRA_PARAMETER_KEY_LENGTH &&
+                    value.codePointCount(0, value.length) <= MAX_EXTRA_PARAMETER_VALUE_LENGTH &&
+                    !key.startsWith('$') &&
+                    '.' !in key
+            }
+            .sortedBy { it.first }
+            .toList()
+        if (valid.size != entries.size || valid.size > MAX_EXTRA_PARAMETER_ENTRIES) warnSafely()
 
-    if (valid.isEmpty()) return null
-    val snapshot = LinkedHashMap<String, String>(minOf(valid.size, MAX_EXTRA_PARAMETER_ENTRIES))
-    valid.take(MAX_EXTRA_PARAMETER_ENTRIES).forEach { (key, value) -> snapshot[key] = value }
-    return Collections.unmodifiableMap(snapshot)
+        if (valid.isEmpty()) return@runCatching null
+        val snapshot = LinkedHashMap<String, String>(minOf(valid.size, MAX_EXTRA_PARAMETER_ENTRIES))
+        valid.take(MAX_EXTRA_PARAMETER_ENTRIES).forEach { (key, value) -> snapshot[key] = value }
+        Collections.unmodifiableMap(snapshot)
+    }.getOrElse {
+        warnSafely()
+        null
+    }
 }
 
 /** Lock-guarded publisher metadata used by imperative full-screen ad instances. */

@@ -43,13 +43,18 @@ NativeAdSlot(
     adUnitId = "native-unit-id",
     metadata = mapOf("placement" to "feed"),
 )
+
+val preloadedAdId = SimulaAds.preloadNativeAd(
+    adUnitId = "native-unit-id",
+    metadata = mapOf("placement" to "feed"),
+)
 ```
 
 `SimulaRewardedAd` supports the same `setMetadata` overloads. Metadata is snapshotted when a load
-starts; changing metadata later affects future loads, not one already in flight. Fullscreen and live
-native loads send that same snapshot on the durable `/seen` beacon. Native cache entries preserve
-the original snapshot. Imperatively preloaded native ads carry no metadata because the preload API
-does not accept it; mounting one never retrofits the slot's current metadata onto that impression.
+starts; changing metadata later affects future loads, not one already in flight. Fullscreen, live
+native, and preloaded native loads send that same snapshot on the durable `/seen` beacon. Native
+cache entries preserve the original snapshot. Pass metadata to `preloadNativeAd` for preloaded ads;
+mount-time `NativeAdSlot` metadata never overrides an already-loaded preload snapshot.
 
 Metadata is limited to 10 entries. Keys must be non-empty, at most 64 Unicode code points, must not
 start with `$`, and must not contain `.`. Values are limited to 256 Unicode code points. Invalid or

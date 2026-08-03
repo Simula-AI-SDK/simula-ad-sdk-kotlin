@@ -192,14 +192,15 @@ fun NativeAdSlot(
 
         // Caches the outcome so the next remount of this slot reuses it (no duplicate serve).
         // [source] tags the fill origin for the load_success lifecycle (preload | cache | network).
-        fun apply(result: SimulaApiClient.NativeAdResult, source: String, durationMs: Long? = null) {
+        fun apply(
+            result: SimulaApiClient.NativeAdResult,
+            source: String,
+            seenMetadata: Map<String, String>?,
+            durationMs: Long? = null,
+        ) {
             val hasCreative = result.adInserted &&
                 (!result.iframeUrl.isNullOrBlank() || !result.renderedHtml.isNullOrBlank())
             if (hasCreative) {
-                // A live request owns the current load-time snapshot. Preloaded fills have no
-                // metadata because the preload API accepts none; never attach mount-time values
-                // retroactively to an already loaded impression.
-                val seenMetadata = normalizedMetadata.takeIf { source == "network" }
                 NativeAdCache.putFill(adUnitId, position, result, seenMetadata)
                 heightDp = 0f
                 impressionFired = false
@@ -225,7 +226,10 @@ fun NativeAdSlot(
         }
 
         // 1. Honor a fresh preload first (a new id the publisher just preloaded).
-        preloadedAdId?.let { NativeAdPreloadCache.consume(it) }?.let { apply(it, source = "preload"); return@LaunchedEffect }
+        preloadedAdId?.let { NativeAdPreloadCache.consume(it) }?.let {
+            apply(it.result, source = "preload", seenMetadata = it.metadata)
+            return@LaunchedEffect
+        }
 
         // 2. Per-slot cache hit → render without a network call (no duplicate serve / impression).
         when (val cached = NativeAdCache.get(adUnitId, position)) {
@@ -251,7 +255,12 @@ fun NativeAdSlot(
                 resolvedTheme,
                 metadata = normalizedMetadata,
             )
-            apply(result, source = "network", durationMs = (System.nanoTime() - loadStartNanos) / 1_000_000)
+            apply(
+                result,
+                source = "network",
+                seenMetadata = normalizedMetadata,
+                durationMs = (System.nanoTime() - loadStartNanos) / 1_000_000,
+            )
         } catch (e: SimulaAdError) {
             state = NativeAdSlotState.Empty // error → hide; not cached so it can retry next time
             reportError(e.toNativeAdError())

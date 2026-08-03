@@ -2,7 +2,6 @@ package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.network.SimulaApiClient
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
 class NativeAdCacheTest {
@@ -29,7 +28,8 @@ class NativeAdCacheTest {
     }
 
     @Test
-    fun `preloaded fill retains absent seen metadata`() {
+    fun `preloaded fill retains its preload-time metadata`() {
+        val preloadMetadata = mapOf("screen" to "search")
         NativeAdCache.putFill(
             adUnitId = "preload-snapshot-test",
             position = 988,
@@ -40,11 +40,11 @@ class NativeAdCacheTest {
                 iframeUrl = null,
                 renderedHtml = "<html></html>",
             ),
-            seenMetadata = null,
+            seenMetadata = preloadMetadata,
         )
 
         val cached = NativeAdCache.get("preload-snapshot-test", 988) as NativeAdCache.Value.Fill
 
-        assertNull(cached.seenMetadata)
+        assertEquals(preloadMetadata, cached.seenMetadata)
     }
 }

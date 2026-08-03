@@ -4,6 +4,7 @@ import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.network.SimulaApiClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MetadataApiTest {
@@ -26,6 +27,33 @@ class MetadataApiTest {
             assertFalse(adClass.declaredMethods.any { it.name == "setExtraParameter" })
             assertFalse(adClass.declaredMethods.any { it.name == "setExtraParameters" })
         }
+    }
+
+    @Test
+    fun `native preload keeps legacy JVM API and exposes metadata overload`() {
+        val signatures = SimulaAds::class.java.declaredMethods
+            .filter { it.name == "preloadNativeAd" }
+            .map { it.parameterTypes.toList() }
+            .toSet()
+
+        assertTrue(signatures.contains(listOf(String::class.java, Int::class.javaPrimitiveType, String::class.java)))
+        assertTrue(
+            signatures.contains(
+                listOf(String::class.java, Int::class.javaPrimitiveType, String::class.java, Map::class.java),
+            ),
+        )
+        val legacyDefault = SimulaAds::class.java.declaredMethods.singleOrNull { method ->
+            method.name == "preloadNativeAd\$default" &&
+                method.parameterTypes.toList() == listOf(
+                    SimulaAds::class.java,
+                    String::class.java,
+                    Int::class.javaPrimitiveType,
+                    String::class.java,
+                    Int::class.javaPrimitiveType,
+                    Any::class.java,
+                )
+        }
+        assertTrue(legacyDefault != null)
     }
 
     @Test

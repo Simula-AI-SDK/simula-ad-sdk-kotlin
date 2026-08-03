@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.ads.SimulaAds
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.model.normalizeExtraParameters
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.util.Log
@@ -29,10 +30,14 @@ internal object NativeAdPreloadCache {
     private const val MAX = 5
     private const val TAG = "SimulaNativeAd"
 
+    internal data class PreloadedNativeAd(
+        val result: SimulaApiClient.NativeAdResult,
+        val metadata: Map<String, String>?,
+    )
+
     private data class Entry(
         val deferred: Deferred<SimulaApiClient.NativeAdResult>,
-        val adUnitId: String?,
-        val position: Int,
+        val metadata: Map<String, String>?,
     )
 
     private val entries = ConcurrentHashMap<String, Entry>()
@@ -41,7 +46,22 @@ internal object NativeAdPreloadCache {
     private val capLock = Any()
 
     /** Fire one preload and return its id, or null if the [MAX] cap is already reached. */
-    fun preload(adUnitId: String?, position: Int, theme: String? = null): String? {
+    fun preload(
+        adUnitId: String?,
+        position: Int,
+        theme: String? = null,
+        metadata: Map<String, String> = emptyMap(),
+        load: suspend (Map<String, String>?) -> SimulaApiClient.NativeAdResult = { snapshot ->
+            NativeAdController.load(
+                ensureSession = { SimulaAds.store.ensureSession() },
+                adUnitId = adUnitId,
+                position = position,
+                theme = theme,
+                metadata = snapshot,
+            )
+        },
+    ): String? {
+        val metadataSnapshot = normalizeExtraParameters(metadata)
         // The check-and-insert must be atomic: a plain `size >= MAX` check then a separate put let
         // two concurrent callers both pass the check and overshoot the cap. Launching the request
         // inside the lock is fine — async() returns immediately without blocking.
@@ -55,14 +75,9 @@ internal object NativeAdPreloadCache {
             // async on the process-lifetime supervisor scope: an un-awaited failure can't crash the
             // host, and the exception is surfaced only when consume() awaits (then mapped to a live fallback).
             val deferred = SimulaScope.async {
-                NativeAdController.load(
-                    ensureSession = { SimulaAds.store.ensureSession() },
-                    adUnitId = adUnitId,
-                    position = position,
-                    theme = theme,
-                )
+                load(metadataSnapshot)
             }
-            entries[id] = Entry(deferred, adUnitId, position)
+            entries[id] = Entry(deferred, metadataSnapshot)
             return id
         }
     }
@@ -72,13 +87,18 @@ internal object NativeAdPreloadCache {
      * destroyed, or already consumed) or if its load failed — the caller then falls back to a live
      * request, surfacing no error (PRD).
      */
-    suspend fun consume(id: String): SimulaApiClient.NativeAdResult? {
-        val entry = entries.remove(id) ?: return null
+    suspend fun consume(id: String): PreloadedNativeAd? {
+        val entry = entries[id] ?: return null
         return try {
-            entry.deferred.await()
+            val result = entry.deferred.await()
+            if (!entries.remove(id, entry)) return null
+            PreloadedNativeAd(result, entry.metadata)
         } catch (e: CancellationException) {
+            // The slot was recycled while the process-scoped preload continued. Keep the entry so
+            // a remount can consume the same request and metadata snapshot instead of loading twice.
             throw e
         } catch (_: Exception) {
+            entries.remove(id, entry)
             null
         }
     }

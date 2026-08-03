@@ -64,6 +64,19 @@ class ExtraParametersTest {
     }
 
     @Test
+    fun `bulk cap uses UTF-16 order for cross-platform parity`() {
+        val supplementary = "\uD800\uDC00"
+        val privateUse = "\uE000"
+        val input = (0 until 9).associate { "a$it" to "value" } +
+            mapOf(supplementary to "kept", privateUse to "dropped")
+
+        val result = normalizeExtraParameters(input) {}
+
+        assertTrue(supplementary in result.orEmpty())
+        assertTrue(privateUse !in result.orEmpty())
+    }
+
+    @Test
     fun `normalization defensively copies input and exposes an immutable result`() {
         val input = mutableMapOf("placement" to "feed")
         val result = normalizeExtraParameters(input) { fail("unexpected warning") }
@@ -77,6 +90,17 @@ class ExtraParametersTest {
         } catch (_: UnsupportedOperationException) {
             // Expected from Collections.unmodifiableMap.
         }
+    }
+
+    @Test
+    fun `normalization absorbs null entries from raw Java maps`() {
+        var warnings = 0
+        val raw = java.util.HashMap<Any?, Any?>().apply { put(null, "value") }
+        @Suppress("UNCHECKED_CAST")
+        val hostile = raw as Map<String, String>
+
+        assertNull(normalizeExtraParameters(hostile) { warnings++ })
+        assertEquals(1, warnings)
     }
 
     @Test
