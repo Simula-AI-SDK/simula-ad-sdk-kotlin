@@ -25,9 +25,11 @@ import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * CompositionLocal providing the Simula context to child composables.
@@ -241,14 +243,26 @@ fun SimulaProvider(
         resolvedConfig
     }
 
-    // Attach for IAB auto-read and re-read the GAID whenever the resolved config changes —
-    // off the first frame. The initial-composition read ALSO runs inside ProvideSimulaContext
-    // (sequenced ahead of the first /session/create); this effect additionally covers config
-    // changes that don't alter the consent snapshot (e.g. an enableAdvertisingId toggle is
-    // not a ConsentSnapshot field), which wouldn't retrigger that effect.
-    LaunchedEffect(context, resolvedConfig) {
-        SimulaPrivacy.attach(context)
+    // Attach for IAB auto-read and settle the initial GAID read off the first frame. Keep one
+    // coordinator for the provider lifetime: replacing it on a config change could release a child
+    // waiting on the old generation before the initial preference attach has completed.
+    val privacySessionCoordinator = remember(context) { PrivacySessionCoordinator() }
+    LaunchedEffect(privacySessionCoordinator) {
+        privacySessionCoordinator.preparePrivacy(
+            attach = { withContext(Dispatchers.IO) { SimulaPrivacy.attach(context) } },
+            refreshAdvertisingId = { SimulaPrivacy.refreshAdvertisingId() },
+        )
+    }
+    // Config changes still refresh the GAID, but only after the initial attach/readiness barrier.
+    // The first run is harmlessly coalesced by SimulaPrivacy's refresh TTL.
+    LaunchedEffect(privacySessionCoordinator, resolvedConfig) {
+        privacySessionCoordinator.awaitPrivacyReady()
         SimulaPrivacy.refreshAdvertisingId()
+    }
+    // A LaunchedEffect cancelled before its scheduled body starts cannot run its own finally.
+    // Release any resolver that outlives this composition/config generation in that case.
+    DisposableEffect(privacySessionCoordinator) {
+        onDispose { privacySessionCoordinator.completeFailOpen() }
     }
 
     // Re-read the GAID on foreground: ad-tracking permission or the GAID itself
@@ -292,7 +306,13 @@ fun SimulaProvider(
     // Delegate cache + context construction to the shared builder. The imperative
     // interstitial Activity uses the same path with a session warmed by SimulaAds,
     // so the two entry points stay in lock-step.
-    ProvideSimulaContext(sessionStore, apiKey, devMode, content)
+    ProvideSimulaContext(
+        store = sessionStore,
+        apiKey = apiKey,
+        devMode = devMode,
+        privacySessionCoordinator = privacySessionCoordinator,
+        content = content,
+    )
 }
 
 /**
@@ -310,6 +330,7 @@ internal fun ProvideSimulaContext(
     store: SimulaSessionStore,
     apiKey: String,
     devMode: Boolean,
+    privacySessionCoordinator: PrivacySessionCoordinator? = null,
     content: @Composable () -> Unit,
 ) {
     // Resolved consent (explicit overrides merged over auto-read IAB keys); drives
@@ -322,21 +343,32 @@ internal fun ProvideSimulaContext(
     val heightCache = remember { boundedLruMap<String, Float>(MAX_AD_CACHE_ENTRIES) }
     val noFillSet = remember { boundedLruSet(MAX_AD_CACHE_ENTRIES) }
 
-    // Kick off session creation off the critical path (idempotent / coalesced). The IAB
-    // attach and the initial GAID read run first IN THE SAME coroutine: both are idempotent
-    // (cheap once any entry path already ran them) and guarantee consent headers AND the
-    // collected advertising id are merged before the first /session/create snapshots the
-    // privacy block — independent LaunchedEffects could otherwise fire the session ahead of
-    // the GAID read, and the backend ties the privacy block to the session at creation.
+    val sessionResolver: suspend () -> String? = remember(store, privacySessionCoordinator) {
+        {
+            if (privacySessionCoordinator != null) {
+                privacySessionCoordinator.ensureSession { store.ensureSession() }
+            } else {
+                store.ensureSession()
+            }
+        }
+    }
+
+    // Kick off session creation off the critical path (idempotent / coalesced). A
+    // SimulaProvider supplies a coordinator shared with every child resolver, so both paths
+    // wait for the same IAB attach + initial GAID refresh. Imperative Activities omit it and
+    // preserve their existing attach/refresh warm-up; their store's startupGate remains the
+    // authority for initial imperative startup ordering.
     val context = LocalContext.current
-    LaunchedEffect(store) {
-        SimulaPrivacy.attach(context)
-        SimulaPrivacy.refreshAdvertisingId()
-        store.ensureSession()
+    LaunchedEffect(store, privacySessionCoordinator) {
+        if (privacySessionCoordinator == null) {
+            withContext(Dispatchers.IO) { SimulaPrivacy.attach(context) }
+            SimulaPrivacy.refreshAdvertisingId()
+        }
+        sessionResolver()
     }
 
     // Build context value — equivalent to React's useMemo
-    val contextValue = remember(apiKey, devMode, store.sessionId, consent) {
+    val contextValue = remember(apiKey, devMode, store.sessionId, consent, sessionResolver) {
         SimulaContextValue(
             apiKey = apiKey,
             devMode = devMode,
@@ -344,7 +376,7 @@ internal fun ProvideSimulaContext(
             hasPrivacyConsent = consent.hasPrivacyConsent,
             consent = consent,
             updateConsent = { SimulaPrivacy.apply(it) },
-            ensureSession = { store.ensureSession() },
+            ensureSession = sessionResolver,
             getCachedAd = { slot, position ->
                 adCache[getCacheKey(slot, position)]
             },

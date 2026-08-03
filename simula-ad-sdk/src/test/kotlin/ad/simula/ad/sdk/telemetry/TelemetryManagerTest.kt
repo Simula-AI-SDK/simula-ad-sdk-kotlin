@@ -3,7 +3,9 @@ package ad.simula.ad.sdk.telemetry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -26,15 +28,20 @@ class TelemetryManagerTest {
     // ── Fakes ────────────────────────────────────────────────────────────────
 
     private class FakeStore(initial: List<TelemetryEvent> = emptyList()) : TelemetryStore {
-        var data: List<TelemetryEvent> = initial.toList()
-        override fun load(): List<TelemetryEvent> = data
-        override fun save(events: List<TelemetryEvent>) { data = events.toList() }
+        var data: List<TelemetryEvent> = initial.map { it.copy() }
+        var saveCount = 0
+        override fun load(): List<TelemetryEvent> = data.map { it.copy() }
+        override fun save(events: List<TelemetryEvent>) {
+            saveCount++
+            data = events.map { it.copy() }
+        }
     }
 
     /** Records decoded batches; replays queued acks then falls back to [defaultAck]. Optional
      * one-shot gate so a test can hold the first send in flight while it enqueues more work. */
     private inner class FakeSender : TelemetrySender {
         val batches = mutableListOf<TelemetryEnvelope>()
+        var sendCount = 0
         var defaultAck = TelemetryAck.ACCEPTED
         private val acks = ArrayDeque<TelemetryAck>()
         private var gate: CompletableDeferred<Unit>? = null
@@ -44,6 +51,7 @@ class TelemetryManagerTest {
         fun release() { gate?.complete(Unit); gate = null }
 
         override suspend fun send(body: String): TelemetryAck {
+            sendCount++
             gate?.await()
             batches.add(json.decodeFromString<TelemetryEnvelope>(body))
             return if (acks.isNotEmpty()) acks.removeFirst() else defaultAck
@@ -138,6 +146,66 @@ class TelemetryManagerTest {
         assertTrue(sender.batches.allEvents().any { it.type == TYPE_ERROR && it.name == "api:fatal" })
     }
 
+    @Test
+    fun `repeated errors avoid eager save and send but join the timed flush`() = runTest {
+        val store = FakeStore()
+        val sender = FakeSender().apply { gateFirst() }
+        val m = build(this, store, sender)
+
+        m.recordError("api:decode", "decode", "first")
+        runCurrent()
+        assertEquals("first occurrence is saved immediately", 1, store.saveCount)
+        assertEquals("first occurrence starts an eager send", 1, sender.sendCount)
+
+        m.recordError("api:decode", "decode", "repeat-1")
+        m.recordError("api:decode", "decode", "repeat-2")
+        runCurrent()
+        assertEquals("repeats do not save eagerly", 1, store.saveCount)
+        assertEquals("repeats do not send eagerly", 1, sender.sendCount)
+        assertEquals("durable snapshot remains at the first occurrence", 1, store.data.single().count)
+
+        advanceTimeBy(30_000L)
+        runCurrent()
+        assertEquals("timed request waits for the active send", 1, sender.sendCount)
+
+        sender.release()
+        advanceUntilIdle()
+
+        assertEquals("the timed request drains repeats after the active send", 2, sender.sendCount)
+        val errors = sender.batches.allEvents().filter { it.type == TYPE_ERROR && it.name == "api:decode" }
+        assertEquals(3, errors.sumOf { it.count ?: 0 })
+        assertEquals("each accepted send clears and persists its snapshot", 3, store.saveCount)
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `manual flush persists and sends an in-memory repeat`() = runTest {
+        val store = FakeStore()
+        val sender = FakeSender().apply { gateFirst() }
+        val m = build(this, store, sender)
+
+        m.recordError("api:decode", "decode", "first")
+        runCurrent()
+        m.recordError("api:decode", "decode", "repeat")
+        runCurrent()
+        assertEquals(1, store.saveCount)
+        assertEquals(1, sender.sendCount)
+
+        m.flushNow()
+        runCurrent()
+        assertEquals("manual/background flush makes the repeat durable", 2, store.saveCount)
+        assertEquals("the active send is not duplicated", 1, sender.sendCount)
+        assertEquals(2, store.data.single().count)
+
+        sender.release()
+        advanceUntilIdle()
+
+        assertEquals(2, sender.sendCount)
+        val errors = sender.batches.allEvents().filter { it.type == TYPE_ERROR && it.name == "api:decode" }
+        assertEquals(2, errors.sumOf { it.count ?: 0 })
+        assertTrue(store.data.isEmpty())
+    }
+
     // ── Durability + recovery ──────────────────────────────────────────────────
 
     @Test
@@ -187,17 +255,19 @@ class TelemetryManagerTest {
     // ── Sampling + kill-switch ──────────────────────────────────────────────────
 
     @Test
-    fun `sampling drops perf but never errors`() = runTest {
+    fun `sampling drops network and operation events but never errors`() = runTest {
         val sender = FakeSender()
         // random() 0.9 >= sampleRate 0.5 → this session is NOT sampled in for perf.
         val m = build(this, FakeStore(), sender, sampleRate = 0.5, random = { 0.9 })
 
         m.recordNetwork("/load", "POST", 200, 5, 0, 10, null)
+        m.recordOperation("extra_parameters_invalid", 0, success = false)
         m.recordError("api:err", "err", "x")
         advanceUntilIdle()
 
         val events = sender.batches.allEvents()
-        assertTrue("perf suppressed by sampling", events.none { it.type == TYPE_NETWORK })
+        assertTrue("network suppressed by sampling", events.none { it.type == TYPE_NETWORK })
+        assertTrue("operations suppressed by sampling", events.none { it.type == TYPE_OPERATION })
         assertTrue("errors always sent", events.any { it.type == TYPE_ERROR })
     }
 
@@ -209,11 +279,13 @@ class TelemetryManagerTest {
         val m = build(this, FakeStore(), FakeSender(), debugLog = { lines.add(it) })
 
         m.recordNetwork("/load/interstitial", "POST", 200, durationMs = 12, requestBytes = 0, responseBytes = 100, failureClass = null)
+        m.recordOperation("extra_parameters_invalid", 0, success = false)
         m.recordError("api:x", "x", "boom")
         advanceUntilIdle()
 
-        assertEquals(2, lines.size)
+        assertEquals(3, lines.size)
         assertTrue(lines.any { it.startsWith("network POST /load/interstitial") })
+        assertTrue(lines.any { it.startsWith("operation extra_parameters_invalid") })
         assertTrue(lines.any { it.startsWith("error api:x") })
     }
 

@@ -44,10 +44,11 @@ internal data class CarrierInfo(val carrier: String?, val radio: String?)
  * off the UI path. Models the durable, conflict-free design of
  * [ad.simula.ad.sdk.network.RewardVerificationQueue]:
  *
- * - **Durable**: the buffer is persisted via [TelemetryStore]; errors persist immediately
- *   (most likely to precede process death), perf events on each flush. Recovered on start.
+ * - **Durable**: the buffer is persisted via [TelemetryStore]; the first occurrence of an error
+ *   signature persists immediately (most likely to precede process death), while repeats persist
+ *   with the next timed/manual flush. Perf events persist on each flush. Recovered on start.
  * - **Batched**: flushes at [FLUSH_THRESHOLD] events, every [FLUSH_INTERVAL_MS], or eagerly
- *   on an error. Failed batches retry with exponential backoff.
+ *   for a new error signature. Failed batches retry with exponential backoff.
  * - **Bounded**: the buffer caps at [MAX_BUFFER] (oldest dropped) and distinct error
  *   signatures at [MAX_ERROR_SIGNATURES]; both surface a `dropped` meta event rather than
  *   silently truncating.
@@ -88,6 +89,7 @@ internal class TelemetryManager(
     private val errorAgg = LinkedHashMap<String, TelemetryEvent>()
     private var droppedCount = 0
     private var isFlushing = false
+    private var flushRequested = false
     private var flushScheduled = false
     private var retryCount = 0
 
@@ -248,16 +250,27 @@ internal class TelemetryManager(
         )
         debugLog?.invoke(formatForLog(event))
         scope.launch {
-            mutex.withLock {
+            val eagerFlush = mutex.withLock {
                 val existing = errorAgg[signature]
                 when {
-                    existing != null -> existing.count = (existing.count ?: 1) + 1
-                    errorAgg.size < MAX_ERROR_SIGNATURES -> errorAgg[signature] = event
-                    else -> droppedCount++
+                    existing != null -> {
+                        existing.count = (existing.count ?: 1) + 1
+                        false
+                    }
+                    errorAgg.size < MAX_ERROR_SIGNATURES -> {
+                        errorAgg[signature] = event
+                        store.save(snapshot()) // first occurrence is durable immediately
+                        true
+                    }
+                    else -> {
+                        droppedCount++
+                        store.save(snapshot()) // preserve existing cap/drop flush behavior
+                        true
+                    }
                 }
-                store.save(snapshot()) // errors are durable immediately
             }
-            flush() // eager — an error may immediately precede a crash/kill
+            // Repeats stay in memory and join the normal timer/manual/background flush path.
+            if (eagerFlush) flush() else scheduleTimedFlush()
         }
     }
 
@@ -360,7 +373,12 @@ internal class TelemetryManager(
         val droppedSnap: Int
         val events: List<TelemetryEvent>
         mutex.withLock {
-            if (isFlushing) return
+            if (isFlushing) {
+                // A timed/manual flush or a new signature may arrive while send is suspended.
+                // Remember it so the completed send cannot strand newer in-memory events.
+                flushRequested = true
+                return
+            }
             if (buffer.isEmpty() && errorAgg.isEmpty()) return
             isFlushing = true
             pendingBuffer = buffer.toList()
@@ -393,6 +411,8 @@ internal class TelemetryManager(
 
         val reFlush = withContext(NonCancellable) {
             mutex.withLock {
+                val requestedWhileSending = flushRequested
+                flushRequested = false
                 when (ack) {
                     TelemetryAck.ACCEPTED, TelemetryAck.DROP -> {
                         val ids = pendingBuffer.mapTo(HashSet()) { it.eventId }
@@ -406,9 +426,9 @@ internal class TelemetryManager(
                         retryCount = 0
                         store.save(snapshot())
                         isFlushing = false
-                        // Re-drain leftovers that arrived mid-send: perf only once it re-hits the
-                        // batch threshold (stay batchy), but errors promptly (low-volume, valuable).
-                        buffer.size >= FLUSH_THRESHOLD || errorAgg.isNotEmpty()
+                        // Re-drain threshold work and explicit eager/timed/manual requests. A repeated
+                        // signature alone waits for its timer instead of forcing an immediate send.
+                        buffer.size >= FLUSH_THRESHOLD || requestedWhileSending
                     }
 
                     TelemetryAck.RETRY -> {

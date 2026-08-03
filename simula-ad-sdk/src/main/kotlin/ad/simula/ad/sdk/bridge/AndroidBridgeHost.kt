@@ -30,9 +30,12 @@ internal fun androidCreativeBridge(
 ): CreativeBridge {
     val main = Handler(Looper.getMainLooper())
     val host = AndroidBridgeHost(appContext.applicationContext, activityProvider, onEarlyComplete)
-    return CreativeBridge(host) { block ->
-        if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post { block() }
-    }
+    return CreativeBridge(
+        host = host,
+        mainDispatch = { block ->
+            if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post { block() }
+        },
+    )
 }
 
 /** [BridgeHost] backed by Android framework APIs. */
@@ -48,12 +51,8 @@ internal class AndroidBridgeHost(
 
     override fun setOrientation(orientation: String) {
         val activity = activityProvider() ?: return
-        activity.requestedOrientation = when (orientation) {
-            "portrait" -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            "landscape" -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-            "auto" -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            else -> return
-        }
+        val requestedOrientation = requestedOrientationFor(orientation, Build.VERSION.SDK_INT) ?: return
+        runCatching { activity.requestedOrientation = requestedOrientation }
     }
 
     override fun deviceContext(): JsonObject {
@@ -80,6 +79,17 @@ internal class AndroidBridgeHost(
         val landscape =
             appContext.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         return buildJsonObject { put("orientation", if (landscape) "landscape" else "portrait") }
+    }
+}
+
+/** API 26 can crash while changing orientation for a translucent/floating Activity. */
+internal fun requestedOrientationFor(orientation: String, sdkInt: Int): Int? {
+    if (sdkInt == Build.VERSION_CODES.O) return null
+    return when (orientation) {
+        "portrait" -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        "landscape" -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        "auto" -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        else -> null
     }
 }
 

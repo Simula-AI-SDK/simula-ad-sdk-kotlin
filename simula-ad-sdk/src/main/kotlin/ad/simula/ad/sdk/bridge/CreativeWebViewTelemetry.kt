@@ -72,8 +72,8 @@ internal fun recordRenderProcessGone(surface: String, detail: RenderProcessGoneD
 
 /**
  * [WebChromeClient] that captures creative JS **console errors** as deduped telemetry. The message is
- * redacted + length-capped by [Telemetry.recordError] before storage/send. Returns `false` so the
- * platform's default console logging still runs.
+ * redacted + length-capped by [Telemetry.recordError] before storage/send. Captured errors return
+ * `true` so the platform does not duplicate them to Logcat; other console output remains unhandled.
  */
 internal class CreativeTelemetryWebChromeClient(private val adFormat: String) : WebChromeClient() {
     override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
@@ -84,6 +84,7 @@ internal class CreativeTelemetryWebChromeClient(private val adFormat: String) : 
                 message = message.message(),
                 breadcrumb = "line=${message.lineNumber()}",
             )
+            return true
         }
         return false
     }

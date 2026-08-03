@@ -406,6 +406,15 @@ class AdLoadParsingTest {
     }
 
     @Test
+    fun `skoverlay clamps oversized delay to max`() {
+        val overlay = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"skoverlay":{"delay_seconds":600}}}""",
+        ).adBehavior.toDomain()!!.skoverlay!!
+
+        assertEquals(MAX_CLOSE_DELAY_SECONDS, overlay.delaySeconds)
+    }
+
+    @Test
     fun `ad_unit_type falls back to legacy flags`() {
         // No creative node: adUnitType derives from the legacy `rendered_format` (the imperative
         // HTML model dropped the flat `rewarded` flag, so a stray `rewarded` key is ignored).

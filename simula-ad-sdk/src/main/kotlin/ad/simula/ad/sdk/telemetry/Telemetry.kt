@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.telemetry
 
+import ad.simula.ad.sdk.core.installSimulaScopeFailureReporter
 import ad.simula.ad.sdk.image.ImageCache
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaConnectionType
@@ -20,7 +21,7 @@ import kotlinx.serialization.json.Json
  * SDK version stamped on every telemetry batch. Keep in sync with the `coordinates(...)`
  * version in `simula-ad-sdk/build.gradle.kts`.
  */
-internal const val SIMULA_SDK_VERSION = "1.1.7-dev.1"
+internal const val SIMULA_SDK_VERSION = "1.1.7-dev.2"
 
 /** logcat tag for the dev-mode telemetry mirror. */
 private const val LOG_TAG = "SimulaTelemetry"
@@ -56,6 +57,7 @@ internal object Telemetry {
     ) {
         if (!enabled) {
             manager = null
+            installSimulaScopeFailureReporter(null)
             return
         }
         val appCtx = context.applicationContext
@@ -90,6 +92,12 @@ internal object Telemetry {
             // In dev mode, mirror every (redacted) event to logcat for local verification.
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
         ).also { it.start() }
+        installSimulaScopeFailureReporter { throwable ->
+            recordError(
+                signature = "scope:uncaught",
+                errorCode = throwable.javaClass.simpleName,
+            )
+        }
     }
 
     /** Apply a server-side directive (kill-switch / sampling) from `/session/create`. */

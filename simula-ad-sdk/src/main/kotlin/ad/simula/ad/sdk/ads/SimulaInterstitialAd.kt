@@ -296,6 +296,10 @@ class SimulaInterstitialAd(val adUnitId: String) {
             }
         ) return
 
+        if (!SimulaAds.isInitialized) {
+            failShow(SimulaAdError.NotInitialized)
+            return
+        }
         if (state == State.Showing) {
             failShow(SimulaAdError.AlreadyShowing)
             return

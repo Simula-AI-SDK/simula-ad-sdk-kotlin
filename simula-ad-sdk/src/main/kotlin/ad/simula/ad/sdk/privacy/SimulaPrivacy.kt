@@ -83,15 +83,20 @@ object SimulaPrivacy {
      */
     fun attach(context: Context) {
         val app = context.applicationContext
+        // Fast path before touching default SharedPreferences again. Keep the actual first access
+        // below outside the lock because Android may synchronously read it from disk.
+        synchronized(lock) {
+            if (appContext != null) return
+        }
         // The IAB in-app spec stores consent in the *default* SharedPreferences,
         // i.e. "<package>_preferences" — replicated here without pulling in androidx.preference.
-        // getSharedPreferences() does a first-access disk read, so resolve it OUTSIDE the lock —
-        // initialize() calls attach() inside its own synchronized block on the main thread, and we
-        // must not hold a lock across I/O. Android caches the instance, so a concurrent/repeat call
-        // is cheap and idempotent.
+        // The first value access can wait for Android's asynchronous disk load. Force that wait
+        // OUTSIDE the SDK lock so concurrent privacy updates never block behind preference I/O.
         val p = app.getSharedPreferences("${app.packageName}_preferences", Context.MODE_PRIVATE)
+        runCatching { p.contains("IABTCF_TCString") }
         synchronized(lock) {
-            if (appContext != null) return@attach
+            // Another first attach may have completed while this caller resolved preferences.
+            if (appContext != null) return
             appContext = app
             prefs = p
             p.registerOnSharedPreferenceChangeListener(prefsListener)

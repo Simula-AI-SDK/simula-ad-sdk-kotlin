@@ -4,7 +4,6 @@ import ad.simula.ad.sdk.ads.SimulaAds
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.telemetry.Telemetry
-import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
@@ -21,13 +20,12 @@ import java.util.concurrent.ConcurrentHashMap
  * from cache with no live network call — and the entry is evicted. Unconsumed ids must be released
  * with [destroy].
  *
- * At most [MAX] ads are kept at once; further preloads are dropped (PRD: "cap silently at 5, log
- * warning internally"). Backed by a [ConcurrentHashMap] so it's safe to call from any thread.
+ * At most [MAX] ads are kept at once; further preloads are dropped and recorded by telemetry.
+ * Backed by a [ConcurrentHashMap] so it's safe to call from any thread.
  */
 internal object NativeAdPreloadCache {
 
     private const val MAX = 5
-    private const val TAG = "SimulaNativeAd"
 
     private data class Entry(
         val deferred: Deferred<SimulaApiClient.NativeAdResult>,
@@ -47,7 +45,6 @@ internal object NativeAdPreloadCache {
         // inside the lock is fine — async() returns immediately without blocking.
         synchronized(capLock) {
             if (entries.size >= MAX) {
-                Log.w(TAG, "preloadNativeAd ignored — at most $MAX preloaded ads are kept at once.")
                 Telemetry.recordOperation("native_preload_capped", 0L, false)
                 return null
             }

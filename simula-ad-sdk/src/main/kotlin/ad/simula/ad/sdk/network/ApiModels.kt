@@ -294,7 +294,7 @@ internal fun ApiSkOverlay?.toDomain(): SkOverlayConfig? {
     return SkOverlayConfig(
         enabled = enabled,
         timing = OverlayTiming.from(timing),
-        delaySeconds = delaySeconds.coerceAtLeast(0),
+        delaySeconds = delaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS),
         position = OverlayPosition.from(position),
         dismissible = dismissible,
     )
