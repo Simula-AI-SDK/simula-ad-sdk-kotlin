@@ -28,7 +28,27 @@ internal val NATIVE_AD_BRIDGE_MESSAGE_TYPES = setOf(
 
 private val creativeBridgeJson = Json { ignoreUnknownKeys = true }
 
-private fun recordBridgeMessageRejected(reason: String) {
+private const val MAX_REPORTED_BRIDGE_REJECTION_REASONS = 4
+
+internal class BoundedBridgeRejectionRecorder(
+    private val emit: (String) -> Unit,
+) {
+    private val lock = Any()
+    private val reportedReasons = mutableSetOf<String>()
+
+    fun record(reason: String) {
+        val shouldRecord = synchronized(lock) {
+            if (reason in reportedReasons || reportedReasons.size >= MAX_REPORTED_BRIDGE_REJECTION_REASONS) {
+                false
+            } else {
+                reportedReasons.add(reason)
+            }
+        }
+        if (shouldRecord) runCatching { emit(reason) }
+    }
+}
+
+private val bridgeRejectionRecorder = BoundedBridgeRejectionRecorder { reason ->
     Telemetry.recordOperation(
         name = "bridge_message_rejected",
         durationMs = 0L,
@@ -36,6 +56,8 @@ private fun recordBridgeMessageRejected(reason: String) {
         failureClass = reason,
     )
 }
+
+private fun recordBridgeMessageRejected(reason: String) = bridgeRejectionRecorder.record(reason)
 
 /** Rejects oversized, malformed, non-object, missing-type, and unknown-type messages off-main. */
 internal fun parseKnownCreativeBridgeMessage(

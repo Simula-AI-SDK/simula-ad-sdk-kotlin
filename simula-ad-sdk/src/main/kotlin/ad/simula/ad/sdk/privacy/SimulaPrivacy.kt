@@ -1,9 +1,13 @@
 package ad.simula.ad.sdk.privacy
 
+import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import android.content.SharedPreferences
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,6 +49,7 @@ object SimulaPrivacy {
     private var collectedAdvertisingId: String? = null
     private var appContext: Context? = null
     private var prefs: SharedPreferences? = null
+    private var privacyGeneration = 0L
 
     // GAID re-read throttle: the reflective Play Services lookup runs on every ON_RESUME,
     // but the id rarely changes within a session. Refresh at most once per [GAID_REFRESH_TTL_MS]
@@ -55,11 +60,11 @@ object SimulaPrivacy {
     // so a consent change forces an immediate re-read regardless of the TTL. null = never refreshed.
     @Volatile private var lastGaidEnabled: Boolean? = null
 
-    // Serializes concurrent refresh triggers (startup + ON_RESUME + provider effects can overlap):
-    // the winner reads from Play Services while the others WAIT for it — a caller returning from
-    // [refreshAdvertisingId] must find the GAID state settled (sequenced callers, e.g. a session
-    // create that follows, rely on that).
-    private val gaidRefreshMutex = Mutex()
+    private val gaidRefresh = GaidRefreshSingleFlight(
+        scope = SimulaScope,
+        currentGeneration = { synchronized(lock) { privacyGeneration } },
+        refreshGeneration = ::refreshAdvertisingIdGeneration,
+    )
 
     private const val ZERO_GAID = "00000000-0000-0000-0000-000000000000"
 
@@ -99,6 +104,7 @@ object SimulaPrivacy {
             if (appContext != null) return
             appContext = app
             prefs = p
+            privacyGeneration++
             p.registerOnSharedPreferenceChangeListener(prefsListener)
         }
         recompute()
@@ -107,7 +113,10 @@ object SimulaPrivacy {
     /** Replace the explicit configuration wholesale (provider init / CMP handoff). */
     fun apply(config: SimulaPrivacyConfig) {
         synchronized(lock) {
+            val wasGaidEnabled = explicitConfig.enableAdvertisingId && !explicitConfig.coppaApplies
             explicitConfig = config
+            val isGaidEnabled = config.enableAdvertisingId && !config.coppaApplies
+            if (wasGaidEnabled != isGaidEnabled) privacyGeneration++
             if (!config.enableAdvertisingId || config.coppaApplies) collectedAdvertisingId = null
         }
         recompute()
@@ -126,6 +135,7 @@ object SimulaPrivacy {
         enableAdvertisingId: Boolean? = null,
     ) {
         synchronized(lock) {
+            val wasGaidEnabled = explicitConfig.enableAdvertisingId && !explicitConfig.coppaApplies
             explicitConfig = explicitConfig.copy(
                 hasPrivacyConsent = hasPrivacyConsent ?: explicitConfig.hasPrivacyConsent,
                 tcString = tcString ?: explicitConfig.tcString,
@@ -137,6 +147,8 @@ object SimulaPrivacy {
                 coppaApplies = coppaApplies ?: explicitConfig.coppaApplies,
                 enableAdvertisingId = enableAdvertisingId ?: explicitConfig.enableAdvertisingId,
             )
+            val isGaidEnabled = explicitConfig.enableAdvertisingId && !explicitConfig.coppaApplies
+            if (wasGaidEnabled != isGaidEnabled) privacyGeneration++
             if (!explicitConfig.enableAdvertisingId || explicitConfig.coppaApplies) {
                 collectedAdvertisingId = null
             }
@@ -176,10 +188,9 @@ object SimulaPrivacy {
      * Gracefully no-ops (id stays null) when Play Services is absent or ad
      * personalization is limited.
      *
-     * Returns with the GAID state settled: concurrent callers coalesce onto the
-     * in-flight read (double-checked under [gaidRefreshMutex]) instead of racing a
-     * second one, so a caller that sequences work after this function (e.g. a
-     * `/session/create`) sees the refreshed value.
+     * Returns with the GAID state settled: concurrent callers coalesce onto one
+     * process-scoped read. Cancelling a caller only abandons its wait; it cannot
+     * cancel the synchronous Play Services call or strand an SDK mutex.
      *
      * When collection is enabled but [attach] hasn't supplied a context yet (e.g. an
      * ON_RESUME fired ahead of the deferred startup attach), the call is a no-op that
@@ -187,9 +198,14 @@ object SimulaPrivacy {
      * instead of the first real read being throttled away for the full TTL.
      */
     suspend fun refreshAdvertisingId() {
+        gaidRefresh.refresh()
+    }
+
+    private suspend fun refreshAdvertisingIdGeneration(generation: Long) {
         val enabled: Boolean
         val ctx: Context?
         synchronized(lock) {
+            if (generation != privacyGeneration) return
             enabled = explicitConfig.enableAdvertisingId && !explicitConfig.coppaApplies
             ctx = appContext
         }
@@ -201,18 +217,24 @@ object SimulaPrivacy {
         val now = System.currentTimeMillis()
         if (!shouldReadGaidNow(enabled, ctx != null, lastGaidEnabled, lastGaidRefreshAt, now, GAID_REFRESH_TTL_MS)) return
 
-        gaidRefreshMutex.withLock {
-            // Double-checked under the mutex: a concurrent caller that just finished already
-            // refreshed, so skip the duplicate binder read but still return after its write.
-            if (!shouldReadGaidNow(enabled, ctx != null, lastGaidEnabled, lastGaidRefreshAt, now, GAID_REFRESH_TTL_MS)) return
-            val id = if (enabled && ctx != null) withContext(Dispatchers.IO) { readGaid(ctx) } else null
-            synchronized(lock) { collectedAdvertisingId = id }
-            lastGaidEnabled = enabled
+        if (!enabled) {
+            synchronized(lock) {
+                if (generation != privacyGeneration) return
+                collectedAdvertisingId = null
+                lastGaidEnabled = false
+                lastGaidRefreshAt = now
+                recompute()
+            }
+            return
+        }
+
+        val id = ctx?.let { withContext(Dispatchers.IO) { readGaid(it) } }
+        synchronized(lock) {
+            if (!isGaidResultCurrent(generation, privacyGeneration, explicitConfig)) return
+            collectedAdvertisingId = id
+            lastGaidEnabled = true
             lastGaidRefreshAt = now
-            // Publish INSIDE the mutex: a coalesced waiter returns from the double-check above
-            // the instant this lock is released, so the snapshot must already carry the new id
-            // by then — otherwise a sequenced /session/create can still read the stale
-            // (GAID-less) snapshot in the gap before a post-release recompute().
+            // Publish before coalesced callers return, so a sequenced session sees this result.
             recompute()
         }
     }
@@ -236,7 +258,11 @@ object SimulaPrivacy {
                 gdprApplies = cfg.gdprApplies ?: readGdprApplies(p),
                 coppaApplies = cfg.coppaApplies,
                 tcfPurpose1Consent = cfg.tcfPurpose1Consent ?: readPurpose1(p),
-                advertisingId = if (cfg.coppaApplies) null else collectedAdvertisingId,
+                advertisingId = if (cfg.enableAdvertisingId && !cfg.coppaApplies) {
+                    collectedAdvertisingId
+                } else {
+                    null
+                },
             )
         }
     }
@@ -320,6 +346,49 @@ object SimulaPrivacy {
         }
     }
 }
+
+private data class GaidRefreshFlight(
+    val generation: Long,
+    val deferred: Deferred<Unit>,
+)
+
+/** Coalesces GAID reads without holding a mutex across the blocking platform call. */
+internal class GaidRefreshSingleFlight(
+    private val scope: CoroutineScope,
+    private val currentGeneration: () -> Long,
+    private val refreshGeneration: suspend (Long) -> Unit,
+) {
+    private val lock = Mutex()
+    private var inFlight: GaidRefreshFlight? = null
+
+    suspend fun refresh() {
+        while (true) {
+            val requestedGeneration = currentGeneration()
+            val flight = lock.withLock {
+                inFlight?.takeUnless { it.deferred.isCompleted } ?: GaidRefreshFlight(
+                    generation = requestedGeneration,
+                    deferred = scope.async {
+                        runCatching { refreshGeneration(requestedGeneration) }
+                        Unit
+                    },
+                ).also { inFlight = it }
+            }
+
+            flight.deferred.await()
+            lock.withLock {
+                if (inFlight === flight) inFlight = null
+            }
+            if (currentGeneration() == flight.generation) return
+        }
+    }
+}
+
+internal fun isGaidResultCurrent(
+    readGeneration: Long,
+    currentGeneration: Long,
+    config: SimulaPrivacyConfig,
+): Boolean =
+    readGeneration == currentGeneration && config.enableAdvertisingId && !config.coppaApplies
 
 /**
  * The GAID refresh gate (pure, JVM-testable). Returns true when a Play Services re-read

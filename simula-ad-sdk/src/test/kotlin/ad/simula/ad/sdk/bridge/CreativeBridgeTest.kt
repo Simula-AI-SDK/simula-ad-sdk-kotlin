@@ -143,6 +143,26 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun rejectionTelemetryIsBoundedAcrossFullScreenAndNativeMessages() {
+        val recorded = mutableListOf<String>()
+        val recorder = BoundedBridgeRejectionRecorder { recorded += it }
+
+        repeat(100) {
+            parseKnownCreativeBridgeMessage("malformed", FULL_SCREEN_BRIDGE_MESSAGE_TYPES, recorder::record)
+            parseKnownCreativeBridgeMessage("malformed", NATIVE_AD_BRIDGE_MESSAGE_TYPES, recorder::record)
+        }
+        parseKnownCreativeBridgeMessage("{}", FULL_SCREEN_BRIDGE_MESSAGE_TYPES, recorder::record)
+        parseKnownCreativeBridgeMessage("""{"type":"UNKNOWN"}""", FULL_SCREEN_BRIDGE_MESSAGE_TYPES, recorder::record)
+        parseKnownCreativeBridgeMessage(
+            " ".repeat(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS + 1),
+            NATIVE_AD_BRIDGE_MESSAGE_TYPES,
+            recorder::record,
+        )
+
+        assertEquals(listOf("malformed", "missing_type", "unknown_type", "too_large"), recorded)
+    }
+
+    @Test
     fun getAudioStateReplyShape() {
         val reply = capture("""{"type":"GET_AUDIO_STATE","requestId":"42"}""")
         assertEquals("GET_AUDIO_STATE", reply["type"]!!.jsonPrimitive.content)
