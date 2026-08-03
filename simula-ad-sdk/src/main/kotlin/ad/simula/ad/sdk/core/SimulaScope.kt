@@ -1,6 +1,6 @@
 package ad.simula.ad.sdk.core
 
-import android.util.Log
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,10 +12,33 @@ import kotlinx.coroutines.SupervisorJob
  * [SupervisorJob] isolates a failed task from its siblings, but an unhandled throwable still
  * propagates to the context's handler — and without one it reaches the host app's default
  * crash handler. Every SDK API already guards its own failures; this guarantees that even a
- * miss can never crash the host (PRD: the SDK must never bring down the publisher's app).
+ * miss can never crash the host. The first miss per process is reported through an optional
+ * failure-safe hook installed by telemetry, without making this core scope depend on telemetry.
  */
+internal class SimulaScopeFailureHook {
+    private val reported = AtomicBoolean(false)
+
+    @Volatile
+    private var reporter: ((Throwable) -> Unit)? = null
+
+    fun install(reporter: ((Throwable) -> Unit)?) {
+        this.reporter = reporter
+    }
+
+    fun report(throwable: Throwable) {
+        val callback = reporter ?: return
+        if (reported.compareAndSet(false, true)) runCatching { callback(throwable) }
+    }
+}
+
+private val failureHook = SimulaScopeFailureHook()
+
+internal fun installSimulaScopeFailureReporter(reporter: ((Throwable) -> Unit)?) {
+    failureHook.install(reporter)
+}
+
 private val crashGuard = CoroutineExceptionHandler { _, throwable ->
-    Log.w("SimulaAdSDK", "Uncaught exception in a SimulaScope task (swallowed)", throwable)
+    failureHook.report(throwable)
 }
 
 /**

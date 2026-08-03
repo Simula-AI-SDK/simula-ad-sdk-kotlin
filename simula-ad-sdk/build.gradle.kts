@@ -51,7 +51,7 @@ mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
     signAllPublications()
 
-    coordinates("ad.simula", "ad-sdk", findProperty("VERSION_NAME")?.toString() ?: "1.1.5")
+    coordinates("ad.simula", "ad-sdk", findProperty("VERSION_NAME")?.toString() ?: "1.1.7-dev.2")
 
     pom {
         name.set("Simula Ad SDK")

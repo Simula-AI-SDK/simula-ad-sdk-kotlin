@@ -12,6 +12,10 @@ import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.model.validatedHexColor
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -83,6 +87,33 @@ class AdLoadParsingTest {
         assertEquals("Mentor", decoded.charName)
         assertEquals("https://cdn.example.com/avatar.png", decoded.charImage)
         assertEquals("a wise mentor", decoded.charDesc)
+    }
+
+    @Test
+    fun `request encodes metadata under the exact top-level wire key`() {
+        val encoded = json.encodeToString(
+            AdLoadRequestBody(
+                adUnitId = "u",
+                metadata = mapOf("placement" to "home", "language" to "日本語"),
+            ),
+        )
+        val root = json.parseToJsonElement(encoded).jsonObject
+
+        assertEquals(
+            JsonObject(mapOf("placement" to JsonPrimitive("home"), "language" to JsonPrimitive("日本語"))),
+            root["metadata"],
+        )
+        assertFalse(root.containsKey("extraParameters"))
+        assertFalse(root.containsKey("extra_parameters"))
+    }
+
+    @Test
+    fun `request represents empty metadata as omitted or null`() {
+        val root = json.parseToJsonElement(
+            json.encodeToString(AdLoadRequestBody(adUnitId = "u", metadata = null)),
+        ).jsonObject
+
+        assertTrue(root["metadata"] == null || root["metadata"] == JsonNull)
     }
 
     // ── Response: happy path ────────────────────────────────────────────────────
@@ -372,6 +403,15 @@ class AdLoadParsingTest {
         assertEquals(0, o.delaySeconds) // negative clamps to 0
         assertEquals(OverlayPosition.BOTTOM_RAISED, o.position)
         assertFalse(o.dismissible)
+    }
+
+    @Test
+    fun `skoverlay clamps oversized delay to max`() {
+        val overlay = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"skoverlay":{"delay_seconds":600}}}""",
+        ).adBehavior.toDomain()!!.skoverlay!!
+
+        assertEquals(MAX_CLOSE_DELAY_SECONDS, overlay.delaySeconds)
     }
 
     @Test
