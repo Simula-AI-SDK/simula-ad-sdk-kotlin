@@ -86,7 +86,9 @@ import kotlinx.coroutines.launch
  * @param previewHtml   Debug/QA only: render this HTML creative directly through the full pipeline
  *                      (WebView + height sizing + viewability + AD-badge feedback bridge) with no
  *                      network call. Mirrors the imperative ads' `showPreview`.
- * @param metadata Per-impression publisher metadata. Invalid entries are dropped safely.
+ * @param metadata Per-impression publisher metadata. Normal and preload-fallback requests send it
+ *                 on `/load`; a successfully consumed preload sends it on `/seen` instead. Invalid
+ *                 entries are dropped safely.
  */
 @Composable
 fun NativeAdSlot(
@@ -210,8 +212,8 @@ fun NativeAdSlot(
                     renderStartNanos = System.nanoTime()
                     renderTimeRecorded = false
                 }
-                // Freeze metadata with this fill. A recomposition that changes metadata after
-                // the request/consume must not rewrite the eventual billable `/seen` attribution.
+                // Freeze pending `/seen` metadata with this fill. Only consumed preloads carry it;
+                // normal loads already sent their snapshot on `/load`.
                 state = NativeAdSlotState.Filled(
                     result,
                     seenMetadata = seenMetadata,
@@ -227,7 +229,7 @@ fun NativeAdSlot(
 
         // 1. Honor a fresh preload first (a new id the publisher just preloaded).
         preloadedAdId?.let { NativeAdPreloadCache.consume(it) }?.let {
-            apply(it.result, source = "preload", seenMetadata = it.metadata)
+            apply(it, source = "preload", seenMetadata = normalizedMetadata)
             return@LaunchedEffect
         }
 
@@ -258,7 +260,7 @@ fun NativeAdSlot(
             apply(
                 result,
                 source = "network",
-                seenMetadata = normalizedMetadata,
+                seenMetadata = null,
                 durationMs = (System.nanoTime() - loadStartNanos) / 1_000_000,
             )
         } catch (e: SimulaAdError) {

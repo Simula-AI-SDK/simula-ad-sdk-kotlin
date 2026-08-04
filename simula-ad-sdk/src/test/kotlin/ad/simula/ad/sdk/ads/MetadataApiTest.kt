@@ -30,17 +30,20 @@ class MetadataApiTest {
     }
 
     @Test
-    fun `native preload keeps legacy JVM API and exposes metadata overload`() {
+    fun `native preload keeps only the metadata-free JVM API`() {
         val signatures = SimulaAds::class.java.declaredMethods
             .filter { it.name == "preloadNativeAd" }
             .map { it.parameterTypes.toList() }
             .toSet()
 
-        assertTrue(signatures.contains(listOf(String::class.java, Int::class.javaPrimitiveType, String::class.java)))
-        assertTrue(
-            signatures.contains(
-                listOf(String::class.java, Int::class.javaPrimitiveType, String::class.java, Map::class.java),
-            ),
+        assertEquals(
+            setOf(listOf(String::class.java, Int::class.javaPrimitiveType, String::class.java)),
+            signatures,
+        )
+        assertFalse(
+            SimulaAds::class.java.declaredMethods
+                .filter { it.name.startsWith("preloadNativeAd") }
+                .any { Map::class.java in it.parameterTypes },
         )
         val legacyDefault = SimulaAds::class.java.declaredMethods.singleOrNull { method ->
             method.name == "preloadNativeAd\$default" &&

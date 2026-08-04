@@ -7,8 +7,7 @@ import org.junit.Test
 class NativeAdCacheTest {
 
     @Test
-    fun `cached fill retains seen metadata snapshot`() {
-        val metadata = mapOf("placement" to "feed")
+    fun `normal fill has no pending seen metadata`() {
         NativeAdCache.putFill(
             adUnitId = "snapshot-test",
             position = 987,
@@ -19,17 +18,17 @@ class NativeAdCacheTest {
                 iframeUrl = null,
                 renderedHtml = "<html></html>",
             ),
-            seenMetadata = metadata,
+            seenMetadata = null,
         )
 
         val cached = NativeAdCache.get("snapshot-test", 987) as NativeAdCache.Value.Fill
 
-        assertEquals(metadata, cached.seenMetadata)
+        assertEquals(null, cached.seenMetadata)
     }
 
     @Test
-    fun `preloaded fill retains its preload-time metadata`() {
-        val preloadMetadata = mapOf("screen" to "search")
+    fun `preloaded fill retains consuming slot metadata for seen`() {
+        val slotMetadata = mapOf("screen" to "search")
         NativeAdCache.putFill(
             adUnitId = "preload-snapshot-test",
             position = 988,
@@ -40,11 +39,11 @@ class NativeAdCacheTest {
                 iframeUrl = null,
                 renderedHtml = "<html></html>",
             ),
-            seenMetadata = preloadMetadata,
+            seenMetadata = slotMetadata,
         )
 
         val cached = NativeAdCache.get("preload-snapshot-test", 988) as NativeAdCache.Value.Fill
 
-        assertEquals(preloadMetadata, cached.seenMetadata)
+        assertEquals(slotMetadata, cached.seenMetadata)
     }
 }

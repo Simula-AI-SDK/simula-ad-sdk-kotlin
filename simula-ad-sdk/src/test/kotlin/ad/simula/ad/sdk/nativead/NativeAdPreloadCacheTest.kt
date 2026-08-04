@@ -16,42 +16,25 @@ import org.junit.Test
 class NativeAdPreloadCacheTest {
 
     @Test
-    fun `preload snapshots metadata for load and consumption`() = runBlocking {
-        val source = linkedMapOf("screen" to "search")
+    fun `preload invokes metadata-free loader and returns its result`() = runBlocking {
         val releaseLoad = CompletableDeferred<Unit>()
-        var loadMetadata: Map<String, String>? = null
+        var loadCount = 0
         val id = NativeAdPreloadCache.preload(
             adUnitId = "feed",
             position = 1,
-            metadata = source,
-            load = { snapshot ->
-                loadMetadata = snapshot
+            load = {
+                loadCount++
                 releaseLoad.await()
                 nativeResult()
             },
         )
 
-        source["screen"] = "mutated"
         releaseLoad.complete(Unit)
         assertNotNull(id)
         val consumed = NativeAdPreloadCache.consume(id ?: error("missing preload id"))
 
-        assertEquals(mapOf("screen" to "search"), loadMetadata)
-        assertEquals(mapOf("screen" to "search"), consumed?.metadata)
-    }
-
-    @Test
-    fun `preload without metadata retains an empty snapshot`() = runBlocking {
-        val id = NativeAdPreloadCache.preload(
-            adUnitId = "feed",
-            position = 2,
-            load = { nativeResult() },
-        )
-
-        assertNotNull(id)
-        val consumed = NativeAdPreloadCache.consume(id ?: error("missing preload id"))
-
-        assertEquals(null, consumed?.metadata)
+        assertEquals(1, loadCount)
+        assertEquals("preloaded-impression", consumed?.impressionId)
     }
 
     @Test
@@ -62,7 +45,6 @@ class NativeAdPreloadCacheTest {
             val id = NativeAdPreloadCache.preload(
                 adUnitId = "feed",
                 position = 3,
-                metadata = mapOf("screen" to "search"),
                 load = {
                     loadStarted.complete(Unit)
                     releaseLoad.await()
@@ -76,7 +58,7 @@ class NativeAdPreloadCacheTest {
             releaseLoad.complete(Unit)
             val remounted = NativeAdPreloadCache.consume(id)
 
-            assertEquals(mapOf("screen" to "search"), remounted?.metadata)
+            assertEquals("preloaded-impression", remounted?.impressionId)
         }
     }
 

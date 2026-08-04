@@ -140,4 +140,27 @@ class ExtraParametersTest {
         assertTrue("overflow" !in store.snapshot().orEmpty())
         assertEquals(1, warnings)
     }
+
+    @Test
+    fun `single inserts preserve deterministic UTF-16 key order`() {
+        val store = ExtraParametersStore {}
+
+        store.set("z", "last")
+        store.set("a", "first")
+
+        assertEquals(listOf("a", "z"), store.snapshot()?.keys?.toList())
+    }
+
+    @Test
+    fun `single insert uses the same sorted cap as bulk replacement`() {
+        var warnings = 0
+        val store = ExtraParametersStore { warnings++ }
+        store.replace((1..10).associate { "k%02d".format(it) to "$it" })
+
+        store.set("k00", "earliest")
+
+        assertEquals((0..9).map { "k%02d".format(it) }, store.snapshot()?.keys?.toList())
+        assertTrue("k10" !in store.snapshot().orEmpty())
+        assertEquals(1, warnings)
+    }
 }

@@ -408,18 +408,6 @@ object SimulaAds {
         adUnitId: String? = null,
         position: Int = 0,
         theme: String? = null,
-    ): String? = preloadNativeAd(adUnitId, position, theme, emptyMap())
-
-    /**
-     * Preload a native ad with publisher metadata snapshotted for its load and `/seen` beacon.
-     * The metadata supplied later to [ad.simula.ad.sdk.nativead.NativeAdSlot] cannot override this
-     * preload-time snapshot.
-     */
-    fun preloadNativeAd(
-        adUnitId: String? = null,
-        position: Int = 0,
-        theme: String? = null,
-        metadata: Map<String, String>,
     ): String? {
         if (!initialized) return null
         val resolvedTheme = resolveThemeImperative(theme)
@@ -427,7 +415,6 @@ object SimulaAds {
             adUnitId = adUnitId,
             position = position,
             theme = resolvedTheme,
-            metadata = metadata,
         )
     }
 

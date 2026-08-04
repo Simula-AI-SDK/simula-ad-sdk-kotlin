@@ -66,11 +66,7 @@ internal class ExtraParametersStore(
     fun set(key: String, value: String) {
         val entry = normalizeExtraParameters(mapOf(key to value), warn) ?: return
         synchronized(lock) {
-            if (key !in parameters && parameters.size >= MAX_EXTRA_PARAMETER_ENTRIES) {
-                warn()
-                return
-            }
-            parameters = Collections.unmodifiableMap(LinkedHashMap(parameters + entry))
+            parameters = normalizeExtraParameters(parameters + entry, warn).orEmpty()
         }
     }
 
