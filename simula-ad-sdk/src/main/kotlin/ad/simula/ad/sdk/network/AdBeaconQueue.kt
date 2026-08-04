@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.model.normalizeExtraParameters
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
@@ -25,6 +26,7 @@ import kotlinx.serialization.json.Json
 internal data class PendingBeacon(
     val impressionId: String,
     val action: String,
+    val metadata: Map<String, String>? = null,
     var retryCount: Int = 0,
     var lastAttemptTimestamp: Long = 0L,
 )
@@ -37,7 +39,7 @@ internal interface BeaconStore {
 
 /** Sends one impression-action beacon; returns the HTTP status, or throws on a connectivity failure. */
 internal interface BeaconSender {
-    suspend fun send(impressionId: String, action: String): Int
+    suspend fun send(impressionId: String, action: String, metadata: Map<String, String>?): Int
 }
 
 /**
@@ -64,16 +66,23 @@ internal class AdBeaconQueue(
     private val mutex = Mutex()
     private var isProcessing = false
 
-    /** Enqueue a beacon and start draining. Safe to call repeatedly — duplicates are ignored. */
-    fun queue(impressionId: String, action: String) {
+    /** Enqueue a beacon and start draining. Duplicate metadata is merged for the same action. */
+    fun queue(impressionId: String, action: String, metadata: Map<String, String>? = null) {
         if (impressionId.isBlank()) return
+        val metadataSnapshot = metadata?.takeIf { action == "seen" }?.let { normalizeExtraParameters(it) }
         scope.launch {
             mutex.withLock {
                 val list = store.load().toMutableList()
-                if (list.none { it.impressionId == impressionId && it.action == action }) {
-                    list.add(PendingBeacon(impressionId, action))
-                    store.save(list)
+                val index = list.indexOfFirst { it.impressionId == impressionId && it.action == action }
+                if (index == -1) {
+                    list.add(PendingBeacon(impressionId, action, metadataSnapshot))
+                } else if (!metadataSnapshot.isNullOrEmpty()) {
+                    val existing = list[index]
+                    list[index] = existing.copy(
+                        metadata = normalizeExtraParameters(existing.metadata.orEmpty() + metadataSnapshot),
+                    )
                 }
+                store.save(list)
             }
             processQueue()
         }
@@ -100,7 +109,7 @@ internal class AdBeaconQueue(
                 } ?: break
 
                 val delivered = try {
-                    val code = sender.send(task.impressionId, task.action)
+                    val code = sender.send(task.impressionId, task.action, task.metadata)
                     when {
                         code in 200..299 -> true // accepted
                         code in 400..499 && code != 408 && code != 429 -> true // permanent client error → drop
@@ -137,7 +146,14 @@ internal class AdBeaconQueue(
     }
 
     private suspend fun removeTask(task: PendingBeacon) = mutex.withLock {
-        store.save(store.load().filterNot { it.impressionId == task.impressionId && it.action == task.action })
+        // Remove only the snapshot that was sent. If metadata was merged while this request was in
+        // flight, the newer snapshot must stay queued for one more idempotent `/seen`; removing by
+        // `(impressionId, action)` alone would silently discard metadata the server never received.
+        store.save(store.load().filterNot {
+            it.impressionId == task.impressionId &&
+                it.action == task.action &&
+                it.metadata == task.metadata
+        })
     }
 
     private suspend fun recordAttempt(task: PendingBeacon) = mutex.withLock {
@@ -190,7 +206,13 @@ internal object AdBeaconManager {
      * diagnostic lifecycle event for the billing-relevant ones. A no-op before [init] (beacons only
      * fire while an ad is showing, which requires init).
      */
-    fun enqueue(impressionId: String, action: String, adFormat: String? = null, adUnitId: String? = null) {
+    fun enqueue(
+        impressionId: String,
+        action: String,
+        adFormat: String? = null,
+        adUnitId: String? = null,
+        metadata: Map<String, String>? = null,
+    ) {
         if (impressionId.isBlank()) return
         when (action) {
             "seen" -> Telemetry.recordLifecycle(
@@ -200,14 +222,14 @@ internal object AdBeaconManager {
                 stage = "click_fired", adFormat = adFormat, adUnitId = adUnitId, adId = impressionId,
             )
         }
-        engine?.queue(impressionId, action)
+        engine?.queue(impressionId, action, metadata)
     }
 }
 
 /** Real sender: a no-body impression beacon, surfacing the HTTP status so the queue can retry/drop. */
 private class ApiBeaconSender(private val apiKey: String) : BeaconSender {
-    override suspend fun send(impressionId: String, action: String): Int =
-        SimulaApiClient.sendImpressionBeacon(impressionId, action, apiKey)
+    override suspend fun send(impressionId: String, action: String, metadata: Map<String, String>?): Int =
+        SimulaApiClient.sendImpressionBeacon(impressionId, action, apiKey, metadata)
 }
 
 /** Real store: a single `SharedPreferences` entry holding the JSON-encoded queue. */

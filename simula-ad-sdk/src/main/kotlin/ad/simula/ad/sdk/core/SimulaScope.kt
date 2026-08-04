@@ -12,10 +12,50 @@ import kotlinx.coroutines.SupervisorJob
  * [SupervisorJob] isolates a failed task from its siblings, but an unhandled throwable still
  * propagates to the context's handler — and without one it reaches the host app's default
  * crash handler. Every SDK API already guards its own failures; this guarantees that even a
- * miss can never crash the host (PRD: the SDK must never bring down the publisher's app).
+ * miss can never crash the host. The first miss per stable failure signature is reported through an
+ * optional failure-safe hook installed by telemetry, without making this core scope depend on telemetry.
  */
+internal class SimulaScopeFailureHook {
+    private val lock = Any()
+    private val reported = LinkedHashSet<String>()
+
+    @Volatile
+    private var reporter: ((String, Throwable) -> Unit)? = null
+
+    fun install(reporter: ((String, Throwable) -> Unit)?) {
+        this.reporter = reporter
+    }
+
+    fun report(throwable: Throwable) {
+        val callback = reporter ?: return
+        val signature = simulaScopeFailureSignature(throwable)
+        val firstForSignature = synchronized(lock) {
+            if (signature in reported || reported.size >= MAX_REPORTED_SCOPE_FAILURE_SIGNATURES) false
+            else reported.add(signature)
+        }
+        if (firstForSignature) runCatching { callback(signature, throwable) }
+    }
+}
+
+private const val MAX_REPORTED_SCOPE_FAILURE_SIGNATURES = 32
+private const val SDK_PACKAGE = "ad.simula.ad.sdk."
+
+internal fun simulaScopeFailureSignature(throwable: Throwable): String {
+    val frame = throwable.stackTrace.firstOrNull { it.className.startsWith(SDK_PACKAGE) }
+        ?: throwable.stackTrace.firstOrNull()
+    val site = frame?.let { "${it.className.removePrefix(SDK_PACKAGE)}.${it.methodName}" } ?: "unknown"
+    return "${throwable.javaClass.simpleName}:$site"
+}
+
+private val failureHook = SimulaScopeFailureHook()
+
+internal fun installSimulaScopeFailureReporter(reporter: ((String, Throwable) -> Unit)?) {
+    failureHook.install(reporter)
+}
+
 private val crashGuard = CoroutineExceptionHandler { _, throwable ->
     Log.w("SimulaAdSDK", "Uncaught exception in a SimulaScope task (swallowed)", throwable)
+    failureHook.report(throwable)
 }
 
 /**

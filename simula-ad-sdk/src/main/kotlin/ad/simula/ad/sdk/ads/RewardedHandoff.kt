@@ -55,6 +55,7 @@ internal class RewardedPresentation(
     // fires. Held here from load time (no network round-trip at impression). Defaults to a $0 estimate
     // for the preview path, which constructs this presentation without a real serve.
     val adValue: AdValue = AdValue.fromBidCpm(0.0),
+    val metadata: Map<String, String>? = null,
 ) {
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */
     var displayedReported = false

@@ -17,6 +17,7 @@ import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.provider.SimulaSessionStore
+import ad.simula.ad.sdk.provider.awaitInitialAdvertisingIdRefresh
 import ad.simula.ad.sdk.telemetry.SimulaCrashGuard
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
@@ -212,7 +213,9 @@ object SimulaAds {
                 // when the play-services-ads-identifier dep is absent). Returns with the GAID
                 // state settled, so the session warm-up below (and any gated host load) carries
                 // the id on the first /session/create.
-                runCatching { SimulaPrivacy.refreshAdvertisingId() }
+                awaitInitialAdvertisingIdRefresh(
+                    refreshAdvertisingId = { SimulaPrivacy.refreshAdvertisingId() },
+                )
 
                 // Build the durable impression/click beacon queue BEFORE the gate releases:
                 // a host load awaiting the gate can show an ad (and fire billing beacons) the
@@ -408,7 +411,11 @@ object SimulaAds {
     ): String? {
         if (!initialized) return null
         val resolvedTheme = resolveThemeImperative(theme)
-        return NativeAdPreloadCache.preload(adUnitId = adUnitId, position = position, theme = resolvedTheme)
+        return NativeAdPreloadCache.preload(
+            adUnitId = adUnitId,
+            position = position,
+            theme = resolvedTheme,
+        )
     }
 
     /** Release a preloaded native ad that was never consumed, cancelling its request if in flight. */

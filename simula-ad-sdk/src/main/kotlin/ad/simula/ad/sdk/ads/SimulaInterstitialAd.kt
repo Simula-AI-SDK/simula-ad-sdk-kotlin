@@ -8,6 +8,7 @@ import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.ExtraParametersStore
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayTiming
 import ad.simula.ad.sdk.model.SkOverlayConfig
@@ -51,13 +52,18 @@ class SimulaInterstitialAd(val adUnitId: String) {
         object Idle : State
         object Loading : State
         /** [loadedAtMs] is `elapsedRealtime()` at the moment the creative became ready (for staleness). */
-        class Ready(val ad: SimulaApiClient.AdLoadResult, val loadedAtMs: Long) : State
+        class Ready(
+            val ad: SimulaApiClient.AdLoadResult,
+            val metadata: Map<String, String>?,
+            val loadedAtMs: Long,
+        ) : State
         object Showing : State
     }
 
     // Confined to the main thread (all reads/writes happen there).
     private var state: State = State.Idle
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val metadataStore = ExtraParametersStore()
 
     // Dedup: the (ad unit, character, session) key of the load currently in flight or
     // ready, and when that load was initiated. Re-loads of the same key are blocked for
@@ -79,6 +85,16 @@ class SimulaInterstitialAd(val adUnitId: String) {
     // Monotonic stage markers for telemetry latencies (0 = not yet started).
     private var loadStartNanos = 0L
     private var showStartNanos = 0L
+
+    /** Upsert one metadata entry for future loads. Invalid entries are ignored safely. */
+    fun setMetadata(key: String, value: String) {
+        metadataStore.set(key, value)
+    }
+
+    /** Replace metadata for future loads. Passing an empty map clears it. */
+    fun setMetadata(metadata: Map<String, String>) {
+        metadataStore.replace(metadata)
+    }
 
     /**
      * Preload an interstitial for the given character context.
@@ -103,7 +119,17 @@ class SimulaInterstitialAd(val adUnitId: String) {
         charImage: String? = null,
         charDesc: String? = null,
     ) {
-        if (!confineToMain { load(charId, charName, charImage, charDesc) }) return
+        loadOnMain(charId, charName, charImage, charDesc, metadataStore.snapshot())
+    }
+
+    private fun loadOnMain(
+        charId: String?,
+        charName: String?,
+        charImage: String?,
+        charDesc: String?,
+        metadata: Map<String, String>?,
+    ) {
+        if (!confineToMain { loadOnMain(charId, charName, charImage, charDesc, metadata) }) return
 
         if (!SimulaAds.isInitialized) {
             failLoad(SimulaAdError.NotInitialized)
@@ -166,6 +192,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     // AdContext (contextual targeting) now rides on the full-screen request too, read
                     // from the same provider-level store the native surface uses.
                     context = NativeAdContextStore.current,
+                    metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
                 // Fillable only when the payload carries a non-blank `rendered_html`
@@ -187,7 +214,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 )
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
-                    state = State.Ready(ad, SystemClock.elapsedRealtime())
+                    state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
                     listener?.onAdLoaded(this@SimulaInterstitialAd)
                 }
             } catch (e: Exception) {
@@ -273,6 +300,10 @@ class SimulaInterstitialAd(val adUnitId: String) {
             }
         ) return
 
+        if (!SimulaAds.isInitialized) {
+            failShow(SimulaAdError.NotInitialized)
+            return
+        }
         if (state == State.Showing) {
             failShow(SimulaAdError.AlreadyShowing)
             return
@@ -344,7 +375,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
     // ── Internals ────────────────────────────────────────────────────────────
 
     private fun present(activity: Activity?) {
-        val ad = when (val current = state) {
+        val ready = when (val current = state) {
             State.Showing -> {
                 failShow(SimulaAdError.AlreadyShowing)
                 return
@@ -361,9 +392,10 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     failShow(SimulaAdError.Stale)
                     return
                 }
-                current.ad
+                current
             }
         }
+        val ad = ready.ad
         // A foreground Activity is required to present — matching Swift's
         // "no presentation context" semantics and the standard show(activity) entry point. A
         // background activity-start from the app context can be silently dropped
@@ -381,6 +413,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 ad = ad,
                 apiKey = SimulaAds.apiKey,
                 callbacks = bridge(ad.impressionId),
+                metadata = ready.metadata,
             ),
         )
 

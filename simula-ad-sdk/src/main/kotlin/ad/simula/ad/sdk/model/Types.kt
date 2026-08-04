@@ -177,6 +177,9 @@ private fun normalizeBehaviorToken(raw: String?): String =
  * bounding a malformed/oversized one. */
 internal const val MAX_CLOSE_DELAY_SECONDS = 45
 
+/** Independent safety cap for the delayed install overlay. Kept separate from close-gate policy. */
+internal const val MAX_SK_OVERLAY_DELAY_SECONDS = 300
+
 /**
  * Validates a server-supplied progress-bar color. Accepts an optional leading `#` followed by
  * exactly 6 hex digits; anything else (missing, wrong length, non-hex) falls back to white per

@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.ExtraParametersStore
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
@@ -48,13 +49,18 @@ class SimulaRewardedAd(val adUnitId: String) {
         object Idle : State
         object Loading : State
         /** [loadedAtMs] is `elapsedRealtime()` at the moment the ad became ready (for staleness). */
-        class Ready(val ad: SimulaApiClient.RewardedInitResult, val loadedAtMs: Long) : State
+        class Ready(
+            val ad: SimulaApiClient.RewardedInitResult,
+            val metadata: Map<String, String>?,
+            val loadedAtMs: Long,
+        ) : State
         object Showing : State
     }
 
     // Confined to the main thread (all reads/writes happen there).
     private var state: State = State.Idle
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val metadataStore = ExtraParametersStore()
 
     // Captured at load so verification can run after the Ready state is cleared on close.
     // `impressionId` is the verify-reward handle (the wire body still names it `serve_id`).
@@ -82,6 +88,16 @@ class SimulaRewardedAd(val adUnitId: String) {
     private var loadStartNanos = 0L
     private var showStartNanos = 0L
 
+    /** Upsert one metadata entry for future loads. Invalid entries are ignored safely. */
+    fun setMetadata(key: String, value: String) {
+        metadataStore.set(key, value)
+    }
+
+    /** Replace metadata for future loads. Passing an empty map clears it. */
+    fun setMetadata(metadata: Map<String, String>) {
+        metadataStore.replace(metadata)
+    }
+
     /**
      * Preload a rewarded minigame for the given character context.
      *
@@ -105,7 +121,17 @@ class SimulaRewardedAd(val adUnitId: String) {
         charImage: String? = null,
         charDesc: String? = null,
     ) {
-        if (!confineToMain { load(charId, charName, charImage, charDesc) }) return
+        loadOnMain(charId, charName, charImage, charDesc, metadataStore.snapshot())
+    }
+
+    private fun loadOnMain(
+        charId: String?,
+        charName: String?,
+        charImage: String?,
+        charDesc: String?,
+        metadata: Map<String, String>?,
+    ) {
+        if (!confineToMain { loadOnMain(charId, charName, charImage, charDesc, metadata) }) return
 
         if (!SimulaAds.isInitialized) {
             failLoad(SimulaAdError.NotInitialized)
@@ -168,6 +194,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     // AdContext (contextual targeting) now rides on the rewarded request too, read from
                     // the same provider-level store the native surface uses.
                     context = NativeAdContextStore.current,
+                    metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
                 // A rewarded ad with no iframe to render is a no-fill.
@@ -190,7 +217,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     impressionId = ad.impressionId
                     // Warm a WebView so show() doesn't pay cold-start on the critical path.
                     WebViewPool.prewarm(SimulaAds.appContext)
-                    state = State.Ready(ad, SystemClock.elapsedRealtime())
+                    state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
                     listener?.onAdLoaded(this@SimulaRewardedAd)
                 }
             } catch (e: Exception) {
@@ -332,7 +359,7 @@ class SimulaRewardedAd(val adUnitId: String) {
     // ── Internals ────────────────────────────────────────────────────────────
 
     private fun present(activity: Activity?) {
-        val ad = when (val current = state) {
+        val ready = when (val current = state) {
             State.Showing -> {
                 failShow(SimulaAdError.AlreadyShowing)
                 return
@@ -349,9 +376,10 @@ class SimulaRewardedAd(val adUnitId: String) {
                     failShow(SimulaAdError.Stale)
                     return
                 }
-                current.ad
+                current
             }
         }
+        val ad = ready.ad
         if (activity == null) {
             failShow(SimulaAdError.NoPresentationContext)
             return
@@ -372,6 +400,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                 destination = ad.destination,
                 androidStoreUrl = ad.androidStoreUrl,
                 adValue = ad.adValue,
+                metadata = ready.metadata,
             ),
         )
 

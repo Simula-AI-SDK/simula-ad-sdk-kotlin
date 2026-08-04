@@ -3,7 +3,8 @@ package ad.simula.ad.sdk.nativead
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
-import ad.simula.ad.sdk.telemetry.Telemetry
+import ad.simula.ad.sdk.bridge.NATIVE_AD_BRIDGE_MESSAGE_TYPES
+import ad.simula.ad.sdk.bridge.parseKnownCreativeBridgeMessage
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.minigame.repaintOnNextFrame
@@ -45,11 +46,9 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
-import kotlinx.serialization.json.jsonObject
 import java.util.WeakHashMap
 
 /**
@@ -79,6 +78,7 @@ internal fun NativeAdWebView(
     iframeUrl: String?,
     renderedHtml: String?,
     apiKey: String,
+    devMode: Boolean,
     impressionId: String,
     heightDp: Float,
     onHeightPx: (Float) -> Unit,
@@ -165,7 +165,7 @@ internal fun NativeAdWebView(
                 // collapses to a sliver — the slot keeps a shimmer over this until the height arrives.
                 .height(if (heightDp > 0f) heightDp.dp else NATIVE_AD_PROVISIONAL_HEIGHT_DP.dp),
             // Reattaches the retained WebView (no reload) or builds + loads a fresh one on first mount.
-            factory = { NativeAdWebViewStore.attach(session, context, iframeUrl, renderedHtml) },
+            factory = { NativeAdWebViewStore.attach(session, context, iframeUrl, renderedHtml, devMode) },
             // Scroll-out: detach + pause + keep the loaded DOM (retained ids); recycle ephemerals/orphans.
             onRelease = { released -> NativeAdWebViewStore.release(session, released) },
         )
@@ -247,7 +247,13 @@ internal object NativeAdWebViewStore {
 
     /** Return the view to mount: the retained one (already loaded → no reload) or a freshly built one. */
     @MainThread
-    fun attach(session: Session, hostContext: Context, iframeUrl: String?, renderedHtml: String?): WebView {
+    fun attach(
+        session: Session,
+        hostContext: Context,
+        iframeUrl: String?,
+        renderedHtml: String?,
+        devMode: Boolean,
+    ): WebView {
         val creativeKey = creativeKey(iframeUrl, renderedHtml)
         val retained = session.webView
         // Reuse the retained view only if it is alive (render process intact), actually holds this
@@ -258,6 +264,7 @@ internal object NativeAdWebViewStore {
         ) {
             (retained.context as? MutableContextWrapper)?.baseContext = hostContext // re-home for theming
             (retained.parent as? ViewGroup)?.removeView(retained)                   // clear any stale parent
+            retained.webChromeClient = CreativeTelemetryWebChromeClient("character_ad", devMode)
             retained.onResume()
             session.attached = true
             session.wiring.webView = retained // visibility pushes target the live view
@@ -278,7 +285,7 @@ internal object NativeAdWebViewStore {
             session.loadedKey = null
             session.wiring.webView = null
         }
-        val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml)
+        val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml, devMode)
         // Adopt as the retained instance only if the slot isn't already showing one (don't orphan it).
         if (!session.attached) {
             session.webView?.takeIf { it !== fresh }?.let { uninstallBridge(it); WebViewPool.release(it) }
@@ -374,10 +381,16 @@ internal object NativeAdWebViewStore {
     }
 
     @MainThread
-    private fun buildWebView(wiring: NativeAdWiring, hostContext: Context, iframeUrl: String?, renderedHtml: String?): WebView {
+    private fun buildWebView(
+        wiring: NativeAdWiring,
+        hostContext: Context,
+        iframeUrl: String?,
+        renderedHtml: String?,
+        devMode: Boolean,
+    ): WebView {
         val docStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         val webView = WebViewPool.acquire(hostContext, NativeAdWebViewClient(wiring, docStart))
-        webView.webChromeClient = CreativeTelemetryWebChromeClient("character_ad") // capture JS console errors
+        webView.webChromeClient = CreativeTelemetryWebChromeClient("character_ad", devMode)
         webView.setBackgroundColor(Color.TRANSPARENT)
         // A native ad sizes to content and must never scroll (parity with iOS, where the scroll
         // view is disabled): no scrollbars, no overscroll glow. The BRIDGE_SCRIPT additionally
@@ -507,8 +520,6 @@ internal class NativeAdWiring(
     @Volatile var webView: WebView? = null
 
     private val main = Handler(Looper.getMainLooper())
-    private val json = Json { ignoreUnknownKeys = true }
-
     /**
      * Forward the slot's live visible fraction (0..1) to the creative via `window.onVisibility`, called
      * on every scroll frame by the viewability tracker. Guarded so it's a no-op until the creative
@@ -532,14 +543,9 @@ internal class NativeAdWiring(
         webView?.evaluateJavascript("window.onAppForeground&&window.onAppForeground()", null)
     }
 
-    /** Called off-main from the JS interface. Parses and dispatches on the main thread. */
+    /** Called off-main from the JS interface. Admits known bounded messages before main dispatch. */
     fun handleMessage(raw: String) {
-        val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: run {
-            // Malformed JSON / non-object from the creative bridge — dropped, but counted so a broken
-            // or hostile creative is visible rather than silent. Aggregated by signature (bounded).
-            Telemetry.recordError(signature = "native:bridge_parse_failed", breadcrumb = "NativeAdWebView.handleMessage")
-            return
-        }
+        val obj = parseKnownCreativeBridgeMessage(raw, NATIVE_AD_BRIDGE_MESSAGE_TYPES) ?: return
         // `as? JsonPrimitive` (not `.jsonPrimitive`, which throws IllegalArgumentException on a
         // non-primitive) so a creative sending an object/array for type/height/value can't crash the
         // WebView's JS thread with an uncaught exception.
@@ -552,7 +558,6 @@ internal class NativeAdWiring(
                 val value = (obj["value"] as? JsonPrimitive)?.contentOrNull ?: return
                 main.post { handleFeedback(value) }
             }
-            else -> Unit
         }
     }
 

@@ -10,6 +10,7 @@ import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
+import ad.simula.ad.sdk.model.MAX_SK_OVERLAY_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.OverlayTiming
 import ad.simula.ad.sdk.model.SkOverlayConfig
@@ -17,6 +18,7 @@ import ad.simula.ad.sdk.model.StoreOpen
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
+import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -132,6 +134,7 @@ internal data class AdLoadRequestBody(
     // native surface sends, now extended to the full-screen formats so they get character-aware
     // targeting too. Null omits the key (the backend treats it as no context).
     val context: NativeContextBody? = null,
+    val metadata: Map<String, String>? = null,
     // Device capability snapshot so the backend never assigns an unsupported variant. Defaults to a
     // neutral value (no framework access) so pure-JVM tests can construct this; the ad path injects
     // the real values via `currentDeviceCapabilities()`.
@@ -293,10 +296,26 @@ internal fun ApiSkOverlay?.toDomain(): SkOverlayConfig? {
     return SkOverlayConfig(
         enabled = enabled,
         timing = OverlayTiming.from(timing),
-        delaySeconds = delaySeconds.coerceAtLeast(0),
+        delaySeconds = clampSkOverlayDelaySeconds(delaySeconds),
         position = OverlayPosition.from(position),
         dismissible = dismissible,
     )
+}
+
+internal fun clampSkOverlayDelaySeconds(
+    delaySeconds: Int,
+    recordClamp: () -> Unit = {
+        Telemetry.recordOperation(
+            name = "skoverlay_delay_clamped",
+            durationMs = 0L,
+            success = false,
+            failureClass = "out_of_range",
+        )
+    },
+): Int {
+    val clamped = delaySeconds.coerceIn(0, MAX_SK_OVERLAY_DELAY_SECONDS)
+    if (clamped != delaySeconds) runCatching(recordClamp)
+    return clamped
 }
 
 internal fun ApiAutoStoreRedirect?.toDomain(): AutoStoreRedirect? {
@@ -321,6 +340,7 @@ internal data class RewardedInitRequestBody(
     // Contextual targeting signals — see [AdLoadRequestBody.context]. Extended to rewarded so the
     // full-screen formats target the same way native does.
     val context: NativeContextBody? = null,
+    val metadata: Map<String, String>? = null,
 )
 
 @Serializable
@@ -377,7 +397,20 @@ internal data class NativeAdRequestBody(
     @SerialName("char_id") val charId: String? = null,
     @SerialName("char_name") val charName: String? = null,
     @SerialName("char_desc") val charDesc: String? = null,
+    val metadata: Map<String, String>? = null,
 )
+
+@Serializable
+internal data class ImpressionMetadataRequestBody(
+    val metadata: Map<String, String>,
+)
+
+internal fun impressionMetadataRequestBody(
+    action: String,
+    metadata: Map<String, String>?,
+): ImpressionMetadataRequestBody? = metadata
+    ?.takeIf { action == "seen" && it.isNotEmpty() }
+    ?.let(::ImpressionMetadataRequestBody)
 
 /** The wire `NativeContext` object — camelCase keys (unlike the rest of the snake_case API). */
 @Serializable

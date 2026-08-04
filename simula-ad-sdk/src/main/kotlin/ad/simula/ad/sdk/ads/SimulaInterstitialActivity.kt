@@ -441,7 +441,12 @@ private fun CreativeInterstitial(
             presentation.callbacks.onImpression()
             presentation.callbacks.onPaid(ad.adValue)
             // Durable billable-impression beacon (was a fire-and-forget trackImpression).
-            AdBeaconManager.enqueue(ad.impressionId, "seen", adFormat = "interstitial")
+            AdBeaconManager.enqueue(
+                ad.impressionId,
+                "seen",
+                adFormat = "interstitial",
+                metadata = presentation.metadata,
+            )
         }
 
         if (presentation.accumulatedImpressionTimeMs >= FULLSCREEN_IMPRESSION_DELAY_MS) {
@@ -653,7 +658,7 @@ private fun CreativeHtml(
                     }
                 },
             ).apply {
-                webChromeClient = CreativeTelemetryWebChromeClient("interstitial") // capture JS console errors
+                webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
                 BridgeWebViewInstaller.install(this, bridge)
                 // Self-contained creative: asset URLs are absolute (baseURL = null).
                 loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)

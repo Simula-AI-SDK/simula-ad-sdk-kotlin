@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -36,7 +37,13 @@ class CreativeBridgeTest {
     }
 
     /** Bridge with a synchronous main dispatcher so `handle` resolves inline. */
-    private fun bridge(host: BridgeHost) = CreativeBridge(host) { it() }
+    private fun bridge(host: BridgeHost) = CreativeBridge(host, mainDispatch = { it() })
+
+    private class HostFailure : RuntimeException("must not be reported")
+
+    private class ReplyFailure : RuntimeException("must not be reported")
+
+    private class DispatchFailure : RuntimeException("must not be reported")
 
     @Test
     fun earlyCompleteRoutesAndDoesNotReply() {
@@ -72,6 +79,90 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun exactUtf16CapIsAdmitted() {
+        val host = FakeHost()
+        var dispatches = 0
+        val errors = mutableListOf<String>()
+        val message = messageOfLength("AD_EARLY_COMPLETE", CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS)
+
+        CreativeBridge(host, { dispatches++; it() }, { errors += it }).handle(message) {}
+
+        assertEquals(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS, message.length)
+        assertEquals(1, dispatches)
+        assertEquals(1, host.earlyCompletes)
+        assertTrue(errors.isEmpty())
+    }
+
+    @Test
+    fun oversizedMessageIsRejectedBeforeDispatchAndRecorded() {
+        val host = FakeHost()
+        var dispatches = 0
+        var replied = false
+        val errors = mutableListOf<String>()
+        val rejections = mutableListOf<String>()
+        val message = messageOfLength("AD_EARLY_COMPLETE", CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS) + " "
+
+        CreativeBridge(host, { dispatches++; it() }, { errors += it }, { rejections += it })
+            .handle(message) { replied = true }
+
+        assertEquals(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS + 1, message.length)
+        assertEquals(0, dispatches)
+        assertEquals(0, host.earlyCompletes)
+        assertFalse(replied)
+        assertTrue(errors.isEmpty())
+        assertEquals(listOf("too_large"), rejections)
+    }
+
+    @Test
+    fun unknownAndMalformedMessagesNeverDispatchAndRecordRejections() {
+        var dispatches = 0
+        var replied = false
+        val errors = mutableListOf<String>()
+        val rejections = mutableListOf<String>()
+        val bridge = CreativeBridge(FakeHost(), { dispatches++; it() }, { errors += it }, { rejections += it })
+
+        bridge.handle("""{"type":"UNKNOWN"}""") { replied = true }
+        bridge.handle("not json") { replied = true }
+
+        assertEquals(0, dispatches)
+        assertFalse(replied)
+        assertTrue(errors.isEmpty())
+        assertEquals(listOf("unknown_type", "malformed"), rejections)
+    }
+
+    @Test
+    fun nativeMessageTypesUseTheSameAdmissionProtection() {
+        val exact = messageOfLength("SIMULA_AD_HEIGHT", CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS)
+        val rejections = mutableListOf<String>()
+
+        assertTrue(parseKnownCreativeBridgeMessage(exact, NATIVE_AD_BRIDGE_MESSAGE_TYPES) { rejections += it } != null)
+        assertNull(parseKnownCreativeBridgeMessage("$exact ", NATIVE_AD_BRIDGE_MESSAGE_TYPES) { rejections += it })
+        assertNull(parseKnownCreativeBridgeMessage("""{"type":"NOT_NATIVE"}""", NATIVE_AD_BRIDGE_MESSAGE_TYPES) { rejections += it })
+        assertNull(parseKnownCreativeBridgeMessage("malformed", NATIVE_AD_BRIDGE_MESSAGE_TYPES) { rejections += it })
+        assertEquals(listOf("too_large", "unknown_type", "malformed"), rejections)
+    }
+
+    @Test
+    fun rejectionTelemetryIsBoundedAcrossFullScreenAndNativeMessages() {
+        val recorded = mutableListOf<String>()
+        val recorder = BoundedBridgeRejectionRecorder { recorded += it }
+
+        repeat(100) {
+            parseKnownCreativeBridgeMessage("malformed", FULL_SCREEN_BRIDGE_MESSAGE_TYPES, recorder::record)
+            parseKnownCreativeBridgeMessage("malformed", NATIVE_AD_BRIDGE_MESSAGE_TYPES, recorder::record)
+        }
+        parseKnownCreativeBridgeMessage("{}", FULL_SCREEN_BRIDGE_MESSAGE_TYPES, recorder::record)
+        parseKnownCreativeBridgeMessage("""{"type":"UNKNOWN"}""", FULL_SCREEN_BRIDGE_MESSAGE_TYPES, recorder::record)
+        parseKnownCreativeBridgeMessage(
+            " ".repeat(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS + 1),
+            NATIVE_AD_BRIDGE_MESSAGE_TYPES,
+            recorder::record,
+        )
+
+        assertEquals(listOf("malformed", "missing_type", "unknown_type", "too_large"), recorded)
+    }
+
+    @Test
     fun getAudioStateReplyShape() {
         val reply = capture("""{"type":"GET_AUDIO_STATE","requestId":"42"}""")
         assertEquals("GET_AUDIO_STATE", reply["type"]!!.jsonPrimitive.content)
@@ -99,6 +190,44 @@ class CreativeBridgeTest {
         assertEquals("14", payload["osVersion"]!!.jsonPrimitive.content)
     }
 
+    @Test
+    fun hostFailureIsAbsorbedAndRecordedOnceWithoutQueryReply() {
+        val errorCodes = mutableListOf<String>()
+        val host = object : BridgeHost by FakeHost() {
+            override fun deviceContext(): JsonObject = throw HostFailure()
+        }
+        var reply: String? = null
+
+        CreativeBridge(host, { it() }, { errorCodes += it }).handle(
+            """{"type":"GET_DEVICE_CONTEXT","requestId":"private-id"}""",
+        ) { reply = it }
+
+        assertNull(reply)
+        assertEquals(listOf("HostFailure"), errorCodes)
+    }
+
+    @Test
+    fun replyFailureIsAbsorbedAndRecordedOnce() {
+        val errorCodes = mutableListOf<String>()
+
+        CreativeBridge(FakeHost(), { it() }, { errorCodes += it }).handle(
+            """{"type":"GET_AUDIO_STATE","requestId":7}""",
+        ) { throw ReplyFailure() }
+
+        assertEquals(listOf("ReplyFailure"), errorCodes)
+    }
+
+    @Test
+    fun dispatcherFailureIsAbsorbedAndRecordedOnce() {
+        val errorCodes = mutableListOf<String>()
+
+        CreativeBridge(FakeHost(), { throw DispatchFailure() }, { errorCodes += it }).handle(
+            """{"type":"AD_EARLY_COMPLETE"}""",
+        ) {}
+
+        assertEquals(listOf("DispatchFailure"), errorCodes)
+    }
+
     /** Drives a query and parses the `window.postMessage(<json>, '*');` reply into a [JsonObject]. */
     private fun capture(message: String): JsonObject {
         var js: String? = null
@@ -106,5 +235,12 @@ class CreativeBridgeTest {
         val raw = requireNotNull(js) { "no reply for: $message" }
         val json = raw.removePrefix("window.postMessage(").removeSuffix(", '*');")
         return Json.parseToJsonElement(json).jsonObject
+    }
+
+    private fun messageOfLength(type: String, length: Int): String {
+        val prefix = "{\"type\":\"$type\",\"padding\":\""
+        val suffix = "\"}"
+        require(length >= prefix.length + suffix.length)
+        return prefix + "x".repeat(length - prefix.length - suffix.length) + suffix
     }
 }

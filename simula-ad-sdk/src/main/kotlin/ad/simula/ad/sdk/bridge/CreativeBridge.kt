@@ -8,6 +8,75 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
+/** Maximum creative bridge message size, measured as Kotlin [String.length] UTF-16 code units. */
+internal const val CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS = 64 * 1024
+
+internal val FULL_SCREEN_BRIDGE_MESSAGE_TYPES = setOf(
+    "AD_EARLY_COMPLETE",
+    "TRIGGER_HAPTIC",
+    "SET_ORIENTATION",
+    "GET_DEVICE_CONTEXT",
+    "GET_AUDIO_STATE",
+    "GET_ORIENTATION",
+)
+
+internal val NATIVE_AD_BRIDGE_MESSAGE_TYPES = setOf(
+    "SIMULA_AD_HEIGHT",
+    "AD_RESIZE",
+    "AD_FEEDBACK",
+)
+
+private val creativeBridgeJson = Json { ignoreUnknownKeys = true }
+
+private const val MAX_REPORTED_BRIDGE_REJECTION_REASONS = 4
+
+internal class BoundedBridgeRejectionRecorder(
+    private val emit: (String) -> Unit,
+) {
+    private val lock = Any()
+    private val reportedReasons = mutableSetOf<String>()
+
+    fun record(reason: String) {
+        val shouldRecord = synchronized(lock) {
+            if (reason in reportedReasons || reportedReasons.size >= MAX_REPORTED_BRIDGE_REJECTION_REASONS) {
+                false
+            } else {
+                reportedReasons.add(reason)
+            }
+        }
+        if (shouldRecord) runCatching { emit(reason) }
+    }
+}
+
+private val bridgeRejectionRecorder = BoundedBridgeRejectionRecorder { reason ->
+    Telemetry.recordOperation(
+        name = "bridge_message_rejected",
+        durationMs = 0L,
+        success = false,
+        failureClass = reason,
+    )
+}
+
+private fun recordBridgeMessageRejected(reason: String) = bridgeRejectionRecorder.record(reason)
+
+/** Rejects oversized, malformed, non-object, missing-type, and unknown-type messages off-main. */
+internal fun parseKnownCreativeBridgeMessage(
+    message: String,
+    knownTypes: Set<String>,
+    recordRejected: (String) -> Unit = ::recordBridgeMessageRejected,
+): JsonObject? {
+    fun reject(reason: String): JsonObject? {
+        runCatching { recordRejected(reason) }
+        return null
+    }
+    if (message.length > CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS) return reject("too_large")
+    val root = runCatching { creativeBridgeJson.parseToJsonElement(message) as? JsonObject }.getOrNull()
+        ?: return reject("malformed")
+    val type = (root["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        ?: return reject("missing_type")
+    return if (type in knownTypes) root else reject("unknown_type")
+}
+
 /**
  * The platform side of the WebView ↔ SDK bridge (PRD §3). Implemented by [AndroidBridgeHost]
  * (real device) and by fakes in tests, so [CreativeBridge]'s parsing / routing / reply logic is
@@ -37,19 +106,44 @@ internal interface BridgeHost {
 internal class CreativeBridge(
     private val host: BridgeHost,
     private val mainDispatch: (block: () -> Unit) -> Unit,
+    private val recordDispatchError: (errorCode: String) -> Unit = { errorCode ->
+        Telemetry.recordError(
+            signature = "bridge:creative_dispatch",
+            errorCode = errorCode,
+        )
+    },
+    private val recordRejectedMessage: (reason: String) -> Unit = ::recordBridgeMessageRejected,
 ) {
-    private val json = Json { ignoreUnknownKeys = true }
-
     /**
      * Handle one envelope. [reply] delivers a JS string back into the page (the installer binds it
-     * to `webView.evaluateJavascript`). No-ops silently on malformed input or an unknown `type`.
+     * to `webView.evaluateJavascript`). Rejects malformed input or an unknown `type` with telemetry.
      */
     fun handle(message: String, reply: (String) -> Unit) {
-        val root = runCatching { json.parseToJsonElement(message) as? JsonObject }.getOrNull() ?: return
+        val root = parseKnownCreativeBridgeMessage(
+            message,
+            FULL_SCREEN_BRIDGE_MESSAGE_TYPES,
+            recordRejectedMessage,
+        ) ?: return
         val type = root.str("type") ?: return
         val requestId = root["requestId"] // preserved verbatim so the reply echoes its JSON type
         val payload = root["payload"] as? JsonObject
-        mainDispatch { process(type, requestId, payload, reply) }
+        try {
+            mainDispatch {
+                try {
+                    process(type, requestId, payload, reply)
+                } catch (error: Throwable) {
+                    reportDispatchError(error)
+                    // The current bridge protocol has no error-reply envelope. In particular,
+                    // failed GET_* requests stay silent rather than inventing a wire contract.
+                }
+            }
+        } catch (error: Throwable) {
+            reportDispatchError(error)
+        }
+    }
+
+    private fun reportDispatchError(error: Throwable) {
+        runCatching { recordDispatchError(error::class.java.simpleName) }
     }
 
     private fun process(type: String, requestId: JsonElement?, payload: JsonObject?, reply: (String) -> Unit) {
@@ -65,8 +159,6 @@ internal class CreativeBridge(
             "GET_DEVICE_CONTEXT" -> reply(buildReply(type, requestId, host.deviceContext()))
             "GET_AUDIO_STATE" -> reply(buildReply(type, requestId, host.audioState()))
             "GET_ORIENTATION" -> reply(buildReply(type, requestId, host.currentOrientation()))
-
-            else -> return // unknown type: ignore (no telemetry)
         }
         Telemetry.recordOperation("bridge_${type.lowercase()}", 0L, true)
     }

@@ -8,6 +8,8 @@ import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -21,8 +23,8 @@ import java.util.concurrent.ConcurrentHashMap
  * from cache with no live network call — and the entry is evicted. Unconsumed ids must be released
  * with [destroy].
  *
- * At most [MAX] ads are kept at once; further preloads are dropped (PRD: "cap silently at 5, log
- * warning internally"). Backed by a [ConcurrentHashMap] so it's safe to call from any thread.
+ * At most [MAX] ads are kept at once; further preloads are dropped and recorded by telemetry.
+ * Backed by a [ConcurrentHashMap] so it's safe to call from any thread.
  */
 internal object NativeAdPreloadCache {
 
@@ -31,8 +33,6 @@ internal object NativeAdPreloadCache {
 
     private data class Entry(
         val deferred: Deferred<SimulaApiClient.NativeAdResult>,
-        val adUnitId: String?,
-        val position: Int,
     )
 
     private val entries = ConcurrentHashMap<String, Entry>()
@@ -41,13 +41,25 @@ internal object NativeAdPreloadCache {
     private val capLock = Any()
 
     /** Fire one preload and return its id, or null if the [MAX] cap is already reached. */
-    fun preload(adUnitId: String?, position: Int, theme: String? = null): String? {
+    fun preload(
+        adUnitId: String?,
+        position: Int,
+        theme: String? = null,
+        load: suspend () -> SimulaApiClient.NativeAdResult = {
+            NativeAdController.load(
+                ensureSession = { SimulaAds.store.ensureSession() },
+                adUnitId = adUnitId,
+                position = position,
+                theme = theme,
+            )
+        },
+    ): String? {
         // The check-and-insert must be atomic: a plain `size >= MAX` check then a separate put let
         // two concurrent callers both pass the check and overshoot the cap. Launching the request
         // inside the lock is fine — async() returns immediately without blocking.
         synchronized(capLock) {
             if (entries.size >= MAX) {
-                Log.w(TAG, "preloadNativeAd ignored — at most $MAX preloaded ads are kept at once.")
+                Log.w(TAG, "preloadNativeAd ignored: at most $MAX preloaded ads are kept at once.")
                 Telemetry.recordOperation("native_preload_capped", 0L, false)
                 return null
             }
@@ -55,14 +67,9 @@ internal object NativeAdPreloadCache {
             // async on the process-lifetime supervisor scope: an un-awaited failure can't crash the
             // host, and the exception is surfaced only when consume() awaits (then mapped to a live fallback).
             val deferred = SimulaScope.async {
-                NativeAdController.load(
-                    ensureSession = { SimulaAds.store.ensureSession() },
-                    adUnitId = adUnitId,
-                    position = position,
-                    theme = theme,
-                )
+                load()
             }
-            entries[id] = Entry(deferred, adUnitId, position)
+            entries[id] = Entry(deferred)
             return id
         }
     }
@@ -73,12 +80,20 @@ internal object NativeAdPreloadCache {
      * request, surfacing no error (PRD).
      */
     suspend fun consume(id: String): SimulaApiClient.NativeAdResult? {
-        val entry = entries.remove(id) ?: return null
+        val entry = entries[id] ?: return null
         return try {
-            entry.deferred.await()
+            val result = entry.deferred.await()
+            if (!entries.remove(id, entry)) return null
+            result
         } catch (e: CancellationException) {
-            throw e
+            // Caller cancellation means the slot was recycled: preserve the process-scoped preload
+            // for remount. A still-active caller means destroy() or the loader cancelled the deferred;
+            // consume that terminal entry and fail open to the slot's live-load fallback.
+            currentCoroutineContext().ensureActive()
+            entries.remove(id, entry)
+            null
         } catch (_: Exception) {
+            entries.remove(id, entry)
             null
         }
     }

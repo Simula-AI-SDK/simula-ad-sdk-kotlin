@@ -28,7 +28,10 @@ internal object NativeAdCache {
 
     /** A cached fill (with its measured height + whether its impression already fired) or a no-fill. */
     internal sealed interface Value {
-        class Fill(val result: SimulaApiClient.NativeAdResult) : Value {
+        class Fill(
+            val result: SimulaApiClient.NativeAdResult,
+            val seenMetadata: Map<String, String>?,
+        ) : Value {
             @Volatile var heightDp: Float = 0f
             @Volatile var impressionFired: Boolean = false
         }
@@ -69,8 +72,13 @@ internal object NativeAdCache {
     fun get(adUnitId: String?, position: Int): Value? =
         synchronized(lock) { entries[key(adUnitId, position)] }
 
-    fun putFill(adUnitId: String?, position: Int, result: SimulaApiClient.NativeAdResult): Value.Fill {
-        val fill = Value.Fill(result)
+    fun putFill(
+        adUnitId: String?,
+        position: Int,
+        result: SimulaApiClient.NativeAdResult,
+        seenMetadata: Map<String, String>?,
+    ): Value.Fill {
+        val fill = Value.Fill(result, seenMetadata)
         synchronized(lock) { entries[key(adUnitId, position)] = fill }
         return fill
     }

@@ -1,7 +1,6 @@
 package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.ads.SimulaAdError
-import ad.simula.ad.sdk.ads.SimulaAds
 import ad.simula.ad.sdk.network.AdUnitNotFoundException
 import ad.simula.ad.sdk.network.SimulaApiClient
 import kotlinx.coroutines.CancellationException
@@ -26,10 +25,10 @@ internal object NativeAdController {
         adUnitId: String?,
         position: Int,
         theme: String? = null,
+        metadata: Map<String, String>? = null,
     ): SimulaApiClient.NativeAdResult {
-        // Distinguish "SDK never initialized" from "session creation failed" — both leave the session
-        // null, but the publisher's fix differs (call initialize() vs. check key/network).
-        if (!SimulaAds.isInitialized) throw SimulaAdError.NotInitialized
+        // The resolver is authoritative: declarative slots own a provider session and imperative
+        // preloads enforce SimulaAds initialization before reaching this controller.
         val sessionId = ensureSession()
         if (sessionId.isNullOrBlank()) throw SimulaAdError.NoSession
 
@@ -40,6 +39,7 @@ internal object NativeAdController {
                 adUnitId = adUnitId,
                 context = NativeAdContextStore.current,
                 theme = theme,
+                metadata = metadata,
             )
         } catch (e: CancellationException) {
             throw e

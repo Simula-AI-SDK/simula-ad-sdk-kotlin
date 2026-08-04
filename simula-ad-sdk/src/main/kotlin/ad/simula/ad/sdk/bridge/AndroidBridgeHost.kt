@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.bridge
 
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
 import android.content.Context
 import android.content.pm.ActivityInfo
@@ -30,9 +31,12 @@ internal fun androidCreativeBridge(
 ): CreativeBridge {
     val main = Handler(Looper.getMainLooper())
     val host = AndroidBridgeHost(appContext.applicationContext, activityProvider, onEarlyComplete)
-    return CreativeBridge(host) { block ->
-        if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post { block() }
-    }
+    return CreativeBridge(
+        host = host,
+        mainDispatch = { block ->
+            if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post { block() }
+        },
+    )
 }
 
 /** [BridgeHost] backed by Android framework APIs. */
@@ -48,12 +52,10 @@ internal class AndroidBridgeHost(
 
     override fun setOrientation(orientation: String) {
         val activity = activityProvider() ?: return
-        activity.requestedOrientation = when (orientation) {
-            "portrait" -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            "landscape" -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-            "auto" -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            else -> return
-        }
+        applyRequestedOrientation(
+            orientation = orientation,
+            assign = { activity.requestedOrientation = it },
+        )
     }
 
     override fun deviceContext(): JsonObject {
@@ -81,6 +83,26 @@ internal class AndroidBridgeHost(
             appContext.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         return buildJsonObject { put("orientation", if (landscape) "landscape" else "portrait") }
     }
+}
+
+internal fun requestedOrientationFor(orientation: String): Int? = when (orientation) {
+    "portrait" -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    "landscape" -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+    "auto" -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    else -> null
+}
+
+/** API 26 translucent/floating activities may reject this assignment; absorb and report that case. */
+internal fun applyRequestedOrientation(
+    orientation: String,
+    assign: (Int) -> Unit,
+    recordFailure: (String) -> Unit = { errorCode ->
+        Telemetry.recordError(signature = "bridge:orientation_failed", errorCode = errorCode)
+    },
+) {
+    val requestedOrientation = requestedOrientationFor(orientation) ?: return
+    runCatching { assign(requestedOrientation) }
+        .onFailure { error -> runCatching { recordFailure(error.javaClass.simpleName) } }
 }
 
 /** Maps `TRIGGER_HAPTIC` styles to vibration effects. Requires the `VIBRATE` permission. */
