@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.bridge.NATIVE_AD_BRIDGE_MESSAGE_TYPES
 import ad.simula.ad.sdk.bridge.parseKnownCreativeBridgeMessage
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.isWebViewMemoryConstrained
 import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.content.ComponentCallbacks2
@@ -197,12 +198,9 @@ internal object NativeAdWebViewStore {
     /** Retained-view cap on a low-RAM / small-heap device, where 3 retained views are too costly. */
     private const val MAX_RETAINED_LOW_RAM = 1
 
-    /** Heaps below this are treated as low-end (small Dalvik heap ⇒ retain fewer views). */
-    private const val LOW_HEAP_THRESHOLD_BYTES = 128L * 1024 * 1024
-
     // Resolved once on first [registerTrimCallbacks] (where an app context is available) so the cap
-    // can consult ActivityManager.isLowRamDevice(); a `const` can't read runtime state. Defaults to
-    // the normal cap until then. Volatile: written on the main thread, read in evictIfNeeded().
+    // can consult the shared physical-RAM/heap policy. Defaults to the normal cap until then.
+    // Volatile: written on the main thread, read in evictIfNeeded().
     @Volatile private var maxRetained = MAX_RETAINED
 
     /** One retained creative: its [webView] + the [wiring] its bridge points at + what's loaded. */
@@ -437,15 +435,21 @@ internal object NativeAdWebViewStore {
         }
     }
 
-    /** Pick the retained-view cap once per process: 1 on a low-RAM / small-heap device, else 3. */
+    /** Pick the retained-view cap once per process: 1 on a constrained device, else 3. */
     @MainThread
     private fun resolveMaxRetained(appContext: Context) {
-        val lowRam = runCatching {
+        val constrained = runCatching {
             val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
-            am?.isLowRamDevice == true
-        }.getOrDefault(false)
-        val smallHeap = Runtime.getRuntime().maxMemory() < LOW_HEAP_THRESHOLD_BYTES
-        maxRetained = if (lowRam || smallHeap) MAX_RETAINED_LOW_RAM else MAX_RETAINED
+                ?: return@runCatching true
+            val memory = android.app.ActivityManager.MemoryInfo()
+            am.getMemoryInfo(memory)
+            isWebViewMemoryConstrained(
+                isLowRamDevice = am.isLowRamDevice,
+                totalRamBytes = memory.totalMem,
+                maxHeapBytes = Runtime.getRuntime().maxMemory(),
+            )
+        }.getOrDefault(true)
+        maxRetained = if (constrained) MAX_RETAINED_LOW_RAM else MAX_RETAINED
     }
 
     private fun registerTrimCallbacks(appContext: Context) {

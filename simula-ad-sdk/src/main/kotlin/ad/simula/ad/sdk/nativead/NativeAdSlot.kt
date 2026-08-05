@@ -115,7 +115,11 @@ fun NativeAdSlot(
     // Surface a native failure to the publisher and record it for telemetry (errorCode parity with the
     // imperative ads). Reused by the load, no-fill, and creative-render-failure paths.
     fun reportError(error: NativeAdError) {
-        Telemetry.recordError(signature = "native:load", errorCode = error.telemetryCode(), breadcrumb = "NativeAdSlot")
+        // No-fill is an expected inventory outcome, already represented by load_fail below. Keeping
+        // it out of TYPE_ERROR prevents product availability from inflating the SDK fault rate.
+        if (error.shouldRecordErrorTelemetry()) {
+            Telemetry.recordError(signature = "native:load", errorCode = error.telemetryCode(), breadcrumb = "NativeAdSlot")
+        }
         // load_fail lifecycle parity with interstitial/rewarded (native previously emitted error
         // telemetry only). adFormat is fixed for native; no creative is loaded so adId is null.
         Telemetry.recordLifecycle(
