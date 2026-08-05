@@ -45,6 +45,11 @@ import android.net.Uri
  */
 internal object CreativeCtaRouter {
 
+    /** Prefer the attribution URL carried outside rendered HTML, whose script text may HTML-escape
+     * query separators. Older payloads without that field keep using the creative's tapped URL. */
+    internal fun preferredClickUrl(trackingUrl: String?, embeddedUrl: String): String =
+        trackingUrl?.takeIf { it.isNotBlank() } ?: embeddedUrl
+
     /**
      * The URL a creative CTA should open: the tracking link itself, trimmed and **verbatim**
      * (never rewritten into a store URL), or — when the tracker is blank/missing AND the

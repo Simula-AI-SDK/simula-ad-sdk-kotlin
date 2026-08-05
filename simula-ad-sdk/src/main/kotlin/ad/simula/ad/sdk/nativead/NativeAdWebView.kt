@@ -581,7 +581,7 @@ internal class NativeAdWiring(
      * rides along so the router can deterministically land an appstore CTA on the store when the
      * tracker can't be launched (parity with the interstitial/rewarded CTAs). */
     fun openExternal(tappedUrl: String) {
-        val target = trackingUrl?.takeIf { it.isNotBlank() } ?: tappedUrl
+        val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, tappedUrl)
         CreativeCtaRouter.open(appContext, target, destination, storeUrl = storeUrl)
         onAdClick()
     }

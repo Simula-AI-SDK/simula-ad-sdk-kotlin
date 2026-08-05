@@ -136,6 +136,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                         )
                     },
                     // End-screen CTA routing context (deterministic store fallback).
+                    ctaTrackingUrl = p.trackingUrl,
                     ctaDestination = p.destination,
                     ctaStoreUrl = p.androidStoreUrl,
                 ) { onClose ->
@@ -500,9 +501,13 @@ private fun RewardedMinigame(
                             // pre-router failure behavior). Only a user-gesture navigation counts
                             // as a click (parity with the interstitial); auto-redirects open the
                             // store but don't fire CLICKED.
+                            val target = CreativeCtaRouter.preferredClickUrl(
+                                presentation.trackingUrl,
+                                requestUrl,
+                            )
                             val opened = CreativeCtaRouter.open(
                                 ctx.applicationContext,
-                                requestUrl,
+                                target,
                                 presentation.destination,
                                 presentation.adBehavior?.storeOpen,
                                 presentation.androidStoreUrl,
