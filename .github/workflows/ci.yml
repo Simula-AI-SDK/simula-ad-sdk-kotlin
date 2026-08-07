@@ -2,9 +2,14 @@ name: CI
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ main, dev ]
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -14,6 +19,7 @@ jobs:
   build:
     name: Build, test & assemble AAR
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -26,18 +32,21 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Verify release version
+        run: ./gradlew :simula-ad-sdk:verifyVersionConsistency
+
       - name: Compile (fail fast)
-        run: ./gradlew compileDebugKotlin
+        run: ./gradlew :simula-ad-sdk:compileDebugKotlin
 
       - name: Run all unit tests
-        run: ./gradlew testDebugUnitTest
+        run: ./gradlew :simula-ad-sdk:testDebugUnitTest :simula-ad-sdk:testReleaseUnitTest
 
       - name: Build release AAR
-        run: ./gradlew assembleRelease
+        run: ./gradlew :simula-ad-sdk:assembleRelease
 
       - name: Upload AAR artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ad-sdk-aar
+          name: ad-sdk-aar-${{ github.sha }}
           path: simula-ad-sdk/build/outputs/aar/*.aar
           if-no-files-found: error
