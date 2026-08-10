@@ -2,6 +2,8 @@ package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.ads.SimulaAdError
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Tier-0 pure-logic tests for the native error taxonomy: telemetry codes + the internal mapping from
@@ -15,6 +17,15 @@ class NativeAdErrorTest {
         assertEquals("no_fill", NativeAdError.NoFill.telemetryCode())
         assertEquals("network", NativeAdError.Network.telemetryCode())
         assertEquals("ad_unit_not_found", NativeAdError.AdUnitNotFound.telemetryCode())
+    }
+
+    @Test
+    fun `no fill stays out of error telemetry while real failures remain`() {
+        assertFalse(NativeAdError.NoFill.shouldRecordErrorTelemetry())
+        assertTrue(NativeAdError.NotInitialized.shouldRecordErrorTelemetry())
+        assertTrue(NativeAdError.NoSession.shouldRecordErrorTelemetry())
+        assertTrue(NativeAdError.Network.shouldRecordErrorTelemetry())
+        assertTrue(NativeAdError.AdUnitNotFound.shouldRecordErrorTelemetry())
     }
 
     @Test

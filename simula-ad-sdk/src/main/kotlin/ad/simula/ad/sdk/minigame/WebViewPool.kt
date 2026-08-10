@@ -1,7 +1,9 @@
 package ad.simula.ad.sdk.minigame
 
+import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.MutableContextWrapper
@@ -9,14 +11,18 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
-import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.annotation.MainThread
+
+/** Shared limits for all SDK-owned WebView retention, backed by production renderer-OOM data. */
+private const val CONSTRAINED_DEVICE_RAM_BYTES = 4L * 1024 * 1024 * 1024
+private const val CONSTRAINED_HEAP_BYTES = 256L * 1024 * 1024
 
 /**
  * Prewarms and recycles [WebView] instances so the game / post-game ad iframe
@@ -35,7 +41,12 @@ import androidx.annotation.MainThread
  */
 internal object WebViewPool {
 
-    private const val MAX_IDLE = 2
+    /** One spare is enough to hide Chromium startup without pinning a second idle renderer client. */
+    private const val MAX_IDLE = 1
+
+    /** Avoid recreating an idle renderer immediately after Android killed it or signalled pressure. */
+    private const val POOL_COOLDOWN_MS = 5L * 60 * 1000
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val idle = ArrayDeque<WebView>()
 
@@ -43,21 +54,31 @@ internal object WebViewPool {
     val pooledCount: Int get() = idle.size
 
     @Volatile private var callbacksRegistered = false
+    @Volatile private var maxIdle = MAX_IDLE
+    @Volatile private var poolingBlockedUntilMs = 0L
 
     /** Swallows the prewarm `about:blank` navigation so consumers never see it. */
     private val blankIgnoringClient = object : WebViewClient() {
         override fun onPageFinished(view: WebView?, url: String?) { /* ignore about:blank */ }
         // A pooled view can sit idle on about:blank for a while; absorb a renderer death here too so
-        // it can't kill the host process before the view is handed to (or returned by) a consumer.
-        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
-            recordRenderProcessGone("pool_idle", detail)
+        // it can't kill the host process before the view is handed to a consumer. Every WebView
+        // attached to the dead renderer is unusable, so destroy the whole idle pool and pause
+        // prewarming; retaining the callback's dead view would later hand out a permanently blank ad.
+        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+            val absorbed = recordRenderProcessGone("pool_idle", detail)
+            if (view != null && view in idle) {
+                suspendPooling()
+                trimIdle()
+            }
+            return absorbed
+        }
     }
 
     /** Create and warm an idle WebView if there's room. Cheap no-op when full. */
     @MainThread
     fun prewarm(context: Context) {
         registerTrimCallbacks(context)
-        if (idle.size >= MAX_IDLE) return
+        if (!canRetainPooledWebView(maxIdle, idle.size, SystemClock.elapsedRealtime(), poolingBlockedUntilMs)) return
         idle.addLast(create(context))
     }
 
@@ -104,7 +125,7 @@ internal object WebViewPool {
         (webView.parent as? ViewGroup)?.removeView(webView)
         // Drop the Activity reference so a pooled WebView can't leak it.
         (webView.context as? MutableContextWrapper)?.let { it.baseContext = it.applicationContext }
-        if (idle.size < MAX_IDLE) {
+        if (canRetainPooledWebView(maxIdle, idle.size, SystemClock.elapsedRealtime(), poolingBlockedUntilMs)) {
             // Re-pooling: reset to about:blank so a recycled view never flashes the prior creative.
             // about:blank tears down the page's DOM/JS context; clearHistory drops back/forward state.
             // (No clearCache — that flushes the app-global RAM cache and would undercut prewarming
@@ -136,6 +157,11 @@ internal object WebViewPool {
         while (idle.isNotEmpty()) idle.removeFirst().destroy()
     }
 
+    private fun suspendPooling() {
+        val blockedUntil = SystemClock.elapsedRealtime() + POOL_COOLDOWN_MS
+        if (blockedUntil > poolingBlockedUntilMs) poolingBlockedUntilMs = blockedUntil
+    }
+
     // The check-and-set below is intentionally NOT synchronized: like the unsynchronized [idle]
     // deque, it relies on this object's whole-class @MainThread contract (only `prewarm`/`acquire`,
     // both @MainThread, reach here), so the two callers can never run concurrently. `callbacksRegistered`
@@ -144,19 +170,42 @@ internal object WebViewPool {
     @MainThread
     private fun registerTrimCallbacks(context: Context) {
         if (callbacksRegistered) return
-        context.applicationContext.registerComponentCallbacks(object : ComponentCallbacks2 {
+        val appContext = context.applicationContext
+        resolveMaxIdle(appContext)
+        appContext.registerComponentCallbacks(object : ComponentCallbacks2 {
             override fun onTrimMemory(level: Int) {
-                if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) trimIdle()
+                if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+                    suspendPooling()
+                    trimIdle()
+                }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onLowMemory() {
+                suspendPooling()
                 trimIdle()
             }
 
             override fun onConfigurationChanged(newConfig: Configuration) {}
         })
         callbacksRegistered = true
+    }
+
+    /** Constrained devices skip idle pooling entirely; active WebViews still work normally. */
+    @MainThread
+    private fun resolveMaxIdle(appContext: Context) {
+        val constrained = runCatching {
+            val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                ?: return@runCatching true
+            val memory = ActivityManager.MemoryInfo()
+            am.getMemoryInfo(memory)
+            isWebViewMemoryConstrained(
+                isLowRamDevice = am.isLowRamDevice,
+                totalRamBytes = memory.totalMem,
+                maxHeapBytes = Runtime.getRuntime().maxMemory(),
+            )
+        }.getOrDefault(true)
+        maxIdle = if (constrained) 0 else MAX_IDLE
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -178,3 +227,21 @@ internal object WebViewPool {
         }
     }
 }
+
+/** Pure retention policy kept outside Android callbacks for deterministic JVM coverage. */
+internal fun canRetainPooledWebView(
+    maxIdle: Int,
+    idleCount: Int,
+    nowMs: Long,
+    blockedUntilMs: Long,
+): Boolean = maxIdle > 0 && idleCount < maxIdle && nowMs >= blockedUntilMs
+
+/** Shared pure memory policy for the idle pool and retained native-ad WebViews. */
+internal fun isWebViewMemoryConstrained(
+    isLowRamDevice: Boolean,
+    totalRamBytes: Long,
+    maxHeapBytes: Long,
+): Boolean =
+    isLowRamDevice ||
+        totalRamBytes <= CONSTRAINED_DEVICE_RAM_BYTES ||
+        maxHeapBytes <= CONSTRAINED_HEAP_BYTES

@@ -35,6 +35,9 @@ internal fun NativeAdError.telemetryCode(): String = when (this) {
     NativeAdError.AdUnitNotFound -> "ad_unit_not_found"
 }
 
+/** No-fill is an expected inventory outcome: keep its lifecycle event, but not an error event. */
+internal fun NativeAdError.shouldRecordErrorTelemetry(): Boolean = this != NativeAdError.NoFill
+
 /**
  * Maps an internal load-path [SimulaAdError] to the public native taxonomy. Only the four native
  * outcomes can occur on the native load path; any other case is mapped defensively to

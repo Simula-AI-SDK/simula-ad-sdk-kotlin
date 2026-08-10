@@ -15,6 +15,23 @@ import org.junit.Test
 class CreativeCtaRouterTest {
 
     @Test
+    fun `top-level tracker wins over the URL embedded in HTML`() {
+        val tracker = "https://tracker.example/click?a=1&b=2"
+        val embedded = "https://tracker.example/click?a=1&amp;b=2"
+
+        assertEquals(tracker, CreativeCtaRouter.preferredClickUrl(tracker, embedded))
+    }
+
+    @Test
+    fun `missing or blank top-level tracker falls back to embedded URL`() {
+        val embedded = "https://example.com/landing"
+
+        assertEquals(embedded, CreativeCtaRouter.preferredClickUrl(null, embedded))
+        assertEquals(embedded, CreativeCtaRouter.preferredClickUrl("", embedded))
+        assertEquals(embedded, CreativeCtaRouter.preferredClickUrl("   ", embedded))
+    }
+
+    @Test
     fun `opens the tracking link verbatim regardless of destination`() {
         val tracking = "https://app.appsflyer.com/id123?pid=net&c=camp&af_siteid=pub&clickid=abc"
         // The opened URL is exactly the tracker — same host, query untouched, never a market:// link.

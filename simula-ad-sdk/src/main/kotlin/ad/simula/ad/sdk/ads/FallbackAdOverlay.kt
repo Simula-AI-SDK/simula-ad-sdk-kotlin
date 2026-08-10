@@ -74,6 +74,7 @@ internal fun FallbackAdHost(
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
     // through the shared router (tracker verbatim, raw store link as the deterministic fallback).
     // Defaults preserve today's behavior when no context is available.
+    ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
     content: @Composable (onClose: () -> Unit) -> Unit,
@@ -137,6 +138,7 @@ internal fun FallbackAdHost(
                     html = ad.html,
                     adId = ad.adId,
                     onAdClick = onAdClick,
+                    ctaTrackingUrl = ctaTrackingUrl,
                     ctaDestination = ctaDestination,
                     ctaStoreUrl = ctaStoreUrl,
                     onClose = {
@@ -167,6 +169,7 @@ private fun FallbackAdOverlay(
     html: String? = null,
     adId: String,
     onAdClick: () -> Unit = {},
+    ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
     onClose: () -> Unit,
@@ -247,9 +250,13 @@ private fun FallbackAdOverlay(
                             // deterministic fallback when it can't be launched. A failed launch
                             // returns false so the WebView navigates in place (the pre-router
                             // failure behavior).
+                            val clickTarget = CreativeCtaRouter.preferredClickUrl(
+                                ctaTrackingUrl,
+                                target,
+                            )
                             val opened = CreativeCtaRouter.open(
                                 ctx.applicationContext,
-                                target,
+                                clickTarget,
                                 ctaDestination,
                                 null,
                                 ctaStoreUrl,
