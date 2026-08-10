@@ -23,16 +23,22 @@ restrict release-tag creation to release maintainers.
 2. Run `./gradlew :simula-ad-sdk:verifyVersionConsistency`,
    `./gradlew compileDebugKotlin`, and `./gradlew testDebugUnitTest`.
 3. Merge the version change to `main` after CI passes.
-4. Create and push the stable tag from that exact `main` commit:
+4. Create and push the release tag from that exact `main` commit. Stable tags use `vMAJOR.MINOR.PATCH`;
+   test releases use `vMAJOR.MINOR.PATCH-dev.NUMBER`:
 
    ```bash
    git tag -a v1.2.3 -m "Release 1.2.3"
    git push origin v1.2.3
+
+   # Test release
+   git tag -a v1.2.4-dev.1 -m "Test release 1.2.4-dev.1"
+   git push origin v1.2.4-dev.1
    ```
 
-The workflow verifies that the tag is a stable semantic version, belongs to `main`, matches all
+The workflow verifies that the tag is a supported release version, belongs to `main`, matches all
 runtime version constants, and does not already exist on Maven Central. It then runs the full release
-gate, signs and publishes the artifacts, and creates the GitHub release.
+gate, signs and publishes the artifacts, and creates the GitHub release. Test releases are marked as
+GitHub prereleases.
 
-Development builds must not be published to Maven Central. Use Maven Local or a separate internal
-repository for snapshots.
+Maven Central versions are immutable, including test releases. Increment the `-dev.NUMBER` suffix for
+every test attempt. Use Maven Local or a separate internal repository for snapshots.

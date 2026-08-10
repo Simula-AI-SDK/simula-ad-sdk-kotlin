@@ -8,7 +8,7 @@ plugins {
     alias(libs.plugins.vanniktech.maven.publish)
 }
 
-val sdkVersion = "1.1.7"
+val sdkVersion = "1.1.8-dev.1"
 
 android {
     namespace = "ad.simula.ad.sdk"
