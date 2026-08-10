@@ -1,0 +1,142 @@
+name: Release to Maven Central
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: maven-central-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Validate and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: maven-central
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Validate release tag
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?)$ ]] || {
+            echo "::error::Release tags must use vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-dev.NUMBER"
+            exit 1
+          }
+          VERSION="${BASH_REMATCH[1]}"
+          git fetch origin main
+          RELEASE_COMMIT=$(git rev-parse "${TAG}^{commit}")
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main || {
+            echo "::error::Release tag must point to a commit on main"
+            exit 1
+          }
+          SUCCESSFUL_RUNS=$(gh run list \
+            --workflow CI \
+            --commit "$RELEASE_COMMIT" \
+            --json conclusion \
+            --jq 'map(select(.conclusion == "success")) | length')
+          [[ "$SUCCESSFUL_RUNS" -gt 0 ]] || {
+            echo "::error::Release commit must have a successful CI run"
+            exit 1
+          }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version sync
+        run: |
+          ./gradlew :simula-ad-sdk:verifyVersionConsistency
+          grep -Fq "val sdkVersion = \"${{ steps.version.outputs.version }}\"" \
+            simula-ad-sdk/build.gradle.kts || {
+              echo "::error::Tag version does not match sdkVersion"
+              exit 1
+            }
+
+      - name: Reject an existing Maven Central version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          URL="https://repo1.maven.org/maven2/ad/simula/ad-sdk/$VERSION/ad-sdk-$VERSION.pom"
+          if curl --fail --silent --show-error --head "$URL" >/dev/null; then
+            echo "::error::ad.simula:ad-sdk:$VERSION already exists on Maven Central"
+            exit 1
+          fi
+
+      - name: Build and test release
+        run: |
+          ./gradlew clean \
+            :simula-ad-sdk:compileDebugKotlin \
+            :simula-ad-sdk:testDebugUnitTest \
+            :simula-ad-sdk:testReleaseUnitTest \
+            :simula-ad-sdk:assembleRelease
+
+      - name: Upload release AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-aar-${{ github.sha }}
+          path: simula-ad-sdk/build/outputs/aar/simula-ad-sdk-release.aar
+          if-no-files-found: error
+
+      - name: Publish to Maven Central
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.MAVEN_SIGNING_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_SIGNING_PASSWORD }}
+        run: ./gradlew :simula-ad-sdk:publishAndReleaseToMavenCentral --no-configuration-cache
+
+  release:
+    name: Create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download release AAR
+        uses: actions/download-artifact@v4
+        with:
+          name: release-aar-${{ github.sha }}
+          path: release-artifact
+
+      - name: Create release and upload AAR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          RELEASE_TYPE=()
+          if [[ "$VERSION" == *-dev.* ]]; then
+            RELEASE_TYPE=(--prerelease)
+          fi
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --generate-notes \
+              --title "$GITHUB_REF_NAME" \
+              "${RELEASE_TYPE[@]}"
+          fi
+          gh release upload "$GITHUB_REF_NAME" \
+            "release-artifact/simula-ad-sdk-release.aar#ad-sdk-$VERSION.aar" \
+            --clobber

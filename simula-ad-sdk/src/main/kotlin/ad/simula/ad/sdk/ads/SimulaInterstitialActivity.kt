@@ -169,6 +169,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                         )
                     },
                     // End-screen CTA routing context (deterministic store fallback).
+                    ctaTrackingUrl = p.ad.trackingUrl,
                     ctaDestination = p.ad.destination,
                     ctaStoreUrl = p.ad.androidStoreUrl,
                 ) { onClose ->
@@ -487,6 +488,7 @@ private fun CreativeInterstitial(
         if (html != null) {
             CreativeHtml(
                 html = html,
+                trackingUrl = ad.trackingUrl,
                 destination = ad.destination,
                 storeUrl = ad.androidStoreUrl,
                 bridge = bridge,
@@ -585,6 +587,7 @@ private fun CreativeInterstitial(
 @Composable
 private fun CreativeHtml(
     html: String,
+    trackingUrl: String?,
     destination: String,
     storeUrl: String? = null,
     bridge: CreativeBridge,
@@ -651,7 +654,8 @@ private fun CreativeHtml(
                         // the launch actually succeeding — parity with the rewarded playable — so
                         // a failed launch is never recorded as a click/store visit; returning
                         // false then lets the WebView navigate in place.
-                        val opened = CreativeCtaRouter.open(appContext, url, destination, null, storeUrl)
+                        val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, url)
+                        val opened = CreativeCtaRouter.open(appContext, target, destination, null, storeUrl)
                         if (!opened) return false
                         onAdClick() // CLICKED
                         return true

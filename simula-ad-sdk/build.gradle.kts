@@ -1,3 +1,5 @@
+import org.gradle.api.publish.maven.tasks.AbstractPublishToMaven
+
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
@@ -5,6 +7,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.vanniktech.maven.publish)
 }
+
+val sdkVersion = "1.1.8-dev.1"
 
 android {
     namespace = "ad.simula.ad.sdk"
@@ -51,7 +55,7 @@ mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
     signAllPublications()
 
-    coordinates("ad.simula", "ad-sdk", findProperty("VERSION_NAME")?.toString() ?: "1.1.7")
+    coordinates("ad.simula", "ad-sdk", sdkVersion)
 
     pom {
         name.set("Simula Ad SDK")
@@ -79,6 +83,47 @@ mavenPublishing {
             url.set("https://github.com/Simula-AI-SDK/simula-ad-sdk-kotlin")
         }
     }
+}
+
+val verifyVersionConsistency = tasks.register("verifyVersionConsistency") {
+    group = "verification"
+    description = "Verifies that Maven, telemetry, and public API versions match."
+
+    val telemetryFile = file("src/main/kotlin/ad/simula/ad/sdk/telemetry/Telemetry.kt")
+    val sdkInfoFile = file("src/main/kotlin/ad/simula/ad/sdk/SimulaAdSdk.kt")
+    inputs.files(telemetryFile, sdkInfoFile)
+    inputs.property("sdkVersion", sdkVersion)
+
+    doLast {
+        fun versionFrom(file: File, pattern: Regex, label: String): String =
+            pattern.find(file.readText())?.groupValues?.get(1)
+                ?: throw GradleException("Could not read $label version from ${file.path}")
+
+        val telemetryVersion = versionFrom(
+            telemetryFile,
+            Regex("SIMULA_SDK_VERSION\\s*=\\s*\"([^\"]+)\""),
+            "telemetry",
+        )
+        val publicApiVersion = versionFrom(
+            sdkInfoFile,
+            Regex("const val VERSION\\s*=\\s*\"([^\"]+)\""),
+            "public API",
+        )
+        val versions = mapOf(
+            "Maven" to sdkVersion,
+            "telemetry" to telemetryVersion,
+            "public API" to publicApiVersion,
+        )
+        if (versions.values.toSet().size != 1) {
+            throw GradleException(
+                "SDK versions must match: " + versions.entries.joinToString { "${it.key}=${it.value}" },
+            )
+        }
+    }
+}
+
+tasks.withType<AbstractPublishToMaven>().configureEach {
+    dependsOn(verifyVersionConsistency)
 }
 
 dependencies {
