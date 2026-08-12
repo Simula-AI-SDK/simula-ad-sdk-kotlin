@@ -5,7 +5,7 @@ Stable releases are published as `ad.simula:ad-sdk:<version>` to Maven Central b
 
 ## One-time GitHub setup
 
-Create a `maven-central` environment, require a reviewer, and add these environment secrets:
+Create a `Maven` environment, require a reviewer, and add these environment secrets:
 
 - `MAVEN_CENTRAL_USERNAME`: Central Portal publishing token username
 - `MAVEN_CENTRAL_PASSWORD`: Central Portal publishing token password

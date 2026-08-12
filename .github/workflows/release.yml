@@ -18,7 +18,7 @@ jobs:
     name: Validate and publish
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    environment: maven-central
+    environment: Maven
     steps:
       - uses: actions/checkout@v4
         with:
@@ -80,6 +80,36 @@ jobs:
           URL="https://repo1.maven.org/maven2/ad/simula/ad-sdk/$VERSION/ad-sdk-$VERSION.pom"
           if curl --fail --silent --show-error --head "$URL" >/dev/null; then
             echo "::error::ad.simula:ad-sdk:$VERSION already exists on Maven Central"
+            exit 1
+          fi
+
+      - name: Validate publishing secrets
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_SIGNING_KEY: ${{ secrets.MAVEN_SIGNING_KEY }}
+          MAVEN_SIGNING_KEY_ID: ${{ secrets.MAVEN_SIGNING_KEY_ID }}
+          MAVEN_SIGNING_PASSWORD: ${{ secrets.MAVEN_SIGNING_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REQUIRED_SECRETS=(
+            MAVEN_CENTRAL_USERNAME
+            MAVEN_CENTRAL_PASSWORD
+            MAVEN_SIGNING_KEY
+            MAVEN_SIGNING_KEY_ID
+            MAVEN_SIGNING_PASSWORD
+          )
+          MISSING_SECRETS=()
+          for NAME in "${REQUIRED_SECRETS[@]}"; do
+            [[ -n "${!NAME:-}" ]] || MISSING_SECRETS+=("$NAME")
+          done
+          if (( ${#MISSING_SECRETS[@]} > 0 )); then
+            echo "::error::Missing secrets in the Maven environment: ${MISSING_SECRETS[*]}"
+            exit 1
+          fi
+          if [[ "$MAVEN_SIGNING_KEY" != *"-----BEGIN PGP PRIVATE KEY BLOCK-----"* ]]; then
+            echo "::error::MAVEN_SIGNING_KEY must contain an ASCII-armored PGP private key"
             exit 1
           fi
 
