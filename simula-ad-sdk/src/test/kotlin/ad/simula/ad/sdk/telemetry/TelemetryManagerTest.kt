@@ -138,6 +138,64 @@ class TelemetryManagerTest {
     }
 
     @Test
+    fun `same wire error name keeps distinct fingerprinted crash sites`() = runTest {
+        val sender = FakeSender()
+        val m = build(this, FakeStore(), sender)
+
+        repeat(2) {
+            m.recordError(
+                signature = "exit:anr",
+                stack = listOf("nativead.NativeAdSlot.render(NativeAdSlot.kt:10)"),
+                fingerprint = "0123456789abcdef",
+            )
+        }
+        m.recordError(
+            signature = "exit:anr",
+            stack = listOf("minigame.GameWebView.load(GameWebView.kt:20)"),
+            fingerprint = "fedcba9876543210",
+        )
+        advanceUntilIdle()
+
+        val errors = sender.batches.allEvents().filter { it.type == TYPE_ERROR && it.name == "exit:anr" }
+        assertEquals("wire name is unchanged", setOf("exit:anr"), errors.map { it.name }.toSet())
+        val countsByStack = errors.groupBy { it.stack.orEmpty() }
+            .mapValues { (_, events) -> events.sumOf { it.count ?: 0 } }
+        assertEquals("two crash sites remain distinct", 2, countsByStack.size)
+        assertEquals(listOf(1, 2), countsByStack.values.sorted())
+        assertEquals(
+            setOf("0123456789abcdef", "fedcba9876543210"),
+            errors.mapNotNull {
+                it.breadcrumb?.substringAfter("fp=", missingDelimiterValue = "")?.takeIf { value -> value.isNotEmpty() }
+            }.toSet(),
+        )
+    }
+
+    @Test
+    fun `in-flight reconciliation does not remove a newer crash site with the same wire name`() = runTest {
+        val sender = FakeSender().apply { gateFirst() }
+        val m = build(this, FakeStore(), sender)
+
+        m.recordError("exit:native_crash", stack = listOf("ads.First.show(First.kt:1)"))
+        runCurrent()
+        assertEquals(1, sender.sendCount)
+
+        m.recordError("exit:native_crash", stack = listOf("ads.Second.show(Second.kt:2)"))
+        runCurrent()
+        sender.release()
+        advanceUntilIdle()
+
+        val errors = sender.batches.allEvents().filter { it.type == TYPE_ERROR && it.name == "exit:native_crash" }
+        assertEquals(2, errors.size)
+        assertEquals(
+            setOf(
+                listOf("ads.First.show(First.kt:1)"),
+                listOf("ads.Second.show(Second.kt:2)"),
+            ),
+            errors.map { it.stack.orEmpty() }.toSet(),
+        )
+    }
+
+    @Test
     fun `an error triggers an eager flush`() = runTest {
         val sender = FakeSender()
         val m = build(this, FakeStore(), sender)
@@ -220,6 +278,37 @@ class TelemetryManagerTest {
 
         assertTrue(sender.batches.allEvents().any { it.eventId == "id-prev" })
         assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `recovery rebuilds internal keys from persisted stack context`() = runTest {
+        val seeded = listOf(
+            TelemetryEvent(
+                type = TYPE_ERROR,
+                name = "exit:anr",
+                eventId = "site-a",
+                timestamp = 1L,
+                stack = listOf("nativead.A.block(A.kt:1)"),
+                count = 2,
+            ),
+            TelemetryEvent(
+                type = TYPE_ERROR,
+                name = "exit:anr",
+                eventId = "site-b",
+                timestamp = 2L,
+                stack = listOf("minigame.B.block(B.kt:2)"),
+                count = 3,
+            ),
+        )
+        val sender = FakeSender()
+        val m = build(this, FakeStore(seeded), sender)
+
+        m.start()
+        advanceUntilIdle()
+
+        val recovered = sender.batches.allEvents().filter { it.type == TYPE_ERROR && it.name == "exit:anr" }
+        assertEquals(2, recovered.size)
+        assertEquals(5, recovered.sumOf { it.count ?: 0 })
     }
 
     // ── Retry + backoff ─────────────────────────────────────────────────────────

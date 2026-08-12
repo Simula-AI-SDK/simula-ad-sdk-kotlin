@@ -85,7 +85,9 @@ internal class TelemetryManager(
     private val mutex = Mutex()
     // Perf/network/lifecycle/operation events, FIFO.
     private val buffer = ArrayDeque<TelemetryEvent>()
-    // Handled errors aggregated by signature (the event `name`) within the flush window.
+    // Handled errors aggregated by an internal key within the flush window. The event's wire
+    // `name` stays unchanged; crash/ANR sites add persisted fingerprint/stack context to this key
+    // so two sites sharing one stable wire name cannot collapse into each other.
     private val errorAgg = LinkedHashMap<String, TelemetryEvent>()
     private var droppedCount = 0
     private var isFlushing = false
@@ -111,8 +113,17 @@ internal class TelemetryManager(
         scope.launch {
             mutex.withLock {
                 for (e in store.load()) {
-                    if (e.type == TYPE_ERROR && e.name.isNotEmpty()) errorAgg[e.name] = e
-                    else buffer.addLast(e)
+                    if (e.type == TYPE_ERROR && e.name.isNotEmpty()) {
+                        val key = telemetryErrorAggregationKey(e.name, e.breadcrumb, e.stack)
+                        val existing = errorAgg[key]
+                        if (existing == null) {
+                            errorAgg[key] = e
+                        } else {
+                            existing.count = (existing.count ?: 1) + (e.count ?: 1)
+                        }
+                    } else {
+                        buffer.addLast(e)
+                    }
                 }
             }
             flush()
@@ -235,30 +246,33 @@ internal class TelemetryManager(
         message: String? = null,
         breadcrumb: String? = null,
         stack: List<String>? = null,
+        fingerprint: String? = null,
     ) {
         if (!isEnabled) return
+        val persistedBreadcrumb = appendTelemetryFingerprint(breadcrumb, fingerprint)
         val event = newEvent(TYPE_ERROR, name = signature).copy(
             errorCode = errorCode,
             // Sanitize at the source so secrets are stripped from BOTH the dev log and the
             // payload sent to the backend (exception text can embed URLs/tokens).
             message = redact(message),
-            breadcrumb = breadcrumb,
+            breadcrumb = persistedBreadcrumb,
             // Frames are structural (Class.method(File:line) / SDK trace lines) — no free text,
             // so unlike `message` they carry no URLs/tokens/PII and need no redaction.
             stack = stack,
             count = 1,
         )
+        val aggregationKey = telemetryErrorAggregationKey(signature, persistedBreadcrumb, stack)
         debugLog?.invoke(formatForLog(event))
         scope.launch {
             val eagerFlush = mutex.withLock {
-                val existing = errorAgg[signature]
+                val existing = errorAgg[aggregationKey]
                 when {
                     existing != null -> {
                         existing.count = (existing.count ?: 1) + 1
                         false
                     }
                     errorAgg.size < MAX_ERROR_SIGNATURES -> {
-                        errorAgg[signature] = event
+                        errorAgg[aggregationKey] = event
                         store.save(snapshot()) // first occurrence is durable immediately
                         true
                     }
@@ -383,8 +397,8 @@ internal class TelemetryManager(
             isFlushing = true
             pendingBuffer = buffer.toList()
             // Deep-ish copy of error events so the in-flight count can't drift the payload.
-            val errorEvents = errorAgg.values.map { it.copy() }
-            pendingErrors = errorEvents.associate { it.name to (it.count ?: 1) }
+            val errorEvents = errorAgg.map { (key, event) -> key to event.copy() }
+            pendingErrors = errorEvents.associate { (key, event) -> key to (event.count ?: 1) }
             droppedSnap = droppedCount
             // Snapshot the events under the lock (the buffers are mutable shared state); the actual
             // JSON serialization happens AFTER releasing the lock so encoding a large batch can't
@@ -392,7 +406,7 @@ internal class TelemetryManager(
             // (session/ppid/gaid) + immutable context, none of which are guarded by this mutex.
             events = ArrayList<TelemetryEvent>(pendingBuffer.size + errorEvents.size + 1).apply {
                 addAll(pendingBuffer)
-                addAll(errorEvents)
+                addAll(errorEvents.map { it.second })
                 if (droppedSnap > 0) add(newEvent(TYPE_META, "dropped").copy(count = droppedSnap))
             }
         }
@@ -508,6 +522,39 @@ internal class TelemetryManager(
         val SECRET_RE = Regex("(?i)(api[_-]?key|token|secret|password)([=:])\\S+")
     }
 }
+
+/**
+ * Internal-only aggregation key for handled errors. The stable wire [name] is always the prefix and
+ * is never rewritten. Crash/ANR callers persist a 16-hex fingerprint in the breadcrumb; older
+ * records (or other structured errors) can still isolate sites via their persisted stack. Generic
+ * errors with neither context keep the historical name-only aggregation behavior.
+ */
+internal fun telemetryErrorAggregationKey(
+    name: String,
+    breadcrumb: String?,
+    stack: List<String>?,
+): String {
+    val fingerprint = telemetryFingerprintFromBreadcrumb(breadcrumb)
+        ?: stack?.takeIf { it.isNotEmpty() }?.let { fnv1a64Hex(it.take(8)) }
+        ?: return name
+    return "$name\u0000$fingerprint"
+}
+
+/** Add a validated fingerprint to the existing wire breadcrumb without creating a new wire key. */
+internal fun appendTelemetryFingerprint(breadcrumb: String?, fingerprint: String?): String? {
+    val normalized = fingerprint?.lowercase()?.takeIf { TELEMETRY_FINGERPRINT_RE.matches(it) }
+        ?: return breadcrumb
+    if (telemetryFingerprintFromBreadcrumb(breadcrumb) != null) return breadcrumb
+    return if (breadcrumb.isNullOrBlank()) "fp=$normalized" else "$breadcrumb;fp=$normalized"
+}
+
+private fun telemetryFingerprintFromBreadcrumb(breadcrumb: String?): String? {
+    if (breadcrumb.isNullOrBlank()) return null
+    return TELEMETRY_FINGERPRINT_FIELD.find(breadcrumb)?.groupValues?.getOrNull(1)?.lowercase()
+}
+
+private val TELEMETRY_FINGERPRINT_RE = Regex("[0-9a-fA-F]{16}")
+private val TELEMETRY_FINGERPRINT_FIELD = Regex("(?:^|;)fp=([0-9a-fA-F]{16})(?:;|$)")
 
 /** Exponential backoff for failed telemetry batches: 2s, 4s, 8s … capped at 60s. */
 internal fun telemetryBackoffMs(retryCount: Int): Long {

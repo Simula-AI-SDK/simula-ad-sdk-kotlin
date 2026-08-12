@@ -12,6 +12,79 @@ import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.io.File
 
+private const val CRASH_SDK_PACKAGE = "ad.simula.ad.sdk"
+private const val CRASH_SDK_CLASS_PREFIX = "$CRASH_SDK_PACKAGE."
+internal const val MAX_FRAMES = 8
+private const val MAX_CANONICAL_FRAME_LENGTH = 160
+private const val MAX_INCIDENT_CONTEXT_LENGTH = 180
+private val HEX_ADDRESS_RE = Regex("0x[0-9a-fA-F]+")
+private val WHITESPACE_RE = Regex("\\s+")
+
+/**
+ * Deterministic unsigned 64-bit FNV-1a over at most eight NUL-delimited canonical SDK frames.
+ * The fixed 16-lowercase-hex representation is shared with the Swift watchdog implementation.
+ */
+internal fun fnv1a64Hex(frames: List<String>): String {
+    var hash = -3750763034362895579L // unsigned 0xcbf29ce484222325
+    frames.take(MAX_FRAMES).forEach { frame ->
+        for (byte in frame.toByteArray(Charsets.UTF_8)) {
+            hash = hash xor (byte.toLong() and 0xffL)
+            hash *= 1099511628211L
+        }
+        hash = hash xor 0x00L
+        hash *= 1099511628211L
+    }
+    return java.lang.Long.toUnsignedString(hash, 16).padStart(16, '0')
+}
+
+/** Canonical SDK-only throwable frames, walking causes in order and excluding host frames. */
+internal fun canonicalSdkFrames(t: Throwable): List<String> {
+    val frames = ArrayList<String>(MAX_FRAMES)
+    val seen = HashSet<Throwable>()
+    var current: Throwable? = t
+    while (current != null && seen.add(current) && frames.size < MAX_FRAMES) {
+        for (frame in current.stackTrace) {
+            if (!frame.className.startsWith(CRASH_SDK_CLASS_PREFIX)) continue
+            val owner = frame.className.removePrefix(CRASH_SDK_CLASS_PREFIX)
+            val location = when {
+                frame.fileName != null && frame.lineNumber >= 0 -> "${frame.fileName}:${frame.lineNumber}"
+                frame.fileName != null -> frame.fileName
+                else -> "unknown"
+            }
+            frames.add("$owner.${frame.methodName}($location)".take(MAX_CANONICAL_FRAME_LENGTH))
+            if (frames.size >= MAX_FRAMES) break
+        }
+        current = current.cause
+    }
+    return frames
+}
+
+/** Canonical SDK-only lines from an OS-native ANR/crash trace. */
+internal fun canonicalSdkFrames(trace: String): List<String> =
+    trace.lineSequence().mapNotNull { line ->
+        val start = line.indexOf(CRASH_SDK_CLASS_PREFIX)
+        if (start < 0) null
+        else line.substring(start)
+            .replace(HEX_ADDRESS_RE, "0x?")
+            .replace(WHITESPACE_RE, " ")
+            .trim()
+            .take(MAX_CANONICAL_FRAME_LENGTH)
+            .takeIf { it.isNotEmpty() }
+    }.take(MAX_FRAMES).toList()
+
+/**
+ * Conservative ANR attribution: only the quoted `main` thread block may implicate the SDK. SDK
+ * worker frames elsewhere in the all-thread dump are intentionally ignored.
+ */
+internal fun anrMainThreadInvolvesSdk(trace: String): Boolean {
+    var inMain = false
+    for (line in trace.lineSequence()) {
+        if (line.startsWith("\"")) inMain = line.startsWith("\"main\"")
+        else if (inMain && line.contains(CRASH_SDK_PACKAGE)) return true
+    }
+    return false
+}
+
 /**
  * Process-wide crash capture for the SDK, routed into [Telemetry]. No NDK required:
  *
@@ -36,9 +109,9 @@ import java.io.File
  */
 internal object SimulaCrashGuard {
 
-    private const val SDK_PACKAGE = "ad.simula.ad.sdk"
+    private const val SDK_PACKAGE = CRASH_SDK_PACKAGE
     /** Trailing dot so a host package like `ad.simula.ad.sdkfoo` can't false-positive a class match. */
-    private const val SDK_CLASS_PREFIX = "ad.simula.ad.sdk."
+    private const val SDK_CLASS_PREFIX = CRASH_SDK_CLASS_PREFIX
     private const val DIR = "simula_crash"
     private const val PENDING_FILE = "pending_crashes.txt"
     private const val PREFS = "simula_crash_prefs"
@@ -53,8 +126,6 @@ internal object SimulaCrashGuard {
 
     /** Cap the pending file so a crash-on-launch loop can't grow it without bound. */
     private const val MAX_FILE_BYTES = 64L * 1024
-    /** Stack frames kept in the (300-char-capped) telemetry message — enough to locate + group. */
-    private const val MAX_FRAMES = 6
     /** Bytes of an [ApplicationExitInfo] trace scanned for attribution. */
     private const val MAX_TRACE_BYTES = 256 * 1024
     /** Most-recent crash records replayed per launch. Bounds the SQLite-write burst a crash-loop
@@ -119,13 +190,14 @@ internal object SimulaCrashGuard {
         if (!dir.exists()) dir.mkdirs()
         val file = File(dir, PENDING_FILE)
         if (file.length() >= MAX_FILE_BYTES) return // crash-loop guard
+        val frames = canonicalSdkFrames(t)
         val record = listOf(
             System.currentTimeMillis().toString(),
             thread.name.orEmpty(),
             signatureFor(t),
             t.javaClass.simpleName,
             compactStack(t),
-            stackFrames(t).joinToString(FRAME_SEP),
+            frames.joinToString(FRAME_SEP),
         ).joinToString(FIELD_SEP) { it.replace(FIELD_SEP, " ").replace("\n", NL_ESC) }
         file.appendText(record + "\n")
     }
@@ -145,12 +217,15 @@ internal object SimulaCrashGuard {
             // 6th field (frames) is present on records written by this SDK version; older
             // 5-field records simply carry no structured stack.
             val stack = if (f.size >= 6 && f[5].isNotBlank()) f[5].split(FRAME_SEP) else null
+            val fingerprint = stack?.takeIf { it.isNotEmpty() }?.let(::fnv1a64Hex)
+            val threadKind = if (f[1] == "main") "main" else "background"
             Telemetry.recordError(
                 signature = f[2],
                 errorCode = f[3],
                 message = f[4].replace(NL_ESC, "\n"),
-                breadcrumb = "fatal=uncaught;thread=${f[1]}",
+                breadcrumb = "fatal=uncaught;thread=$threadKind",
                 stack = stack,
+                fingerprint = fingerprint,
             )
         }
     }
@@ -172,7 +247,7 @@ internal object SimulaCrashGuard {
         return null
     }
 
-    /** Exception type + message + the top [MAX_FRAMES] frames; [Telemetry] caps it to 300 chars. */
+    /** Exception type + message + the top [MAX_FRAMES] frames; Telemetry caps it to 300 chars. */
     private fun compactStack(t: Throwable): String {
         val sb = StringBuilder(t.javaClass.simpleName)
         t.message?.takeIf { it.isNotBlank() }?.let { sb.append(": ").append(it) }
@@ -187,10 +262,6 @@ internal object SimulaCrashGuard {
         return if (e.fileName != null && e.lineNumber >= 0) "$cls.${e.methodName}(${e.fileName}:${e.lineNumber})"
         else "$cls.${e.methodName}"
     }
-
-    /** Top [MAX_FRAMES] frames as structured strings, for the wire `stack` field. */
-    private fun stackFrames(t: Throwable): List<String> =
-        t.stackTrace.take(MAX_FRAMES).map { fmtFrame(it) }
 
     // ── ApplicationExitInfo sweep (ANR / native crash; API 30+) ───────────────────
 
@@ -230,13 +301,32 @@ internal object SimulaCrashGuard {
         // - Native crash: the faulting thread can be any thread, so a whole-trace match is right.
         val attributed = if (kind == "anr") anrMainThreadInvolvesSdk(trace) else trace.contains(SDK_PACKAGE)
         if (!attributed) return
+        val frames = canonicalSdkFrames(trace)
+        val fingerprint = frames.takeIf { it.isNotEmpty() }?.let(::fnv1a64Hex)
+        val incidentContext = incidentContext(info)
         Telemetry.recordError(
             signature = "exit:$kind",
             errorCode = "exit_reason_${info.reason}",
             message = sdkExcerpt(trace),
-            breadcrumb = "fatal=$kind;desc=${info.description?.take(40)}",
-            stack = sdkFrames(trace).ifEmpty { null },
+            breadcrumb = "fatal=$kind;$incidentContext",
+            stack = frames.ifEmpty { null },
+            fingerprint = fingerprint,
         )
+    }
+
+    /**
+     * Bounded, non-identifying OS context for exit diagnostics. Numeric platform fields help
+     * distinguish renderer pressure from logic failures without adding new wire keys.
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun incidentContext(info: ApplicationExitInfo): String {
+        return buildString {
+            append("incidentMs=").append(info.timestamp.coerceAtLeast(0L))
+            append(";status=").append(info.status)
+            append(";importance=").append(info.importance)
+            append(";pssKb=").append(info.pss)
+            append(";rssKb=").append(info.rss)
+        }.take(MAX_INCIDENT_CONTEXT_LENGTH)
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
@@ -255,29 +345,9 @@ internal object SimulaCrashGuard {
         }
     }.getOrNull()
 
-    /**
-     * True only if the SDK appears in the **main thread's** stack within an ANR dump. ANR traces are
-     * grouped into per-thread blocks, each opening with a quoted thread name (`"main" …`, `"Thread-3" …`)
-     * and continuing until the next quoted header. We track only the `"main"` block so an idle SDK
-     * worker thread elsewhere in the dump can't attribute a host ANR to us. Errs toward under-matching
-     * (an unrecognized header format just means we skip) — never toward exfiltrating a host ANR.
-     */
-    private fun anrMainThreadInvolvesSdk(trace: String): Boolean {
-        var inMain = false
-        for (line in trace.lineSequence()) {
-            if (line.startsWith("\"")) inMain = line.startsWith("\"main\"")
-            else if (inMain && line.contains(SDK_PACKAGE)) return true
-        }
-        return false
-    }
-
-    /** The SDK-mentioning trace lines (trimmed), capped — the relevant frames for [stack]. */
-    private fun sdkFrames(trace: String): List<String> =
-        trace.lineSequence().filter { it.contains(SDK_PACKAGE) }.take(MAX_FRAMES).map { it.trim() }.toList()
-
     /** Those frames joined for the (300-char-capped) telemetry message; falls back to the raw trace. */
     private fun sdkExcerpt(trace: String): String {
-        val lines = sdkFrames(trace)
+        val lines = canonicalSdkFrames(trace)
         return if (lines.isNotEmpty()) lines.joinToString(" <- ") else trace
     }
 }

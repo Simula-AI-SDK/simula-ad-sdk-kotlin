@@ -74,12 +74,38 @@ internal object WebViewPool {
         }
     }
 
-    /** Create and warm an idle WebView if there's room. Cheap no-op when full. */
+    /**
+     * Create and warm an idle WebView if there's room. An actual creation attempt emits the existing
+     * sampled operation pipeline's `webview_prewarm` event with a bounded trigger/result breadcrumb;
+     * skipped speculative work stays silent. Creation failures fail open.
+     */
     @MainThread
-    fun prewarm(context: Context) {
+    fun prewarm(context: Context, trigger: String = "unspecified") {
+        val startNanos = System.nanoTime()
         registerTrimCallbacks(context)
-        if (!canRetainPooledWebView(maxIdle, idle.size, SystemClock.elapsedRealtime(), poolingBlockedUntilMs)) return
-        idle.addLast(create(context))
+        val decision = webViewPrewarmDecision(
+            maxIdle = maxIdle,
+            idleCount = idle.size,
+            nowMs = SystemClock.elapsedRealtime(),
+            blockedUntilMs = poolingBlockedUntilMs,
+        )
+        if (decision != WebViewPrewarmDecision.WARM) {
+            return
+        }
+        val created = runCatching { create(context) }
+        val webView = created.getOrNull()
+        if (webView != null) {
+            idle.addLast(webView)
+            recordPrewarm(startNanos, trigger, success = true, result = "warmed")
+        } else {
+            recordPrewarm(
+                startNanos,
+                trigger,
+                success = false,
+                result = "failed",
+                failureClass = created.exceptionOrNull()?.javaClass?.simpleName,
+            )
+        }
     }
 
     /**
@@ -104,7 +130,7 @@ internal object WebViewPool {
         // creative's telemetry chrome client mislabeling a later minigame/fallback iframe's JS errors).
         webView.webChromeClient = null
         val appContext = context.applicationContext
-        mainHandler.post { prewarm(appContext) }
+        mainHandler.post { prewarm(appContext, trigger = "acquire_refill") }
         // Warm (pool hit) vs cold (had to create) — surfaces prewarm effectiveness + cold cost.
         Telemetry.recordOperation(
             name = if (pooled != null) "webview_acquire_warm" else "webview_acquire_cold",
@@ -160,6 +186,22 @@ internal object WebViewPool {
     private fun suspendPooling() {
         val blockedUntil = SystemClock.elapsedRealtime() + POOL_COOLDOWN_MS
         if (blockedUntil > poolingBlockedUntilMs) poolingBlockedUntilMs = blockedUntil
+    }
+
+    private fun recordPrewarm(
+        startNanos: Long,
+        trigger: String,
+        success: Boolean,
+        result: String,
+        failureClass: String? = null,
+    ) {
+        Telemetry.recordOperation(
+            name = "webview_prewarm",
+            durationMs = (System.nanoTime() - startNanos) / 1_000_000,
+            success = success,
+            failureClass = failureClass?.take(40),
+            breadcrumb = "trigger=${canonicalWebViewPrewarmTrigger(trigger)};result=$result",
+        )
     }
 
     // The check-and-set below is intentionally NOT synchronized: like the unsynchronized [idle]
@@ -234,7 +276,32 @@ internal fun canRetainPooledWebView(
     idleCount: Int,
     nowMs: Long,
     blockedUntilMs: Long,
-): Boolean = maxIdle > 0 && idleCount < maxIdle && nowMs >= blockedUntilMs
+): Boolean = webViewPrewarmDecision(maxIdle, idleCount, nowMs, blockedUntilMs) == WebViewPrewarmDecision.WARM
+
+internal enum class WebViewPrewarmDecision(val wireValue: String) {
+    WARM("warmed"),
+    CONSTRAINED("constrained"),
+    FULL("full"),
+    COOLDOWN("cooldown"),
+}
+
+internal fun webViewPrewarmDecision(
+    maxIdle: Int,
+    idleCount: Int,
+    nowMs: Long,
+    blockedUntilMs: Long,
+): WebViewPrewarmDecision = when {
+    maxIdle <= 0 -> WebViewPrewarmDecision.CONSTRAINED
+    idleCount >= maxIdle -> WebViewPrewarmDecision.FULL
+    nowMs < blockedUntilMs -> WebViewPrewarmDecision.COOLDOWN
+    else -> WebViewPrewarmDecision.WARM
+}
+
+/** Keep operation cardinality bounded even if a future caller forwards host-controlled text. */
+internal fun canonicalWebViewPrewarmTrigger(trigger: String): String = when (trigger) {
+    "startup", "minigame_menu", "minigame_game", "rewarded_ready", "acquire_refill" -> trigger
+    else -> "unspecified"
+}
 
 /** Shared pure memory policy for the idle pool and retained native-ad WebViews. */
 internal fun isWebViewMemoryConstrained(

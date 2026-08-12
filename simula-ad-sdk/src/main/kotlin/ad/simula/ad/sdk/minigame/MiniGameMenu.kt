@@ -16,7 +16,6 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -68,7 +67,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -83,6 +81,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.ads.AdInfoReportOverlay
 import ad.simula.ad.sdk.telemetry.Telemetry
+import ad.simula.ad.sdk.image.BundledResourceImage
 import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.R
 import ad.simula.ad.sdk.model.GameData
@@ -159,7 +158,7 @@ fun MiniGameMenu(
         if (!isOpen) return@LaunchedEffect
 
         // Prewarm a WebView so the game/ad iframe opens without renderer cold-start.
-        WebViewPool.prewarm(context)
+        WebViewPool.prewarm(context, trigger = "minigame_menu")
 
         // Imperative interstitial path: catalog was already fetched by load().
         val preloaded = preloadedCatalog
@@ -474,11 +473,25 @@ fun MiniGameMenu(
                                                     ),
                                                 ),
                                         )
-                                        Image(
-                                            painter = painterResource(R.drawable.game_icon),
+                                        BundledResourceImage(
+                                            resourceId = R.drawable.game_icon,
                                             contentDescription = null,
                                             contentScale = ContentScale.Fit,
                                             modifier = Modifier.size(56.dp),
+                                            placeholder = {
+                                                Text(
+                                                    text = "🎮",
+                                                    fontSize = 28.sp,
+                                                    modifier = Modifier.align(Alignment.Center),
+                                                )
+                                            },
+                                            fallback = {
+                                                Text(
+                                                    text = "🎮",
+                                                    fontSize = 28.sp,
+                                                    modifier = Modifier.align(Alignment.Center),
+                                                )
+                                            },
                                         )
                                     }
 
@@ -562,13 +575,28 @@ fun MiniGameMenu(
                                             verticalArrangement = Arrangement.spacedBy(16.dp),
                                             modifier = Modifier.padding(20.dp),
                                         ) {
-                                            Image(
-                                                painter = painterResource(R.drawable.games_unavailable),
+                                            BundledResourceImage(
+                                                resourceId = R.drawable.games_unavailable,
                                                 contentDescription = "Games unavailable",
                                                 contentScale = ContentScale.Crop,
                                                 modifier = Modifier
                                                     .size(150.dp)
-                                                    .clip(CircleShape),
+                                                    .clip(CircleShape)
+                                                    .background(appliedSecondaryFontColor.copy(alpha = 0.08f)),
+                                                placeholder = {
+                                                    Text(
+                                                        text = "🎮",
+                                                        fontSize = 48.sp,
+                                                        modifier = Modifier.align(Alignment.Center),
+                                                    )
+                                                },
+                                                fallback = {
+                                                    Text(
+                                                        text = "🎮",
+                                                        fontSize = 48.sp,
+                                                        modifier = Modifier.align(Alignment.Center),
+                                                    )
+                                                },
                                             )
                                             Text(
                                                 text = "No games are available to play right now. Please check back later!",

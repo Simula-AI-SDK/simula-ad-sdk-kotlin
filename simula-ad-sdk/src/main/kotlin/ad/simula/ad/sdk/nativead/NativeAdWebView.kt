@@ -239,7 +239,9 @@ internal object NativeAdWebViewStore {
         }
         val session = Session(impressionId, apiKey, NativeAdWiring(appContext, apiKey, impressionId))
         sessions[impressionId] = session
-        evictIfNeeded()
+        // The session is not attached until AndroidView.factory runs. Evicting here could select
+        // this just-created idle entry, then return an orphan that release() would pause/retain
+        // outside the bounded map. Enforce after attach (and again after every release) instead.
         return session
     }
 
@@ -267,6 +269,7 @@ internal object NativeAdWebViewStore {
             session.attached = true
             session.wiring.webView = retained // visibility pushes target the live view
             retained.repaintOnNextFrame() // repaint the stale hardware layer (avoid a black/blank frame)
+            evictIfNeeded()
             return retained
         }
         // A retained view whose render process died (e.g. killed while this slot was scrolled off) is
@@ -295,6 +298,7 @@ internal object NativeAdWebViewStore {
             // release() would recycle the healthy mid-load view on scroll-out instead of retaining
             // it. onReceivedError/onReceivedHttpError re-arm the flag if the retry fails too.
             session.wiring.loadFailed = false
+            evictIfNeeded()
         }
         return fresh
     }
@@ -308,6 +312,7 @@ internal object NativeAdWebViewStore {
         if (released === session.webView && session.wiring.renderGone) {
             session.attached = false
             discardDeadView(session)
+            evictIfNeeded()
             return
         }
         // Ephemeral (preview) / orphaned views are recycled, and so is a view whose creative load
@@ -325,6 +330,7 @@ internal object NativeAdWebViewStore {
                 session.wiring.loadFailed = false
             }
             session.attached = false
+            evictIfNeeded()
             return
         }
         session.attached = false
@@ -332,6 +338,9 @@ internal object NativeAdWebViewStore {
         released.onPause() // suspend the creative's JS/rendering while off-screen (per-instance; no global timers)
         // Drop the Activity reference so a retained, off-screen view can't leak it.
         (released.context as? MutableContextWrapper)?.let { it.baseContext = it.applicationContext }
+        // The store can temporarily exceed its cap while every session is attached. Enforce the cap
+        // as soon as one becomes idle; attached/on-screen views remain ineligible for eviction.
+        evictIfNeeded()
     }
 
     /** Tear down a session's render-dead [WebView]: destroy it (a dead view must never be recycled to
@@ -371,10 +380,12 @@ internal object NativeAdWebViewStore {
      * `!attached` guard in [evictIfNeeded].
      */
     fun evictAll() = onMain {
-        val it = sessions.entries.iterator()
-        while (it.hasNext()) {
-            val e = it.next()
-            if (!e.value.attached) { destroy(e.value); it.remove() }
+        val plan = retainedIdleEvictionKeys(
+            sessions.entries.map { it.key to it.value.attached },
+            maxRetained = 0,
+        )
+        for (key in plan) {
+            sessions.remove(key)?.let(::destroy)
         }
     }
 
@@ -426,12 +437,12 @@ internal object NativeAdWebViewStore {
 
     @MainThread
     private fun evictIfNeeded() {
-        val cap = maxRetained
-        if (sessions.size <= cap) return
-        val it = sessions.entries.iterator()
-        while (it.hasNext() && sessions.size > cap) {
-            val e = it.next()
-            if (!e.value.attached) { destroy(e.value); it.remove() } // LRU-first (access-ordered map)
+        val plan = retainedIdleEvictionKeys(
+            sessions.entries.map { it.key to it.value.attached },
+            maxRetained = maxRetained,
+        )
+        for (key in plan) {
+            sessions.remove(key)?.let(::destroy)
         }
     }
 
@@ -473,6 +484,27 @@ internal object NativeAdWebViewStore {
     /** Iframe URL identifies a creative directly; a rendered-HTML creative is keyed by its content. */
     private fun creativeKey(iframeUrl: String?, renderedHtml: String?): String =
         iframeUrl?.takeIf { it.isNotBlank() } ?: "html:${renderedHtml?.hashCode() ?: 0}"
+}
+
+/**
+ * Pure LRU eviction plan. [accessOrder] is oldest-first and the Boolean is `attached`; attached
+ * views are never selected, even if they alone exceed the cap. Re-run after every release so a
+ * temporary all-attached overflow is corrected the moment an idle candidate exists.
+ */
+internal fun retainedIdleEvictionKeys(
+    accessOrder: List<Pair<String, Boolean>>,
+    maxRetained: Int,
+): List<String> {
+    var remaining = accessOrder.size
+    val keys = ArrayList<String>()
+    for ((key, attached) in accessOrder) {
+        if (remaining <= maxRetained.coerceAtLeast(0)) break
+        if (!attached) {
+            keys.add(key)
+            remaining--
+        }
+    }
+    return keys
 }
 
 // ── Bridge wiring ──────────────────────────────────────────────────────────────

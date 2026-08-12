@@ -142,7 +142,8 @@ internal object Telemetry {
         message: String? = null,
         breadcrumb: String? = null,
         stack: List<String>? = null,
-    ) = manager?.recordError(signature, errorCode, message, breadcrumb, stack) ?: Unit
+        fingerprint: String? = null,
+    ) = manager?.recordError(signature, errorCode, message, breadcrumb, stack, fingerprint) ?: Unit
 
     /** Persist + attempt delivery now (e.g. app background). */
     fun flush() = manager?.flushNow() ?: Unit

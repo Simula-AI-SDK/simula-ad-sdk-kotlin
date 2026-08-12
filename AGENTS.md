@@ -95,6 +95,16 @@ SimulaScope.launch { queue.processPending() }
 - **Deferred startup**: `SimulaAds.initialize` keeps the calling thread (usually main, from `Application.onCreate`) free of disk I/O — `SimulaPrivacy.attach`, `Telemetry.initialize` (SQLite), the initial GAID refresh, the `AdBeaconManager.init` build, `SimulaCrashGuard.install` (its replay records into telemetry, so it must follow telemetry), the recovery/beacon drains, `WebViewPool.prewarm`, and the session warm-up run in the `SimulaScope` startup block in that order; `SimulaSessionStore.startupGate` holds any host load fired immediately after `initialize` until consent + telemetry + the beacon queue are in place (the queue build is inside the gate because a released load can fire billing beacons immediately, and `enqueue` is a no-op until the engine exists). Keep heavy one-time work there, not inline in `initialize`.
 - **Uninitialized SDK**: return null / render blank / log one warning. `require()` only at documented init boundaries.
 - **WebView render-process death**: absorb and report (`webview:render_gone`); returning "unhandled" kills the host process.
+- **Watchdog parity**: crash/ANR wire names stay stable; group sites internally with a persisted
+  16-hex FNV-1a fingerprint of at most 8 canonical SDK frames. Android ANRs are attributable only
+  when the SDK is on the main-thread stack. OS incident context belongs in the existing bounded
+  breadcrumb/stack fields — never add high-cardinality event names.
+- **WebView retention**: the idle pool is 1 (0 on constrained devices) with a 5-minute pressure
+  cooldown; retained native-ad views are capped at 3/1 and the cap is re-enforced after detach.
+  Background/memory policy may evict idle views but must never destroy an attached view.
+- **Bundled images**: never decode `painterResource` synchronously on a Compose path for raster
+  assets. Use the bounded, single-flight bundled-resource cache; decode in `SimulaScope` and render
+  loading/failure as a stable-size phase.
 - **Durable work** (beacons, reward verification, telemetry): serializable item + persistent store + backoff (drop permanent 4xx, retry transient) + `triggerProcessQueue()` on init for process recovery.
 - **Consent**: headers come from `SimulaPrivacy` at request time; PII (PPID/GAID) is re-read at flush from live consent, never cached.
 - **Connection type**: `X-Connection-Type` is read live per request from `SimulaConnectionType`, never cached at init.
