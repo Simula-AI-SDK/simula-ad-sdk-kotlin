@@ -478,13 +478,6 @@ fun MiniGameMenu(
                                             contentDescription = null,
                                             contentScale = ContentScale.Fit,
                                             modifier = Modifier.size(56.dp),
-                                            placeholder = {
-                                                Text(
-                                                    text = "🎮",
-                                                    fontSize = 28.sp,
-                                                    modifier = Modifier.align(Alignment.Center),
-                                                )
-                                            },
                                             fallback = {
                                                 Text(
                                                     text = "🎮",
@@ -583,13 +576,6 @@ fun MiniGameMenu(
                                                     .size(150.dp)
                                                     .clip(CircleShape)
                                                     .background(appliedSecondaryFontColor.copy(alpha = 0.08f)),
-                                                placeholder = {
-                                                    Text(
-                                                        text = "🎮",
-                                                        fontSize = 48.sp,
-                                                        modifier = Modifier.align(Alignment.Center),
-                                                    )
-                                                },
                                                 fallback = {
                                                     Text(
                                                         text = "🎮",

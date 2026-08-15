@@ -56,6 +56,7 @@ internal object WebViewPool {
     @Volatile private var callbacksRegistered = false
     @Volatile private var maxIdle = MAX_IDLE
     @Volatile private var poolingBlockedUntilMs = 0L
+    private val prewarmSkipGate = WebViewPrewarmSkipGate()
 
     /** Swallows the prewarm `about:blank` navigation so consumers never see it. */
     private val blankIgnoringClient = object : WebViewClient() {
@@ -76,8 +77,8 @@ internal object WebViewPool {
 
     /**
      * Create and warm an idle WebView if there's room. An actual creation attempt emits the existing
-     * sampled operation pipeline's `webview_prewarm` event with a bounded trigger/result breadcrumb;
-     * skipped speculative work stays silent. Creation failures fail open.
+     * sampled operation pipeline's `webview_prewarm` event with a bounded trigger/result breadcrumb.
+     * Skips emit at most once per canonical reason for the process. Creation failures fail open.
      */
     @MainThread
     fun prewarm(context: Context, trigger: String = "unspecified") {
@@ -90,6 +91,14 @@ internal object WebViewPool {
             blockedUntilMs = poolingBlockedUntilMs,
         )
         if (decision != WebViewPrewarmDecision.WARM) {
+            if (prewarmSkipGate.shouldRecord(decision)) {
+                recordPrewarm(
+                    startNanos = startNanos,
+                    trigger = trigger,
+                    success = true,
+                    result = decision.wireValue,
+                )
+            }
             return
         }
         val created = runCatching { create(context) }
@@ -188,6 +197,17 @@ internal object WebViewPool {
         if (blockedUntil > poolingBlockedUntilMs) poolingBlockedUntilMs = blockedUntil
     }
 
+    /** Share the pool's pressure/background cooldown with other SDK-owned WebView stores. */
+    @MainThread
+    internal fun suspendRetention() {
+        suspendPooling()
+    }
+
+    /** Native-ad views use the same five-minute eligibility window as idle pooled views. */
+    @MainThread
+    internal fun isRetentionEligible(): Boolean =
+        isWebViewRetentionEligible(SystemClock.elapsedRealtime(), poolingBlockedUntilMs)
+
     private fun recordPrewarm(
         startNanos: Long,
         trigger: String,
@@ -278,11 +298,21 @@ internal fun canRetainPooledWebView(
     blockedUntilMs: Long,
 ): Boolean = webViewPrewarmDecision(maxIdle, idleCount, nowMs, blockedUntilMs) == WebViewPrewarmDecision.WARM
 
+internal fun isWebViewRetentionEligible(nowMs: Long, blockedUntilMs: Long): Boolean =
+    nowMs >= blockedUntilMs
+
 internal enum class WebViewPrewarmDecision(val wireValue: String) {
     WARM("warmed"),
     CONSTRAINED("constrained"),
     FULL("full"),
     COOLDOWN("cooldown"),
+}
+
+internal class WebViewPrewarmSkipGate {
+    private val reported = HashSet<WebViewPrewarmDecision>()
+
+    fun shouldRecord(decision: WebViewPrewarmDecision): Boolean =
+        decision != WebViewPrewarmDecision.WARM && reported.add(decision)
 }
 
 internal fun webViewPrewarmDecision(

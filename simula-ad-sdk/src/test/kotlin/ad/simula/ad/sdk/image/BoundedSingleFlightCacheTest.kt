@@ -6,6 +6,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -77,5 +78,67 @@ class BoundedSingleFlightCacheTest {
         assertEquals(2, oversizedCalls)
         assertEquals(2, failedCalls)
         assertEquals(emptyList<String>(), cache.cachedKeys())
+    }
+
+    @Test
+    fun `bundled mode negatively caches failure until clear`() = runTest {
+        val cache = BoundedSingleFlightCache<String, String>(
+            maxCost = 10,
+            scope = this,
+            costOf = String::length,
+            cacheFailures = true,
+        )
+        var calls = 0
+
+        repeat(2) {
+            assertEquals(null, cache.load("failed") { calls++; null })
+        }
+
+        assertEquals(1, calls)
+        assertTrue(cache.peek("failed") is CachePeek.Failed)
+        cache.clear()
+        assertTrue(cache.peek("failed") is CachePeek.Miss)
+        assertEquals("bitmap", cache.load("failed") { calls++; "bitmap" })
+        assertEquals(2, calls)
+        assertTrue(cache.peek("failed") is CachePeek.Value)
+    }
+
+    @Test
+    fun `clear prevents older in-flight producer from repopulating cache`() = runTest {
+        val cache = BoundedSingleFlightCache<String, String>(
+            maxCost = 10,
+            scope = this,
+            costOf = String::length,
+            cacheFailures = true,
+        )
+        val gate = CompletableDeferred<Unit>()
+        var calls = 0
+        val oldLoad = async {
+            cache.load("icon") {
+                calls++
+                gate.await()
+                "old"
+            }
+        }
+        runCurrent()
+
+        cache.clear()
+        val joinedAfterClear = async {
+            cache.load("icon") {
+                calls++
+                "duplicate"
+            }
+        }
+        runCurrent()
+        assertEquals(1, calls)
+        gate.complete(Unit)
+        assertEquals("old", oldLoad.await())
+        assertEquals("old", joinedAfterClear.await())
+        assertTrue(cache.peek("icon") is CachePeek.Miss)
+
+        assertEquals("new", cache.load("icon") { calls++; "new" })
+        assertEquals(2, calls)
+        val cached = cache.peek("icon")
+        assertTrue(cached is CachePeek.Value && cached.value == "new")
     }
 }

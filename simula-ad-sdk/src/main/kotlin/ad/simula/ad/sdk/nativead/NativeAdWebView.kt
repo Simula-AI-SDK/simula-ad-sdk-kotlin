@@ -92,31 +92,33 @@ internal fun NativeAdWebView(
     visibilityRelay: VisibilityRelay? = null,
 ) {
     val context = LocalContext.current
-    // Per-creative retained session (WebView + bridge wiring) keyed by impression id. Stable across
-    // remounts via the store, so a recycled feed row reattaches the same loaded view (no reload).
-    val session = remember(impressionId, apiKey) {
-        NativeAdWebViewStore.obtain(context.applicationContext, impressionId, apiKey)
+    // Composition only creates local ownership state. The process-global LRU is not touched until
+    // AndroidView.factory runs, so an abandoned composition cannot leave an orphan store entry.
+    val owner = remember(impressionId, apiKey) {
+        NativeAdWebViewStore.createOwner(context.applicationContext, impressionId, apiKey)
     }
     // Bumped to force a remount of the AndroidView (below) when the creative's render process dies: the
     // dead WebView is torn down by onRelease and the creative is rebuilt by the factory. See
     // [NativeAdWiring.renderGone].
-    var generation by remember(session) { mutableIntStateOf(0) }
+    var generation by remember(owner) { mutableIntStateOf(0) }
     // Point the wiring at the latest callbacks + server CTA routing on each recomposition (cheap;
     // @Volatile fields). The routing is stable for a given impression but re-set here so a retained
     // session that outlives a recompose always reflects the current creative's tracking link.
-    session.wiring.onHeightPx = onHeightPx
-    session.wiring.onAdClick = onAdClick
-    session.wiring.onLoadError = onLoadError
-    session.wiring.onRenderGone = { generation++ }
-    session.wiring.onPageReady = { visibilityRelay?.flush() }
-    session.wiring.trackingUrl = trackingUrl
-    session.wiring.destination = destination
-    session.wiring.storeUrl = storeUrl
+    owner.updateWiring { wiring ->
+        wiring.onHeightPx = onHeightPx
+        wiring.onAdClick = onAdClick
+        wiring.onLoadError = onLoadError
+        wiring.onRenderGone = { generation++ }
+        wiring.onPageReady = { visibilityRelay?.flush() }
+        wiring.trackingUrl = trackingUrl
+        wiring.destination = destination
+        wiring.storeUrl = storeUrl
+    }
 
     // Route the live visible fraction (from the viewability tracker) into this slot's WebView while it
     // is mounted; unbind on dispose so a retained, off-screen creative receives no further onVisibility.
-    DisposableEffect(session, visibilityRelay) {
-        visibilityRelay?.bind { ratio -> session.wiring.pushVisibility(ratio) }
+    DisposableEffect(owner, visibilityRelay) {
+        visibilityRelay?.bind { ratio -> owner.session.wiring.pushVisibility(ratio) }
         onDispose { visibilityRelay?.bind(null) }
     }
 
@@ -130,7 +132,7 @@ internal fun NativeAdWebView(
     // again. Resume timers, re-arm the relay so the next sample is forwarded even if unchanged, and
     // deterministically wake the creative via the `onAppForeground` bridge (see character_ad.html).
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, session, visibilityRelay) {
+    DisposableEffect(lifecycleOwner, owner, visibilityRelay) {
         var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -138,6 +140,7 @@ internal fun NativeAdWebView(
                 Lifecycle.Event.ON_RESUME -> {
                     if (wasStopped) {
                         wasStopped = false
+                        val session = owner.session
                         if (session.attached) {
                             val webView = session.webView
                             webView?.repaintOnNextFrame()
@@ -159,6 +162,7 @@ internal fun NativeAdWebView(
     // onRelease destroys the dead WebView) and recreating it, whose factory rebuilds the creative.
     // generation is stable across scroll/recompose, so normal reattach still reuses the retained view.
     key(generation) {
+        val attachment = remember(owner, generation) { NativeAdWebViewStore.createAttachment(owner) }
         AndroidView(
             modifier = modifier
                 .fillMaxWidth()
@@ -166,9 +170,9 @@ internal fun NativeAdWebView(
                 // collapses to a sliver — the slot keeps a shimmer over this until the height arrives.
                 .height(if (heightDp > 0f) heightDp.dp else NATIVE_AD_PROVISIONAL_HEIGHT_DP.dp),
             // Reattaches the retained WebView (no reload) or builds + loads a fresh one on first mount.
-            factory = { NativeAdWebViewStore.attach(session, context, iframeUrl, renderedHtml, devMode) },
+            factory = { NativeAdWebViewStore.attach(attachment, context, iframeUrl, renderedHtml, devMode) },
             // Scroll-out: detach + pause + keep the loaded DOM (retained ids); recycle ephemerals/orphans.
-            onRelease = { released -> NativeAdWebViewStore.release(session, released) },
+            onRelease = { released -> NativeAdWebViewStore.release(attachment, released) },
         )
     }
 }
@@ -212,8 +216,24 @@ internal object NativeAdWebViewStore {
         var webView: WebView? = null
         /** Identity of the creative currently loaded into [webView] (so a changed creative rebuilds). */
         var loadedKey: String? = null
-        /** True while mounted in a live `AndroidView` — guards against stealing a view shown elsewhere. */
-        var attached: Boolean = false
+        /** Exact AndroidView attachment currently owning [webView], if any. */
+        var attachment: Attachment? = null
+        val attached: Boolean get() = attachment != null
+    }
+
+    /** Composition-local owner. Creating one must never mutate [sessions]. */
+    class Owner internal constructor(internal val candidate: Session) {
+        var session: Session = candidate
+
+        fun updateWiring(update: (NativeAdWiring) -> Unit) {
+            update(candidate.wiring)
+            if (session !== candidate) update(session.wiring)
+        }
+    }
+
+    /** One AndroidView instance, used to reject stale/out-of-order release callbacks. */
+    class Attachment internal constructor(val owner: Owner) {
+        var session: Session? = null
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -223,32 +243,72 @@ internal object NativeAdWebViewStore {
 
     @Volatile private var trimRegistered = false
 
-    /**
-     * The stable session for [impressionId] (created + registered on first use), or a fresh ephemeral
-     * session for a blank id. Reused across remounts so the retained view survives feed recycling.
-     */
-    @MainThread
-    fun obtain(appContext: Context, impressionId: String, apiKey: String): Session {
-        registerTrimCallbacks(appContext)
-        if (impressionId.isBlank()) {
-            return Session(impressionId, apiKey, NativeAdWiring(appContext, apiKey, impressionId))
-        }
-        sessions[impressionId]?.let {
-            if (it.apiKey == apiKey) return it
-            destroy(it); sessions.remove(impressionId) // api key changed → rebuild
-        }
-        val session = Session(impressionId, apiKey, NativeAdWiring(appContext, apiKey, impressionId))
-        sessions[impressionId] = session
-        // The session is not attached until AndroidView.factory runs. Evicting here could select
-        // this just-created idle entry, then return an orphan that release() would pause/retain
-        // outside the bounded map. Enforce after attach (and again after every release) instead.
-        return session
-    }
+    fun createOwner(appContext: Context, impressionId: String, apiKey: String): Owner =
+        Owner(Session(impressionId, apiKey, NativeAdWiring(appContext, apiKey, impressionId)))
+
+    fun createAttachment(owner: Owner): Attachment = Attachment(owner)
 
     /** Return the view to mount: the retained one (already loaded → no reload) or a freshly built one. */
     @MainThread
     fun attach(
+        attachment: Attachment,
+        hostContext: Context,
+        iframeUrl: String?,
+        renderedHtml: String?,
+        devMode: Boolean,
+    ): WebView {
+        registerTrimCallbacks(hostContext.applicationContext)
+        val requested = attachment.owner.session
+
+        // A keyed AndroidView replacement can attach before the old holder releases. The same owner
+        // takes over its own session; the old attachment's later release is ignored by identity.
+        if (requested.attachment != null) {
+            return mount(requested, attachment, hostContext, iframeUrl, renderedHtml, devMode)
+        }
+
+        val retainable = requested.impressionId.isNotBlank()
+        val existing = requested.impressionId.takeIf { retainable }?.let(sessions::get)
+        val claim = nativeSessionClaim(
+            retainable = retainable,
+            existingApiKey = existing?.apiKey,
+            requestedApiKey = requested.apiKey,
+            existingAttached = existing?.attached == true,
+            existingIsRequested = existing === requested,
+        )
+        if (claim == NativeSessionClaim.REUSE) {
+            val session = existing ?: requested
+            if (session !== requested) session.wiring.adoptCallbacksFrom(requested.wiring)
+            attachment.owner.session = session
+            return mount(session, attachment, hostContext, iframeUrl, renderedHtml, devMode)
+        }
+
+        val fresh = buildWebView(requested.wiring, hostContext, iframeUrl, renderedHtml, devMode)
+        requested.webView = fresh
+        requested.loadedKey = creativeKey(iframeUrl, renderedHtml)
+        requested.attachment = attachment
+        requested.wiring.webView = fresh
+        requested.wiring.loadFailed = false
+        attachment.session = requested
+        attachment.owner.session = requested
+
+        when (claim) {
+            NativeSessionClaim.REGISTER -> sessions[requested.impressionId] = requested
+            NativeSessionClaim.REPLACE_IDLE -> {
+                val replaced = sessions.put(requested.impressionId, requested)
+                if (replaced != null && replaced !== requested) destroy(replaced)
+            }
+            NativeSessionClaim.REPLACE_ATTACHED -> sessions[requested.impressionId] = requested
+            NativeSessionClaim.EPHEMERAL -> Unit
+            NativeSessionClaim.REUSE -> Unit
+        }
+        evictIfNeeded()
+        return fresh
+    }
+
+    @MainThread
+    private fun mount(
         session: Session,
+        attachment: Attachment,
         hostContext: Context,
         iframeUrl: String?,
         renderedHtml: String?,
@@ -257,16 +317,17 @@ internal object NativeAdWebViewStore {
         val creativeKey = creativeKey(iframeUrl, renderedHtml)
         val retained = session.webView
         // Reuse the retained view only if it is alive (render process intact), actually holds this
-        // creative (its load completed — not the about:blank a failed load left behind), and isn't
-        // already on screen elsewhere.
-        if (retained != null && session.loadedKey == creativeKey && !session.attached &&
+        // creative (its load completed — not the about:blank a failed load left behind). A newer
+        // attachment from the same owner may take it over before the old holder releases.
+        if (retained != null && session.loadedKey == creativeKey &&
             !session.wiring.renderGone && !session.wiring.loadFailed
         ) {
             (retained.context as? MutableContextWrapper)?.baseContext = hostContext // re-home for theming
             (retained.parent as? ViewGroup)?.removeView(retained)                   // clear any stale parent
             retained.webChromeClient = CreativeTelemetryWebChromeClient("character_ad", devMode)
             retained.onResume()
-            session.attached = true
+            session.attachment = attachment
+            attachment.session = session
             session.wiring.webView = retained // visibility pushes target the live view
             retained.repaintOnNextFrame() // repaint the stale hardware layer (avoid a black/blank frame)
             evictIfNeeded()
@@ -288,29 +349,45 @@ internal object NativeAdWebViewStore {
         }
         val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml, devMode)
         // Adopt as the retained instance only if the slot isn't already showing one (don't orphan it).
-        if (!session.attached) {
-            session.webView?.takeIf { it !== fresh }?.let { uninstallBridge(it); WebViewPool.release(it) }
-            session.webView = fresh
-            session.loadedKey = creativeKey
-            session.attached = true
-            session.wiring.webView = fresh
-            // [loadFailed] described the view just discarded, not this fresh retry. Left sticky,
-            // release() would recycle the healthy mid-load view on scroll-out instead of retaining
-            // it. onReceivedError/onReceivedHttpError re-arm the flag if the retry fails too.
-            session.wiring.loadFailed = false
-            evictIfNeeded()
-        }
+        session.webView?.takeIf { it !== fresh }?.let { uninstallBridge(it); WebViewPool.release(it) }
+        session.webView = fresh
+        session.loadedKey = creativeKey
+        session.attachment = attachment
+        attachment.session = session
+        session.wiring.webView = fresh
+        // [loadFailed] described the view just discarded, not this fresh retry. Left sticky,
+        // release() would recycle the healthy mid-load view on scroll-out instead of retaining
+        // it. onReceivedError/onReceivedHttpError re-arm the flag if the retry fails too.
+        session.wiring.loadFailed = false
+        evictIfNeeded()
         return fresh
     }
 
     /** Scroll-out / dispose: retain (detach + pause) the loaded view, or recycle an ephemeral/orphan. */
     @MainThread
-    fun release(session: Session, released: WebView) {
+    fun release(attachment: Attachment, released: WebView) {
+        val session = attachment.session
+        if (session == null) {
+            uninstallBridge(released)
+            WebViewPool.release(released)
+            return
+        }
+        val disposition = nativeReleaseDisposition(
+            isRegisteredOwner = session.impressionId.isNotBlank() && sessions[session.impressionId] === session,
+            isCurrentView = released === session.webView,
+            isCurrentAttachment = session.attachment === attachment,
+            loadFailed = session.wiring.loadFailed,
+            renderGone = session.wiring.renderGone,
+            retentionEligible = WebViewPool.isRetentionEligible(),
+        )
+        // A newer keyed AndroidView already took over this session. Its stale predecessor's view was
+        // moved, recycled, or destroyed during takeover, so an out-of-order release is a no-op.
+        if (disposition == NativeReleaseDisposition.IGNORE) return
         // A render-dead current view must be destroyed, never recycled to the pool — a dead view in the
         // pool would hand the next consumer a permanently-blank WebView. (This fires when the slot
         // remounts after onRenderProcessGone: the dead view is disposed here, attach() rebuilds.)
-        if (released === session.webView && session.wiring.renderGone) {
-            session.attached = false
+        if (disposition == NativeReleaseDisposition.DESTROY) {
+            session.attachment = null
             discardDeadView(session)
             evictIfNeeded()
             return
@@ -318,7 +395,7 @@ internal object NativeAdWebViewStore {
         // Ephemeral (preview) / orphaned views are recycled, and so is a view whose creative load
         // FAILED (it holds only the about:blank that pre-empted the error page): retaining it would
         // reattach a blank card on remount instead of retrying the load (see NativeAdWiring.loadFailed).
-        if (session.impressionId.isBlank() || released !== session.webView || session.wiring.loadFailed) {
+        if (disposition == NativeReleaseDisposition.RECYCLE) {
             uninstallBridge(released)
             WebViewPool.release(released)
             if (released === session.webView) {
@@ -329,11 +406,11 @@ internal object NativeAdWebViewStore {
                 // (healthy, mid-load) retry too. Mirrors discardDeadView clearing renderGone.
                 session.wiring.loadFailed = false
             }
-            session.attached = false
+            if (session.attachment === attachment) session.attachment = null
             evictIfNeeded()
             return
         }
-        session.attached = false
+        session.attachment = null
         (released.parent as? ViewGroup)?.removeView(released)
         released.onPause() // suspend the creative's JS/rendering while off-screen (per-instance; no global timers)
         // Drop the Activity reference so a retained, off-screen view can't leak it.
@@ -354,6 +431,7 @@ internal object NativeAdWebViewStore {
         }
         session.webView = null
         session.loadedKey = null
+        session.attachment = null
         session.wiring.webView = null
         session.wiring.renderGone = false
         session.wiring.loadFailed = false // a failed-then-render-dead view must not leave the flag sticky
@@ -429,7 +507,7 @@ internal object NativeAdWebViewStore {
         }
         session.webView = null
         session.loadedKey = null
-        session.attached = false
+        session.attachment = null
         session.wiring.webView = null
         session.wiring.renderGone = false
         session.wiring.loadFailed = false
@@ -468,10 +546,18 @@ internal object NativeAdWebViewStore {
         trimRegistered = true
         resolveMaxRetained(appContext)
         appContext.applicationContext.registerComponentCallbacks(object : ComponentCallbacks2 {
-            override fun onTrimMemory(level: Int) { if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) evictAll() }
+            override fun onTrimMemory(level: Int) {
+                if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+                    WebViewPool.suspendRetention()
+                    evictAll()
+                }
+            }
 
             @Deprecated("Deprecated in Java")
-            override fun onLowMemory() { evictAll() }
+            override fun onLowMemory() {
+                WebViewPool.suspendRetention()
+                evictAll()
+            }
 
             override fun onConfigurationChanged(newConfig: Configuration) {}
         })
@@ -505,6 +591,48 @@ internal fun retainedIdleEvictionKeys(
         }
     }
     return keys
+}
+
+internal enum class NativeSessionClaim {
+    REGISTER,
+    REUSE,
+    REPLACE_IDLE,
+    REPLACE_ATTACHED,
+    EPHEMERAL,
+}
+
+/** Pure ownership plan used by attach before it commits a session to the process-global store. */
+internal fun nativeSessionClaim(
+    retainable: Boolean,
+    existingApiKey: String?,
+    requestedApiKey: String,
+    existingAttached: Boolean,
+    existingIsRequested: Boolean,
+): NativeSessionClaim = when {
+    !retainable -> NativeSessionClaim.EPHEMERAL
+    existingApiKey == null -> NativeSessionClaim.REGISTER
+    existingIsRequested -> NativeSessionClaim.REUSE
+    existingApiKey == requestedApiKey && !existingAttached -> NativeSessionClaim.REUSE
+    existingApiKey == requestedApiKey -> NativeSessionClaim.EPHEMERAL
+    existingAttached -> NativeSessionClaim.REPLACE_ATTACHED
+    else -> NativeSessionClaim.REPLACE_IDLE
+}
+
+internal enum class NativeReleaseDisposition { IGNORE, RETAIN, RECYCLE, DESTROY }
+
+/** Pure release policy: only the registered current view may survive, and never during cooldown. */
+internal fun nativeReleaseDisposition(
+    isRegisteredOwner: Boolean,
+    isCurrentView: Boolean,
+    isCurrentAttachment: Boolean,
+    loadFailed: Boolean,
+    renderGone: Boolean,
+    retentionEligible: Boolean,
+): NativeReleaseDisposition = when {
+    !isCurrentAttachment -> NativeReleaseDisposition.IGNORE
+    isCurrentView && renderGone -> NativeReleaseDisposition.DESTROY
+    isRegisteredOwner && isCurrentView && !loadFailed && retentionEligible -> NativeReleaseDisposition.RETAIN
+    else -> NativeReleaseDisposition.RECYCLE
 }
 
 // ── Bridge wiring ──────────────────────────────────────────────────────────────
@@ -550,6 +678,17 @@ internal class NativeAdWiring(
     @Volatile var trackingUrl: String? = null
     @Volatile var destination: String = "appstore"
     @Volatile var storeUrl: String? = null
+
+    fun adoptCallbacksFrom(other: NativeAdWiring) {
+        onHeightPx = other.onHeightPx
+        onAdClick = other.onAdClick
+        onLoadError = other.onLoadError
+        onRenderGone = other.onRenderGone
+        onPageReady = other.onPageReady
+        trackingUrl = other.trackingUrl
+        destination = other.destination
+        storeUrl = other.storeUrl
+    }
 
     // The WebView currently displaying this wiring's creative; set by the store on (re)attach and
     // cleared on release/destroy. Used by [pushVisibility] to reach the live view.

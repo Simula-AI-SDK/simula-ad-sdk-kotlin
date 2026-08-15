@@ -23,10 +23,15 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import java.util.LinkedHashMap
-import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+
+internal sealed interface CachePeek<out V> {
+    data object Miss : CachePeek<Nothing>
+    data object Failed : CachePeek<Nothing>
+    class Value<V>(val value: V) : CachePeek<V>
+}
 
 /**
  * Small cost-bounded LRU with process-scope single-flight loading. Android-free state/coordination is
@@ -36,51 +41,75 @@ internal class BoundedSingleFlightCache<K : Any, V : Any>(
     private val maxCost: Int,
     private val scope: CoroutineScope,
     private val costOf: (V) -> Int,
+    private val cacheFailures: Boolean = false,
 ) {
     private val lock = Any()
     private val cache = LinkedHashMap<K, V>(4, 0.75f, true)
     private val costs = HashMap<K, Int>()
+    private val failed = HashSet<K>()
     private var currentCost = 0
-    private val inFlight = ConcurrentHashMap<K, Deferred<V?>>()
+    private var generation = 0L
+    private val inFlight = HashMap<K, Deferred<V?>>()
+
+    fun peek(key: K): CachePeek<V> = synchronized(lock) {
+        cache[key]?.let { return@synchronized CachePeek.Value(it) }
+        if (key in failed) CachePeek.Failed else CachePeek.Miss
+    }
 
     suspend fun load(key: K, producer: suspend () -> V?): V? {
-        synchronized(lock) { cache[key] }?.let { return it }
+        val deferred = synchronized(lock) {
+            cache[key]?.let { return it }
+            if (key in failed) return null
+            inFlight[key]?.let { return@synchronized it }
 
-        var created: Deferred<V?>? = null
-        val deferred = inFlight.computeIfAbsent(key) {
+            val loadGeneration = generation
             scope.async {
-                producer()?.also { value -> put(key, value) }
-            }.also { created = it }
+                val value = producer()
+                synchronized(lock) {
+                    if (generation == loadGeneration) {
+                        if (value != null) putLocked(key, value)
+                        else if (cacheFailures) failed.add(key)
+                    }
+                }
+                value
+            }.also { created ->
+                inFlight[key] = created
+                created.invokeOnCompletion {
+                    synchronized(lock) {
+                        if (inFlight[key] === created) inFlight.remove(key)
+                    }
+                }
+            }
         }
-        created?.invokeOnCompletion { inFlight.remove(key, deferred) }
         return deferred.await()
     }
 
     fun clear() {
         synchronized(lock) {
+            generation++
             cache.clear()
             costs.clear()
+            failed.clear()
             currentCost = 0
         }
     }
 
     internal fun cachedKeys(): List<K> = synchronized(lock) { cache.keys.toList() }
 
-    private fun put(key: K, value: V) {
+    private fun putLocked(key: K, value: V) {
         val cost = runCatching { costOf(value).coerceAtLeast(1) }.getOrDefault(maxCost + 1)
         if (maxCost <= 0 || cost > maxCost) return
-        synchronized(lock) {
-            cache.remove(key)
-            currentCost -= costs.remove(key) ?: 0
-            cache[key] = value
-            costs[key] = cost
-            currentCost += cost
-            val iterator = cache.entries.iterator()
-            while (currentCost > maxCost && iterator.hasNext()) {
-                val eldest = iterator.next()
-                currentCost -= costs.remove(eldest.key) ?: 0
-                iterator.remove()
-            }
+        failed.remove(key)
+        cache.remove(key)
+        currentCost -= costs.remove(key) ?: 0
+        cache[key] = value
+        costs[key] = cost
+        currentCost += cost
+        val iterator = cache.entries.iterator()
+        while (currentCost > maxCost && iterator.hasNext()) {
+            val eldest = iterator.next()
+            currentCost -= costs.remove(eldest.key) ?: 0
+            iterator.remove()
         }
     }
 }
@@ -100,6 +129,7 @@ internal object BundledResourceImageCache {
         maxCost = MAX_CACHE_BYTES,
         scope = SimulaScope,
         costOf = { bitmap -> bitmap.allocationByteCount.coerceAtLeast(1) },
+        cacheFailures = true,
     )
 
     @Volatile private var callbacksRegistered = false
@@ -111,6 +141,8 @@ internal object BundledResourceImageCache {
             decode(appContext, resourceId)
         }
     }
+
+    fun peek(@DrawableRes resourceId: Int): CachePeek<Bitmap> = cache.peek(resourceId)
 
     private fun decode(context: Context, @DrawableRes resourceId: Int): Bitmap? {
         return try {
@@ -193,11 +225,16 @@ internal fun BundledResourceImage(
 ) {
     val context = LocalContext.current.applicationContext
     var phase by remember(resourceId) {
-        mutableStateOf<BundledResourceImagePhase>(BundledResourceImagePhase.Loading)
+        mutableStateOf(
+            when (val cached = BundledResourceImageCache.peek(resourceId)) {
+                CachePeek.Miss -> BundledResourceImagePhase.Loading
+                CachePeek.Failed -> BundledResourceImagePhase.Failed
+                is CachePeek.Value -> BundledResourceImagePhase.Ready(cached.value)
+            },
+        )
     }
 
     LaunchedEffect(resourceId) {
-        phase = BundledResourceImagePhase.Loading
         phase = BundledResourceImageCache.load(context, resourceId)
             ?.let(BundledResourceImagePhase::Ready)
             ?: BundledResourceImagePhase.Failed

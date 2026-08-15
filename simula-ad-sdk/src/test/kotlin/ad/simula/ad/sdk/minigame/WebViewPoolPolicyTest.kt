@@ -13,6 +13,8 @@ class WebViewPoolPolicyTest {
         assertTrue(canRetainPooledWebView(maxIdle = 1, idleCount = 0, nowMs = 10_000L, blockedUntilMs = 10_000L))
         assertFalse(canRetainPooledWebView(maxIdle = 1, idleCount = 1, nowMs = 10_000L, blockedUntilMs = 0L))
         assertFalse(canRetainPooledWebView(maxIdle = 1, idleCount = 0, nowMs = 9_999L, blockedUntilMs = 10_000L))
+        assertTrue(isWebViewRetentionEligible(nowMs = 10_000L, blockedUntilMs = 10_000L))
+        assertFalse(isWebViewRetentionEligible(nowMs = 9_999L, blockedUntilMs = 10_000L))
     }
 
     @Test
@@ -28,6 +30,21 @@ class WebViewPoolPolicyTest {
         assertEquals(WebViewPrewarmDecision.WARM, webViewPrewarmDecision(1, 0, 10L, 10L))
         assertEquals("startup", canonicalWebViewPrewarmTrigger("startup"))
         assertEquals("unspecified", canonicalWebViewPrewarmTrigger("host-value-with-id-123"))
+    }
+
+    @Test
+    fun `skip diagnostics emit at most once per canonical reason`() {
+        val gate = WebViewPrewarmSkipGate()
+
+        listOf(
+            WebViewPrewarmDecision.CONSTRAINED,
+            WebViewPrewarmDecision.FULL,
+            WebViewPrewarmDecision.COOLDOWN,
+        ).forEach { decision ->
+            assertTrue(gate.shouldRecord(decision))
+            assertFalse(gate.shouldRecord(decision))
+        }
+        assertFalse(gate.shouldRecord(WebViewPrewarmDecision.WARM))
     }
 
     @Test
