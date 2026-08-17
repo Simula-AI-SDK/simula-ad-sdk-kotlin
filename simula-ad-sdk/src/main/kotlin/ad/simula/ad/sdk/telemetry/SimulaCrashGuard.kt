@@ -11,18 +11,198 @@ import androidx.annotation.RequiresApi
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
+
+private const val CRASH_SDK_PACKAGE = "ad.simula.ad.sdk"
+private const val CRASH_SDK_CLASS_PREFIX = "$CRASH_SDK_PACKAGE."
+internal const val MAX_FRAMES = 8
+private const val MAX_CANONICAL_FRAME_LENGTH = 160
+private const val MAX_INCIDENT_CONTEXT_LENGTH = 180
+private val HEX_ADDRESS_RE = Regex("0x[0-9a-fA-F]+")
+private val WHITESPACE_RE = Regex("\\s+")
+private val QUOTED_THREAD_HEADER_RE = Regex("^\\s*\"([^\"]+)\".*$")
+private val TOMBSTONE_THREAD_HEADER_RE = Regex("^\\s*pid:\\s*\\d+,\\s*tid:\\s*\\d+,\\s*name:.*$")
+
+/**
+ * Deterministic unsigned 64-bit FNV-1a over at most eight NUL-delimited canonical SDK frames.
+ * The fixed 16-lowercase-hex representation is shared with the Swift watchdog implementation.
+ */
+internal fun fnv1a64Hex(frames: List<String>): String {
+    var hash = -3750763034362895579L // unsigned 0xcbf29ce484222325
+    frames.take(MAX_FRAMES).forEach { frame ->
+        for (byte in frame.toByteArray(Charsets.UTF_8)) {
+            hash = hash xor (byte.toLong() and 0xffL)
+            hash *= 1099511628211L
+        }
+        hash = hash xor 0x00L
+        hash *= 1099511628211L
+    }
+    return java.lang.Long.toUnsignedString(hash, 16).padStart(16, '0')
+}
+
+/** Canonical SDK-only throwable frames, walking causes in order and excluding host frames. */
+internal fun canonicalSdkFrames(t: Throwable): List<String> {
+    val frames = ArrayList<String>(MAX_FRAMES)
+    val seen = HashSet<Throwable>()
+    var current: Throwable? = t
+    while (current != null && seen.add(current) && frames.size < MAX_FRAMES) {
+        for (frame in current.stackTrace) {
+            if (!frame.className.startsWith(CRASH_SDK_CLASS_PREFIX)) continue
+            val owner = frame.className.removePrefix(CRASH_SDK_CLASS_PREFIX)
+            val location = when {
+                frame.fileName != null && frame.lineNumber >= 0 -> "${frame.fileName}:${frame.lineNumber}"
+                frame.fileName != null -> frame.fileName
+                else -> "unknown"
+            }
+            frames.add("$owner.${frame.methodName}($location)".take(MAX_CANONICAL_FRAME_LENGTH))
+            if (frames.size >= MAX_FRAMES) break
+        }
+        current = current.cause
+    }
+    return frames
+}
+
+/** Canonical SDK-only lines from an OS-native ANR/crash trace. */
+internal fun canonicalSdkFrames(trace: String): List<String> =
+    trace.lineSequence().mapNotNull(::canonicalSdkTraceFrame).take(MAX_FRAMES).toList()
+
+private fun canonicalSdkTraceFrame(line: String): String? {
+    val trimmed = line.trim()
+    val candidate = when {
+        trimmed.startsWith("at ") -> {
+            val frame = trimmed.removePrefix("at ").trim()
+            val openParen = frame.indexOf('(')
+            val closeParen = frame.indexOf(')', startIndex = openParen.coerceAtLeast(0))
+            val callable = if (openParen > 0) frame.substring(0, openParen) else ""
+            if (
+                openParen <= 0 || closeParen < openParen ||
+                !callable.startsWith(CRASH_SDK_CLASS_PREFIX) || callable.any(Char::isWhitespace)
+            ) return null
+            frame.substring(0, closeParen + 1) + frame.substring(closeParen + 1)
+                .trim()
+                .takeIf { it.isEmpty() || HEX_ADDRESS_RE.matches(it) }
+                ?.let { if (it.isEmpty()) "" else " $it" }
+                .orEmpty()
+        }
+        trimmed.startsWith("#") -> {
+            val start = trimmed.indexOf(CRASH_SDK_CLASS_PREFIX)
+            if (start <= 0 || trimmed[start - 1] !in "( ") return null
+            if (trimmed[start - 1] == '(' && (start < 2 || !trimmed[start - 2].isWhitespace())) return null
+            val remainder = trimmed.substring(start)
+            val closeParen = remainder.indexOf(')')
+            if (closeParen >= 0) remainder.substring(0, closeParen + 1)
+            else remainder.substringBefore(' ').substringBefore('+')
+        }
+        else -> return null
+    }
+    return candidate
+        .replace(HEX_ADDRESS_RE, "0x?")
+        .replace(WHITESPACE_RE, " ")
+        .trim()
+        .take(MAX_CANONICAL_FRAME_LENGTH)
+        .takeIf { it.isNotEmpty() }
+}
+
+internal fun canonicalFingerprint(frames: List<String>): String? =
+    frames.take(MAX_FRAMES).takeIf { it.isNotEmpty() }?.let(::fnv1a64Hex)
+
+internal fun canonicalFrameMessage(frames: List<String>): String? =
+    frames.take(MAX_FRAMES).takeIf { it.isNotEmpty() }?.joinToString(" <- ")
+
+private fun quotedThreadBlock(trace: String, name: String): String? {
+    val block = ArrayList<String>()
+    var collecting = false
+    for (line in trace.lineSequence()) {
+        val header = QUOTED_THREAD_HEADER_RE.matchEntire(line)
+        if (header != null) {
+            if (collecting) break
+            collecting = header.groupValues[1] == name
+        } else if (collecting) {
+            block.add(line)
+        }
+    }
+    return block.takeIf { it.isNotEmpty() }?.joinToString("\n")
+}
+
+internal fun anrMainThreadSdkFrames(trace: String): List<String> =
+    quotedThreadBlock(trace, "main")?.let(::canonicalSdkFrames).orEmpty()
+
+/**
+ * Conservative ANR attribution: only the quoted `main` thread block may implicate the SDK. SDK
+ * worker frames elsewhere in the all-thread dump are intentionally ignored.
+ */
+internal fun anrMainThreadInvolvesSdk(trace: String): Boolean {
+    return anrMainThreadSdkFrames(trace).isNotEmpty()
+}
+
+/** SDK frames from a safely identified native faulting thread; ambiguous whole traces are ignored. */
+internal fun nativeCrashedThreadSdkFrames(trace: String): List<String> {
+    val lines = trace.lineSequence().toList()
+
+    // debuggerd tombstones identify the faulting thread in the first pid/tid/name header.
+    val tombstoneStart = lines.indexOfFirst { TOMBSTONE_THREAD_HEADER_RE.matches(it) }
+    if (tombstoneStart >= 0) {
+        val end = (tombstoneStart + 1 until lines.size).firstOrNull { index ->
+            TOMBSTONE_THREAD_HEADER_RE.matches(lines[index]) ||
+                QUOTED_THREAD_HEADER_RE.matches(lines[index])
+        } ?: lines.size
+        return canonicalSdkFrames(lines.subList(tombstoneStart + 1, end).joinToString("\n"))
+    }
+
+    // Some platform traces explicitly mark a quoted thread as crashed/faulting.
+    val crashMarker = Regex("\\b(crashed|faulting)\\b", RegexOption.IGNORE_CASE)
+    val markedHeader = lines.indexOfFirst { line ->
+        val firstQuote = line.indexOf('"')
+        val closingQuote = if (firstQuote >= 0) line.indexOf('"', firstQuote + 1) else -1
+        QUOTED_THREAD_HEADER_RE.matches(line) && closingQuote >= 0 &&
+            crashMarker.containsMatchIn(line.substring(closingQuote + 1))
+    }
+    if (markedHeader >= 0) {
+        val end = (markedHeader + 1 until lines.size).firstOrNull { index ->
+            QUOTED_THREAD_HEADER_RE.matches(lines[index])
+        } ?: lines.size
+        return canonicalSdkFrames(lines.subList(markedHeader + 1, end).joinToString("\n"))
+    }
+
+    return emptyList()
+}
+
+/**
+ * `ApplicationExitInfo` may return binary tombstone protobufs for native crashes. Without a public
+ * platform decoder, treat only strict UTF-8 text as parseable; under-attribution is safer than
+ * searching arbitrary protobuf bytes and attributing a host crash to an SDK worker.
+ */
+internal fun decodeTextExitTrace(bytes: ByteArray): String? {
+    if (bytes.isEmpty()) return null
+    if (bytes.any { byte ->
+            val value = byte.toInt() and 0xff
+            value < 0x20 && value != '\t'.code && value != '\n'.code && value != '\r'.code
+        }
+    ) return null
+    return runCatching {
+        StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes))
+            .toString()
+            .takeIf { it.isNotBlank() }
+    }.getOrNull()
+}
 
 /**
  * Process-wide crash capture for the SDK, routed into [Telemetry]. No NDK required:
  *
  * - **Uncaught JVM/Kotlin exceptions** are caught via [Thread.setDefaultUncaughtExceptionHandler]
  *   (this also covers `launch{}` coroutine failures, which propagate to the thread's default handler).
- * - **ANRs and native-renderer crashes** — which the handler above can't see — are harvested from
- *   [ApplicationExitInfo] on the next launch (Android 11+ / API 30).
+ * - **ANRs and parseable text native-crash traces** — which the handler above can't see — are
+ *   harvested from [ApplicationExitInfo] on the next launch (Android 11+ / API 30). Binary native
+ *   tombstones are skipped because Android exposes no public protobuf decoder for their faulting stack.
  *
  * SDK-citizen rules, deliberately baked in:
  * - **Only the SDK's own crashes are reported.** A throwable is recorded only when it (or a cause in
- *   its chain) has a frame in [SDK_PACKAGE]; an exit record only when its trace mentions the package.
+ *   its chain) has an SDK frame; exits require one on the ANR main thread or native faulting thread.
  *   The host app's unrelated crashes / ANRs are never exfiltrated.
  * - **The host's crash handling is preserved.** The previously-installed default handler is always
  *   invoked after we persist, so Crashlytics / the host's own reporting / the platform "app stopped"
@@ -36,9 +216,9 @@ import java.io.File
  */
 internal object SimulaCrashGuard {
 
-    private const val SDK_PACKAGE = "ad.simula.ad.sdk"
+    private const val SDK_PACKAGE = CRASH_SDK_PACKAGE
     /** Trailing dot so a host package like `ad.simula.ad.sdkfoo` can't false-positive a class match. */
-    private const val SDK_CLASS_PREFIX = "ad.simula.ad.sdk."
+    private const val SDK_CLASS_PREFIX = CRASH_SDK_CLASS_PREFIX
     private const val DIR = "simula_crash"
     private const val PENDING_FILE = "pending_crashes.txt"
     private const val PREFS = "simula_crash_prefs"
@@ -53,8 +233,6 @@ internal object SimulaCrashGuard {
 
     /** Cap the pending file so a crash-on-launch loop can't grow it without bound. */
     private const val MAX_FILE_BYTES = 64L * 1024
-    /** Stack frames kept in the (300-char-capped) telemetry message — enough to locate + group. */
-    private const val MAX_FRAMES = 6
     /** Bytes of an [ApplicationExitInfo] trace scanned for attribution. */
     private const val MAX_TRACE_BYTES = 256 * 1024
     /** Most-recent crash records replayed per launch. Bounds the SQLite-write burst a crash-loop
@@ -119,13 +297,15 @@ internal object SimulaCrashGuard {
         if (!dir.exists()) dir.mkdirs()
         val file = File(dir, PENDING_FILE)
         if (file.length() >= MAX_FILE_BYTES) return // crash-loop guard
+        val frames = canonicalSdkFrames(t)
+        val message = canonicalFrameMessage(frames) ?: return
         val record = listOf(
             System.currentTimeMillis().toString(),
             thread.name.orEmpty(),
             signatureFor(t),
             t.javaClass.simpleName,
-            compactStack(t),
-            stackFrames(t).joinToString(FRAME_SEP),
+            message,
+            frames.joinToString(FRAME_SEP),
         ).joinToString(FIELD_SEP) { it.replace(FIELD_SEP, " ").replace("\n", NL_ESC) }
         file.appendText(record + "\n")
     }
@@ -142,15 +322,25 @@ internal object SimulaCrashGuard {
             if (line.isBlank()) continue
             val f = line.split(FIELD_SEP)
             if (f.size < 5) continue
-            // 6th field (frames) is present on records written by this SDK version; older
-            // 5-field records simply carry no structured stack.
-            val stack = if (f.size >= 6 && f[5].isNotBlank()) f[5].split(FRAME_SEP) else null
+            // Legacy records have no canonical frames and may contain raw host text, so skip them.
+            val stack = if (f.size >= 6 && f[5].isNotBlank()) {
+                f[5].split(FRAME_SEP)
+                    .filter { it.isNotBlank() }
+                    .take(MAX_FRAMES)
+                    .map { it.take(MAX_CANONICAL_FRAME_LENGTH) }
+            } else {
+                emptyList()
+            }
+            val message = canonicalFrameMessage(stack) ?: continue
+            val fingerprint = canonicalFingerprint(stack) ?: continue
+            val threadKind = if (f[1] == "main") "main" else "background"
             Telemetry.recordError(
                 signature = f[2],
                 errorCode = f[3],
-                message = f[4].replace(NL_ESC, "\n"),
-                breadcrumb = "fatal=uncaught;thread=${f[1]}",
+                message = message,
+                breadcrumb = "fatal=uncaught;thread=$threadKind",
                 stack = stack,
+                fingerprint = fingerprint,
             )
         }
     }
@@ -171,26 +361,6 @@ internal object SimulaCrashGuard {
         }
         return null
     }
-
-    /** Exception type + message + the top [MAX_FRAMES] frames; [Telemetry] caps it to 300 chars. */
-    private fun compactStack(t: Throwable): String {
-        val sb = StringBuilder(t.javaClass.simpleName)
-        t.message?.takeIf { it.isNotBlank() }?.let { sb.append(": ").append(it) }
-        val frames = t.stackTrace.take(MAX_FRAMES).joinToString(" <- ") { fmtFrame(it) }
-        if (frames.isNotEmpty()) sb.append(" @ ").append(frames)
-        t.cause?.let { sb.append(" cause=").append(it.javaClass.simpleName) }
-        return sb.toString()
-    }
-
-    private fun fmtFrame(e: StackTraceElement): String {
-        val cls = e.className.substringAfterLast('.')
-        return if (e.fileName != null && e.lineNumber >= 0) "$cls.${e.methodName}(${e.fileName}:${e.lineNumber})"
-        else "$cls.${e.methodName}"
-    }
-
-    /** Top [MAX_FRAMES] frames as structured strings, for the wire `stack` field. */
-    private fun stackFrames(t: Throwable): List<String> =
-        t.stackTrace.take(MAX_FRAMES).map { fmtFrame(it) }
 
     // ── ApplicationExitInfo sweep (ANR / native crash; API 30+) ───────────────────
 
@@ -223,20 +393,37 @@ internal object SimulaCrashGuard {
         }
         val trace = readTrace(info)
         if (trace == null) return
-        // Attribute conservatively so we never exfiltrate the host's own crashes/ANRs:
-        // - ANR: the dump lists EVERY thread, and the SDK always has idle worker threads in it, so a
-        //   whole-dump `contains` would match almost any host ANR. An ANR is about the MAIN thread
-        //   being blocked → only attribute when the SDK is on the main thread's stack.
-        // - Native crash: the faulting thread can be any thread, so a whole-trace match is right.
-        val attributed = if (kind == "anr") anrMainThreadInvolvesSdk(trace) else trace.contains(SDK_PACKAGE)
-        if (!attributed) return
+        val frames = if (kind == "anr") {
+            anrMainThreadSdkFrames(trace)
+        } else {
+            nativeCrashedThreadSdkFrames(trace)
+        }
+        val message = canonicalFrameMessage(frames) ?: return
+        val fingerprint = canonicalFingerprint(frames) ?: return
+        val incidentContext = incidentContext(info)
         Telemetry.recordError(
             signature = "exit:$kind",
             errorCode = "exit_reason_${info.reason}",
-            message = sdkExcerpt(trace),
-            breadcrumb = "fatal=$kind;desc=${info.description?.take(40)}",
-            stack = sdkFrames(trace).ifEmpty { null },
+            message = message,
+            breadcrumb = "fatal=$kind;$incidentContext",
+            stack = frames,
+            fingerprint = fingerprint,
         )
+    }
+
+    /**
+     * Bounded, non-identifying OS context for exit diagnostics. Numeric platform fields help
+     * distinguish renderer pressure from logic failures without adding new wire keys.
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun incidentContext(info: ApplicationExitInfo): String {
+        return buildString {
+            append("incidentMs=").append(info.timestamp.coerceAtLeast(0L))
+            append(";status=").append(info.status)
+            append(";importance=").append(info.importance)
+            append(";pssKb=").append(info.pss)
+            append(";rssKb=").append(info.rss)
+        }.take(MAX_INCIDENT_CONTEXT_LENGTH)
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
@@ -251,33 +438,8 @@ internal object SimulaCrashGuard {
                 out.write(chunk, 0, minOf(n, MAX_TRACE_BYTES - total))
                 total += n
             }
-            String(out.toByteArray())
+            decodeTextExitTrace(out.toByteArray())
         }
     }.getOrNull()
 
-    /**
-     * True only if the SDK appears in the **main thread's** stack within an ANR dump. ANR traces are
-     * grouped into per-thread blocks, each opening with a quoted thread name (`"main" …`, `"Thread-3" …`)
-     * and continuing until the next quoted header. We track only the `"main"` block so an idle SDK
-     * worker thread elsewhere in the dump can't attribute a host ANR to us. Errs toward under-matching
-     * (an unrecognized header format just means we skip) — never toward exfiltrating a host ANR.
-     */
-    private fun anrMainThreadInvolvesSdk(trace: String): Boolean {
-        var inMain = false
-        for (line in trace.lineSequence()) {
-            if (line.startsWith("\"")) inMain = line.startsWith("\"main\"")
-            else if (inMain && line.contains(SDK_PACKAGE)) return true
-        }
-        return false
-    }
-
-    /** The SDK-mentioning trace lines (trimmed), capped — the relevant frames for [stack]. */
-    private fun sdkFrames(trace: String): List<String> =
-        trace.lineSequence().filter { it.contains(SDK_PACKAGE) }.take(MAX_FRAMES).map { it.trim() }.toList()
-
-    /** Those frames joined for the (300-char-capped) telemetry message; falls back to the raw trace. */
-    private fun sdkExcerpt(trace: String): String {
-        val lines = sdkFrames(trace)
-        return if (lines.isNotEmpty()) lines.joinToString(" <- ") else trace
-    }
 }

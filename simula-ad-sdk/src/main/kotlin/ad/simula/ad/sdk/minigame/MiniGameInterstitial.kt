@@ -5,9 +5,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.ui.res.painterResource
 import ad.simula.ad.sdk.R
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -53,6 +51,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import ad.simula.ad.sdk.image.BundledResourceImage
 import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.model.MiniGameInterstitialTheme
 import ad.simula.ad.sdk.model.resolve
@@ -192,8 +191,8 @@ fun MiniGameInterstitial(
                     modifier = Modifier.fillMaxSize(),
                 )
             } else {
-                Image(
-                    painter = painterResource(R.drawable.minigame_interstitial_background),
+                BundledResourceImage(
+                    resourceId = R.drawable.minigame_interstitial_background,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),

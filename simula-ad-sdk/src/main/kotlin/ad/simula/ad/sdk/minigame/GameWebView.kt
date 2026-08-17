@@ -110,7 +110,7 @@ fun GameWebView(
 
     // Warm a spare WebView for the post-game ad iframe while the game loads.
     LaunchedEffect(Unit) {
-        WebViewPool.prewarm(context)
+        WebViewPool.prewarm(context, trigger = "minigame_game")
     }
 
     // Fetch the minigame iframe URL
