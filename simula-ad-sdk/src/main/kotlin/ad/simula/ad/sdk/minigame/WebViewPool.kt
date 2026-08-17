@@ -215,13 +215,15 @@ internal object WebViewPool {
         result: String,
         failureClass: String? = null,
     ) {
-        Telemetry.recordOperation(
-            name = "webview_prewarm",
-            durationMs = (System.nanoTime() - startNanos) / 1_000_000,
-            success = success,
-            failureClass = failureClass?.take(40),
-            breadcrumb = "trigger=${canonicalWebViewPrewarmTrigger(trigger)};result=$result",
-        )
+        runCatching {
+            Telemetry.recordOperation(
+                name = "webview_prewarm",
+                durationMs = (System.nanoTime() - startNanos) / 1_000_000,
+                success = success,
+                failureClass = failureClass?.take(40),
+                breadcrumb = "trigger=${canonicalWebViewPrewarmTrigger(trigger)};result=$result",
+            )
+        }
     }
 
     // The check-and-set below is intentionally NOT synchronized: like the unsynchronized [idle]

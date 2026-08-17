@@ -172,6 +172,22 @@ class SimulaCrashGuardFingerprintTest {
     }
 
     @Test
+    fun `pending crash decoder rejects legacy records that may contain host frames`() {
+        val fields = listOf(
+            "123",
+            "main",
+            "crash:network.SimulaHttp.request",
+            "IllegalStateException",
+            "Checkout.submit(Checkout.kt:7)",
+            "Checkout.submit(Checkout.kt:7)\u0003SimulaHttp.request(SimulaHttp.kt:8)",
+        )
+        val legacyRecord = fields.joinToString("\u0001")
+
+        assertNull(SimulaCrashGuard.decodePendingCrashRecord(legacyRecord))
+        assertEquals(fields, SimulaCrashGuard.decodePendingCrashRecord("v2\u0001$legacyRecord"))
+    }
+
+    @Test
     fun `native crash ignores SDK workers outside the faulting thread section`() {
         val workerOnly = """
             pid: 123, tid: 123, name: main  >>> com.host.app <<<

@@ -231,6 +231,9 @@ internal object SimulaCrashGuard {
     /** Separator between stack frames within the single persisted frames field (off real text). */
     private const val FRAME_SEP = "\u0003"
 
+    /** Distinguishes SDK-only canonical records from legacy records that may contain host frames. */
+    private const val PENDING_RECORD_VERSION = "v2"
+
     /** Cap the pending file so a crash-on-launch loop can't grow it without bound. */
     private const val MAX_FILE_BYTES = 64L * 1024
     /** Bytes of an [ApplicationExitInfo] trace scanned for attribution. */
@@ -300,6 +303,7 @@ internal object SimulaCrashGuard {
         val frames = canonicalSdkFrames(t)
         val message = canonicalFrameMessage(frames) ?: return
         val record = listOf(
+            PENDING_RECORD_VERSION,
             System.currentTimeMillis().toString(),
             thread.name.orEmpty(),
             signatureFor(t),
@@ -308,6 +312,13 @@ internal object SimulaCrashGuard {
             frames.joinToString(FRAME_SEP),
         ).joinToString(FIELD_SEP) { it.replace(FIELD_SEP, " ").replace("\n", NL_ESC) }
         file.appendText(record + "\n")
+    }
+
+    internal fun decodePendingCrashRecord(line: String): List<String>? {
+        if (line.isBlank()) return null
+        val fields = line.split(FIELD_SEP)
+        if (fields.size != 7 || fields[0] != PENDING_RECORD_VERSION) return null
+        return fields.subList(1, fields.size)
     }
 
     private fun replayPending(app: Context) {
@@ -319,11 +330,9 @@ internal object SimulaCrashGuard {
         val lines = file.readLines().takeLast(MAX_REPLAY)
         file.delete()
         for (line in lines) {
-            if (line.isBlank()) continue
-            val f = line.split(FIELD_SEP)
-            if (f.size < 5) continue
-            // Legacy records have no canonical frames and may contain raw host text, so skip them.
-            val stack = if (f.size >= 6 && f[5].isNotBlank()) {
+            // Unversioned legacy records may contain raw host text, so never replay them.
+            val f = decodePendingCrashRecord(line) ?: continue
+            val stack = if (f[5].isNotBlank()) {
                 f[5].split(FRAME_SEP)
                     .filter { it.isNotBlank() }
                     .take(MAX_FRAMES)

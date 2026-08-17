@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import java.util.LinkedHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
@@ -136,9 +137,15 @@ internal object BundledResourceImageCache {
 
     suspend fun load(context: Context, @DrawableRes resourceId: Int): Bitmap? {
         val appContext = context.applicationContext
-        registerMemoryCallbacks(appContext)
-        return cache.load(resourceId) {
-            decode(appContext, resourceId)
+        return try {
+            registerMemoryCallbacks(appContext)
+            cache.load(resourceId) {
+                decode(appContext, resourceId)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            null
         }
     }
 
@@ -164,11 +171,13 @@ internal object BundledResourceImageCache {
                 BitmapFactory.decodeResource(context.resources, resourceId, options)
             }
         } catch (throwable: Throwable) {
-            Telemetry.recordError(
-                signature = "image:decode_fatal",
-                errorCode = throwable.javaClass.simpleName,
-                breadcrumb = "BundledResourceImageCache.decode",
-            )
+            runCatching {
+                Telemetry.recordError(
+                    signature = "image:decode_fatal",
+                    errorCode = throwable.javaClass.simpleName,
+                    breadcrumb = "BundledResourceImageCache.decode",
+                )
+            }
             null
         }
     }
