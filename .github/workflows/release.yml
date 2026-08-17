@@ -1,9 +1,12 @@
 name: Release to Maven Central
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (must match sdkVersion, without a leading v)"
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -19,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: Maven
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,34 +38,44 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Validate release tag
+      - name: Validate source and version
         id: version
         env:
+          VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          TAG="$GITHUB_REF_NAME"
-          [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?)$ ]] || {
-            echo "::error::Release tags must use vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-dev.NUMBER"
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || {
+            echo "::error::Releases must be dispatched from main"
             exit 1
           }
-          VERSION="${BASH_REMATCH[1]}"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$ ]] || {
+            echo "::error::Version must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-dev.NUMBER, without a leading v"
+            exit 1
+          }
           git fetch origin main
-          RELEASE_COMMIT=$(git rev-parse "${TAG}^{commit}")
-          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main || {
-            echo "::error::Release tag must point to a commit on main"
+          [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || {
+            echo "::error::Release checkout is not the current origin/main commit"
             exit 1
           }
           SUCCESSFUL_RUNS=$(gh run list \
             --workflow CI \
-            --commit "$RELEASE_COMMIT" \
+            --commit "$GITHUB_SHA" \
             --json conclusion \
             --jq 'map(select(.conclusion == "success")) | length')
           [[ "$SUCCESSFUL_RUNS" -gt 0 ]] || {
             echo "::error::Release commit must have a successful CI run"
             exit 1
           }
+          if git rev-parse --verify --quiet "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Git tag v$VERSION already exists"
+            exit 1
+          fi
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::GitHub release v$VERSION already exists"
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Verify version sync
@@ -68,7 +83,7 @@ jobs:
           ./gradlew :simula-ad-sdk:verifyVersionConsistency
           grep -Fq "val sdkVersion = \"${{ steps.version.outputs.version }}\"" \
             simula-ad-sdk/build.gradle.kts || {
-              echo "::error::Tag version does not match sdkVersion"
+              echo "::error::Release version does not match sdkVersion"
               exit 1
             }
 
@@ -142,31 +157,39 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
       - name: Download release AAR
         uses: actions/download-artifact@v4
         with:
           name: release-aar-${{ github.sha }}
           path: release-artifact
 
-      - name: Create release and upload AAR
+      - name: Create tag, release, and upload AAR
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.publish.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="v$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $VERSION"
+          git push origin "refs/tags/$TAG"
           RELEASE_TYPE=()
           if [[ "$VERSION" == *-dev.* ]]; then
             RELEASE_TYPE=(--prerelease)
           fi
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" \
-              --verify-tag \
-              --generate-notes \
-              --title "$GITHUB_REF_NAME" \
-              "${RELEASE_TYPE[@]}"
-          fi
-          gh release upload "$GITHUB_REF_NAME" \
-            "release-artifact/simula-ad-sdk-release.aar#ad-sdk-$VERSION.aar" \
-            --clobber
+          gh release create "$TAG" \
+            --verify-tag \
+            --generate-notes \
+            --title "$TAG" \
+            "${RELEASE_TYPE[@]}" \
+            "release-artifact/simula-ad-sdk-release.aar#ad-sdk-$VERSION.aar"

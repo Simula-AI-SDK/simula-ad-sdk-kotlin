@@ -216,7 +216,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     sessionId = session
                     impressionId = ad.impressionId
                     // Warm a WebView so show() doesn't pay cold-start on the critical path.
-                    WebViewPool.prewarm(SimulaAds.appContext)
+                    WebViewPool.prewarm(SimulaAds.appContext, trigger = "rewarded_ready")
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
                     listener?.onAdLoaded(this@SimulaRewardedAd)
                 }

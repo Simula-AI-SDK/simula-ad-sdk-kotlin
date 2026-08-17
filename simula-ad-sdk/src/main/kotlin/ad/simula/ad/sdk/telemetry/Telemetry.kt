@@ -21,7 +21,7 @@ import kotlinx.serialization.json.Json
  * SDK version stamped on every telemetry batch. Keep in sync with the `coordinates(...)`
  * version in `simula-ad-sdk/build.gradle.kts`.
  */
-internal const val SIMULA_SDK_VERSION = "1.1.8-dev.2"
+internal const val SIMULA_SDK_VERSION = "1.1.9-dev.1"
 
 /** logcat tag for the dev-mode telemetry mirror. */
 private const val LOG_TAG = "SimulaTelemetry"
@@ -142,7 +142,8 @@ internal object Telemetry {
         message: String? = null,
         breadcrumb: String? = null,
         stack: List<String>? = null,
-    ) = manager?.recordError(signature, errorCode, message, breadcrumb, stack) ?: Unit
+        fingerprint: String? = null,
+    ) = manager?.recordError(signature, errorCode, message, breadcrumb, stack, fingerprint) ?: Unit
 
     /** Persist + attempt delivery now (e.g. app background). */
     fun flush() = manager?.flushNow() ?: Unit

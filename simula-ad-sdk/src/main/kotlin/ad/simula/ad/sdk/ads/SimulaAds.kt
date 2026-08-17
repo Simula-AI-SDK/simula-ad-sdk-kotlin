@@ -285,7 +285,7 @@ object SimulaAds {
             // bring-up cold inside a feed layout or ad show. WebView creation must stay on the
             // main thread; queued from here it runs after the caller's launch-critical work.
             withContext(Dispatchers.Main) {
-                runCatching { WebViewPool.prewarm(appContext) }
+                runCatching { WebViewPool.prewarm(appContext, trigger = "startup") }
             }
 
             // Warm the session before the first load() so it's off the ad critical path.
