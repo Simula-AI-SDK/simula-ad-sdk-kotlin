@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.telemetry
 
+import ad.simula.ad.sdk.core.LaunchSettledGate
+import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.SimulaScope
 import android.app.ActivityManager
 import android.app.ApplicationExitInfo
@@ -250,7 +252,11 @@ internal object SimulaCrashGuard {
      * false. Call once from `SimulaAds.initialize`, after [Telemetry.initialize].
      */
     @MainThread
-    fun install(appContext: Context, enabled: Boolean) {
+    fun install(
+        appContext: Context,
+        enabled: Boolean,
+        launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
+    ) {
         if (!enabled || installed) return
         installed = true
         val app = appContext.applicationContext
@@ -258,8 +264,10 @@ internal object SimulaCrashGuard {
         installUncaughtHandler(app)
 
         // File + trace I/O off the main thread (SimulaScope is Dispatchers.IO). recordError persists
-        // durably on its own, so no flush is needed here — the normal/background flush delivers it.
+        // durably on its own. Replay/sweep wait for the launch quiet window, but handler installation
+        // above is immediate so crashes during startup are still captured locally.
         SimulaScope.launch {
+            launchSettledGate.awaitSettled()
             runCatching { replayPending(app) }
             runCatching { sweepExitInfo(app) }
         }

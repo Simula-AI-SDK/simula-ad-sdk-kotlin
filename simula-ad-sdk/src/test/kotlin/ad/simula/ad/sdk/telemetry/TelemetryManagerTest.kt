@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.telemetry
 
+import ad.simula.ad.sdk.core.LaunchSettledGate
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -69,6 +70,7 @@ class TelemetryManagerTest {
         ppid: String? = null,
         gaid: String? = null,
         debugLog: ((String) -> Unit)? = null,
+        launchSettledGate: LaunchSettledGate = LaunchSettledGate.Open,
     ) = TelemetryManager(
         ctx = TelemetryContext(sdkVersion = "9.9", osVersion = "14", deviceModel = "Test Pixel", hostAppId = "com.test", devMode = true),
         store = store,
@@ -82,6 +84,7 @@ class TelemetryManagerTest {
         scope = scope,
         random = random,
         debugLog = debugLog,
+        launchSettledGate = launchSettledGate,
     )
 
     private fun List<TelemetryEnvelope>.allEvents() = flatMap { it.events }
@@ -277,6 +280,30 @@ class TelemetryManagerTest {
         advanceUntilIdle()
 
         assertTrue(sender.batches.allEvents().any { it.eventId == "id-prev" })
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `start recovers locally but does not send before launch settles`() = runTest {
+        val seeded = TelemetryEvent(type = TYPE_NETWORK, name = "GET /catalog", eventId = "id-prev", timestamp = 1L)
+        val store = FakeStore(listOf(seeded))
+        val sender = FakeSender()
+        val settled = CompletableDeferred<Unit>()
+        val m = build(
+            this,
+            store,
+            sender,
+            launchSettledGate = LaunchSettledGate { settled.await() },
+        )
+
+        m.start()
+        runCurrent()
+        assertEquals("recovery must not wait on the quiet window", 1, store.data.size)
+        assertEquals(0, sender.sendCount)
+
+        settled.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, sender.sendCount)
         assertTrue(store.data.isEmpty())
     }
 

@@ -459,6 +459,8 @@ class SimulaRewardedAd(val adUnitId: String) {
                 // SSV postback still fires; only the client callback is skipped.
                 val weakAd = WeakReference(this@SimulaRewardedAd)
                 val handler = mainHandler
+                val verificationAdUnitId = adUnitId
+                val verificationAdId = adId
                 // End-to-end verification latency, including durable-queue backoff/retries.
                 val verifyStartNanos = System.nanoTime()
                 RewardVerificationManager.queueVerification(
@@ -466,14 +468,30 @@ class SimulaRewardedAd(val adUnitId: String) {
                     serveId = sid,
                     sessionId = sess,
                     elapsedPlayTime = elapsedPlayTimeSeconds,
-                    adUnitId = adUnitId,
+                    adUnitId = verificationAdUnitId,
                 ) { result ->
                     val verifyMs = (System.nanoTime() - verifyStartNanos) / 1_000_000
                     Telemetry.recordOperation("reward_verification", verifyMs, success = result.isSuccess)
                     if (result.isSuccess) {
-                        Telemetry.recordLifecycle("reward_verified", AD_FORMAT, adUnitId, adId, null, verifyMs, null)
+                        Telemetry.recordLifecycle(
+                            "reward_verified",
+                            AD_FORMAT,
+                            verificationAdUnitId,
+                            verificationAdId,
+                            null,
+                            verifyMs,
+                            null,
+                        )
                     } else {
-                        Telemetry.recordLifecycle("reward_verification_failed", AD_FORMAT, adUnitId, adId, null, verifyMs, "verify_failed")
+                        Telemetry.recordLifecycle(
+                            "reward_verification_failed",
+                            AD_FORMAT,
+                            verificationAdUnitId,
+                            verificationAdId,
+                            null,
+                            verifyMs,
+                            "verify_failed",
+                        )
                         Telemetry.recordError(
                             signature = "rewarded:verify",
                             errorCode = result.exceptionOrNull()?.javaClass?.simpleName,

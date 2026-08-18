@@ -1,6 +1,9 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.core.LaunchSettledGate
+import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -31,13 +34,64 @@ internal data class PendingVerification(
     // Sent to verify-reward so the SSV callback resolves the ad unit. Defaulted + last so queue
     // entries persisted before this field existed still decode (with adUnitId = "").
     val adUnitId: String = "",
+    val createdTimestamp: Long = 0L,
 )
 
 /** Persists the pending-verification queue. Abstracted so the queue engine can be unit-tested. */
 internal interface VerificationStore {
-    fun load(): List<PendingVerification>
-    fun save(queue: List<PendingVerification>)
+    fun load(): DurableLoadResult<List<PendingVerification>>
+    fun save(queue: List<PendingVerification>): DurableMutationResult
+
+    fun persistNew(records: List<PendingVerification>): DurableMutationResult {
+        if (records.isEmpty()) return DurableMutationResult.NoMatch
+        val queue = when (val loaded = load()) {
+            is DurableLoadResult.Loaded -> loaded.value.toMutableList()
+            DurableLoadResult.Failed -> return DurableMutationResult.Failed
+        }
+        var changed = false
+        for (record in records) {
+            if (queue.none { it.serveId == record.serveId }) {
+                queue += record
+                changed = true
+            }
+        }
+        return if (changed) save(queue) else DurableMutationResult.NoMatch
+    }
+
+    fun insertIfAbsent(verification: PendingVerification): DurableMutationResult {
+        val queue = when (val loaded = load()) {
+            is DurableLoadResult.Loaded -> loaded.value.toMutableList()
+            DurableLoadResult.Failed -> return DurableMutationResult.Failed
+        }
+        if (queue.any { it.serveId == verification.serveId }) return DurableMutationResult.NoMatch
+        queue += verification
+        return save(queue)
+    }
+
+    fun remove(serveId: String): DurableMutationResult {
+        val queue = when (val loaded = load()) {
+            is DurableLoadResult.Loaded -> loaded.value
+            DurableLoadResult.Failed -> return DurableMutationResult.Failed
+        }
+        if (queue.none { it.serveId == serveId }) return DurableMutationResult.NoMatch
+        return save(queue.filterNot { it.serveId == serveId })
+    }
+
+    fun replaceIfPresent(verification: PendingVerification): DurableMutationResult {
+        val queue = when (val loaded = load()) {
+            is DurableLoadResult.Loaded -> loaded.value.toMutableList()
+            DurableLoadResult.Failed -> return DurableMutationResult.Failed
+        }
+        val index = queue.indexOfFirst { it.serveId == verification.serveId }
+        if (index != -1) {
+            queue[index] = verification
+            return save(queue)
+        }
+        return DurableMutationResult.NoMatch
+    }
 }
+
+internal class DurableQueuePersistenceException(message: String) : Exception(message)
 
 /** Performs one `verify-reward` call; returns the reward token (may be null) or throws. */
 internal interface RewardVerifier {
@@ -81,7 +135,14 @@ internal class RewardVerificationQueue(
     private val verifier: RewardVerifier,
     private val clock: () -> Long = System::currentTimeMillis,
     private val scope: CoroutineScope = SimulaScope,
+    private val sleep: suspend (Long) -> Unit = { delay(it) },
+    private val maxPendingEnqueues: Int = DEFAULT_MAX_PENDING_ENQUEUES,
 ) {
+    private data class PendingEnqueue(
+        val verification: PendingVerification,
+        val callback: ((Result<String?>) -> Unit)?,
+    )
+
     private val mutex = Mutex()
     private var isProcessing = false
 
@@ -92,12 +153,16 @@ internal class RewardVerificationQueue(
      * relaunch, so the reward-verified signal could stall for a whole session. Guarded by [mutex].
      */
     private var retryJob: Job? = null
+    private var storageRecoveryJob: Job? = null
+    private val pendingEnqueues = LinkedHashMap<String, PendingEnqueue>()
+    private var storageFailureCount = 0
+    private var storageFailureReported = false
 
     /**
      * Per-`serveId` result callbacks, so a verification's outcome reaches the caller
-     * that enqueued it — not whoever happens to be draining the queue. One-shot:
-     * removed the first time the task is attempted, so it can't be misrouted to another
-     * play and can't retain the caller beyond a single attempt.
+     * that enqueued it — not whoever happens to be draining the queue. One-shot and removed only
+     * after the network outcome is durably reconciled. Storage-recovery callbacks stay in the
+     * bounded pending map; capacity rejection fails the new callback immediately.
      */
     private val activeCallbacks = ConcurrentHashMap<String, (Result<String?>) -> Unit>()
 
@@ -114,164 +179,270 @@ internal class RewardVerificationQueue(
         adUnitId: String = "",
         onResult: ((Result<String?>) -> Unit)? = null,
     ) {
-        // Register before enqueueing so a drain already in flight (which reloads the
-        // queue each iteration and can pick this task up) still routes the result here.
-        if (onResult != null) {
-            activeCallbacks[serveId] = onResult
-        }
         scope.launch {
-            mutex.withLock {
-                val list = store.load().toMutableList()
-                if (list.none { it.serveId == serveId }) {
-                    list.add(
-                        PendingVerification(
-                            serveId = serveId,
-                            sessionId = sessionId,
-                            elapsedPlayTime = elapsedPlayTime,
-                            retryCount = 0,
-                            lastAttemptTimestamp = 0L,
-                            adUnitId = adUnitId,
-                        ),
+            var rejectedCallback: ((Result<String?>) -> Unit)? = null
+            val shouldProcess = mutex.withLock {
+                val existing = pendingEnqueues[serveId]
+                if (existing == null && pendingEnqueues.size >= maxPendingEnqueues.coerceAtLeast(0)) {
+                    rejectedCallback = onResult
+                    Telemetry.recordError(
+                        signature = "durable_queue:pending_full",
+                        breadcrumb = "queue=reward_verification",
                     )
-                    store.save(list)
+                    return@withLock false
+                }
+                val verification = existing?.verification ?: PendingVerification(
+                    serveId = serveId,
+                    sessionId = sessionId,
+                    elapsedPlayTime = elapsedPlayTime,
+                    retryCount = 0,
+                    lastAttemptTimestamp = 0L,
+                    adUnitId = adUnitId,
+                    createdTimestamp = clock(),
+                )
+                pendingEnqueues[serveId] = PendingEnqueue(
+                    verification = verification,
+                    callback = onResult ?: existing?.callback,
+                )
+                if (storageRecoveryJob?.isActive == true) {
+                    false
+                } else {
+                    recoverStorageLocked()
                 }
             }
+            if (rejectedCallback != null) {
+                try {
+                    rejectedCallback?.invoke(
+                        Result.failure(
+                            DurableQueuePersistenceException("Reward verification pending capacity reached"),
+                        ),
+                    )
+                } catch (_: Exception) {
+                    // A publisher callback must not break the SDK scope.
+                }
+                return@launch
+            }
+            if (shouldProcess) processQueue()
+        }
+    }
+
+    /** Called with [mutex] held. Persists pending serve ids atomically before exposing callbacks. */
+    private fun recoverStorageLocked(scheduleOnFailure: Boolean = true): Boolean {
+        val durable = when (val loaded = store.load()) {
+            is DurableLoadResult.Loaded -> loaded.value
+            DurableLoadResult.Failed -> {
+                noteStorageFailure()
+                if (scheduleOnFailure) scheduleStorageRecoveryLocked()
+                return false
+            }
+        }
+        val durableIds = durable.mapTo(HashSet()) { it.serveId }
+        val records = pendingEnqueues.values
+            .map { it.verification }
+            .filterNot { it.serveId in durableIds }
+        val persistence = store.persistNew(records)
+        if (persistence == DurableMutationResult.Failed) {
+            noteStorageFailure()
+            if (scheduleOnFailure) scheduleStorageRecoveryLocked()
+            return false
+        }
+        for ((serveId, pending) in pendingEnqueues) {
+            pending.callback?.let { activeCallbacks[serveId] = it }
+        }
+        pendingEnqueues.clear()
+        noteStorageSuccess()
+        return true
+    }
+
+    /** Called with [mutex] held. At most one storage-recovery job exists per queue. */
+    private fun scheduleStorageRecoveryLocked() {
+        if (storageRecoveryJob?.isActive == true) return
+        storageRecoveryJob = scope.launch {
+            var recovered = false
+            while (!recovered) {
+                val delayMs = mutex.withLock {
+                    durableMutationBackoffMs(storageFailureCount.coerceAtLeast(1))
+                }
+                sleep(delayMs)
+                recovered = mutex.withLock {
+                    recoverStorageLocked(scheduleOnFailure = false)
+                }
+            }
+            mutex.withLock {
+                storageRecoveryJob = null
+            }
+            processQueue(scheduleIneligibleWake = true)
+        }
+    }
+
+    private fun noteStorageFailure() {
+        storageFailureCount++
+        if (!storageFailureReported) {
+            storageFailureReported = true
+            Telemetry.recordError(
+                signature = "durable_queue:storage_failed",
+                breadcrumb = "queue=reward_verification",
+            )
+        }
+    }
+
+    private fun noteStorageSuccess() {
+        storageFailureCount = 0
+        storageFailureReported = false
+    }
+
+    /** Drains any persisted verifications eligible under their backoff. */
+    fun trigger(launchSettledGate: LaunchSettledGate = LaunchSettledGate.Open) {
+        scope.launch {
+            launchSettledGate.awaitSettled()
             processQueue()
         }
     }
 
-    /** Drains any persisted verifications eligible under their backoff. */
-    fun trigger() {
-        scope.launch { processQueue() }
-    }
-
-    private suspend fun processQueue() {
+    private suspend fun processQueue(scheduleIneligibleWake: Boolean = true) {
         mutex.withLock {
             if (isProcessing) return
             isProcessing = true
         }
-        // True when we stopped because a task hit a retryable error: its peers (if any)
-        // are intentionally left for a later trigger, so we must NOT immediately re-drain.
         var bailedForBackoff = false
-        // Successfully-verified / permanently-failed serveIds, persisted in ONE save in the finally
-        // block. The prior code did store.load() on every loop iteration AND a load+save per removal,
-        // re-parsing the whole queue JSON each time → O(n²) on a large backlog. We now pick from a
-        // single in-memory snapshot and batch the removals. Re-verifying a serveId after a crash
-        // mid-drain is safe: the server SSV is idempotent and the client signal is one-shot.
-        val removedServeIds = mutableSetOf<String>()
+        var madeProgress = false
+        var loadFailed = false
         try {
-            // One load per drain pass (was one per iteration). Concurrently-enqueued verifications
-            // are not in this snapshot, but the finally's re-drain re-loads and re-triggers for them.
-            var queue = mutex.withLock { store.load() }
             while (true) {
-                val now = clock()
-                val task = queue.firstOrNull {
-                    it.serveId !in removedServeIds &&
-                        now - it.lastAttemptTimestamp >= rewardVerificationBackoffMs(it.retryCount)
-                } ?: break
-
-                // Resolve the outcome first, then deliver it. Keeping the callback OUT of
-                // the verify try/catch means a listener that throws can't be misread as a
-                // verification error (and can't derail the drain).
-                val outcome: Result<String?> = try {
-                    val token = verifier.verify(task.serveId, task.sessionId, task.elapsedPlayTime, task.adUnitId)
-                    removedServeIds += task.serveId
-                    Result.success(token)
-                } catch (e: Exception) {
-                    if (isPermanentVerificationError(e)) {
-                        // 4xx (except 408/429): retrying won't help, so drop it.
-                        removedServeIds += task.serveId
-                    } else {
-                        // Keep the task for a later trigger; the server-side SSV postback
-                        // still lands on a successful retry — the client signal is one-shot.
-                        // Persist the retry bump immediately and reflect it in the snapshot so it
-                        // isn't re-picked this pass.
-                        recordAttempt(task.serveId)
-                        queue = queue.map {
-                            if (it.serveId == task.serveId) {
-                                it.copy(retryCount = it.retryCount + 1, lastAttemptTimestamp = now)
-                            } else {
-                                it
-                            }
+                val selection: DurableLoadResult<PendingVerification?> = mutex.withLock {
+                    when (val loaded = store.load()) {
+                        is DurableLoadResult.Loaded -> {
+                            noteStorageSuccess()
+                            val now = clock()
+                            DurableLoadResult.Loaded(
+                                loaded.value.firstOrNull {
+                                    now - it.lastAttemptTimestamp >= rewardVerificationBackoffMs(it.retryCount)
+                                },
+                            )
                         }
-                        bailedForBackoff = true
+                        DurableLoadResult.Failed -> {
+                            noteStorageFailure()
+                            DurableLoadResult.Failed
+                        }
                     }
-                    Result.failure(e)
+                }
+                val task = when (selection) {
+                    is DurableLoadResult.Loaded -> selection.value ?: break
+                    DurableLoadResult.Failed -> {
+                        loadFailed = true
+                        break
+                    }
                 }
 
+                val outcome = try {
+                    Result.success(
+                        verifier.verify(task.serveId, task.sessionId, task.elapsedPlayTime, task.adUnitId),
+                    )
+                } catch (e: Exception) {
+                    Result.failure(e)
+                }
+                val failure = outcome.exceptionOrNull()
+                val retryable = failure != null && !isPermanentVerificationError(failure)
+                if (retryable) {
+                    val mutation = reconcileMutation {
+                        store.replaceIfPresent(
+                            task.copy(
+                                retryCount = task.retryCount + 1,
+                                lastAttemptTimestamp = clock(),
+                            ),
+                        )
+                    }
+                    bailedForBackoff = mutation == DurableMutationResult.Applied
+                } else {
+                    reconcileMutation { store.remove(task.serveId) }
+                }
+
+                // The callback is released only after delete/retry state is durably reconciled.
                 try {
                     activeCallbacks.remove(task.serveId)?.invoke(outcome)
                 } catch (_: Exception) {
                     // A listener that throws must not break queue draining.
                 }
-                if (bailedForBackoff) break
+                madeProgress = true
+                if (retryable && bailedForBackoff) break
             }
         } finally {
-            // Persist all removals in one pass, then — under the SAME lock that observes the queue —
-            // decide whether to re-drain. This closes the race where a verification enqueued just as
-            // the drain finished would otherwise sit idle until some later trigger.
-            // NonCancellable so a cancellation mid-drain can't leave isProcessing stuck or skip the save.
-            val reDrain = withContext(NonCancellable) {
-                mutex.withLock {
-                    // Re-load before filtering so a verification enqueued concurrently during a
-                    // verify() is preserved rather than clobbered by a stale snapshot save.
-                    if (removedServeIds.isNotEmpty()) {
-                        store.save(store.load().filterNot { it.serveId in removedServeIds })
-                    }
-                    isProcessing = false
-                    if (bailedForBackoff) {
-                        // Bailed on a retryable failure: schedule a wake at the earliest remaining
-                        // backoff so the retry actually happens in-session, instead of waiting for
-                        // the next enqueue or launch. Scheduled ONLY from the bail path (not from
-                        // every pass with pending tasks), so a wake that finds nothing eligible —
-                        // e.g. under a frozen test clock — terminates instead of rescheduling
-                        // itself forever. One pending wake is enough: every bail recomputes the
-                        // earliest eligibility across the WHOLE queue and replaces the schedule.
-                        val remaining = store.load()
-                        if (remaining.isNotEmpty()) {
-                            val now = clock()
-                            val delayMs = remaining
-                                .minOf { rewardVerificationBackoffMs(it.retryCount) - (now - it.lastAttemptTimestamp) }
-                                .coerceAtLeast(1_000L) // ≥1s floor: never hot-loop a failing backend
-                            retryJob?.cancel()
-                            retryJob = scope.launch {
-                                delay(delayMs)
-                                processQueue()
-                            }
-                        }
-                        false
-                    } else {
-                        val now = clock()
-                        store.load().any { now - it.lastAttemptTimestamp >= rewardVerificationBackoffMs(it.retryCount) }
-                    }
-                }
-            }
-            if (reDrain) trigger()
+            finishProcessing(bailedForBackoff, scheduleIneligibleWake, madeProgress, loadFailed)
         }
     }
 
-    private suspend fun recordAttempt(serveId: String) = mutex.withLock {
-        val queue = store.load().toMutableList()
-        val idx = queue.indexOfFirst { it.serveId == serveId }
-        if (idx != -1) {
-            queue[idx] = queue[idx].copy(
-                retryCount = queue[idx].retryCount + 1,
-                lastAttemptTimestamp = clock(),
-            )
-            store.save(queue)
+    private suspend fun reconcileMutation(
+        mutation: () -> DurableMutationResult,
+    ): DurableMutationResult = withContext(NonCancellable) {
+        var failures = 0
+        var result: DurableMutationResult
+        do {
+            result = mutex.withLock { mutation() }
+            if (result == DurableMutationResult.Failed) {
+                failures++
+                sleep(durableMutationBackoffMs(failures))
+            }
+        } while (result == DurableMutationResult.Failed)
+        result
+    }
+
+    private suspend fun finishProcessing(
+        bailedForBackoff: Boolean,
+        scheduleIneligibleWake: Boolean,
+        madeProgress: Boolean,
+        loadFailed: Boolean,
+    ) {
+        val (reDrain, wakeDelay) = withContext(NonCancellable) {
+            mutex.withLock {
+                isProcessing = false
+                if (loadFailed) {
+                    scheduleStorageRecoveryLocked()
+                    return@withLock false to null
+                }
+                val remaining = when (val loaded = store.load()) {
+                    is DurableLoadResult.Loaded -> {
+                        noteStorageSuccess()
+                        loaded.value
+                    }
+                    DurableLoadResult.Failed -> {
+                        noteStorageFailure()
+                        scheduleStorageRecoveryLocked()
+                        return@withLock false to null
+                    }
+                }
+                if (remaining.isEmpty()) return@withLock false to null
+                val now = clock()
+                val earliestDelay = remaining.minOf {
+                    rewardVerificationBackoffMs(it.retryCount) - (now - it.lastAttemptTimestamp)
+                }
+                when {
+                    earliestDelay <= 0L && !bailedForBackoff -> true to null
+                    bailedForBackoff -> false to earliestDelay.coerceAtLeast(1_000L)
+                    scheduleIneligibleWake || madeProgress -> false to earliestDelay.coerceAtLeast(1L)
+                    else -> false to null
+                }
+            }
+        }
+        if (reDrain) trigger()
+        if (wakeDelay != null) scheduleRetry(wakeDelay)
+    }
+
+    private suspend fun scheduleRetry(delayMs: Long) = mutex.withLock {
+        retryJob?.cancel()
+        retryJob = scope.launch {
+            sleep(delayMs)
+            processQueue(scheduleIneligibleWake = false)
         }
     }
 }
 
 /**
  * Production entry point: a process-wide [RewardVerificationQueue] wired to the real
- * `SharedPreferences` store and `SimulaApiClient` verifier, built lazily from the app
+ * SQLite row store and `SimulaApiClient` verifier, built lazily from the app
  * context. The rewarded ad enqueues here on a qualifying close; [triggerProcessQueue]
  * is also called at SDK init to recover verifications left pending by a prior process.
  */
 internal object RewardVerificationManager {
-    private const val PREFS_NAME = "simula_ad_sdk_verification_prefs"
-    private const val KEY_PENDING_QUEUE = "pending_reward_verifications"
     private val json = Json { ignoreUnknownKeys = true }
 
     @Volatile
@@ -280,7 +451,7 @@ internal object RewardVerificationManager {
     private fun engine(context: Context): RewardVerificationQueue {
         return engine ?: synchronized(this) {
             engine ?: RewardVerificationQueue(
-                store = SharedPrefsVerificationStore(context.applicationContext, json, PREFS_NAME, KEY_PENDING_QUEUE),
+                store = SqliteVerificationStore(context.applicationContext, json),
                 verifier = ApiRewardVerifier,
             ).also { engine = it }
         }
@@ -293,13 +464,32 @@ internal object RewardVerificationManager {
         elapsedPlayTime: Double,
         adUnitId: String = "",
         onResult: ((Result<String?>) -> Unit)? = null,
-    ) = engine(context).queue(serveId, sessionId, elapsedPlayTime, adUnitId, onResult)
+    ) {
+        // Store construction can open/migrate SQLite. Keep it off the Activity caller even if an ad
+        // somehow earns a reward before the normal startup recovery trigger builds the singleton.
+        SimulaScope.launch {
+            val queue = runCatching { engine(context) }.getOrElse {
+                try {
+                    onResult?.invoke(
+                        Result.failure(DurableQueuePersistenceException("Unable to open reward verification store")),
+                    )
+                } catch (_: Exception) {
+                    // A publisher callback must not break the SDK scope.
+                }
+                return@launch
+            }
+            queue.queue(serveId, sessionId, elapsedPlayTime, adUnitId, onResult)
+        }
+    }
 
     /**
      * Drains any persisted verifications eligible under their backoff. Call at app
      * startup to recover work left over from a previous session.
      */
-    fun triggerProcessQueue(context: Context) = engine(context).trigger()
+    fun triggerProcessQueue(
+        context: Context,
+        launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
+    ) = engine(context).trigger(launchSettledGate)
 }
 
 /** Real verifier: the SSV-firing `verify-reward` call (HTTP 409 → success token=null). */
@@ -308,25 +498,93 @@ private object ApiRewardVerifier : RewardVerifier {
         SimulaApiClient.verifyReward(serveId, sessionId, elapsedPlayTime, adUnitId).token
 }
 
-/** Real store: a single `SharedPreferences` entry holding the JSON-encoded queue. */
-private class SharedPrefsVerificationStore(
-    private val context: Context,
+/** WAL SQLite rows keyed by the stable reward action key (`serveId`). */
+internal class SqliteVerificationStore internal constructor(
+    private val rows: DurableQueueRows,
+    private val legacy: LegacyQueueSource,
     private val json: Json,
-    private val prefsName: String,
-    private val key: String,
+    private val clock: () -> Long,
 ) : VerificationStore {
-    override fun load(): List<PendingVerification> {
-        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        val jsonStr = prefs.getString(key, null) ?: return emptyList()
-        return try {
-            json.decodeFromString<List<PendingVerification>>(jsonStr)
-        } catch (_: Exception) {
-            emptyList()
+    constructor(
+        context: Context,
+        json: Json,
+        clock: () -> Long = System::currentTimeMillis,
+    ) : this(
+        rows = SqliteDurableQueueRows(context, DB_NAME, TABLE),
+        legacy = SharedPrefsLegacyQueueSource(context, LEGACY_PREFS, LEGACY_KEY),
+        json = json,
+        clock = clock,
+    )
+
+    init {
+        migrateLegacy()
+    }
+
+    override fun load(): DurableLoadResult<List<PendingVerification>> {
+        return when (val loaded = rows.load()) {
+            is DurableLoadResult.Loaded -> {
+                val decoded = ArrayList<PendingVerification>(loaded.value.size)
+                for (row in loaded.value) {
+                    val verification = runCatching {
+                        json.decodeFromString<PendingVerification>(row.payload)
+                    }.getOrNull() ?: return DurableLoadResult.Failed
+                    if (verification.serveId != row.key || verification.serveId != row.rowId) {
+                        return DurableLoadResult.Failed
+                    }
+                    decoded += verification
+                }
+                DurableLoadResult.Loaded(decoded)
+            }
+            DurableLoadResult.Failed -> DurableLoadResult.Failed
         }
     }
 
-    override fun save(queue: List<PendingVerification>) {
-        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        prefs.edit().putString(key, json.encodeToString(queue)).apply()
+    override fun save(queue: List<PendingVerification>): DurableMutationResult = mutation {
+        rows.replaceAll(queue.map(::row))
+    }
+
+    override fun insertIfAbsent(verification: PendingVerification): DurableMutationResult = mutation {
+        rows.insertIfAbsent(row(verification))
+    }
+
+    override fun persistNew(records: List<PendingVerification>): DurableMutationResult = mutation {
+        rows.insertAllIfAbsent(records.map(::row))
+    }
+
+    override fun remove(serveId: String): DurableMutationResult = mutation { rows.remove(serveId) }
+
+    override fun replaceIfPresent(verification: PendingVerification): DurableMutationResult = mutation {
+        rows.replaceIfRevision(verification.serveId, verification.serveId, row(verification))
+    }
+
+    private fun mutation(block: () -> DurableMutationResult): DurableMutationResult =
+        runCatching(block).getOrDefault(DurableMutationResult.Failed)
+
+    private fun row(verification: PendingVerification): DurableQueueRow {
+        val normalized = if (verification.createdTimestamp > 0L) {
+            verification
+        } else {
+            verification.copy(createdTimestamp = clock())
+        }
+        return DurableQueueRow(
+            key = normalized.serveId,
+            rowId = normalized.serveId,
+            createdAt = normalized.createdTimestamp,
+            payload = json.encodeToString(normalized),
+        )
+    }
+
+    private fun migrateLegacy() {
+        val encoded = legacy.read() ?: return
+        val pending = runCatching { json.decodeFromString<List<PendingVerification>>(encoded) }.getOrNull() ?: return
+        val migratedRows = runCatching { pending.map(::row) }.getOrNull() ?: return
+        if (mutation { rows.import(migratedRows) } == DurableMutationResult.Applied) legacy.clear()
+    }
+
+    internal companion object {
+        const val DB_NAME = "simula_ad_sdk_reward_verifications.db"
+        const val TABLE = "pending_reward_verifications"
+        const val LEGACY_PREFS = "simula_ad_sdk_verification_prefs"
+        const val LEGACY_KEY = "pending_reward_verifications"
     }
 }
