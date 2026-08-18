@@ -297,6 +297,7 @@ fun NativeAdSlot(
                     trackingUrl = result.trackingUrl,
                     destination = result.destination,
                     storeUrl = result.androidStoreUrl,
+                    placeholderDark = resolvedTheme != "light",
                     visibilityRelay = visibilityRelay,
                     onHeightPx = { px ->
                         // Threshold sub-dp churn so a measuring creative can't thrash the feed below.
@@ -508,7 +509,7 @@ private fun initialNativeAdState(
  * is light only for an explicitly light (or system-light) creative, so an unspecified theme shows a
  * dark block rather than a light one that then flips. */
 @Composable
-private fun NativeAdShimmer(modifier: Modifier = Modifier, isDark: Boolean = true) {
+internal fun NativeAdShimmer(modifier: Modifier = Modifier, isDark: Boolean = true) {
     val transition = rememberInfiniteTransition(label = "native-ad-shimmer")
     val progress by transition.animateFloat(
         initialValue = 0f,

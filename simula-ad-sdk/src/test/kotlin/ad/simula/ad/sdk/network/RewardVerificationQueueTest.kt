@@ -1,7 +1,9 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.core.LaunchSettledGate
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
@@ -25,8 +27,19 @@ class RewardVerificationQueueTest {
 
     private class FakeStore(initial: List<PendingVerification> = emptyList()) : VerificationStore {
         var data: List<PendingVerification> = initial.toList()
-        override fun load(): List<PendingVerification> = data
-        override fun save(queue: List<PendingVerification>) { data = queue.toList() }
+        val loadResults = ArrayDeque<DurableLoadResult<List<PendingVerification>>>()
+        val saveResults = ArrayDeque<DurableMutationResult>()
+        var failLoads = false
+        override fun load(): DurableLoadResult<List<PendingVerification>> = if (failLoads) {
+            DurableLoadResult.Failed
+        } else {
+            loadResults.removeFirstOrNull() ?: DurableLoadResult.Loaded(data)
+        }
+        override fun save(queue: List<PendingVerification>): DurableMutationResult {
+            val result = saveResults.removeFirstOrNull() ?: DurableMutationResult.Applied
+            if (result == DurableMutationResult.Applied) data = queue.toList()
+            return result
+        }
     }
 
     /**
@@ -75,6 +88,231 @@ class RewardVerificationQueueTest {
         assertEquals("tokA", received?.getOrNull())
         assertTrue(store.data.isEmpty())
         assertEquals(1, verifier.callCounts["A"])
+    }
+
+    @Test
+    fun `failed enqueue persistence retains one callback until coalesced recovery`() = runTest {
+        val store = FakeStore().apply {
+            saveResults += DurableMutationResult.Failed
+            saveResults += DurableMutationResult.Applied
+        }
+        val verifier = FakeVerifier().apply { tokens["A"] = "token" }
+        val sleepEntered = CompletableDeferred<Unit>()
+        val releaseSleep = CompletableDeferred<Unit>()
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 0L },
+            scope = this,
+            sleep = {
+                sleepEntered.complete(Unit)
+                releaseSleep.await()
+            },
+        )
+        var received: Result<String?>? = null
+        var callbackCount = 0
+
+        engine.queue("A", "sess", 5.0) {
+            callbackCount++
+            received = it
+        }
+        sleepEntered.await()
+
+        assertNull(received)
+        assertTrue(verifier.callCounts.isEmpty())
+
+        releaseSleep.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("token", received?.getOrNull())
+        assertEquals(1, callbackCount)
+        assertEquals(1, verifier.callCounts["A"])
+    }
+
+    @Test
+    fun `failed load retains callback and retries persistence before verification`() = runTest {
+        val store = FakeStore().apply { loadResults += DurableLoadResult.Failed }
+        val verifier = FakeVerifier().apply { tokens["A"] = "token" }
+        val sleepEntered = CompletableDeferred<Unit>()
+        val releaseSleep = CompletableDeferred<Unit>()
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 0L },
+            scope = this,
+            sleep = {
+                sleepEntered.complete(Unit)
+                releaseSleep.await()
+            },
+        )
+        var received: Result<String?>? = null
+
+        engine.queue("A", "sess", 5.0) { received = it }
+        sleepEntered.await()
+        assertNull(received)
+        assertTrue(verifier.callCounts.isEmpty())
+        assertTrue(store.data.isEmpty())
+
+        releaseSleep.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("token", received?.getOrNull())
+        assertEquals(1, verifier.callCounts["A"])
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `storage recovery coalesces serve callbacks and rejects bounded overflow`() = runTest {
+        val store = FakeStore().apply { failLoads = true }
+        val verifier = FakeVerifier().apply { tokens["A"] = "token" }
+        val sleepEntered = CompletableDeferred<Unit>()
+        val releaseSleep = CompletableDeferred<Unit>()
+        var sleepCount = 0
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 0L },
+            scope = this,
+            sleep = {
+                sleepCount++
+                sleepEntered.complete(Unit)
+                releaseSleep.await()
+            },
+            maxPendingEnqueues = 1,
+        )
+        var first: Result<String?>? = null
+        var newest: Result<String?>? = null
+        var overflow: Result<String?>? = null
+
+        engine.queue("A", "sess", 5.0) { first = it }
+        engine.queue("A", "sess", 5.0) { newest = it }
+        engine.queue("B", "sess", 5.0) { overflow = it }
+        sleepEntered.await()
+        runCurrent()
+
+        assertEquals(1, sleepCount)
+        assertNull(first)
+        assertNull(newest)
+        assertTrue(overflow?.exceptionOrNull() is DurableQueuePersistenceException)
+
+        store.failLoads = false
+        releaseSleep.complete(Unit)
+        advanceUntilIdle()
+
+        assertNull("same-serve pending callback is deduped to the newest callback", first)
+        assertEquals("token", newest?.getOrNull())
+        assertEquals(1, verifier.callCounts["A"])
+        assertEquals(null, verifier.callCounts["B"])
+    }
+
+    @Test
+    fun `storage recovery re-arms network backoff eligibility for recovered reward`() = runTest {
+        var now = 0L
+        val store = FakeStore(
+            listOf(PendingVerification("A", "sess", 5.0, retryCount = 1, lastAttemptTimestamp = 0L)),
+        ).apply { loadResults += DurableLoadResult.Failed }
+        val verifier = FakeVerifier().apply { tokens["A"] = "token" }
+        val releaseStorage = CompletableDeferred<Unit>()
+        val delays = mutableListOf<Long>()
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { now },
+            scope = this,
+            sleep = { delayMs ->
+                delays += delayMs
+                if (delays.size == 1) releaseStorage.await() else delay(delayMs)
+            },
+        )
+
+        engine.trigger()
+        runCurrent()
+        assertEquals(listOf(100L), delays)
+
+        releaseStorage.complete(Unit)
+        runCurrent()
+        assertEquals(listOf(100L, 5_000L), delays)
+        assertTrue(verifier.callCounts.isEmpty())
+
+        now = 5_000L
+        advanceTimeBy(5_000L)
+        advanceUntilIdle()
+        assertEquals(1, verifier.callCounts["A"])
+    }
+
+    @Test
+    fun `callback waits while successful verification removal retries storage`() = runTest {
+        val task = PendingVerification("A", "sess", 5.0, 0, 0L)
+        val store = FakeStore(listOf(task)).apply {
+            saveResults += DurableMutationResult.Failed
+            saveResults += DurableMutationResult.Applied
+        }
+        val verifier = FakeVerifier().apply { tokens["A"] = "token" }
+        val sleepEntered = CompletableDeferred<Unit>()
+        val releaseSleep = CompletableDeferred<Unit>()
+        val delays = mutableListOf<Long>()
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 0L },
+            scope = this,
+            sleep = { delayMs ->
+                delays += delayMs
+                sleepEntered.complete(Unit)
+                releaseSleep.await()
+            },
+        )
+        var received: Result<String?>? = null
+        engine.queue("A", "sess", 5.0) { received = it }
+
+        sleepEntered.await()
+        assertNull(received)
+        assertEquals(1, verifier.callCounts["A"])
+        assertEquals(listOf(100L), delays)
+
+        releaseSleep.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("token", received?.getOrNull())
+        assertEquals("storage retry must not reverify", 1, verifier.callCounts["A"])
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `retry callback waits for retry-state persistence and verification is not hot-looped`() = runTest {
+        val task = PendingVerification("A", "sess", 5.0, 0, 0L)
+        val store = FakeStore(listOf(task)).apply {
+            saveResults += DurableMutationResult.Failed
+            saveResults += DurableMutationResult.Applied
+        }
+        val verifier = FakeVerifier().apply { errors["A"] = Exception("HTTP error! status: 500") }
+        val sleepEntered = CompletableDeferred<Unit>()
+        val releaseSleep = CompletableDeferred<Unit>()
+        val delays = mutableListOf<Long>()
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 0L },
+            scope = this,
+            sleep = { delayMs ->
+                delays += delayMs
+                if (delays.size == 1) {
+                    sleepEntered.complete(Unit)
+                    releaseSleep.await()
+                }
+            },
+        )
+        var received: Result<String?>? = null
+        engine.queue("A", "sess", 5.0) { received = it }
+
+        sleepEntered.await()
+        assertNull(received)
+        assertEquals(1, verifier.callCounts["A"])
+        assertEquals(listOf(100L), delays)
+
+        releaseSleep.complete(Unit)
+        advanceUntilIdle()
+        assertTrue(received?.isFailure == true)
+        assertEquals(1, verifier.callCounts["A"])
+        assertEquals(1, store.data.single().retryCount)
+        assertEquals(listOf(100L, 5_000L), delays)
     }
 
     @Test
@@ -207,6 +445,24 @@ class RewardVerificationQueueTest {
     }
 
     @Test
+    fun `startup trigger does not drain before launch settles`() = runTest {
+        val store = FakeStore(listOf(PendingVerification("A", "sess", 5.0, 0, 0L)))
+        val verifier = FakeVerifier()
+        val settled = CompletableDeferred<Unit>()
+        val engine = RewardVerificationQueue(store, verifier, clock = { 0L }, scope = this)
+
+        engine.trigger(LaunchSettledGate { settled.await() })
+        runCurrent()
+        assertTrue(verifier.callCounts.isEmpty())
+        assertEquals(1, store.data.size)
+
+        settled.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, verifier.callCounts["A"])
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
     fun `a backed-off task is skipped until its delay elapses, then retried`() = runTest {
         var now = 0L
         val store = FakeStore()
@@ -230,6 +486,38 @@ class RewardVerificationQueueTest {
         engine.trigger()
         advanceUntilIdle()
         assertEquals("now eligible → retried", 2, verifier.callCounts["A"])
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `startup trigger schedules the earliest recovered reward automatically`() = runTest {
+        var now = 0L
+        val store = FakeStore(
+            listOf(
+                PendingVerification("A", "sess", 5.0, retryCount = 1, lastAttemptTimestamp = 0L),
+                PendingVerification("B", "sess", 5.0, retryCount = 2, lastAttemptTimestamp = 0L),
+            ),
+        )
+        val verifier = FakeVerifier().apply {
+            tokens["A"] = "tokA"
+            tokens["B"] = "tokB"
+        }
+        val engine = RewardVerificationQueue(store, verifier, clock = { now }, scope = this)
+
+        engine.trigger()
+        runCurrent()
+        assertTrue(verifier.callCounts.isEmpty())
+
+        now = 5_000L
+        advanceTimeBy(5_000L)
+        runCurrent()
+        assertEquals(1, verifier.callCounts["A"])
+        assertEquals(null, verifier.callCounts["B"])
+
+        now = 10_000L
+        advanceTimeBy(5_000L)
+        advanceUntilIdle()
+        assertEquals(1, verifier.callCounts["B"])
         assertTrue(store.data.isEmpty())
     }
 

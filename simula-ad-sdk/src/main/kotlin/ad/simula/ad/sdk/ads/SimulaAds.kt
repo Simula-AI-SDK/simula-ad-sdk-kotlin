@@ -1,7 +1,7 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.SimulaScope
-import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
@@ -40,8 +40,8 @@ import java.lang.ref.WeakReference
  *
  * All methods are intended to be called on the main thread. [initialize] itself is
  * deliberately cheap on the calling thread: the steps that do disk I/O
- * (SharedPreferences/SQLite), telemetry-store construction, WebView prewarm, and the
- * session warm-up run in a deferred [SimulaScope] startup, so calling from
+     * (SharedPreferences/SQLite), durable-store construction, and the session warm-up
+ * run in a deferred [SimulaScope] startup, so calling from
  * `Application.onCreate` adds no meaningful main-thread cost.
  */
 object SimulaAds {
@@ -134,6 +134,7 @@ object SimulaAds {
         // (see SimulaSessionStore.startupGate) — a host ad-load fired immediately after this
         // call returns still can't race a request out ahead of them.
         val gate = CompletableDeferred<Unit>()
+        val launchSettledGate = ProcessLaunchSettledGate
         synchronized(this) {
             if (initialized) return
 
@@ -155,7 +156,6 @@ object SimulaAds {
             // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
             // request. Also a first-party-request signal, primed off the critical path.
             SimulaDeviceSignals.prime(appContext)
-
             // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
             // seeds it — identical resolution to SimulaProvider, so the imperative and
             // declarative entry points present the same consent signals.
@@ -181,10 +181,11 @@ object SimulaAds {
         // Deferred startup, OFF the calling thread (typically the main thread when the host
         // initializes from Application.onCreate): the remaining steps do disk I/O
         // (SharedPreferences first access, SQLite open/migration) or heavy one-time work
-        // (Chromium provider bring-up) that used to run inline on the caller. Ordering is
+        // that used to run inline on the caller. Ordering is
         // preserved — IAB attach → telemetry install → initial GAID read → beacon-queue
-        // build → crash-guard install (its replay records into telemetry) → recovery/beacon
-        // drains → WebView prewarm → session warm-up — so the first /session/create is
+        // build → crash-handler install → recovery triggers → session warm-up. Outbound recovery,
+        // crash replay, telemetry, and IPv4 sends independently wait on the launch-settled gate, so
+        // the first /session/create is
         // built with attached consent + collected GAID and captured by telemetry, exactly
         // as before. Each step fails open independently: telemetry/consent infrastructure
         // must never break ads.
@@ -205,6 +206,7 @@ object SimulaAds {
                         enabled = telemetryEnabled,
                         sessionIdProvider = { store.sessionId },
                         primaryUserIdProvider = { store.effectiveUserID },
+                        launchSettledGate = launchSettledGate,
                     )
                 }
 
@@ -221,9 +223,8 @@ object SimulaAds {
                 // a host load awaiting the gate can show an ad (and fire billing beacons) the
                 // moment it proceeds, and AdBeaconManager.enqueue is a silent no-op until the
                 // engine exists — building it here closes that drop window. Construction is
-                // allocation-only (the SharedPreferences read happens lazily inside the queue),
-                // so this adds no disk I/O to the gated section. The prior-process DRAIN stays
-                // after the gate: those beacons are already persisted and self-contained.
+                // off-main SQLite open/migration work. The prior-process DRAIN is triggered later
+                // through the launch-settled gate; these records are already self-contained.
                 runCatching { AdBeaconManager.init(appContext, apiKey) }
             } finally {
                 // Release session waiters (see SimulaSessionStore.startupGate) no matter what —
@@ -239,7 +240,13 @@ object SimulaAds {
             // records into the pipeline, and a record landing before the manager exists would be
             // permanently dropped (the ordering SimulaCrashGuard.install documents).
             withContext(Dispatchers.Main) {
-                runCatching { SimulaCrashGuard.install(appContext, enabled = telemetryEnabled) }
+                runCatching {
+                    SimulaCrashGuard.install(
+                        appContext,
+                        enabled = telemetryEnabled,
+                        launchSettledGate = launchSettledGate,
+                    )
+                }
             }
 
             // Independently of session warm-up (each queued verification carries its own
@@ -247,18 +254,18 @@ object SimulaAds {
             // crash/kill before a verify could land) so their server-side SSV postbacks fire
             // without waiting for the next rewarded play. After the IAB attach so recovery
             // requests carry current consent headers.
-            runCatching { RewardVerificationManager.triggerProcessQueue(appContext) }
+            runCatching {
+                RewardVerificationManager.triggerProcessQueue(appContext, launchSettledGate)
+            }
 
             // Drain any impression/click beacons a prior process left undelivered
             // (offline/killed). The queue was built inside the gated section above — any
             // gated load can fire billing beacons the moment it releases — while these
             // already-persisted entries can drain off the gated path.
-            runCatching { AdBeaconManager.triggerProcessQueue() }
+            runCatching { AdBeaconManager.triggerProcessQueue(launchSettledGate) }
 
-            // SDK-init + SDK-upgrade beacons BEFORE the WebView prewarm and the session warm-up,
-            // so sdk_init measures startup work only — not the Web Content process bring-up or
-            // the /session/create network round-trip (parity with iOS, which records both beacons
-            // ahead of session warm-up).
+            // SDK-init + SDK-upgrade beacons before session warm-up, so sdk_init excludes the
+            // /session/create network round-trip (parity with iOS).
             val initMs = (System.nanoTime() - startNanos) / 1_000_000
             val configSummary = runCatching {
                 val c = SimulaPrivacy.current
@@ -279,13 +286,6 @@ object SimulaAds {
                     Telemetry.recordOperation(name = "sdk_upgrade", durationMs = 0, success = true, breadcrumb = "from=$last;to=$current")
                 }
                 if (last != current) vPrefs.edit().putString("last_seen_sdk_version", current).apply()
-            }
-
-            // Prewarm a WebView so the first ad/menu/native slot never pays the Chromium provider
-            // bring-up cold inside a feed layout or ad show. WebView creation must stay on the
-            // main thread; queued from here it runs after the caller's launch-critical work.
-            withContext(Dispatchers.Main) {
-                runCatching { WebViewPool.prewarm(appContext, trigger = "startup") }
             }
 
             // Warm the session before the first load() so it's off the ad critical path.

@@ -53,7 +53,7 @@ Never introduce:
 
 | Task | Model it on |
 |---|---|
-| New durable retry queue | `network/AdBeaconQueue.kt` |
+| New durable retry queue | `network/AdBeaconQueue.kt` + `network/DurableQueueStore.kt` |
 | New API endpoint | `network/SimulaApiClient.kt` + models in `network/ApiModels.kt` |
 | New inline/Compose ad surface | `nativead/NativeAdSlot.kt` |
 | New fullscreen ad format | `ads/SimulaInterstitialAd.kt` + its Activity |
@@ -92,20 +92,21 @@ SimulaScope.launch { queue.processPending() }
 ## Non-negotiable behaviors
 
 - **Provider/imperative parity**: `SimulaProvider` and `SimulaAds.initialize` must perform identical priming (`SimulaUserAgent.build`, `SimulaDeviceId.prime`, `SimulaConnectionType.prime`), privacy resolution, session setup, and telemetry install. A change to one is a change to both. Timing may differ (both defer I/O off the critical path: `SimulaAds.initialize` via its `SimulaScope` startup, the composable via `LaunchedEffect`), but the ordered outcome — consent applied and telemetry installed before the first request — must not.
-- **Deferred startup**: `SimulaAds.initialize` keeps the calling thread (usually main, from `Application.onCreate`) free of disk I/O — `SimulaPrivacy.attach`, `Telemetry.initialize` (SQLite), the initial GAID refresh, the `AdBeaconManager.init` build, `SimulaCrashGuard.install` (its replay records into telemetry, so it must follow telemetry), the recovery/beacon drains, `WebViewPool.prewarm`, and the session warm-up run in the `SimulaScope` startup block in that order; `SimulaSessionStore.startupGate` holds any host load fired immediately after `initialize` until consent + telemetry + the beacon queue are in place (the queue build is inside the gate because a released load can fire billing beacons immediately, and `enqueue` is a no-op until the engine exists). Keep heavy one-time work there, not inline in `initialize`.
+- **Deferred startup**: `SimulaAds.initialize` keeps the calling thread (usually main, from `Application.onCreate`) free of disk I/O — `SimulaPrivacy.attach`, `Telemetry.initialize` (SQLite), the initial GAID refresh, the `AdBeaconManager.init` build, `SimulaCrashGuard.install`, local recovery, and session warm-up stay in `SimulaScope`; `SimulaSessionStore.startupGate` holds any host load only until consent + telemetry + the beacon queue are in place. The single process-wide five-second `ProcessLaunchSettledGate` delays telemetry sends, crash replay/exit sweep, startup reward/beacon drains, and IPv4 sends (including provider-triggered IPv4) without delaying telemetry/crash-handler installation, local telemetry recovery, privacy, session creation, or ad load. Ad load/preload APIs remain network-only; WebView creation starts from visible UI demand. Keep heavy one-time work there, not inline in `initialize`.
 - **Uninitialized SDK**: return null / render blank / log one warning. `require()` only at documented init boundaries.
 - **WebView render-process death**: absorb and report (`webview:render_gone`); returning "unhandled" kills the host process.
 - **Watchdog parity**: crash/ANR wire names stay stable; group sites internally with a persisted
   16-hex FNV-1a fingerprint of at most 8 canonical SDK frames. Android ANRs are attributable only
   when the SDK is on the main-thread stack. OS incident context belongs in the existing bounded
   breadcrumb/stack fields — never add high-cardinality event names.
-- **WebView retention**: the idle pool is 1 (0 on constrained devices) with a 5-minute pressure
+- **WebView retention**: the idle pool is 1 (0 on constrained devices) with a 5-minute real-pressure
   cooldown; retained native-ad views are capped at 3/1 and the cap is re-enforced after detach.
-  Background/memory policy may evict idle views but must never destroy an attached view.
+  `TRIM_MEMORY_UI_HIDDEN` may evict idle views but does not start cooldown. No trim policy may
+  destroy an attached view.
 - **Bundled images**: never decode `painterResource` synchronously on a Compose path for raster
   assets. Use the bounded, single-flight bundled-resource cache; decode in `SimulaScope` and render
   loading/failure as a stable-size phase.
-- **Durable work** (beacons, reward verification, telemetry): serializable item + persistent store + backoff (drop permanent 4xx, retry transient) + `triggerProcessQueue()` on init for process recovery.
+- **Durable work** (beacons, reward verification, telemetry): serializable item + WAL SQLite rows + stable action key/revision + backoff (drop permanent 4xx, retry transient). Billing/reward rows have no age/count/byte eviction; only explicit delivery/permanent-failure reconciliation removes them. Loads return `Loaded` / `Failed` and one malformed row fails the queue without deleting data. Each queue has one capped storage-recovery job and a bounded pending map deduped by action key/serve id; recovery batch-persists pending work before any send, and capacity rejection fails reward callbacks plus emits bounded telemetry. Mutations return `Applied` / `NoMatch` / `Failed`; never send before persistence, and never release a delivery callback or processing claim before delete/retry-state reconciliation succeeds with capped storage backoff. Legacy SharedPreferences migration clears the exact old key only after a confirmed SQLite transaction. Startup `triggerProcessQueue()` calls use the shared launch-settled gate; normal persisted enqueues remain immediate.
 - **Consent**: headers come from `SimulaPrivacy` at request time; PII (PPID/GAID) is re-read at flush from live consent, never cached.
 - **Connection type**: `X-Connection-Type` is read live per request from `SimulaConnectionType`, never cached at init.
 - **Coalescing**: only idempotent reads (catalog, fallbacks). Never session create, ad load, or verify-reward.
@@ -123,11 +124,12 @@ Tests live in `src/test/kotlin/...` mirroring main packages. JUnit 4 + `kotlinx-
 
 ## Definition of done — mandatory gate
 
-The task is not complete until both commands pass:
+The task is not complete until all commands pass:
 
 ```bash
 ./gradlew compileDebugKotlin
 ./gradlew testDebugUnitTest
+./gradlew assembleRelease
 ```
 
-CI (`.github/workflows/ci.yml`) runs these plus `assembleRelease`. If you changed public API or behavior, check whether the same change is needed in `../simula-ad-sdk-swift` and say so in your summary.
+If you changed public API or behavior, check whether the same change is needed in `../simula-ad-sdk-swift` and say so in your summary.

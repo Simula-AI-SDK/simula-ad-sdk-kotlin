@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.telemetry
 
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.core.LaunchSettledGate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -77,6 +78,7 @@ internal class TelemetryManager(
     private val clock: () -> Long = System::currentTimeMillis,
     private val scope: CoroutineScope = SimulaScope,
     private val random: () -> Double = { Random.nextDouble() },
+    private val launchSettledGate: LaunchSettledGate = LaunchSettledGate.Open,
     // Dev-only sink: when set (devMode), each recorded event is logged here (already redacted).
     private val debugLog: ((String) -> Unit)? = null,
 ) {
@@ -382,6 +384,10 @@ internal class TelemetryManager(
     private fun snapshot(): List<TelemetryEvent> = buffer.toList() + errorAgg.values.toList()
 
     private suspend fun flush() {
+        // Persistence and recovery happen before this point. Only outbound network delivery waits
+        // for launch to settle, and the shared one-shot gate is already open for steady-state calls.
+        launchSettledGate.awaitSettled()
+
         val pendingBuffer: List<TelemetryEvent>
         val pendingErrors: Map<String, Int>
         val droppedSnap: Int

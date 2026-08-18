@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.telemetry
 
+import ad.simula.ad.sdk.core.LaunchSettledGate
+import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.installSimulaScopeFailureReporter
 import ad.simula.ad.sdk.image.ImageCache
 import ad.simula.ad.sdk.minigame.WebViewPool
@@ -54,6 +56,7 @@ internal object Telemetry {
         enabled: Boolean,
         sessionIdProvider: () -> String?,
         primaryUserIdProvider: () -> String?,
+        launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
     ) {
         if (!enabled) {
             manager = null
@@ -89,6 +92,7 @@ internal object Telemetry {
             diagnosticsProvider = { resolveDiagnostics() },
             batteryProvider = { resolveBattery(appCtx) },
             carrierProvider = { resolveCarrier(appCtx) },
+            launchSettledGate = launchSettledGate,
             // In dev mode, mirror every (redacted) event to logcat for local verification.
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
         ).also { it.start() }
