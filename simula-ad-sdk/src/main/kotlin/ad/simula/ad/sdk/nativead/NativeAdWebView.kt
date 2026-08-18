@@ -170,13 +170,23 @@ internal fun NativeAdWebView(
     key(generation) {
         val attachment = remember(owner, generation) { NativeAdWebViewStore.createAttachment(owner) }
         var mountAdmitted by remember(owner, generation) { mutableStateOf(false) }
+        val prioritizeRetained = remember(owner, generation, iframeUrl, renderedHtml) {
+            NativeAdWebViewStore.hasReusableIdleSession(
+                impressionId = impressionId,
+                apiKey = apiKey,
+                iframeUrl = iframeUrl,
+                renderedHtml = renderedHtml,
+            )
+        }
         val sizeModifier = Modifier
             .fillMaxWidth()
             // Keep the same dimensions before and after admission so pacing never shifts the feed.
             .height(if (heightDp > 0f) heightDp.dp else NATIVE_AD_PROVISIONAL_HEIGHT_DP.dp)
         val mountModifier = modifier.then(sizeModifier)
-        LaunchedEffect(owner, generation) {
-            mountAdmitted = NativeAdMountScheduler.awaitPermit()
+        LaunchedEffect(owner, generation, prioritizeRetained) {
+            // Healthy retained views still pass through the frame scheduler so a stale availability
+            // check can never create an unpaced WebView, but they move ahead of speculative cold mounts.
+            mountAdmitted = NativeAdMountScheduler.awaitPermit(prioritize = prioritizeRetained)
         }
         if (mountAdmitted) {
             AndroidView(
@@ -267,6 +277,24 @@ internal object NativeAdWebViewStore {
         Owner(Session(impressionId, apiKey, NativeAdWiring(appContext, apiKey, impressionId)))
 
     fun createAttachment(owner: Owner): Attachment = Attachment(owner)
+
+    /** Read-only scheduling hint. A false positive is safe because attach still runs after a permit. */
+    @MainThread
+    fun hasReusableIdleSession(
+        impressionId: String,
+        apiKey: String,
+        iframeUrl: String?,
+        renderedHtml: String?,
+    ): Boolean {
+        if (impressionId.isBlank()) return false
+        val session = sessions[impressionId] ?: return false
+        return !session.attached &&
+            session.apiKey == apiKey &&
+            session.webView != null &&
+            session.loadedKey == creativeKey(iframeUrl, renderedHtml) &&
+            !session.wiring.renderGone &&
+            !session.wiring.loadFailed
+    }
 
     /** Return the view to mount: the retained one (already loaded → no reload) or a freshly built one. */
     @MainThread

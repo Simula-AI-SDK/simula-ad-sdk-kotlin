@@ -20,6 +20,20 @@ class NativeAdMountSchedulerPolicyTest {
     }
 
     @Test
+    fun `retained reattach priority moves ahead of queued cold mounts`() {
+        val queue = NativeMountAdmissionQueue<String>()
+        queue.add("cold-first")
+        queue.add("cold-second")
+        queue.add("retained-first", prioritize = true)
+        queue.add("retained-second", prioritize = true)
+
+        assertEquals("retained-first", queue.takeNext { true })
+        assertEquals("retained-second", queue.takeNext { true })
+        assertEquals("cold-first", queue.takeNext { true })
+        assertEquals("cold-second", queue.takeNext { true })
+    }
+
+    @Test
     fun `cancelled mounts are skipped without consuming an admission`() {
         val queue = NativeMountAdmissionQueue<Pair<String, Boolean>>()
         queue.add("left-composition" to false)

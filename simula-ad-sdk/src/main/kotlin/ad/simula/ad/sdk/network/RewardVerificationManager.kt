@@ -265,11 +265,10 @@ internal class RewardVerificationQueue(
                 }
                 sleep(delayMs)
                 recovered = mutex.withLock {
-                    recoverStorageLocked(scheduleOnFailure = false)
+                    val result = recoverStorageLocked(scheduleOnFailure = false)
+                    if (result) storageRecoveryJob = null
+                    result
                 }
-            }
-            mutex.withLock {
-                storageRecoveryJob = null
             }
             processQueue(scheduleIneligibleWake = true)
         }

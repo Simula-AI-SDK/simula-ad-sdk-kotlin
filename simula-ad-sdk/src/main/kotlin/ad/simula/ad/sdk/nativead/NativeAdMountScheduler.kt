@@ -20,14 +20,14 @@ internal object NativeAdMountScheduler {
     private val fallbackCallback = Runnable { grantNext() }
 
     /** Returns false when the platform cannot schedule either a frame or main-loop fallback. */
-    suspend fun awaitPermit(): Boolean {
+    suspend fun awaitPermit(prioritize: Boolean = false): Boolean {
         val request = CompletableDeferred<Boolean>()
         return try {
             val enqueued = withContext(Dispatchers.Main.immediate) {
                 if (!request.isActive) {
                     false
                 } else {
-                    pending.add(request)
+                    pending.add(request, prioritize)
                     scheduleNext()
                     true
                 }
@@ -71,15 +71,20 @@ internal object NativeAdMountScheduler {
 
 /** Main-thread queue policy extracted for deterministic JVM coverage. */
 internal class NativeMountAdmissionQueue<T> {
+    private val prioritizedItems = ArrayDeque<T>()
     private val items = ArrayDeque<T>()
 
-    fun add(item: T) {
-        items.addLast(item)
+    fun add(item: T, prioritize: Boolean = false) {
+        if (prioritize) prioritizedItems.addLast(item) else items.addLast(item)
     }
 
-    fun isEmpty(): Boolean = items.isEmpty()
+    fun isEmpty(): Boolean = prioritizedItems.isEmpty() && items.isEmpty()
 
     fun takeNext(isEligible: (T) -> Boolean): T? {
+        while (prioritizedItems.isNotEmpty()) {
+            val item = prioritizedItems.removeFirst()
+            if (isEligible(item)) return item
+        }
         while (items.isNotEmpty()) {
             val item = items.removeFirst()
             if (isEligible(item)) return item
@@ -88,6 +93,7 @@ internal class NativeMountAdmissionQueue<T> {
     }
 
     fun drain(): List<T> = buildList {
+        while (prioritizedItems.isNotEmpty()) add(prioritizedItems.removeFirst())
         while (items.isNotEmpty()) add(items.removeFirst())
     }
 }

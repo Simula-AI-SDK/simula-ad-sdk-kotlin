@@ -219,11 +219,10 @@ internal class AdBeaconQueue(
                 }
                 sleep(delayMs)
                 recovered = mutex.withLock {
-                    recoverStorageLocked(scheduleOnFailure = false)
+                    val result = recoverStorageLocked(scheduleOnFailure = false)
+                    if (result) storageRecoveryJob = null
+                    result
                 }
-            }
-            mutex.withLock {
-                storageRecoveryJob = null
             }
             // Storage may recover before network backoff expires; normal processing must arm
             // the earliest eligibility wake rather than treating this as an early retry wake.
