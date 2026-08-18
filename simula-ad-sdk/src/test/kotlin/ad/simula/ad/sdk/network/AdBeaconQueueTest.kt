@@ -1,7 +1,10 @@
 package ad.simula.ad.sdk.network
 
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import ad.simula.ad.sdk.core.LaunchSettledGate
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -26,8 +29,19 @@ class AdBeaconQueueTest {
 
     private class FakeStore(initial: List<PendingBeacon> = emptyList()) : BeaconStore {
         var data: List<PendingBeacon> = initial.toList()
-        override fun load(): List<PendingBeacon> = data
-        override fun save(queue: List<PendingBeacon>) { data = queue.toList() }
+        val loadResults = ArrayDeque<DurableLoadResult<List<PendingBeacon>>>()
+        val saveResults = ArrayDeque<DurableMutationResult>()
+        var failLoads = false
+        override fun load(): DurableLoadResult<List<PendingBeacon>> = if (failLoads) {
+            DurableLoadResult.Failed
+        } else {
+            loadResults.removeFirstOrNull() ?: DurableLoadResult.Loaded(data)
+        }
+        override fun save(queue: List<PendingBeacon>): DurableMutationResult {
+            val result = saveResults.removeFirstOrNull() ?: DurableMutationResult.Applied
+            if (result == DurableMutationResult.Applied) data = queue.toList()
+            return result
+        }
     }
 
     /** Programmable sender: per-`impressionId:action` status code, or a thrown connectivity error. */
@@ -80,6 +94,199 @@ class AdBeaconQueueTest {
 
         assertTrue("delivered beacon must be dropped", store.data.isEmpty())
         assertEquals(1, sender.callCounts["imp:seen"])
+    }
+
+    @Test
+    fun `failed enqueue persistence waits for coalesced recovery before delivery`() = runTest {
+        val store = FakeStore().apply {
+            saveResults += DurableMutationResult.Failed
+            saveResults += DurableMutationResult.Applied
+        }
+        val sender = FakeSender()
+        val sleepEntered = CompletableDeferred<Unit>()
+        val releaseSleep = CompletableDeferred<Unit>()
+        val engine = AdBeaconQueue(
+            store,
+            sender,
+            clock = { 0L },
+            scope = this,
+            sleep = {
+                sleepEntered.complete(Unit)
+                releaseSleep.await()
+            },
+        )
+
+        engine.queue("imp", "seen")
+        sleepEntered.await()
+
+        assertTrue(store.data.isEmpty())
+        assertTrue(sender.callCounts.isEmpty())
+
+        releaseSleep.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, sender.callCounts["imp:seen"])
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `failed queue load retries storage before delivery`() = runTest {
+        val store = FakeStore(listOf(PendingBeacon("imp", "seen"))).apply {
+            loadResults += DurableLoadResult.Failed
+        }
+        val sender = FakeSender()
+        val sleepEntered = CompletableDeferred<Unit>()
+        val releaseSleep = CompletableDeferred<Unit>()
+        val engine = AdBeaconQueue(
+            store,
+            sender,
+            clock = { 0L },
+            scope = this,
+            sleep = {
+                sleepEntered.complete(Unit)
+                releaseSleep.await()
+            },
+        )
+
+        engine.trigger()
+        sleepEntered.await()
+        assertTrue(sender.callCounts.isEmpty())
+        assertEquals(1, store.data.size)
+
+        releaseSleep.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, sender.callCounts["imp:seen"])
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `storage recovery coalesces action keys and bounds pending beacon memory`() = runTest {
+        val store = FakeStore().apply { failLoads = true }
+        val sender = FakeSender()
+        val sleepEntered = CompletableDeferred<Unit>()
+        val releaseSleep = CompletableDeferred<Unit>()
+        var sleepCount = 0
+        val engine = AdBeaconQueue(
+            store,
+            sender,
+            clock = { 0L },
+            scope = this,
+            sleep = {
+                sleepCount++
+                sleepEntered.complete(Unit)
+                releaseSleep.await()
+            },
+            maxPendingEnqueues = 1,
+        )
+
+        engine.queue("imp", "seen", mapOf("a" to "one"))
+        engine.queue("imp", "seen", mapOf("b" to "two"))
+        engine.queue("overflow", "click")
+        sleepEntered.await()
+        runCurrent()
+
+        assertEquals("one recovery sleeper for every pending event", 1, sleepCount)
+        assertTrue(sender.callCounts.isEmpty())
+
+        store.failLoads = false
+        releaseSleep.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, sender.callCounts["imp:seen"])
+        assertEquals(null, sender.callCounts["overflow:click"])
+        assertEquals(mapOf("a" to "one", "b" to "two"), sender.sentMetadata["imp:seen"])
+    }
+
+    @Test
+    fun `persistent storage recovery uses one exponential loop with capped delay`() = runTest {
+        val store = FakeStore().apply { failLoads = true }
+        val sender = FakeSender()
+        val delays = mutableListOf<Long>()
+        val engine = AdBeaconQueue(
+            store,
+            sender,
+            clock = { 0L },
+            scope = this,
+            sleep = { delayMs ->
+                delays += delayMs
+                if (delays.size == 7) store.failLoads = false
+            },
+        )
+
+        engine.queue("imp", "seen")
+        advanceUntilIdle()
+
+        assertEquals(listOf(100L, 200L, 400L, 800L, 1_600L, 3_200L, 5_000L), delays)
+        assertEquals(1, sender.callCounts["imp:seen"])
+    }
+
+    @Test
+    fun `storage recovery re-arms network backoff eligibility for recovered beacon`() = runTest {
+        var now = 0L
+        val store = FakeStore(
+            listOf(PendingBeacon("imp", "seen", retryCount = 1, lastAttemptTimestamp = 0L)),
+        ).apply { loadResults += DurableLoadResult.Failed }
+        val sender = FakeSender()
+        val releaseStorage = CompletableDeferred<Unit>()
+        val delays = mutableListOf<Long>()
+        val engine = AdBeaconQueue(
+            store,
+            sender,
+            clock = { now },
+            scope = this,
+            sleep = { delayMs ->
+                delays += delayMs
+                if (delays.size == 1) releaseStorage.await() else delay(delayMs)
+            },
+        )
+
+        engine.trigger()
+        runCurrent()
+        assertEquals(listOf(100L), delays)
+
+        releaseStorage.complete(Unit)
+        runCurrent()
+        assertEquals(listOf(100L, 5_000L), delays)
+        assertTrue(sender.callCounts.isEmpty())
+
+        now = 5_000L
+        advanceTimeBy(5_000L)
+        advanceUntilIdle()
+        assertEquals(1, sender.callCounts["imp:seen"])
+    }
+
+    @Test
+    fun `failed delivery removal backs off under one processing claim without resending`() = runTest {
+        val task = PendingBeacon("imp", "seen")
+        val store = FakeStore(listOf(task)).apply {
+            saveResults += DurableMutationResult.Failed
+            saveResults += DurableMutationResult.Applied
+        }
+        val sender = FakeSender()
+        val sleepEntered = CompletableDeferred<Unit>()
+        val releaseSleep = CompletableDeferred<Unit>()
+        val delays = mutableListOf<Long>()
+        val engine = AdBeaconQueue(
+            store,
+            sender,
+            clock = { 0L },
+            scope = this,
+            sleep = { delayMs ->
+                delays += delayMs
+                sleepEntered.complete(Unit)
+                releaseSleep.await()
+            },
+        )
+
+        engine.trigger()
+        sleepEntered.await()
+        assertEquals(1, sender.callCounts["imp:seen"])
+        assertEquals(listOf(100L), delays)
+        assertEquals(1, store.data.size)
+
+        releaseSleep.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("storage retry must not resend the network request", 1, sender.callCounts["imp:seen"])
+        assertTrue(store.data.isEmpty())
     }
 
     @Test
@@ -164,6 +371,24 @@ class AdBeaconQueueTest {
     }
 
     @Test
+    fun `startup trigger does not drain before launch settles`() = runTest {
+        val store = FakeStore(listOf(PendingBeacon("imp", "seen")))
+        val sender = FakeSender()
+        val settled = CompletableDeferred<Unit>()
+        val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
+
+        engine.trigger(LaunchSettledGate { settled.await() })
+        runCurrent()
+        assertTrue(sender.callCounts.isEmpty())
+        assertEquals(1, store.data.size)
+
+        settled.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, sender.callCounts["imp:seen"])
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
     fun `a backed-off beacon is skipped until its delay elapses, then retried`() = runTest {
         var now = 0L
         val store = FakeStore()
@@ -184,6 +409,35 @@ class AdBeaconQueueTest {
         engine.trigger()
         advanceUntilIdle()
         assertEquals("now eligible → retried", 2, sender.callCounts["imp:seen"])
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `startup trigger schedules the earliest backed-off beacon automatically`() = runTest {
+        var now = 0L
+        val store = FakeStore(
+            listOf(
+                PendingBeacon("early", "seen", retryCount = 1, lastAttemptTimestamp = 0L),
+                PendingBeacon("late", "seen", retryCount = 2, lastAttemptTimestamp = 0L),
+            ),
+        )
+        val sender = FakeSender()
+        val engine = AdBeaconQueue(store, sender, clock = { now }, scope = this)
+
+        engine.trigger()
+        runCurrent()
+        assertTrue(sender.callCounts.isEmpty())
+
+        now = 5_000L
+        advanceTimeBy(5_000L)
+        runCurrent()
+        assertEquals(1, sender.callCounts["early:seen"])
+        assertEquals(null, sender.callCounts["late:seen"])
+
+        now = 10_000L
+        advanceTimeBy(5_000L)
+        advanceUntilIdle()
+        assertEquals(1, sender.callCounts["late:seen"])
         assertTrue(store.data.isEmpty())
     }
 
@@ -235,6 +489,25 @@ class AdBeaconQueueTest {
         assertEquals(2, store.data[0].retryCount)
         assertEquals(1_000L, store.data[0].lastAttemptTimestamp)
         assertTrue(sender.callCounts.isEmpty())
+    }
+
+    @Test
+    fun `duplicate with identical metadata keeps the same persisted revision`() = runTest {
+        val existing = PendingBeacon(
+            impressionId = "imp",
+            action = "seen",
+            metadata = mapOf("placement" to "feed"),
+            retryCount = 1,
+            lastAttemptTimestamp = 1_000L,
+        )
+        val store = FakeStore(listOf(existing))
+        val engine = AdBeaconQueue(store, FakeSender(), clock = { 1_000L }, scope = this)
+
+        engine.queue("imp", "seen", mapOf("placement" to "feed"))
+        advanceUntilIdle()
+
+        assertEquals(existing.rowId, store.data.single().rowId)
+        assertEquals(1, store.data.single().retryCount)
     }
 
     @Test

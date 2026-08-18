@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.bridge
 
+import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.graphics.Bitmap
 import android.webkit.ConsoleMessage
@@ -62,6 +63,9 @@ internal open class CreativeTelemetryWebViewClient(private val adFormat: String)
  */
 internal fun recordRenderProcessGone(surface: String, detail: RenderProcessGoneDetail?): Boolean {
     val crashed = detail?.didCrash() ?: false
+    // A renderer death is a real pressure signal regardless of which SDK surface owned it.
+    // Suppress retention/prewarm for the cooldown; ordinary backgrounding does not do this.
+    WebViewPool.suspendRetention()
     Telemetry.recordError(
         signature = "webview:render_gone",
         errorCode = if (crashed) "render_crash" else "render_oom",

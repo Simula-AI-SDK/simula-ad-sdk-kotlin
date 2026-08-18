@@ -1,9 +1,11 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.core.LaunchSettledGate
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -25,6 +27,7 @@ class Ipv4BeaconTest {
     @Before
     fun setUp() {
         Ipv4Beacon.resetForTests()
+        Ipv4Beacon.launchSettledGate = LaunchSettledGate.Open
         sent.clear()
         Ipv4Beacon.deviceIdProvider = { "device-123" }
         Ipv4Beacon.clock = { 1_111L }
@@ -116,6 +119,21 @@ class Ipv4BeaconTest {
         assertTrue(sent[0].contains("ppid=user-1"))
         assertTrue(sent[0].contains("did=device-123"))
         assertTrue(sent[0].contains("r=init"))
+    }
+
+    @Test
+    fun `fire waits for launch to settle without blocking its caller`() = runTest {
+        Ipv4Beacon.scope = this
+        val settled = CompletableDeferred<Unit>()
+        Ipv4Beacon.launchSettledGate = LaunchSettledGate { settled.await() }
+
+        Ipv4Beacon.fire("key-1", "sess-1", "user-1", Ipv4Beacon.REASON_INIT)
+        runCurrent()
+        assertTrue(sent.isEmpty())
+
+        settled.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, sent.size)
     }
 
     @Test

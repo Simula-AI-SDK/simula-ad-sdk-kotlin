@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.core.LaunchSettledGate
+import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.SimulaScope
 import java.net.URLEncoder
 import kotlinx.coroutines.CoroutineScope
@@ -59,6 +61,7 @@ internal object Ipv4Beacon {
     }
     internal var deviceIdProvider: () -> String? = { SimulaDeviceId.value }
     internal var clock: () -> Long = System::currentTimeMillis
+    internal var launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate
 
     private val lock = Any()
 
@@ -94,6 +97,10 @@ internal object Ipv4Beacon {
         }
 
         scope.launch {
+            launchSettledGate.awaitSettled()
+            synchronized(lock) {
+                if (gen != generation) return@launch
+            }
             val ok = runCatching {
                 send(buildUrl(base, apiKey, sessionId, ppid, deviceIdProvider(), reason, clock()))
             }.getOrDefault(false)
@@ -157,5 +164,6 @@ internal object Ipv4Beacon {
         send = { u -> SimulaHttp.request(u, instrument = false).isSuccessful }
         deviceIdProvider = { SimulaDeviceId.value }
         clock = System::currentTimeMillis
+        launchSettledGate = ProcessLaunchSettledGate
     }
 }

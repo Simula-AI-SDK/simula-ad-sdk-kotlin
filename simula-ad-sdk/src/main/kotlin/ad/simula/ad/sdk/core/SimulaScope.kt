@@ -60,8 +60,7 @@ private val crashGuard = CoroutineExceptionHandler { _, throwable ->
 
 /**
  * Process-lifetime coroutine scope for SDK background work that must outlive any
- * single composable: dedup'd image downloads, session creation, WebView prewarm
- * refills, and fire-and-forget tracking.
+ * single composable: dedup'd image downloads, session creation, and fire-and-forget tracking.
  *
  * [SupervisorJob] isolates failures so one failed task never cancels its
  * siblings; [Dispatchers.IO] fits the network + decode I/O profile of this work;

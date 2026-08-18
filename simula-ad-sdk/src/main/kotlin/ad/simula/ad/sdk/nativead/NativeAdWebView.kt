@@ -7,8 +7,10 @@ import ad.simula.ad.sdk.bridge.NATIVE_AD_BRIDGE_MESSAGE_TYPES
 import ad.simula.ad.sdk.bridge.parseKnownCreativeBridgeMessage
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.WebViewTrimAction
 import ad.simula.ad.sdk.minigame.isWebViewMemoryConstrained
 import ad.simula.ad.sdk.minigame.repaintOnNextFrame
+import ad.simula.ad.sdk.minigame.webViewTrimAction
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.content.ComponentCallbacks2
 import android.content.Context
@@ -26,13 +28,16 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -56,13 +61,13 @@ import java.util.WeakHashMap
  * Hosts a native-ad creative in a pooled, non-scrollable [WebView] sized to its content.
  *
  * Performance: the [WebView] is owned by [NativeAdWebViewStore], which retains a small LRU of loaded
- * instances keyed by impression id. A first mount acquires a prewarmed view from [WebViewPool], loads
- * the creative, and keeps it; scrolling the slot out **detaches and pauses** that view (preserving its
+ * instances keyed by impression id. Fresh mounts are paced to one admission per display frame before
+ * acquiring from [WebViewPool], loading the creative, and retaining it; scrolling the slot out
+ * **detaches and pauses** that view (preserving its
  * rendered DOM) and scrolling back **reattaches the same view with no reload** — eliminating the
  * blank-then-pop re-render a recycled feed row otherwise shows. The creative is mounted from
  * `rendered_html` (the inline `<iframe srcdoc>`, preferred) and falls back to `iframe_url`. The container
- * grows to the height the creative reports over the JS bridge; nothing is drawn while loading
- * (transparent, no skeleton).
+ * grows to the height the creative reports over the JS bridge, with a stable shimmer while waiting.
  *
  * Bridge (reuses the relay pattern of [ad.simula.ad.sdk.bridge.BridgeWebViewInstaller], scoped to the
  * native-ad message set):
@@ -88,6 +93,7 @@ internal fun NativeAdWebView(
     trackingUrl: String? = null,
     destination: String = "appstore",
     storeUrl: String? = null,
+    placeholderDark: Boolean,
     modifier: Modifier = Modifier,
     visibilityRelay: VisibilityRelay? = null,
 ) {
@@ -163,17 +169,41 @@ internal fun NativeAdWebView(
     // generation is stable across scroll/recompose, so normal reattach still reuses the retained view.
     key(generation) {
         val attachment = remember(owner, generation) { NativeAdWebViewStore.createAttachment(owner) }
-        AndroidView(
-            modifier = modifier
-                .fillMaxWidth()
-                // Hold a provisional height (not ~0) while the creative measures, so the slot never
-                // collapses to a sliver — the slot keeps a shimmer over this until the height arrives.
-                .height(if (heightDp > 0f) heightDp.dp else NATIVE_AD_PROVISIONAL_HEIGHT_DP.dp),
-            // Reattaches the retained WebView (no reload) or builds + loads a fresh one on first mount.
-            factory = { NativeAdWebViewStore.attach(attachment, context, iframeUrl, renderedHtml, devMode) },
-            // Scroll-out: detach + pause + keep the loaded DOM (retained ids); recycle ephemerals/orphans.
-            onRelease = { released -> NativeAdWebViewStore.release(attachment, released) },
-        )
+        var mountAdmitted by remember(owner, generation) { mutableStateOf(false) }
+        val prioritizeRetained = remember(owner, generation, iframeUrl, renderedHtml) {
+            NativeAdWebViewStore.hasReusableIdleSession(
+                impressionId = impressionId,
+                apiKey = apiKey,
+                iframeUrl = iframeUrl,
+                renderedHtml = renderedHtml,
+            )
+        }
+        val sizeModifier = Modifier
+            .fillMaxWidth()
+            // Keep the same dimensions before and after admission so pacing never shifts the feed.
+            .height(if (heightDp > 0f) heightDp.dp else NATIVE_AD_PROVISIONAL_HEIGHT_DP.dp)
+        val mountModifier = modifier.then(sizeModifier)
+        LaunchedEffect(owner, generation, prioritizeRetained) {
+            // Healthy retained views still pass through the frame scheduler so a stale availability
+            // check can never create an unpaced WebView, but they move ahead of speculative cold mounts.
+            mountAdmitted = NativeAdMountScheduler.awaitPermit(prioritize = prioritizeRetained)
+        }
+        if (mountAdmitted) {
+            AndroidView(
+                modifier = mountModifier,
+                // Reattaches a retained view or creates/acquires a fresh one, always on main.
+                factory = { NativeAdWebViewStore.attach(attachment, context, iframeUrl, renderedHtml, devMode) },
+                // Scroll-out: detach + pause + keep the loaded DOM (retained ids); recycle ephemerals/orphans.
+                onRelease = { released -> NativeAdWebViewStore.release(attachment, released) },
+            )
+        } else if (heightDp > 0f) {
+            // Do not apply the mount's viewability modifier to a placeholder: it must not earn an
+            // impression before the creative is attached.
+            NativeAdShimmer(sizeModifier, isDark = placeholderDark)
+        } else {
+            // The slot-level shimmer covers fresh fills while preserving this provisional footprint.
+            Spacer(sizeModifier)
+        }
     }
 }
 
@@ -247,6 +277,24 @@ internal object NativeAdWebViewStore {
         Owner(Session(impressionId, apiKey, NativeAdWiring(appContext, apiKey, impressionId)))
 
     fun createAttachment(owner: Owner): Attachment = Attachment(owner)
+
+    /** Read-only scheduling hint. A false positive is safe because attach still runs after a permit. */
+    @MainThread
+    fun hasReusableIdleSession(
+        impressionId: String,
+        apiKey: String,
+        iframeUrl: String?,
+        renderedHtml: String?,
+    ): Boolean {
+        if (impressionId.isBlank()) return false
+        val session = sessions[impressionId] ?: return false
+        return !session.attached &&
+            session.apiKey == apiKey &&
+            session.webView != null &&
+            session.loadedKey == creativeKey(iframeUrl, renderedHtml) &&
+            !session.wiring.renderGone &&
+            !session.wiring.loadFailed
+    }
 
     /** Return the view to mount: the retained one (already loaded → no reload) or a freshly built one. */
     @MainThread
@@ -547,9 +595,18 @@ internal object NativeAdWebViewStore {
         resolveMaxRetained(appContext)
         appContext.applicationContext.registerComponentCallbacks(object : ComponentCallbacks2 {
             override fun onTrimMemory(level: Int) {
-                if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
-                    WebViewPool.suspendRetention()
-                    evictAll()
+                when (webViewTrimAction(level)) {
+                    WebViewTrimAction.EVICT_IDLE -> {
+                        evictAll()
+                        // This callback may run after the pool already handled UI-hidden. A retained
+                        // session released above can refill that pool, so drain once more here.
+                        WebViewPool.trimIdle()
+                    }
+                    WebViewTrimAction.EVICT_IDLE_AND_COOLDOWN -> {
+                        WebViewPool.suspendRetention()
+                        evictAll()
+                    }
+                    WebViewTrimAction.NONE -> Unit
                 }
             }
 
