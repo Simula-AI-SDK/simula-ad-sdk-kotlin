@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.minigame
 
 import ad.simula.ad.sdk.nativead.retainedIdleEvictionKeys
+import android.content.ComponentCallbacks2
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -28,7 +29,9 @@ class WebViewPoolPolicyTest {
         assertEquals(WebViewPrewarmDecision.FULL, webViewPrewarmDecision(1, 1, 10L, 0L))
         assertEquals(WebViewPrewarmDecision.COOLDOWN, webViewPrewarmDecision(1, 0, 9L, 10L))
         assertEquals(WebViewPrewarmDecision.WARM, webViewPrewarmDecision(1, 0, 10L, 10L))
-        assertEquals("startup", canonicalWebViewPrewarmTrigger("startup"))
+        assertEquals("minigame_menu", canonicalWebViewPrewarmTrigger("minigame_menu"))
+        assertEquals("unspecified", canonicalWebViewPrewarmTrigger("startup"))
+        assertEquals("unspecified", canonicalWebViewPrewarmTrigger("acquire_refill"))
         assertEquals("unspecified", canonicalWebViewPrewarmTrigger("host-value-with-id-123"))
     }
 
@@ -73,5 +76,23 @@ class WebViewPoolPolicyTest {
         assertTrue(isWebViewMemoryConstrained(isLowRamDevice = false, totalRamBytes = 8L * gib, maxHeapBytes = 256L * 1024 * 1024))
         assertTrue(isWebViewMemoryConstrained(isLowRamDevice = true, totalRamBytes = 8L * gib, maxHeapBytes = gib))
         assertFalse(isWebViewMemoryConstrained(isLowRamDevice = false, totalRamBytes = 8L * gib, maxHeapBytes = gib))
+    }
+
+    @Test
+    fun `ui hidden evicts idle views without starting pressure cooldown`() {
+        assertEquals(WebViewTrimAction.EVICT_IDLE, webViewTrimAction(ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN))
+        assertEquals(
+            WebViewTrimAction.EVICT_IDLE_AND_COOLDOWN,
+            webViewTrimAction(ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW),
+        )
+        assertEquals(
+            WebViewTrimAction.EVICT_IDLE_AND_COOLDOWN,
+            webViewTrimAction(ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL),
+        )
+        assertEquals(
+            WebViewTrimAction.EVICT_IDLE_AND_COOLDOWN,
+            webViewTrimAction(ComponentCallbacks2.TRIM_MEMORY_BACKGROUND),
+        )
+        assertEquals(WebViewTrimAction.NONE, webViewTrimAction(ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE))
     }
 }

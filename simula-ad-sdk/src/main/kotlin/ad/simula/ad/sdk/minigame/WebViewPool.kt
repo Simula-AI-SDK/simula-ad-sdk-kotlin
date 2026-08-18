@@ -9,8 +9,6 @@ import android.content.Context
 import android.content.MutableContextWrapper
 import android.content.res.Configuration
 import android.graphics.Color
-import android.os.Handler
-import android.os.Looper
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -47,7 +45,6 @@ internal object WebViewPool {
     /** Avoid recreating an idle renderer immediately after Android killed it or signalled pressure. */
     private const val POOL_COOLDOWN_MS = 5L * 60 * 1000
 
-    private val mainHandler = Handler(Looper.getMainLooper())
     private val idle = ArrayDeque<WebView>()
 
     /** Count of idle pooled WebViews — for telemetry diagnostics. A benign cross-thread int read. */
@@ -118,8 +115,8 @@ internal object WebViewPool {
     }
 
     /**
-     * Hand out a warm WebView wired to [client], re-homed to [context] (the host
-     * Activity), and schedule a refill on the next main-loop tick.
+     * Hand out a warm WebView wired to [client] and re-homed to [context] (the host
+     * Activity). Acquiring never refills speculatively; only an open minigame UI may prewarm.
      */
     @MainThread
     fun acquire(context: Context, client: WebViewClient): WebView {
@@ -138,8 +135,6 @@ internal object WebViewPool {
         // Drop any WebChromeClient left by a prior consumer so it can't outlive its surface (e.g. a
         // creative's telemetry chrome client mislabeling a later minigame/fallback iframe's JS errors).
         webView.webChromeClient = null
-        val appContext = context.applicationContext
-        mainHandler.post { prewarm(appContext, trigger = "acquire_refill") }
         // Warm (pool hit) vs cold (had to create) — surfaces prewarm effectiveness + cold cost.
         Telemetry.recordOperation(
             name = if (pooled != null) "webview_acquire_warm" else "webview_acquire_cold",
@@ -188,7 +183,8 @@ internal object WebViewPool {
     }
 
     /** Destroy warm idle WebViews under memory pressure (callbacks arrive on the main thread). */
-    private fun trimIdle() {
+    @MainThread
+    internal fun trimIdle() {
         while (idle.isNotEmpty()) idle.removeFirst().destroy()
     }
 
@@ -197,10 +193,11 @@ internal object WebViewPool {
         if (blockedUntil > poolingBlockedUntilMs) poolingBlockedUntilMs = blockedUntil
     }
 
-    /** Share the pool's pressure/background cooldown with other SDK-owned WebView stores. */
+    /** Share the pool's real-memory-pressure cooldown with other SDK-owned WebView stores. */
     @MainThread
     internal fun suspendRetention() {
         suspendPooling()
+        trimIdle()
     }
 
     /** Native-ad views use the same five-minute eligibility window as idle pooled views. */
@@ -238,9 +235,13 @@ internal object WebViewPool {
         resolveMaxIdle(appContext)
         appContext.registerComponentCallbacks(object : ComponentCallbacks2 {
             override fun onTrimMemory(level: Int) {
-                if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
-                    suspendPooling()
-                    trimIdle()
+                when (webViewTrimAction(level)) {
+                    WebViewTrimAction.EVICT_IDLE -> trimIdle()
+                    WebViewTrimAction.EVICT_IDLE_AND_COOLDOWN -> {
+                        suspendPooling()
+                        trimIdle()
+                    }
+                    WebViewTrimAction.NONE -> Unit
                 }
             }
 
@@ -331,8 +332,19 @@ internal fun webViewPrewarmDecision(
 
 /** Keep operation cardinality bounded even if a future caller forwards host-controlled text. */
 internal fun canonicalWebViewPrewarmTrigger(trigger: String): String = when (trigger) {
-    "startup", "minigame_menu", "minigame_game", "rewarded_ready", "acquire_refill" -> trigger
+    "minigame_menu", "minigame_game" -> trigger
     else -> "unspecified"
+}
+
+internal enum class WebViewTrimAction { NONE, EVICT_IDLE, EVICT_IDLE_AND_COOLDOWN }
+
+/** UI-hidden is lifecycle cleanup, not pressure; deprecated background levels still signal pressure. */
+internal fun webViewTrimAction(level: Int): WebViewTrimAction = when {
+    level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> WebViewTrimAction.EVICT_IDLE
+    level in ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW until ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ->
+        WebViewTrimAction.EVICT_IDLE_AND_COOLDOWN
+    level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> WebViewTrimAction.EVICT_IDLE_AND_COOLDOWN
+    else -> WebViewTrimAction.NONE
 }
 
 /** Shared pure memory policy for the idle pool and retained native-ad WebViews. */
