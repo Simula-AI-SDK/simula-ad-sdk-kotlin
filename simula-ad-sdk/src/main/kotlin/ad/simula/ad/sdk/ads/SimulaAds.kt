@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
@@ -453,6 +454,7 @@ object SimulaAds {
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 currentActivityRef = WeakReference(activity)
+                WebViewPool.markApplicationActive(activity)
                 // Re-read the GAID on foreground: ad-tracking permission or the GAID itself
                 // can change while the app is backgrounded. Internally throttled (4h TTL), so
                 // this is cheap on every resume. Mirrors the SimulaProvider ON_RESUME hook.

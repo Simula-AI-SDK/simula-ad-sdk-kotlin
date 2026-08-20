@@ -99,6 +99,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             return
         }
         presentation = p
+        token?.let { RewardedHandoff.markPresented(it) }
         storeExit = StoreExitTracker(
             adId = p.impressionId.takeIf { it.isNotBlank() },
             adFormat = "rewarded",

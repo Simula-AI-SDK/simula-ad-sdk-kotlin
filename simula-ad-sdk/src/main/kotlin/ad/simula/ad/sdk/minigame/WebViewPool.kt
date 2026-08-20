@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.minigame
 
 import ad.simula.ad.sdk.bridge.recordRenderProcessGone
+import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.annotation.SuppressLint
 import android.app.ActivityManager
@@ -52,7 +53,9 @@ internal object WebViewPool {
 
     @Volatile private var callbacksRegistered = false
     @Volatile private var maxIdle = MAX_IDLE
-    @Volatile private var poolingBlockedUntilMs = 0L
+    // Remain conservative until either entry path observes a resumed Activity. Required WebViews
+    // still acquire cold; only speculative/idle retention is suppressed before that signal.
+    private val retentionState = WebViewRetentionState(initiallyActive = false)
     private val prewarmSkipGate = WebViewPrewarmSkipGate()
 
     /** Swallows the prewarm `about:blank` navigation so consumers never see it. */
@@ -85,7 +88,10 @@ internal object WebViewPool {
             maxIdle = maxIdle,
             idleCount = idle.size,
             nowMs = SystemClock.elapsedRealtime(),
-            blockedUntilMs = poolingBlockedUntilMs,
+            blockedUntilMs = retentionState.blockedUntilMs,
+            applicationActive = retentionState.applicationActive,
+            readyPresentationActive = isReadyFullscreenPrewarmTrigger(trigger) &&
+                FullscreenPresentationRegistry.hasActivePresentation(),
         )
         if (decision != WebViewPrewarmDecision.WARM) {
             if (prewarmSkipGate.shouldRecord(decision)) {
@@ -157,7 +163,14 @@ internal object WebViewPool {
         (webView.parent as? ViewGroup)?.removeView(webView)
         // Drop the Activity reference so a pooled WebView can't leak it.
         (webView.context as? MutableContextWrapper)?.let { it.baseContext = it.applicationContext }
-        if (canRetainPooledWebView(maxIdle, idle.size, SystemClock.elapsedRealtime(), poolingBlockedUntilMs)) {
+        if (canRetainPooledWebView(
+                maxIdle,
+                idle.size,
+                SystemClock.elapsedRealtime(),
+                retentionState.blockedUntilMs,
+                retentionState.applicationActive,
+            )
+        ) {
             // Re-pooling: reset to about:blank so a recycled view never flashes the prior creative.
             // about:blank tears down the page's DOM/JS context; clearHistory drops back/forward state.
             // (No clearCache — that flushes the app-global RAM cache and would undercut prewarming
@@ -192,7 +205,7 @@ internal object WebViewPool {
 
     private fun suspendPooling() {
         val blockedUntil = SystemClock.elapsedRealtime() + POOL_COOLDOWN_MS
-        if (blockedUntil > poolingBlockedUntilMs) poolingBlockedUntilMs = blockedUntil
+        retentionState.suspendUntil(blockedUntil)
     }
 
     /** Share the pool's real-memory-pressure cooldown with other SDK-owned WebView stores. */
@@ -205,7 +218,18 @@ internal object WebViewPool {
     /** Native-ad views use the same five-minute eligibility window as idle pooled views. */
     @MainThread
     internal fun isRetentionEligible(): Boolean =
-        isWebViewRetentionEligible(SystemClock.elapsedRealtime(), poolingBlockedUntilMs)
+        isWebViewRetentionEligible(
+            SystemClock.elapsedRealtime(),
+            retentionState.blockedUntilMs,
+            retentionState.applicationActive,
+        )
+
+    /** Marks the process foreground-eligible without refilling the pool or changing cooldown state. */
+    @MainThread
+    internal fun markApplicationActive(context: Context) {
+        registerTrimCallbacks(context)
+        retentionState.markActive()
+    }
 
     private fun recordPrewarm(
         startNanos: Long,
@@ -226,8 +250,8 @@ internal object WebViewPool {
     }
 
     // The check-and-set below is intentionally NOT synchronized: like the unsynchronized [idle]
-    // deque, it relies on this object's whole-class @MainThread contract (only `prewarm`/`acquire`,
-    // both @MainThread, reach here), so the two callers can never run concurrently. `callbacksRegistered`
+    // deque, it relies on this object's whole-class @MainThread contract (only `prewarm`, `acquire`,
+    // and `markApplicationActive` reach here), so callers can never run concurrently. `callbacksRegistered`
     // stays @Volatile only for safe visibility of the diagnostic read. Do NOT call from a background
     // thread — that would both double-register here and corrupt the deque.
     @MainThread
@@ -238,7 +262,10 @@ internal object WebViewPool {
         appContext.registerComponentCallbacks(object : ComponentCallbacks2 {
             override fun onTrimMemory(level: Int) {
                 when (webViewTrimAction(level)) {
-                    WebViewTrimAction.EVICT_IDLE -> trimIdle()
+                    WebViewTrimAction.EVICT_IDLE -> {
+                        retentionState.markInactive()
+                        trimIdle()
+                    }
                     WebViewTrimAction.EVICT_IDLE_AND_COOLDOWN -> {
                         suspendPooling()
                         trimIdle()
@@ -301,16 +328,48 @@ internal fun canRetainPooledWebView(
     idleCount: Int,
     nowMs: Long,
     blockedUntilMs: Long,
-): Boolean = webViewPrewarmDecision(maxIdle, idleCount, nowMs, blockedUntilMs) == WebViewPrewarmDecision.WARM
+    applicationActive: Boolean = true,
+): Boolean = webViewPrewarmDecision(
+    maxIdle,
+    idleCount,
+    nowMs,
+    blockedUntilMs,
+    applicationActive,
+) == WebViewPrewarmDecision.WARM
 
-internal fun isWebViewRetentionEligible(nowMs: Long, blockedUntilMs: Long): Boolean =
-    nowMs >= blockedUntilMs
+internal fun isWebViewRetentionEligible(
+    nowMs: Long,
+    blockedUntilMs: Long,
+    applicationActive: Boolean = true,
+): Boolean = applicationActive && nowMs >= blockedUntilMs
+
+/** Mutable state is isolated from Android objects so foreground/cooldown transitions are testable. */
+internal class WebViewRetentionState(initiallyActive: Boolean = true) {
+    var applicationActive: Boolean = initiallyActive
+        private set
+    var blockedUntilMs: Long = 0L
+        private set
+
+    fun markActive() {
+        applicationActive = true
+    }
+
+    fun markInactive() {
+        applicationActive = false
+    }
+
+    fun suspendUntil(untilMs: Long) {
+        if (untilMs > blockedUntilMs) blockedUntilMs = untilMs
+    }
+}
 
 internal enum class WebViewPrewarmDecision(val wireValue: String) {
     WARM("warmed"),
     CONSTRAINED("constrained"),
     FULL("full"),
     COOLDOWN("cooldown"),
+    INACTIVE("inactive"),
+    PRESENTATION_ACTIVE("presentation_active"),
 }
 
 internal class WebViewPrewarmSkipGate {
@@ -325,8 +384,12 @@ internal fun webViewPrewarmDecision(
     idleCount: Int,
     nowMs: Long,
     blockedUntilMs: Long,
+    applicationActive: Boolean = true,
+    readyPresentationActive: Boolean = false,
 ): WebViewPrewarmDecision = when {
     maxIdle <= 0 -> WebViewPrewarmDecision.CONSTRAINED
+    !applicationActive -> WebViewPrewarmDecision.INACTIVE
+    readyPresentationActive -> WebViewPrewarmDecision.PRESENTATION_ACTIVE
     idleCount >= maxIdle -> WebViewPrewarmDecision.FULL
     nowMs < blockedUntilMs -> WebViewPrewarmDecision.COOLDOWN
     else -> WebViewPrewarmDecision.WARM
@@ -337,6 +400,9 @@ internal fun canonicalWebViewPrewarmTrigger(trigger: String): String = when (tri
     "minigame_menu", "minigame_game", "interstitial_ready", "rewarded_ready" -> trigger
     else -> "unspecified"
 }
+
+internal fun isReadyFullscreenPrewarmTrigger(trigger: String): Boolean =
+    trigger == "interstitial_ready" || trigger == "rewarded_ready"
 
 /** Keep acquire diagnostics bounded even if an internal caller forwards dynamic text. */
 internal fun canonicalWebViewAcquireSurface(surface: String): String = when (surface) {

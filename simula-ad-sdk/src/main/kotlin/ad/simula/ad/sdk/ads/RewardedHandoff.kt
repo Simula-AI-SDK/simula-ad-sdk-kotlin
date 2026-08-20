@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdValue
 import java.util.concurrent.ConcurrentHashMap
@@ -100,7 +101,12 @@ internal object RewardedHandoff {
 
     fun get(token: String): RewardedPresentation? = pending[token]
 
+    fun markPresented(token: String) {
+        FullscreenPresentationRegistry.claim("rewarded:$token")
+    }
+
     fun remove(token: String) {
         pending.remove(token)
+        FullscreenPresentationRegistry.release("rewarded:$token")
     }
 }
