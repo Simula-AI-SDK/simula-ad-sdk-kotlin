@@ -16,6 +16,16 @@ class WebViewPoolPolicyTest {
         assertFalse(canRetainPooledWebView(maxIdle = 1, idleCount = 0, nowMs = 9_999L, blockedUntilMs = 10_000L))
         assertTrue(isWebViewRetentionEligible(nowMs = 10_000L, blockedUntilMs = 10_000L))
         assertFalse(isWebViewRetentionEligible(nowMs = 9_999L, blockedUntilMs = 10_000L))
+        assertFalse(
+            canRetainPooledWebView(
+                maxIdle = 1,
+                idleCount = 0,
+                nowMs = 10_000L,
+                blockedUntilMs = 0L,
+                applicationActive = false,
+            ),
+        )
+        assertFalse(isWebViewRetentionEligible(10_000L, 0L, applicationActive = false))
     }
 
     @Test
@@ -29,10 +39,26 @@ class WebViewPoolPolicyTest {
         assertEquals(WebViewPrewarmDecision.FULL, webViewPrewarmDecision(1, 1, 10L, 0L))
         assertEquals(WebViewPrewarmDecision.COOLDOWN, webViewPrewarmDecision(1, 0, 9L, 10L))
         assertEquals(WebViewPrewarmDecision.WARM, webViewPrewarmDecision(1, 0, 10L, 10L))
+        assertEquals(
+            WebViewPrewarmDecision.INACTIVE,
+            webViewPrewarmDecision(1, 0, 10L, 0L, applicationActive = false),
+        )
+        assertEquals(
+            WebViewPrewarmDecision.PRESENTATION_ACTIVE,
+            webViewPrewarmDecision(1, 0, 10L, 0L, readyPresentationActive = true),
+        )
+        assertTrue(isReadyFullscreenPrewarmTrigger("interstitial_ready"))
+        assertTrue(isReadyFullscreenPrewarmTrigger("rewarded_ready"))
+        assertFalse(isReadyFullscreenPrewarmTrigger("minigame_game"))
         assertEquals("minigame_menu", canonicalWebViewPrewarmTrigger("minigame_menu"))
+        assertEquals("interstitial_ready", canonicalWebViewPrewarmTrigger("interstitial_ready"))
+        assertEquals("rewarded_ready", canonicalWebViewPrewarmTrigger("rewarded_ready"))
         assertEquals("unspecified", canonicalWebViewPrewarmTrigger("startup"))
         assertEquals("unspecified", canonicalWebViewPrewarmTrigger("acquire_refill"))
         assertEquals("unspecified", canonicalWebViewPrewarmTrigger("host-value-with-id-123"))
+        assertEquals("interstitial", canonicalWebViewAcquireSurface("interstitial"))
+        assertEquals("rewarded", canonicalWebViewAcquireSurface("rewarded"))
+        assertEquals("unspecified", canonicalWebViewAcquireSurface("native-ad-id-123"))
     }
 
     @Test
@@ -43,11 +69,36 @@ class WebViewPoolPolicyTest {
             WebViewPrewarmDecision.CONSTRAINED,
             WebViewPrewarmDecision.FULL,
             WebViewPrewarmDecision.COOLDOWN,
+            WebViewPrewarmDecision.INACTIVE,
+            WebViewPrewarmDecision.PRESENTATION_ACTIVE,
         ).forEach { decision ->
             assertTrue(gate.shouldRecord(decision))
             assertFalse(gate.shouldRecord(decision))
         }
         assertFalse(gate.shouldRecord(WebViewPrewarmDecision.WARM))
+    }
+
+    @Test
+    fun `reactivation restores eligibility without clearing pressure cooldown`() {
+        val state = WebViewRetentionState()
+        state.suspendUntil(10_000L)
+        state.markInactive()
+
+        assertFalse(isWebViewRetentionEligible(20_000L, state.blockedUntilMs, state.applicationActive))
+
+        state.markActive()
+        assertFalse(isWebViewRetentionEligible(9_999L, state.blockedUntilMs, state.applicationActive))
+        assertTrue(isWebViewRetentionEligible(10_000L, state.blockedUntilMs, state.applicationActive))
+        assertEquals(10_000L, state.blockedUntilMs)
+    }
+
+    @Test
+    fun `retention starts inactive until a foreground signal arrives`() {
+        val state = WebViewRetentionState(initiallyActive = false)
+
+        assertFalse(isWebViewRetentionEligible(10_000L, state.blockedUntilMs, state.applicationActive))
+        state.markActive()
+        assertTrue(isWebViewRetentionEligible(10_000L, state.blockedUntilMs, state.applicationActive))
     }
 
     @Test

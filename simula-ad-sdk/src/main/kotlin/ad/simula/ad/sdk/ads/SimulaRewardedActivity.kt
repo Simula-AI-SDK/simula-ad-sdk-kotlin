@@ -99,6 +99,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             return
         }
         presentation = p
+        token?.let { RewardedHandoff.markPresented(it) }
         storeExit = StoreExitTracker(
             adId = p.impressionId.takeIf { it.isNotBlank() },
             adFormat = "rewarded",
@@ -518,6 +519,7 @@ private fun RewardedMinigame(
                             return true
                         }
                     },
+                    surface = "rewarded",
                 ).apply {
                     webChromeClient = CreativeTelemetryWebChromeClient("rewarded", SimulaAds.devMode)
                     BridgeWebViewInstaller.install(this, bridge)

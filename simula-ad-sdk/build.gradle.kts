@@ -8,7 +8,7 @@ plugins {
     alias(libs.plugins.vanniktech.maven.publish)
 }
 
-val sdkVersion = "1.1.9-dev.2"
+val sdkVersion = "1.1.9-dev.3"
 
 android {
     namespace = "ad.simula.ad.sdk"
@@ -16,6 +16,7 @@ android {
 
     defaultConfig {
         minSdk = 24
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         consumerProguardFiles("consumer-rules.pro")
     }
@@ -165,4 +166,8 @@ dependencies {
     // Deterministic coroutine testing (runTest / StandardTestDispatcher / virtual time)
     // for the reward-verification queue engine. Version tracks kotlinx-coroutines-android.
     testImplementation(libs.kotlinx.coroutines.test)
+
+    // Device tests exercise the actual SQLiteOpenHelper-backed durable row store.
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }

@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.network.SimulaApiClient
 import java.util.concurrent.ConcurrentHashMap
@@ -63,7 +64,12 @@ internal object InterstitialHandoff {
 
     fun get(token: String): InterstitialPresentation? = pending[token]
 
+    fun markPresented(token: String) {
+        FullscreenPresentationRegistry.claim("interstitial:$token")
+    }
+
     fun remove(token: String) {
         pending.remove(token)
+        FullscreenPresentationRegistry.release("interstitial:$token")
     }
 }

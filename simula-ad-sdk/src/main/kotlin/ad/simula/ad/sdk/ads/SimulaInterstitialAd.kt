@@ -1,6 +1,8 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.AdValue
@@ -217,6 +219,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
                     listener?.onAdLoaded(this@SimulaInterstitialAd)
                 }
+                scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
                 // Genuine exception (network/decoding) — always-sent, deduped handled error,
                 // in addition to the sampled `load_fail` lifecycle event from failLoad().
@@ -231,6 +234,21 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     breadcrumb = "SimulaInterstitialAd.load",
                 )
                 failLoadOnMain(generation, error)
+            }
+        }
+    }
+
+    private fun scheduleWebViewPrewarm(generation: Int, ad: SimulaApiClient.AdLoadResult) {
+        val context = SimulaAds.appContext
+        SimulaScope.launch {
+            runCatching {
+                ProcessLaunchSettledGate.awaitSettled()
+                withContext(Dispatchers.Main) {
+                    val current = state
+                    if (generation == loadGeneration && current is State.Ready && current.ad === ad) {
+                        WebViewPool.prewarm(context, trigger = "interstitial_ready")
+                    }
+                }
             }
         }
     }

@@ -132,6 +132,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
             return
         }
         presentation = p
+        token?.let { InterstitialHandoff.markPresented(it) }
         storeExit = StoreExitTracker(
             adId = p.ad.impressionId.takeIf { it.isNotBlank() },
             adFormat = "interstitial",
@@ -661,6 +662,7 @@ private fun CreativeHtml(
                         return true
                     }
                 },
+                surface = "interstitial",
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
                 BridgeWebViewInstaller.install(this, bridge)
