@@ -18,6 +18,7 @@ import ad.simula.ad.sdk.ads.SimulaAds
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.model.SimulaContextValue
+import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
@@ -270,8 +271,12 @@ fun SimulaProvider(
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     DisposableEffect(lifecycleOwner) {
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            WebViewPool.markApplicationActive(context)
+        }
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                WebViewPool.markApplicationActive(context)
                 scope.launch { SimulaPrivacy.refreshAdvertisingId() }
             }
         }
