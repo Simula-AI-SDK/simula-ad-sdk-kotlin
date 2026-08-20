@@ -3,7 +3,6 @@ package ad.simula.ad.sdk.nativead
 import android.os.Handler
 import android.os.Looper
 import android.view.Choreographer
-import androidx.annotation.MainThread
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -14,10 +13,15 @@ internal object NativeAdMountScheduler {
     private const val FALLBACK_FRAME_DELAY_MS = 16L
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val pending = NativeMountAdmissionQueue<CompletableDeferred<Boolean>>()
-    private var callbackScheduled = false
-    private val frameCallback = Choreographer.FrameCallback { grantNext() }
-    private val fallbackCallback = Runnable { grantNext() }
+    private val scheduler = NativeMountFrameScheduler(
+        postFrame = { callback ->
+            Choreographer.getInstance().postFrameCallback { callback() }
+            true
+        },
+        postFallback = { callback ->
+            mainHandler.postDelayed(callback, FALLBACK_FRAME_DELAY_MS)
+        },
+    )
 
     /** Returns false when the platform cannot schedule either a frame or main-loop fallback. */
     suspend fun awaitPermit(prioritize: Boolean = false): Boolean {
@@ -27,8 +31,7 @@ internal object NativeAdMountScheduler {
                 if (!request.isActive) {
                     false
                 } else {
-                    pending.add(request, prioritize)
-                    scheduleNext()
+                    scheduler.enqueue(request, prioritize)
                     true
                 }
             }
@@ -43,22 +46,32 @@ internal object NativeAdMountScheduler {
         }
     }
 
-    @MainThread
+}
+
+/** Android-free frame scheduling engine retained on the main thread by its production owner. */
+internal class NativeMountFrameScheduler(
+    private val postFrame: (() -> Unit) -> Boolean,
+    private val postFallback: (() -> Unit) -> Boolean,
+) {
+    private val pending = NativeMountAdmissionQueue<CompletableDeferred<Boolean>>()
+    private var callbackScheduled = false
+
+    fun enqueue(request: CompletableDeferred<Boolean>, prioritize: Boolean = false) {
+        pending.add(request, prioritize)
+        scheduleNext()
+    }
+
     private fun scheduleNext() {
         if (callbackScheduled || pending.isEmpty()) return
         callbackScheduled = true
-        if (runCatching { Choreographer.getInstance().postFrameCallback(frameCallback) }.isSuccess) return
+        val callback = { grantNext() }
+        if (runCatching { postFrame(callback) }.getOrDefault(false)) return
+        if (runCatching { postFallback(callback) }.getOrDefault(false)) return
 
-        val fallbackAccepted = runCatching {
-            mainHandler.postDelayed(fallbackCallback, FALLBACK_FRAME_DELAY_MS)
-        }.getOrDefault(false)
-        if (!fallbackAccepted) {
-            callbackScheduled = false
-            pending.drain().forEach { it.complete(false) }
-        }
+        callbackScheduled = false
+        pending.drain().forEach { it.complete(false) }
     }
 
-    @MainThread
     private fun grantNext() {
         callbackScheduled = false
         var request = pending.takeNext { it.isActive }

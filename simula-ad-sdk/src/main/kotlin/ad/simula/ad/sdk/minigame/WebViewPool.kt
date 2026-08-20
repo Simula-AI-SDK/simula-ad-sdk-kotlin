@@ -116,10 +116,11 @@ internal object WebViewPool {
 
     /**
      * Hand out a warm WebView wired to [client] and re-homed to [context] (the host
-     * Activity). Acquiring never refills speculatively; only an open minigame UI may prewarm.
+     * Activity). Acquiring never refills speculatively; prewarm is requested only by explicit UI
+     * demand or a still-ready successful fullscreen load.
      */
     @MainThread
-    fun acquire(context: Context, client: WebViewClient): WebView {
+    fun acquire(context: Context, client: WebViewClient, surface: String = "unspecified"): WebView {
         val startNanos = System.nanoTime()
         registerTrimCallbacks(context)
         val pooled = idle.removeFirstOrNull()
@@ -140,6 +141,7 @@ internal object WebViewPool {
             name = if (pooled != null) "webview_acquire_warm" else "webview_acquire_cold",
             durationMs = (System.nanoTime() - startNanos) / 1_000_000,
             success = true,
+            breadcrumb = "surface=${canonicalWebViewAcquireSurface(surface)}",
         )
         return webView
     }
@@ -332,7 +334,13 @@ internal fun webViewPrewarmDecision(
 
 /** Keep operation cardinality bounded even if a future caller forwards host-controlled text. */
 internal fun canonicalWebViewPrewarmTrigger(trigger: String): String = when (trigger) {
-    "minigame_menu", "minigame_game" -> trigger
+    "minigame_menu", "minigame_game", "interstitial_ready", "rewarded_ready" -> trigger
+    else -> "unspecified"
+}
+
+/** Keep acquire diagnostics bounded even if an internal caller forwards dynamic text. */
+internal fun canonicalWebViewAcquireSurface(surface: String): String = when (surface) {
+    "interstitial", "rewarded" -> surface
     else -> "unspecified"
 }
 

@@ -1,6 +1,8 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.CloseBehavior
@@ -217,6 +219,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
                     listener?.onAdLoaded(this@SimulaRewardedAd)
                 }
+                scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
                 // ad_unit_not_found is a distinct, non-retryable misconfiguration — surface it as
                 // its own case rather than burying it in the generic Network bucket.
@@ -229,6 +232,21 @@ class SimulaRewardedAd(val adUnitId: String) {
                     breadcrumb = "SimulaRewardedAd.load",
                 )
                 failLoadOnMain(generation, error)
+            }
+        }
+    }
+
+    private fun scheduleWebViewPrewarm(generation: Int, ad: SimulaApiClient.RewardedInitResult) {
+        val context = SimulaAds.appContext
+        SimulaScope.launch {
+            runCatching {
+                ProcessLaunchSettledGate.awaitSettled()
+                withContext(Dispatchers.Main) {
+                    val current = state
+                    if (generation == loadGeneration && current is State.Ready && current.ad === ad) {
+                        WebViewPool.prewarm(context, trigger = "rewarded_ready")
+                    }
+                }
             }
         }
     }

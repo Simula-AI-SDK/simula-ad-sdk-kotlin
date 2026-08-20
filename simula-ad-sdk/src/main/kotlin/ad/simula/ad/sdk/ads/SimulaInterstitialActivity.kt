@@ -661,6 +661,7 @@ private fun CreativeHtml(
                         return true
                     }
                 },
+                surface = "interstitial",
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
                 BridgeWebViewInstaller.install(this, bridge)

@@ -518,6 +518,7 @@ private fun RewardedMinigame(
                             return true
                         }
                     },
+                    surface = "rewarded",
                 ).apply {
                     webChromeClient = CreativeTelemetryWebChromeClient("rewarded", SimulaAds.devMode)
                     BridgeWebViewInstaller.install(this, bridge)

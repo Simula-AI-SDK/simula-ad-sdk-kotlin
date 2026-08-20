@@ -30,9 +30,14 @@ class WebViewPoolPolicyTest {
         assertEquals(WebViewPrewarmDecision.COOLDOWN, webViewPrewarmDecision(1, 0, 9L, 10L))
         assertEquals(WebViewPrewarmDecision.WARM, webViewPrewarmDecision(1, 0, 10L, 10L))
         assertEquals("minigame_menu", canonicalWebViewPrewarmTrigger("minigame_menu"))
+        assertEquals("interstitial_ready", canonicalWebViewPrewarmTrigger("interstitial_ready"))
+        assertEquals("rewarded_ready", canonicalWebViewPrewarmTrigger("rewarded_ready"))
         assertEquals("unspecified", canonicalWebViewPrewarmTrigger("startup"))
         assertEquals("unspecified", canonicalWebViewPrewarmTrigger("acquire_refill"))
         assertEquals("unspecified", canonicalWebViewPrewarmTrigger("host-value-with-id-123"))
+        assertEquals("interstitial", canonicalWebViewAcquireSurface("interstitial"))
+        assertEquals("rewarded", canonicalWebViewAcquireSurface("rewarded"))
+        assertEquals("unspecified", canonicalWebViewAcquireSurface("native-ad-id-123"))
     }
 
     @Test
