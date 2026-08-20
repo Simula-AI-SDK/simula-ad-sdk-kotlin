@@ -22,10 +22,13 @@ import ad.simula.ad.sdk.provider.awaitInitialAdvertisingIdRefresh
 import ad.simula.ad.sdk.telemetry.SimulaCrashGuard
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -173,6 +176,7 @@ object SimulaAds {
             this.startupGate = gate
 
             registerActivityTracking()
+            seedWebViewRetentionState(context)
 
             // Publish last: a concurrent initialize() that observed the volatile flag as true
             // is guaranteed to see all of the above writes (lateinit store/appContext etc.).
@@ -482,4 +486,29 @@ object SimulaAds {
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
         })
     }
+
+    /**
+     * Activity callbacks do not replay an already-delivered resume when hosts initialize lazily
+     * (notably React Native bridges). Seed only a truly foreground process; later resume and
+     * UI-hidden callbacks remain authoritative and this never changes the pressure cooldown.
+     */
+    private fun seedWebViewRetentionState(context: Context) {
+        val markIfForeground = {
+            val info = ActivityManager.RunningAppProcessInfo()
+            val foreground = runCatching {
+                ActivityManager.getMyMemoryState(info)
+                isForegroundProcessImportance(info.importance)
+            }.getOrDefault(false)
+            if (foreground) WebViewPool.markApplicationActive(context)
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            markIfForeground()
+        } else {
+            Handler(Looper.getMainLooper()).post(markIfForeground)
+        }
+    }
 }
+
+/** Exact foreground importance excludes visible/background services that have no resumed UI. */
+internal fun isForegroundProcessImportance(importance: Int): Boolean =
+    importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
