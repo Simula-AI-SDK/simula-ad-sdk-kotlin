@@ -45,6 +45,21 @@ class AudioStateDeliveryGateTest {
     }
 
     @Test
+    fun navigationStartDisarmsTheOldDocumentUntilANewPageIsReady() {
+        val gate = AudioStateDeliveryGate()
+        gate.onPageReady("page-a")
+        assertTrue(gate.shouldDeliver(audible))
+
+        gate.onPageStarted()
+
+        assertFalse(gate.shouldDeliver(muted))
+        assertFalse("a late ready signal from the old page stays rejected", gate.onPageReady("page-a"))
+        assertFalse(gate.shouldDeliver(muted))
+        assertTrue(gate.onPageReady("page-b"))
+        assertTrue(gate.shouldDeliver(muted))
+    }
+
+    @Test
     fun closePermanentlySuppressesDelivery() {
         val gate = AudioStateDeliveryGate()
         gate.onPageReady("page-a")
@@ -61,5 +76,32 @@ class AudioStateDeliveryGateTest {
         assertNull(readyPageId("__simulaSdkPageReady:18:page-a", "17"))
         assertNull(readyPageId("__simulaSdkPageReady:17:", "17"))
         assertNull(readyPageId("__simulaSdkPageReady:17:" + "x".repeat(256), "17"))
+    }
+
+    @Test
+    fun cleanupAlwaysRunsBeforePooling() {
+        val events = mutableListOf<String>()
+
+        cleanupBeforePooling(
+            cleanup = { events += "cleanup" },
+            release = { events += "release" },
+        )
+
+        assertEquals(listOf("cleanup", "release"), events)
+    }
+
+    @Test
+    fun cleanupFailureCannotSkipPoolingOrEscape() {
+        val events = mutableListOf<String>()
+
+        cleanupBeforePooling(
+            cleanup = {
+                events += "cleanup"
+                error("failure")
+            },
+            release = { events += "release" },
+        )
+
+        assertEquals(listOf("cleanup", "release"), events)
     }
 }

@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.bridge
 
 import ad.simula.ad.sdk.telemetry.Telemetry
+import ad.simula.ad.sdk.minigame.WebViewPool
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
@@ -15,6 +16,7 @@ import java.util.WeakHashMap
 
 private const val PAGE_READY_PREFIX = "__simulaSdkPageReady:"
 private const val PAGE_READY_MAX_CHARS = 256
+private const val AUDIO_CHANGE_COALESCE_MS = 250L
 
 /**
  * Wires the WebView ↔ SDK bridge (PRD §3) onto a creative [WebView]: a `@JavascriptInterface`
@@ -123,12 +125,31 @@ internal object BridgeWebViewInstaller {
         }
     }
 
+    /** Disarm delivery as soon as a replacement main document starts navigating. */
+    fun onPageStarted(webView: WebView?) {
+        val view = webView ?: return
+        installations[view]?.audioObserver?.onPageStarted()
+    }
+
     /** Remove the bridge wiring before a web view is recycled to the pool. Idempotent. */
     fun uninstall(webView: WebView) {
         installations.remove(webView)?.audioObserver?.close()
         runCatching { webView.removeJavascriptInterface(NATIVE_OBJECT) }
         scripts.remove(webView)?.let { runCatching { it.remove() } }
     }
+
+    /** Tear down presentation-scoped wiring before returning the view to the shared pool. */
+    fun release(webView: WebView) {
+        cleanupBeforePooling(
+            cleanup = { uninstall(webView) },
+            release = { WebViewPool.release(webView) },
+        )
+    }
+}
+
+internal fun cleanupBeforePooling(cleanup: () -> Unit, release: () -> Unit) {
+    runCatching(cleanup)
+    runCatching(release)
 }
 
 private data class BridgeInstallation(
@@ -167,6 +188,12 @@ internal class AudioStateDeliveryGate {
         return true
     }
 
+    fun onPageStarted() {
+        if (closed) return
+        pageReady = false
+        lastDelivered = null
+    }
+
     fun close() {
         closed = true
         pageReady = false
@@ -183,16 +210,33 @@ private class CreativeAudioStateObserver(webView: WebView) {
     private val gate = AudioStateDeliveryGate()
     private var registered = false
     private var closed = false
-    private val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val publishRunnable = Runnable { publishIfChanged() }
+    private val observer = object : ContentObserver(mainHandler) {
         override fun onChange(selfChange: Boolean) {
-            publishIfChanged()
+            schedulePublish()
         }
+    }
+
+    fun onPageStarted() {
+        if (closed) return
+        mainHandler.removeCallbacks(publishRunnable)
+        gate.onPageStarted()
     }
 
     fun onPageReady(pageId: String) {
         if (closed || !gate.onPageReady(pageId)) return
+        mainHandler.removeCallbacks(publishRunnable)
         register()
         publishIfChanged()
+    }
+
+    private fun schedulePublish() {
+        if (closed) return
+        runCatching {
+            mainHandler.removeCallbacks(publishRunnable)
+            mainHandler.postDelayed(publishRunnable, AUDIO_CHANGE_COALESCE_MS)
+        }
     }
 
     private fun register() {
@@ -226,6 +270,7 @@ private class CreativeAudioStateObserver(webView: WebView) {
     fun close() {
         if (closed) return
         closed = true
+        mainHandler.removeCallbacks(publishRunnable)
         gate.close()
         if (registered) {
             registered = false
