@@ -480,8 +480,8 @@ private fun RewardedMinigame(
                         override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
                             super.onPageStarted(view, pageUrl, favicon) // starts the page-load timer
                             // Bridge relay fallback when document-start injection is unavailable.
-                            if (!BridgeWebViewInstaller.documentStartSupported() && pageUrl != "about:blank") {
-                                view?.evaluateJavascript(BridgeWebViewInstaller.relayScript, null)
+                            if (!BridgeWebViewInstaller.documentStartSupported()) {
+                                BridgeWebViewInstaller.injectFallback(view)
                             }
                         }
 

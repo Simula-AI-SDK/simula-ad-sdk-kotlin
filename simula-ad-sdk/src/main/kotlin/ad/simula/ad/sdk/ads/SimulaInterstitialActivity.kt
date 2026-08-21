@@ -636,8 +636,8 @@ private fun CreativeHtml(
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon) // starts the page-load timer
                         // Bridge relay fallback when document-start injection is unavailable.
-                        if (!BridgeWebViewInstaller.documentStartSupported() && url != "about:blank") {
-                            view?.evaluateJavascript(BridgeWebViewInstaller.relayScript, null)
+                        if (!BridgeWebViewInstaller.documentStartSupported()) {
+                            BridgeWebViewInstaller.injectFallback(view)
                         }
                     }
 

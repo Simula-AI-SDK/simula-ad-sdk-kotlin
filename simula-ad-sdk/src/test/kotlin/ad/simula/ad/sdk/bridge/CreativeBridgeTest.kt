@@ -6,6 +6,7 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -32,7 +33,7 @@ class CreativeBridgeTest {
         override fun deviceContext() = buildJsonObject {
             put("darkMode", true); put("locale", "en-US"); put("osVersion", "14")
         }
-        override fun audioState() = buildJsonObject { put("muted", true) }
+        override fun audioState() = buildJsonObject { put("muted", true); put("volume", 0) }
         override fun currentOrientation() = buildJsonObject { put("orientation", "portrait") }
     }
 
@@ -169,7 +170,25 @@ class CreativeBridgeTest {
         assertEquals("42", reply["requestId"]!!.jsonPrimitive.content)
         assertTrue(reply["requestId"]!!.jsonPrimitive.isString)
         assertTrue(reply["__simulaSdkResponse"]!!.jsonPrimitive.boolean)
-        assertTrue(reply["payload"]!!.jsonObject["muted"]!!.jsonPrimitive.boolean)
+        val payload = requireNotNull(reply["payload"]).jsonObject
+        assertTrue(requireNotNull(payload["muted"]).jsonPrimitive.boolean)
+        assertEquals(0, requireNotNull(payload["volume"]).jsonPrimitive.int)
+    }
+
+    @Test
+    fun audioStateChangedEventShape() {
+        val event = parseScript(
+            buildCreativeBridgeMessage(
+                AUDIO_STATE_CHANGED,
+                CreativeAudioState(muted = false, volume = 42).payload(),
+            ),
+        )
+        assertEquals(AUDIO_STATE_CHANGED, requireNotNull(event["type"]).jsonPrimitive.content)
+        assertNull(event["requestId"])
+        assertTrue(requireNotNull(event["__simulaSdkResponse"]).jsonPrimitive.boolean)
+        val payload = requireNotNull(event["payload"]).jsonObject
+        assertFalse(requireNotNull(payload["muted"]).jsonPrimitive.boolean)
+        assertEquals(42, requireNotNull(payload["volume"]).jsonPrimitive.int)
     }
 
     @Test
@@ -233,9 +252,12 @@ class CreativeBridgeTest {
         var js: String? = null
         bridge(FakeHost()).handle(message) { js = it }
         val raw = requireNotNull(js) { "no reply for: $message" }
-        val json = raw.removePrefix("window.postMessage(").removeSuffix(", '*');")
-        return Json.parseToJsonElement(json).jsonObject
+        return parseScript(raw)
     }
+
+    private fun parseScript(script: String): JsonObject = Json.parseToJsonElement(
+        script.removePrefix("window.postMessage(").removeSuffix(", '*');"),
+    ).jsonObject
 
     private fun messageOfLength(type: String, length: Int): String {
         val prefix = "{\"type\":\"$type\",\"padding\":\""
