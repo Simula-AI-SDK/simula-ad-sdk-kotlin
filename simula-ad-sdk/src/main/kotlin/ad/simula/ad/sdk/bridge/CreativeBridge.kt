@@ -26,6 +26,8 @@ internal val NATIVE_AD_BRIDGE_MESSAGE_TYPES = setOf(
     "AD_FEEDBACK",
 )
 
+internal const val AUDIO_STATE_CHANGED = "AUDIO_STATE_CHANGED"
+
 private val creativeBridgeJson = Json { ignoreUnknownKeys = true }
 
 private const val MAX_REPORTED_BRIDGE_REJECTION_REASONS = 4
@@ -99,6 +101,10 @@ internal interface BridgeHost {
  * to a native action via [host], and — for `GET_*` queries — posts a reply back into the page
  * echoing the same `requestId` (PRD §3).
  *
+ * `GET_AUDIO_STATE` returns `{ muted, volume }`, where `volume` is the media stream percentage
+ * from 0 to 100. [BridgeWebViewInstaller] also emits `AUDIO_STATE_CHANGED` with that payload after
+ * each creative page load and whenever the normalized state changes.
+ *
  * Parsing runs on the caller's thread; [mainDispatch] hops the actual handling onto the main thread
  * (the Android JS-interface callback arrives on a background thread, and UIKit-equivalent work +
  * the reply must run on main). Tests inject a synchronous dispatcher.
@@ -156,29 +162,29 @@ internal class CreativeBridge(
             "SET_ORIENTATION" -> payload?.str("orientation")?.let(host::setOrientation)
 
             // Queries (request/response)
-            "GET_DEVICE_CONTEXT" -> reply(buildReply(type, requestId, host.deviceContext()))
-            "GET_AUDIO_STATE" -> reply(buildReply(type, requestId, host.audioState()))
-            "GET_ORIENTATION" -> reply(buildReply(type, requestId, host.currentOrientation()))
+            "GET_DEVICE_CONTEXT" -> reply(buildCreativeBridgeMessage(type, host.deviceContext(), requestId))
+            "GET_AUDIO_STATE" -> reply(buildCreativeBridgeMessage(type, host.audioState(), requestId))
+            "GET_ORIENTATION" -> reply(buildCreativeBridgeMessage(type, host.currentOrientation(), requestId))
         }
         Telemetry.recordOperation("bridge_${type.lowercase()}", 0L, true)
     }
 
-    /**
-     * Builds `window.postMessage({ type, requestId, payload, __simulaSdkResponse: true }, '*');`.
-     * The injected relay drops messages carrying `__simulaSdkResponse`, so this reply reaches the
-     * creative without being echoed back to native.
-     */
-    private fun buildReply(type: String, requestId: JsonElement?, payload: JsonObject): String {
-        val obj = buildJsonObject {
-            put("type", type)
-            if (requestId != null) put("requestId", requestId)
-            put("payload", payload)
-            put("__simulaSdkResponse", true)
-        }
-        // JsonObject.toString() emits valid JSON, hence a valid JS object literal.
-        return "window.postMessage($obj, '*');"
-    }
-
     private fun JsonObject.str(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+}
+
+/** Builds a query reply or SDK-originated event that the page relay will not echo back to native. */
+internal fun buildCreativeBridgeMessage(
+    type: String,
+    payload: JsonObject,
+    requestId: JsonElement? = null,
+): String {
+    val obj = buildJsonObject {
+        put("type", type)
+        if (requestId != null) put("requestId", requestId)
+        put("payload", payload)
+        put("__simulaSdkResponse", true)
+    }
+    // JsonObject.toString() emits valid JSON, hence a valid JS object literal.
+    return "window.postMessage($obj, '*');"
 }

@@ -36,4 +36,20 @@ class AndroidBridgeHostTest {
 
         assertEquals(listOf("IllegalStateException"), failures)
     }
+
+    @Test
+    fun creativeAudioStateUsesMediaVolumePercentage() {
+        assertEquals(CreativeAudioState(muted = true, volume = 0), creativeAudioState(0, 15))
+        assertEquals(CreativeAudioState(muted = false, volume = 47), creativeAudioState(7, 15))
+        assertEquals(CreativeAudioState(muted = false, volume = 100), creativeAudioState(15, 15))
+        assertEquals(CreativeAudioState(muted = false, volume = 100), creativeAudioState(20, 15))
+    }
+
+    @Test
+    fun creativeAudioStateDegradesSafelyForUnavailableLevels() {
+        assertEquals(CreativeAudioState(muted = true, volume = 0), creativeAudioState(null, 15))
+        assertEquals(CreativeAudioState(muted = true, volume = 0), creativeAudioState(7, null))
+        assertEquals(CreativeAudioState(muted = true, volume = 0), creativeAudioState(7, 0))
+        assertEquals(CreativeAudioState(muted = true, volume = 0), creativeAudioState(-1, 15))
+    }
 }
