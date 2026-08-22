@@ -71,18 +71,54 @@ internal class AndroidBridgeHost(
         }
     }
 
-    /** Best-effort mute proxy: media-stream volume at zero (mirrors iOS's `outputVolume == 0`). */
-    override fun audioState(): JsonObject {
-        val am = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-        val muted = am?.let { it.getStreamVolume(AudioManager.STREAM_MUSIC) == 0 } ?: false
-        return buildJsonObject { put("muted", muted) }
-    }
+    override fun audioState(): JsonObject = readCreativeAudioState(appContext).payload()
 
     override fun currentOrientation(): JsonObject {
         val landscape =
             appContext.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         return buildJsonObject { put("orientation", if (landscape) "landscape" else "portrait") }
     }
+}
+
+/** Creative-facing media volume, normalized to the native bridge's shared 0-100 scale. */
+internal data class CreativeAudioState(
+    val muted: Boolean,
+    val volume: Int,
+) {
+    fun payload(): JsonObject = buildJsonObject {
+        put("muted", muted)
+        put("volume", volume)
+    }
+}
+
+internal fun creativeAudioState(currentVolume: Int?, maxVolume: Int?): CreativeAudioState {
+    val current = currentVolume?.coerceAtLeast(0)
+    val volume = if (current != null && maxVolume != null && maxVolume > 0) {
+        ((current.toLong() * 100L + maxVolume / 2L) / maxVolume).toInt().coerceIn(0, 100)
+    } else {
+        0
+    }
+    return CreativeAudioState(
+        muted = volume == 0,
+        volume = volume,
+    )
+}
+
+/** Reads the media stream without allowing framework or OEM failures to escape into the host app. */
+internal fun readCreativeAudioState(context: Context): CreativeAudioState = runCatching {
+    val audio = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    creativeAudioState(
+        currentVolume = audio?.getStreamVolume(AudioManager.STREAM_MUSIC),
+        maxVolume = audio?.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+    )
+}.getOrElse { error ->
+    runCatching {
+        Telemetry.recordError(
+            signature = "bridge:audio_state_failed",
+            errorCode = error.javaClass.simpleName,
+        )
+    }
+    CreativeAudioState(muted = true, volume = 0)
 }
 
 internal fun requestedOrientationFor(orientation: String): Int? = when (orientation) {

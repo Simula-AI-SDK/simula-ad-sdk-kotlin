@@ -635,9 +635,10 @@ private fun CreativeHtml(
                 client = object : CreativeTelemetryWebViewClient("interstitial") {
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon) // starts the page-load timer
+                        BridgeWebViewInstaller.onPageStarted(view)
                         // Bridge relay fallback when document-start injection is unavailable.
-                        if (!BridgeWebViewInstaller.documentStartSupported() && url != "about:blank") {
-                            view?.evaluateJavascript(BridgeWebViewInstaller.relayScript, null)
+                        if (!BridgeWebViewInstaller.documentStartSupported()) {
+                            BridgeWebViewInstaller.injectFallback(view)
                         }
                     }
 
@@ -673,8 +674,7 @@ private fun CreativeHtml(
         },
         modifier = modifier,
         onRelease = { webView ->
-            BridgeWebViewInstaller.uninstall(webView)
-            WebViewPool.release(webView)
+            BridgeWebViewInstaller.release(webView)
         },
     )
 }
