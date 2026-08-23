@@ -75,18 +75,6 @@ class PrivacySessionCoordinatorTest {
     }
 
     @Test
-    fun `provider telemetry identity follows consent recreated local stores`() {
-        val identity = ProviderTelemetrySession()
-        val first = SimulaSessionStore("provider-key", false, "user-a")
-        val second = SimulaSessionStore("provider-key", true, "user-b")
-
-        identity.bind(first)
-        assertEquals("user-a", identity.primaryUserId())
-        identity.bind(second)
-        assertEquals("user-b", identity.primaryUserId())
-    }
-
-    @Test
     fun `concurrent child callers release after readiness`() = runTest {
         val coordinator = PrivacySessionCoordinator(
             startAdvertisingIdRefresh = { refresh -> backgroundScope.async { runCatching { refresh() }; Unit } },

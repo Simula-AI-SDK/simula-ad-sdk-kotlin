@@ -1,7 +1,10 @@
 package ad.simula.ad.sdk.telemetry
 
 import java.util.concurrent.atomic.AtomicReference
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 
 /** First-wins process origin used for monotonic time since either public SDK entry point. */
 internal class MonotonicSdkEntryOrigin(
@@ -27,37 +30,46 @@ internal class MonotonicSdkEntryOrigin(
 
 internal val ProcessSdkEntryOrigin = MonotonicSdkEntryOrigin(System::nanoTime)
 
-/** Coroutine-aware first-wins completion gate. No monitor is held while the owner works or losers wait. */
-internal class FirstWinsCompletion {
+/**
+ * First-wins process task. The first block is reserved lazily in [scope], so cancelling a caller
+ * only abandons that caller's wait; later callers still start/await the same process-owned work.
+ */
+internal class FirstWinsProcessTask(
+    private val scope: CoroutineScope,
+) {
     private val lock = Any()
-    private var completion: CompletableDeferred<Unit>? = null
+    private var task: Deferred<Result<Unit>>? = null
 
-    suspend fun runOnce(block: suspend () -> Unit) {
-        val entry = synchronized(lock) {
-            val existing = completion
-            if (existing != null) {
-                Entry(owner = false, completion = existing)
-            } else {
-                val created = CompletableDeferred<Unit>()
-                completion = created
-                Entry(owner = true, completion = created)
-            }
+    /** Atomically reserve the first block without starting it. This performs no suspension or I/O. */
+    fun claim(block: suspend () -> Unit): FirstWinsProcessTaskClaim {
+        val shared = synchronized(lock) {
+            task ?: scope.async(start = CoroutineStart.LAZY) { runCatching { block() } }.also { task = it }
         }
-        if (!entry.owner) {
-            entry.completion.await()
-            return
-        }
-        try {
-            block()
-        } finally {
-            entry.completion.complete(Unit)
-        }
+        return FirstWinsProcessTaskClaim(shared)
     }
 
-    private class Entry(
-        val owner: Boolean,
-        val completion: CompletableDeferred<Unit>,
-    )
+    suspend fun runOnce(block: suspend () -> Unit) {
+        claim(block).startAndAwait()
+    }
+}
+
+internal class FirstWinsProcessTaskClaim internal constructor(
+    private val task: Deferred<Result<Unit>>,
+) {
+    /** Start outside the owner's monitor. The task remains owned by the process scope. */
+    fun start() {
+        task.start()
+    }
+
+    /** Await the shared first-wins result without holding a monitor. */
+    suspend fun await() {
+        task.await().getOrThrow()
+    }
+
+    suspend fun startAndAwait() {
+        start()
+        await()
+    }
 }
 
 /** Saturating process-local count so duplicate calls cannot create unbounded telemetry state. */

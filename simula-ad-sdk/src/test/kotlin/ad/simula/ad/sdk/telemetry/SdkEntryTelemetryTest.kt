@@ -55,8 +55,37 @@ class SdkEntryTelemetryTest {
     }
 
     @Test
-    fun `later first wins callers await owner completion without running their block`() = runTest {
-        val firstWins = FirstWinsCompletion()
+    fun `imperative config claim reserved before provider call remains first wins`() = runTest {
+        val firstWins = FirstWinsProcessTask(backgroundScope)
+        var installedConfig: String? = null
+        val imperative = firstWins.claim { installedConfig = "imperative" }
+
+        runCurrent()
+        assertNull("claim must remain lazy", installedConfig)
+
+        val provider = firstWins.claim { installedConfig = "provider" }
+        provider.startAndAwait()
+        imperative.await()
+
+        assertEquals("imperative", installedConfig)
+    }
+
+    @Test
+    fun `provider config genuinely claimed first remains first wins`() = runTest {
+        val firstWins = FirstWinsProcessTask(backgroundScope)
+        var installedConfig: String? = null
+        val provider = firstWins.claim { installedConfig = "provider" }
+        val imperative = firstWins.claim { installedConfig = "imperative" }
+
+        imperative.startAndAwait()
+        provider.await()
+
+        assertEquals("provider", installedConfig)
+    }
+
+    @Test
+    fun `both first wins callers await shared process task completion`() = runTest {
+        val firstWins = FirstWinsProcessTask(backgroundScope)
         val ownerEntered = CompletableDeferred<Unit>()
         val releaseOwner = CompletableDeferred<Unit>()
         var loserCompleted = false
@@ -82,17 +111,47 @@ class SdkEntryTelemetryTest {
     }
 
     @Test
-    fun `failed first wins owner still completes later waiters`() = runTest {
-        val firstWins = FirstWinsCompletion()
+    fun `failed first wins process task remains the immutable result`() = runTest {
+        val firstWins = FirstWinsProcessTask(backgroundScope)
         val failed = runCatching {
             firstWins.runOnce { throw IllegalStateException("construction failed") }
         }
         var laterBlockRan = false
 
-        firstWins.runOnce { laterBlockRan = true }
+        val later = runCatching { firstWins.runOnce { laterBlockRan = true } }
 
         assertTrue(failed.isFailure)
+        assertTrue(later.isFailure)
         assertFalse(laterBlockRan)
+    }
+
+    @Test
+    fun `first wins process task survives claiming caller cancellation`() = runTest {
+        val firstWins = FirstWinsProcessTask(backgroundScope)
+        val taskEntered = CompletableDeferred<Unit>()
+        val releaseTask = CompletableDeferred<Unit>()
+        var laterCompleted = false
+
+        val claimingCaller = launch {
+            firstWins.runOnce {
+                taskEntered.complete(Unit)
+                releaseTask.await()
+            }
+        }
+        taskEntered.await()
+        claimingCaller.cancel()
+        claimingCaller.join()
+
+        val laterCaller = launch {
+            firstWins.runOnce { error("later caller must not replace the process task") }
+            laterCompleted = true
+        }
+        runCurrent()
+        assertFalse(laterCompleted)
+
+        releaseTask.complete(Unit)
+        laterCaller.join()
+        assertTrue(laterCompleted)
     }
 
     @Test

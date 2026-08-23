@@ -63,8 +63,7 @@ internal class TelemetryManager(
     private val ctx: TelemetryContext,
     private val store: TelemetryStore,
     private val sender: TelemetrySender,
-    private val sessionIdProvider: () -> String?,
-    private val primaryUserIdProvider: () -> String?,
+    private val identityProvider: () -> TelemetryIdentity,
     private val advertisingIdProvider: () -> String?,
     // Resolved fresh on each flush (off the UI path). Must be best-effort/non-throwing.
     private val connectionTypeProvider: () -> String? = { null },
@@ -565,6 +564,7 @@ internal class TelemetryManager(
 
     private fun envelope(events: List<TelemetryEvent>): TelemetryEnvelope {
         // Resolve the flush-time providers once each (best-effort; null when unavailable).
+        val identity = identityProvider()
         val battery = batteryProvider()
         val carrier = carrierProvider()
         return TelemetryEnvelope(
@@ -574,9 +574,9 @@ internal class TelemetryManager(
             deviceModel = ctx.deviceModel,
             hostAppId = ctx.hostAppId,
             devMode = ctx.devMode,
-            sessionId = sessionIdProvider(),
+            sessionId = identity.sessionId,
             // PII providers are already consent-gated by the facade (re-checked at send time).
-            primaryUserId = primaryUserIdProvider(),
+            primaryUserId = identity.primaryUserId,
             advertisingId = advertisingIdProvider(),
             connectionType = connectionTypeProvider(),
             experimentId = synchronized(auxLock) { experimentId },

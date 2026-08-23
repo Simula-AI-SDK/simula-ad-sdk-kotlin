@@ -22,6 +22,7 @@ import ad.simula.ad.sdk.provider.awaitInitialAdvertisingIdRefresh
 import ad.simula.ad.sdk.telemetry.SimulaCrashGuard
 import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.telemetry.ProcessSdkEntryOrigin
+import ad.simula.ad.sdk.telemetry.ProcessTelemetryIdentityRouter
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.Application
@@ -164,7 +165,7 @@ object SimulaAds {
         // call returns still can't race a request out ahead of them.
         val gate = CompletableDeferred<Unit>()
         val launchSettledGate = ProcessLaunchSettledGate
-        synchronized(this) {
+        val telemetryClaim = synchronized(this) {
             if (initialized) {
                 Telemetry.recordDuplicateInitialize()
                 return
@@ -200,15 +201,33 @@ object SimulaAds {
             SimulaPrivacy.apply(resolved)
 
             store = SimulaSessionStore(apiKey, devMode, primaryUserID)
+            // Publish the store identity in the same critical section as imperative initialization.
+            // Telemetry configuration remains first-wins, but process-wide envelopes prefer this
+            // live identity over any provider-local store once the imperative API is present.
+            ProcessTelemetryIdentityRouter.bindImperative(
+                sessionId = { store.sessionId },
+                primaryUserId = { store.effectiveUserID },
+            )
             store.startupGate = { gate }
             this.startupGate = gate
 
             registerActivityTracking()
             seedWebViewRetentionState(context)
 
+            // Reserve immutable telemetry configuration before publishing initialized=true. This
+            // only creates a lazy SimulaScope task: no I/O starts and the main thread never waits.
+            val claim = Telemetry.claimInitialization(
+                context = appContext,
+                apiKey = apiKey,
+                devMode = devMode,
+                enabled = telemetryEnabled,
+                launchSettledGate = launchSettledGate,
+            )
+
             // Publish last: a concurrent initialize() that observed the volatile flag as true
             // is guaranteed to see all of the above writes (lateinit store/appContext etc.).
             initialized = true
+            claim
         }
 
         // Deferred startup, OFF the calling thread (typically the main thread when the host
@@ -229,18 +248,10 @@ object SimulaAds {
 
                 // Install telemetry before the GAID read and the session warm-up: the read can
                 // then report a failure (privacy:gaid_read_failed), and /session/create (and
-                // every subsequent SDK request) is captured. The PPID is read live from the
-                // session store so a mid-session updatePrimaryUserID is honored.
+                // every subsequent SDK request) is captured. Envelope identity is read live from
+                // the process router so mixed-host attribution follows the imperative store.
                 runCatching {
-                    Telemetry.initialize(
-                        context = appContext,
-                        apiKey = apiKey,
-                        devMode = devMode,
-                        enabled = telemetryEnabled,
-                        sessionIdProvider = { store.sessionId },
-                        primaryUserIdProvider = { store.effectiveUserID },
-                        launchSettledGate = launchSettledGate,
-                    )
+                    telemetryClaim.startAndAwait()
                 }
 
                 // Initial GAID read (coalesced + throttled internally; no-op when the host

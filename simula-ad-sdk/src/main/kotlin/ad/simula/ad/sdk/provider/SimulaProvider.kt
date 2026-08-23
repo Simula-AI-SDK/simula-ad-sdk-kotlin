@@ -28,6 +28,7 @@ import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.telemetry.ProcessSdkEntryOrigin
+import ad.simula.ad.sdk.telemetry.ProcessTelemetryIdentityRouter
 import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -82,18 +83,6 @@ private var cachedGlobalContext: SimulaContextValue? = null
 // misintegrated host is warned once rather than on every composition.
 private var cachedEmptyContext: SimulaContextValue? = null
 private var emptyContextWarned = false
-
-/** Stable telemetry providers that follow the latest consent-recreated local session store. */
-internal class ProviderTelemetrySession {
-    @Volatile private var store: SimulaSessionStore? = null
-
-    fun bind(store: SimulaSessionStore) {
-        this.store = store
-    }
-
-    fun sessionId(): String? = store?.sessionId
-    fun primaryUserId(): String? = store?.effectiveUserID
-}
 
 /**
  * Builds (once) a [SimulaContextValue] backed by the global session that
@@ -253,10 +242,6 @@ fun SimulaProvider(
         resolvedConfig
     }
 
-    val telemetrySession = remember(context) {
-        ProviderTelemetrySession()
-    }
-
     // Attach CMP state, install telemetry, and settle the initial GAID read off composition. The
     // coordinator is the declarative startup gate: no provider-local session resolver can pass it.
     val privacySessionCoordinator = remember(context) { PrivacySessionCoordinator() }
@@ -264,21 +249,12 @@ fun SimulaProvider(
         privacySessionCoordinator.preparePrivacy(
             attach = { withContext(Dispatchers.IO) { SimulaPrivacy.attach(context) } },
             installTelemetry = {
-                val imperativeGate = SimulaAds.startupGate
-                if (imperativeGate != null) {
-                    imperativeGate.await()
-                } else {
-                    withContext(Dispatchers.IO) {
-                        Telemetry.initialize(
-                            context = context,
-                            apiKey = apiKey,
-                            devMode = devMode,
-                            enabled = telemetryEnabled,
-                            sessionIdProvider = telemetrySession::sessionId,
-                            primaryUserIdProvider = telemetrySession::primaryUserId,
-                        )
-                    }
-                }
+                Telemetry.initialize(
+                    context = context.applicationContext,
+                    apiKey = apiKey,
+                    devMode = devMode,
+                    enabled = telemetryEnabled,
+                )
             },
             refreshAdvertisingId = { SimulaPrivacy.refreshAdvertisingId() },
         )
@@ -322,8 +298,19 @@ fun SimulaProvider(
             startupGate = { SimulaAds.startupGate }
         }
     }
+    val telemetryIdentityToken = remember { ProcessTelemetryIdentityRouter.createProviderToken() }
     SideEffect {
-        telemetrySession.bind(sessionStore)
+        // Rebind the stable token after commit without first removing it. The router replaces and
+        // reorders the source atomically, so flushes cannot fall through during session replacement.
+        ProcessTelemetryIdentityRouter.bindProvider(
+            token = telemetryIdentityToken,
+            sessionId = { sessionStore.sessionId },
+            primaryUserId = { sessionStore.effectiveUserID },
+        )
+    }
+    DisposableEffect(telemetryIdentityToken) {
+        // Only actual provider disposal removes the token and restores the prior active provider.
+        onDispose { ProcessTelemetryIdentityRouter.unbindProvider(telemetryIdentityToken) }
     }
 
     // Delegate cache + context construction to the shared builder. The imperative

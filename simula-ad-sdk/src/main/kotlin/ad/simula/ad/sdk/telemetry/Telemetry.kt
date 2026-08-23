@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.telemetry
 
 import ad.simula.ad.sdk.core.LaunchSettledGate
 import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
+import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.core.installSimulaScopeFailureReporter
 import ad.simula.ad.sdk.image.ImageCache
 import ad.simula.ad.sdk.minigame.WebViewPool
@@ -43,29 +44,41 @@ internal object Telemetry {
     @Volatile
     private var manager: TelemetryManager? = null
 
-    private val initialization = FirstWinsCompletion()
+    private val initialization = FirstWinsProcessTask(SimulaScope)
 
     /**
      * Install the process telemetry pipeline from the first imperative or declarative startup.
      * Subsequent entry points await that startup's construction/recovery completion and do not
-     * replace its API/session ownership. When [enabled]
-     * is false nothing is created (host opt-out). [primaryUserIdProvider] is read live on every
-     * flush so a mid-session `updatePrimaryUserID` is honored, and it is additionally gated by
-     * the live consent snapshot.
+     * replace its immutable API key/dev-mode/enabled configuration. Envelope identity is resolved
+     * live through [ProcessTelemetryIdentityRouter], so mixed hosts prefer the imperative store
+     * once initialized while provider-only hosts follow their latest committed local store. When
+     * [enabled] is false nothing is created (host opt-out). Primary user identity is additionally
+     * gated by the live consent snapshot on every flush.
      */
     suspend fun initialize(
         context: Context,
         apiKey: String,
         devMode: Boolean,
         enabled: Boolean,
-        sessionIdProvider: () -> String?,
-        primaryUserIdProvider: () -> String?,
         launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
-    ) = initialization.runOnce {
+    ) = claimInitialization(context, apiKey, devMode, enabled, launchSettledGate).startAndAwait()
+
+    /**
+     * Reserve immutable first-wins telemetry configuration without starting work. This is strictly
+     * in-memory so the imperative entry point can call it while atomically publishing its store and
+     * startup gate; the deferred startup starts the returned claim only after CMP attachment.
+     */
+    fun claimInitialization(
+        context: Context,
+        apiKey: String,
+        devMode: Boolean,
+        enabled: Boolean,
+        launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
+    ): FirstWinsProcessTaskClaim = initialization.claim {
         if (!enabled) {
             manager = null
             installSimulaScopeFailureReporter(null)
-            return@runOnce
+            return@claim
         }
         val appCtx = context.applicationContext
         val json = Json { encodeDefaults = false; ignoreUnknownKeys = true }
@@ -85,10 +98,15 @@ internal object Telemetry {
             ctx = ctx,
             store = SqliteTelemetryStore(appCtx, json),
             sender = ApiTelemetrySender(apiKey),
-            sessionIdProvider = sessionIdProvider,
-            // Re-gate on every flush: ppid only with consent (& not under COPPA); the
-            // advertising id is already nulled by the snapshot when not collectible.
-            primaryUserIdProvider = primaryUserIdProvider,
+            identityProvider = {
+                val identity = ProcessTelemetryIdentityRouter.identity()
+                val consent = SimulaPrivacy.current
+                identity.copy(
+                    primaryUserId = identity.primaryUserId.takeIf { consent.allowsPrimaryUserID },
+                )
+            },
+            // Re-gate on every flush: ppid only with consent (& not under COPPA); the advertising
+            // id is already nulled by the live snapshot when not collectible.
             advertisingIdProvider = { SimulaPrivacy.current.advertisingId },
             // Reads SimulaConnectionType's cached value (kept fresh by its own network callback —
             // see SimulaConnectionType.prime) instead of a fresh binder call per flush.
@@ -101,7 +119,7 @@ internal object Telemetry {
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
         )
         installed.start()
-        // Publication precedes runOnce completion, so every losing initializer observes a fully
+        // Publication precedes claim completion, so every losing initializer observes a fully
         // recovered manager (or the completed disabled/failure outcome) before its startup proceeds.
         manager = installed
         drainDuplicateInitializeCount(installed)
