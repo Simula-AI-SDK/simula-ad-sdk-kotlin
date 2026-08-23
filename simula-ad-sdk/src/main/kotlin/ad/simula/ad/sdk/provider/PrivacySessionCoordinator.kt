@@ -10,7 +10,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 internal const val INITIAL_ADVERTISING_ID_TIMEOUT_MS = 2_500L
 
-/** One-shot provider gate that settles privacy before declarative session creation. */
+/** One-shot provider gate that settles privacy and telemetry before declarative session creation. */
 internal class PrivacySessionCoordinator(
     private val advertisingIdTimeoutMs: Long = INITIAL_ADVERTISING_ID_TIMEOUT_MS,
     private val startAdvertisingIdRefresh: (suspend () -> Unit) -> Deferred<Unit> = { refresh ->
@@ -29,10 +29,12 @@ internal class PrivacySessionCoordinator(
 
     suspend fun preparePrivacy(
         attach: suspend () -> Unit,
+        installTelemetry: suspend () -> Unit = {},
         refreshAdvertisingId: suspend () -> Unit,
     ) {
         try {
             settleStep(attach)
+            settleStep(installTelemetry)
             settleStep {
                 awaitInitialAdvertisingIdRefresh(
                     refreshAdvertisingId = refreshAdvertisingId,

@@ -23,7 +23,7 @@ import kotlinx.serialization.json.Json
  * SDK version stamped on every telemetry batch. Keep in sync with the `coordinates(...)`
  * version in `simula-ad-sdk/build.gradle.kts`.
  */
-internal const val SIMULA_SDK_VERSION = "1.1.9-dev.3"
+internal const val SIMULA_SDK_VERSION = "1.1.9-dev.4"
 
 /** logcat tag for the dev-mode telemetry mirror. */
 private const val LOG_TAG = "SimulaTelemetry"
@@ -43,13 +43,17 @@ internal object Telemetry {
     @Volatile
     private var manager: TelemetryManager? = null
 
+    private val initialization = FirstWinsCompletion()
+
     /**
-     * Install the telemetry pipeline. Call once from `SimulaAds.initialize`. When [enabled]
+     * Install the process telemetry pipeline from the first imperative or declarative startup.
+     * Subsequent entry points await that startup's construction/recovery completion and do not
+     * replace its API/session ownership. When [enabled]
      * is false nothing is created (host opt-out). [primaryUserIdProvider] is read live on every
      * flush so a mid-session `updatePrimaryUserID` is honored, and it is additionally gated by
      * the live consent snapshot.
      */
-    fun initialize(
+    suspend fun initialize(
         context: Context,
         apiKey: String,
         devMode: Boolean,
@@ -57,11 +61,11 @@ internal object Telemetry {
         sessionIdProvider: () -> String?,
         primaryUserIdProvider: () -> String?,
         launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
-    ) {
+    ) = initialization.runOnce {
         if (!enabled) {
             manager = null
             installSimulaScopeFailureReporter(null)
-            return
+            return@runOnce
         }
         val appCtx = context.applicationContext
         val json = Json { encodeDefaults = false; ignoreUnknownKeys = true }
@@ -77,7 +81,7 @@ internal object Telemetry {
             deviceRamMb = resolveRamMb(appCtx),
             buildType = if ((appCtx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) "debug" else "release",
         )
-        manager = TelemetryManager(
+        val installed = TelemetryManager(
             ctx = ctx,
             store = SqliteTelemetryStore(appCtx, json),
             sender = ApiTelemetrySender(apiKey),
@@ -95,7 +99,12 @@ internal object Telemetry {
             launchSettledGate = launchSettledGate,
             // In dev mode, mirror every (redacted) event to logcat for local verification.
             debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
-        ).also { it.start() }
+        )
+        installed.start()
+        // Publication precedes runOnce completion, so every losing initializer observes a fully
+        // recovered manager (or the completed disabled/failure outcome) before its startup proceeds.
+        manager = installed
+        drainDuplicateInitializeCount(installed)
         installSimulaScopeFailureReporter { failureSignature, throwable ->
             recordError(
                 signature = "scope:uncaught:$failureSignature",
@@ -125,7 +134,27 @@ internal object Telemetry {
         success: Boolean,
         failureClass: String? = null,
         breadcrumb: String? = null,
-    ) = manager?.recordOperation(name, durationMs, success, failureClass, breadcrumb) ?: Unit
+        timeSinceInitMs: Long? = null,
+    ) = manager?.recordOperation(
+        name,
+        durationMs,
+        success,
+        failureClass,
+        breadcrumb,
+        timeSinceInitMs?.coerceAtLeast(0L),
+    ) ?: Unit
+
+    /** Count one losing imperative initialize call and drain it once a manager is available. */
+    fun recordDuplicateInitialize() {
+        DuplicateImperativeInitializeCounter.increment()
+        manager?.let(::drainDuplicateInitializeCount)
+    }
+
+    private fun drainDuplicateInitializeCount(target: TelemetryManager) {
+        transferBoundedCounter(DuplicateImperativeInitializeCounter) { count, onPersisted ->
+            target.recordMetaCountDurably(DUPLICATE_INITIALIZE_META_NAME, count, onPersisted)
+        }
+    }
 
     fun recordLifecycle(
         stage: String,

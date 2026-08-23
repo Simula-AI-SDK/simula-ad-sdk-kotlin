@@ -120,13 +120,24 @@ class WebViewPoolPolicyTest {
     }
 
     @Test
-    fun `memory policy identifies low ram devices seen in renderer OOM telemetry`() {
-        val gib = 1024L * 1024 * 1024
+    fun `memory policy uses exact heap boundary and low ram flag without physical ram`() {
+        val boundary = 256L * 1024 * 1024
 
-        assertTrue(isWebViewMemoryConstrained(isLowRamDevice = false, totalRamBytes = 3L * gib, maxHeapBytes = gib))
-        assertTrue(isWebViewMemoryConstrained(isLowRamDevice = false, totalRamBytes = 8L * gib, maxHeapBytes = 256L * 1024 * 1024))
-        assertTrue(isWebViewMemoryConstrained(isLowRamDevice = true, totalRamBytes = 8L * gib, maxHeapBytes = gib))
-        assertFalse(isWebViewMemoryConstrained(isLowRamDevice = false, totalRamBytes = 8L * gib, maxHeapBytes = gib))
+        assertTrue(isWebViewMemoryConstrained(isLowRamDevice = false, maxHeapBytes = boundary))
+        assertFalse(isWebViewMemoryConstrained(isLowRamDevice = false, maxHeapBytes = boundary + 1L))
+        assertTrue(isWebViewMemoryConstrained(isLowRamDevice = true, maxHeapBytes = boundary + 1L))
+        // Physical RAM is intentionally absent from the policy: an ordinary <=4 GiB device with a
+        // heap above the boundary is no longer constrained.
+        assertFalse(isWebViewMemoryConstrained(isLowRamDevice = false, maxHeapBytes = 512L * 1024 * 1024))
+    }
+
+    @Test
+    fun `capability resolution fails constrained for both retention policies`() {
+        val ordinaryHeap = 512L * 1024 * 1024
+        assertEquals(0, resolveWebViewRetentionCapacity(null, ordinaryHeap, normalCapacity = 1, constrainedCapacity = 0))
+        assertEquals(0, resolveWebViewRetentionCapacity(false, null, normalCapacity = 1, constrainedCapacity = 0))
+        assertEquals(1, resolveWebViewRetentionCapacity(true, ordinaryHeap, normalCapacity = 3, constrainedCapacity = 1))
+        assertEquals(3, resolveWebViewRetentionCapacity(false, ordinaryHeap, normalCapacity = 3, constrainedCapacity = 1))
     }
 
     @Test

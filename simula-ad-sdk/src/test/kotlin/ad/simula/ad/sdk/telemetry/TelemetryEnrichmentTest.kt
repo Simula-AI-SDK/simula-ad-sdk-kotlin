@@ -2,7 +2,9 @@ package ad.simula.ad.sdk.telemetry
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -19,7 +21,10 @@ class TelemetryEnrichmentTest {
     private class FakeStore : TelemetryStore {
         var data: List<TelemetryEvent> = emptyList()
         override fun load(): List<TelemetryEvent> = data
-        override fun save(events: List<TelemetryEvent>) { data = events.toList() }
+        override fun save(events: List<TelemetryEvent>): Boolean {
+            data = events.toList()
+            return true
+        }
     }
 
     private class FakeSender : TelemetrySender {
@@ -97,6 +102,123 @@ class TelemetryEnrichmentTest {
         assertEquals(false, e.success)
         assertEquals("no_session", e.failureClass)
         assertEquals("ctx=true", e.breadcrumb)
+    }
+
+    @Test
+    fun `recordOperation carries clamped time since init`() = runTest {
+        val sender = FakeSender()
+        val m = build(this, FakeStore(), sender, clock = { 1_000L })
+
+        m.recordOperation(
+            "webview_acquire_warm",
+            durationMs = 2,
+            success = true,
+            timeSinceInitMs = -5L,
+        )
+        advanceUntilIdle()
+
+        val event = sender.batches.flatMap { it.events }.single { it.name == "webview_acquire_warm" }
+        assertEquals(0L, event.timeSinceInitMs)
+    }
+
+    @Test
+    fun `meta counts aggregate into one bounded event`() = runTest {
+        val sender = FakeSender()
+        val m = build(this, FakeStore(), sender, clock = { 1_000L })
+
+        m.recordMetaCount(DUPLICATE_INITIALIZE_META_NAME, 2)
+        m.recordMetaCount(DUPLICATE_INITIALIZE_META_NAME, 3)
+        advanceUntilIdle()
+
+        val events = sender.batches.flatMap { it.events }
+            .filter { it.type == TYPE_META && it.name == DUPLICATE_INITIALIZE_META_NAME }
+        assertEquals(1, events.size)
+        assertEquals(5, events.single().count)
+    }
+
+    @Test
+    fun `meta count added during an active send is drained without loss`() = runTest {
+        val sender = object : TelemetrySender {
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val events = mutableListOf<TelemetryEvent>()
+            val decoder = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+            var calls = 0
+            override suspend fun send(body: String): TelemetryAck {
+                calls++
+                if (calls == 1) gate.await()
+                events += decoder.decodeFromString<TelemetryEnvelope>(body).events
+                return TelemetryAck.ACCEPTED
+            }
+        }
+        val m = build(this, FakeStore(), sender, clock = { 1_000L })
+
+        m.recordMetaCount(DUPLICATE_INITIALIZE_META_NAME, 2)
+        advanceTimeBy(30_000L)
+        runCurrent()
+        m.recordMetaCount(DUPLICATE_INITIALIZE_META_NAME, 3)
+        runCurrent()
+        sender.gate.complete(Unit)
+        advanceUntilIdle()
+
+        val count = sender.events
+            .filter { it.type == TYPE_META && it.name == DUPLICATE_INITIALIZE_META_NAME }
+            .sumOf { it.count ?: 0 }
+        val ids = sender.events
+            .filter { it.type == TYPE_META && it.name == DUPLICATE_INITIALIZE_META_NAME }
+            .map { it.eventId }
+        assertEquals(5, count)
+        assertEquals(2, ids.size)
+        assertEquals("accepted aggregate and surviving remainder need different ids", 2, ids.toSet().size)
+    }
+
+    @Test
+    fun `durable meta callback follows aggregate persistence`() = runTest {
+        val order = mutableListOf<String>()
+        val store = object : TelemetryStore {
+            var data: List<TelemetryEvent> = emptyList()
+            override fun load(): List<TelemetryEvent> = data
+            override fun save(events: List<TelemetryEvent>): Boolean {
+                data = events.toList()
+                order += "saved"
+                return true
+            }
+        }
+        val m = build(this, store, FakeSender(), clock = { 1_000L })
+
+        m.recordMetaCountDurably(DUPLICATE_INITIALIZE_META_NAME, 4) { persisted ->
+            order += "callback:$persisted"
+        }
+        runCurrent()
+
+        assertEquals(listOf("saved", "callback:true"), order)
+        assertEquals(4, store.data.single { it.name == DUPLICATE_INITIALIZE_META_NAME }.count)
+    }
+
+    @Test
+    fun `failed durable meta save rejects and rolls back aggregate`() = runTest {
+        val store = object : TelemetryStore {
+            var allowSave = false
+            var data: List<TelemetryEvent> = emptyList()
+            override fun load(): List<TelemetryEvent> = emptyList()
+            override fun save(events: List<TelemetryEvent>): Boolean {
+                if (!allowSave) return false
+                data = events.toList()
+                return true
+            }
+        }
+        var accepted: Boolean? = null
+        val m = build(this, store, FakeSender(), clock = { 1_000L })
+
+        m.recordMetaCountDurably(DUPLICATE_INITIALIZE_META_NAME, 4) { accepted = it }
+        runCurrent()
+        assertEquals(false, accepted)
+
+        store.allowSave = true
+        m.recordMetaCountDurably(DUPLICATE_INITIALIZE_META_NAME, 4) { accepted = it }
+        runCurrent()
+
+        assertEquals(true, accepted)
+        assertEquals(4, store.data.single { it.name == DUPLICATE_INITIALIZE_META_NAME }.count)
     }
 
     @Test

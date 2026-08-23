@@ -54,6 +54,39 @@ class PrivacySessionCoordinatorTest {
     }
 
     @Test
+    fun `telemetry installs after attach and before provider session readiness`() = runTest {
+        val coordinator = PrivacySessionCoordinator(
+            startAdvertisingIdRefresh = { refresh -> backgroundScope.async { refresh() } },
+        )
+        val steps = mutableListOf<String>()
+
+        coordinator.preparePrivacy(
+            attach = { steps += "attach" },
+            installTelemetry = { steps += "telemetry" },
+            refreshAdvertisingId = { steps += "gaid" },
+        )
+        val session = coordinator.ensureSession {
+            steps += "session"
+            "session-id"
+        }
+
+        assertEquals("session-id", session)
+        assertEquals(listOf("attach", "telemetry", "gaid", "session"), steps)
+    }
+
+    @Test
+    fun `provider telemetry identity follows consent recreated local stores`() {
+        val identity = ProviderTelemetrySession()
+        val first = SimulaSessionStore("provider-key", false, "user-a")
+        val second = SimulaSessionStore("provider-key", true, "user-b")
+
+        identity.bind(first)
+        assertEquals("user-a", identity.primaryUserId())
+        identity.bind(second)
+        assertEquals("user-b", identity.primaryUserId())
+    }
+
+    @Test
     fun `concurrent child callers release after readiness`() = runTest {
         val coordinator = PrivacySessionCoordinator(
             startAdvertisingIdRefresh = { refresh -> backgroundScope.async { runCatching { refresh() }; Unit } },
@@ -102,6 +135,10 @@ class PrivacySessionCoordinatorTest {
                 settledSteps += "attach"
                 throw IllegalStateException("preferences unavailable")
             },
+            installTelemetry = {
+                settledSteps += "telemetry"
+                throw IllegalStateException("telemetry unavailable")
+            },
             refreshAdvertisingId = {
                 settledSteps += "refresh"
                 throw IllegalStateException("GAID unavailable")
@@ -110,7 +147,7 @@ class PrivacySessionCoordinatorTest {
 
         val session = coordinator.ensureSession { "session" }
 
-        assertEquals(listOf("attach", "refresh"), settledSteps)
+        assertEquals(listOf("attach", "telemetry", "refresh"), settledSteps)
         assertEquals("session", session)
     }
 

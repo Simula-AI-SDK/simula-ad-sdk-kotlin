@@ -32,9 +32,10 @@ class TelemetryManagerTest {
         var data: List<TelemetryEvent> = initial.map { it.copy() }
         var saveCount = 0
         override fun load(): List<TelemetryEvent> = data.map { it.copy() }
-        override fun save(events: List<TelemetryEvent>) {
+        override fun save(events: List<TelemetryEvent>): Boolean {
             saveCount++
             data = events.map { it.copy() }
+            return true
         }
     }
 

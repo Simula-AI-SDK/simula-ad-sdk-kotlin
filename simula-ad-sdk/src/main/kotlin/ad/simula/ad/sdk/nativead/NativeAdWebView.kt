@@ -8,8 +8,8 @@ import ad.simula.ad.sdk.bridge.parseKnownCreativeBridgeMessage
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.minigame.WebViewTrimAction
-import ad.simula.ad.sdk.minigame.isWebViewMemoryConstrained
 import ad.simula.ad.sdk.minigame.repaintOnNextFrame
+import ad.simula.ad.sdk.minigame.resolveWebViewRetentionCapacity
 import ad.simula.ad.sdk.minigame.webViewTrimAction
 import ad.simula.ad.sdk.network.SimulaApiClient
 import android.content.ComponentCallbacks2
@@ -233,7 +233,7 @@ internal object NativeAdWebViewStore {
     private const val MAX_RETAINED_LOW_RAM = 1
 
     // Resolved once on first [registerTrimCallbacks] (where an app context is available) so the cap
-    // can consult the shared physical-RAM/heap policy. Defaults to the normal cap until then.
+    // can consult the shared low-RAM/heap policy. Defaults to the normal cap until then.
     // Volatile: written on the main thread, read in evictIfNeeded().
     @Volatile private var maxRetained = MAX_RETAINED
 
@@ -575,18 +575,17 @@ internal object NativeAdWebViewStore {
     /** Pick the retained-view cap once per process: 1 on a constrained device, else 3. */
     @MainThread
     private fun resolveMaxRetained(appContext: Context) {
-        val constrained = runCatching {
+        val capabilities = runCatching {
             val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
-                ?: return@runCatching true
-            val memory = android.app.ActivityManager.MemoryInfo()
-            am.getMemoryInfo(memory)
-            isWebViewMemoryConstrained(
-                isLowRamDevice = am.isLowRamDevice,
-                totalRamBytes = memory.totalMem,
-                maxHeapBytes = Runtime.getRuntime().maxMemory(),
-            )
-        }.getOrDefault(true)
-        maxRetained = if (constrained) MAX_RETAINED_LOW_RAM else MAX_RETAINED
+                ?: return@runCatching null
+            am.isLowRamDevice to Runtime.getRuntime().maxMemory()
+        }.getOrNull()
+        maxRetained = resolveWebViewRetentionCapacity(
+            isLowRamDevice = capabilities?.first,
+            maxHeapBytes = capabilities?.second,
+            normalCapacity = MAX_RETAINED,
+            constrainedCapacity = MAX_RETAINED_LOW_RAM,
+        )
     }
 
     private fun registerTrimCallbacks(appContext: Context) {

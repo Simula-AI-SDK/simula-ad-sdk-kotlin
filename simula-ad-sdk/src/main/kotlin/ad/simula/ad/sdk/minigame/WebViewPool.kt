@@ -3,6 +3,7 @@ package ad.simula.ad.sdk.minigame
 import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.telemetry.Telemetry
+import ad.simula.ad.sdk.telemetry.ProcessSdkEntryOrigin
 import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.content.ComponentCallbacks2
@@ -19,8 +20,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.annotation.MainThread
 
-/** Shared limits for all SDK-owned WebView retention, backed by production renderer-OOM data. */
-private const val CONSTRAINED_DEVICE_RAM_BYTES = 4L * 1024 * 1024 * 1024
+/** Shared limit for all SDK-owned WebView retention, backed by production renderer-OOM data. */
 private const val CONSTRAINED_HEAP_BYTES = 256L * 1024 * 1024
 
 /**
@@ -148,6 +148,7 @@ internal object WebViewPool {
             durationMs = (System.nanoTime() - startNanos) / 1_000_000,
             success = true,
             breadcrumb = "surface=${canonicalWebViewAcquireSurface(surface)}",
+            timeSinceInitMs = ProcessSdkEntryOrigin.elapsedMs(),
         )
         return webView
     }
@@ -245,6 +246,7 @@ internal object WebViewPool {
                 success = success,
                 failureClass = failureClass?.take(40),
                 breadcrumb = "trigger=${canonicalWebViewPrewarmTrigger(trigger)};result=$result",
+                timeSinceInitMs = ProcessSdkEntryOrigin.elapsedMs(),
             )
         }
     }
@@ -288,18 +290,17 @@ internal object WebViewPool {
     /** Constrained devices skip idle pooling entirely; active WebViews still work normally. */
     @MainThread
     private fun resolveMaxIdle(appContext: Context) {
-        val constrained = runCatching {
+        val capabilities = runCatching {
             val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-                ?: return@runCatching true
-            val memory = ActivityManager.MemoryInfo()
-            am.getMemoryInfo(memory)
-            isWebViewMemoryConstrained(
-                isLowRamDevice = am.isLowRamDevice,
-                totalRamBytes = memory.totalMem,
-                maxHeapBytes = Runtime.getRuntime().maxMemory(),
-            )
-        }.getOrDefault(true)
-        maxIdle = if (constrained) 0 else MAX_IDLE
+                ?: return@runCatching null
+            am.isLowRamDevice to Runtime.getRuntime().maxMemory()
+        }.getOrNull()
+        maxIdle = resolveWebViewRetentionCapacity(
+            isLowRamDevice = capabilities?.first,
+            maxHeapBytes = capabilities?.second,
+            normalCapacity = MAX_IDLE,
+            constrainedCapacity = 0,
+        )
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -424,9 +425,19 @@ internal fun webViewTrimAction(level: Int): WebViewTrimAction = when {
 /** Shared pure memory policy for the idle pool and retained native-ad WebViews. */
 internal fun isWebViewMemoryConstrained(
     isLowRamDevice: Boolean,
-    totalRamBytes: Long,
     maxHeapBytes: Long,
 ): Boolean =
     isLowRamDevice ||
-        totalRamBytes <= CONSTRAINED_DEVICE_RAM_BYTES ||
         maxHeapBytes <= CONSTRAINED_HEAP_BYTES
+
+/** Missing capability data fails constrained so speculative retention cannot destabilize the host. */
+internal fun resolveWebViewRetentionCapacity(
+    isLowRamDevice: Boolean?,
+    maxHeapBytes: Long?,
+    normalCapacity: Int,
+    constrainedCapacity: Int,
+): Int = if (
+    isLowRamDevice == null ||
+    maxHeapBytes == null ||
+    isWebViewMemoryConstrained(isLowRamDevice, maxHeapBytes)
+) constrainedCapacity else normalCapacity

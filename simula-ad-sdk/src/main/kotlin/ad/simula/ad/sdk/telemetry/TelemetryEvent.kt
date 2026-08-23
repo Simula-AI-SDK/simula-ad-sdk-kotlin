@@ -28,6 +28,7 @@ internal data class TelemetryEvent(
     val name: String,
     @SerialName("event_id") val eventId: String,
     val timestamp: Long,
+    @SerialName("time_since_init_ms") val timeSinceInitMs: Long? = null,
     @SerialName("duration_ms") val durationMs: Long? = null,
     @SerialName("status_code") val statusCode: Int? = null,
     @SerialName("response_bytes") val responseBytes: Long? = null,

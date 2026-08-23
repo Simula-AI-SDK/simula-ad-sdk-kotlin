@@ -21,6 +21,7 @@ import ad.simula.ad.sdk.provider.SimulaSessionStore
 import ad.simula.ad.sdk.provider.awaitInitialAdvertisingIdRefresh
 import ad.simula.ad.sdk.telemetry.SimulaCrashGuard
 import ad.simula.ad.sdk.telemetry.Telemetry
+import ad.simula.ad.sdk.telemetry.ProcessSdkEntryOrigin
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.Application
@@ -65,12 +66,10 @@ object SimulaAds {
     /**
      * The deferred-startup gate of the current [initialize] run — completes once consent
      * (IAB attach), telemetry, and the durable beacon queue are in place, and always before
-     * the startup's own session warm-up. Null before [initialize] (e.g. declarative-only
-     * hosts). The declarative `SimulaProvider` reads it LIVE from its own [SimulaSessionStore]
-     * gate provider (a provider can be composed — and its store remembered — before this is
-     * published), so a session created from composition can't race ahead of the imperative
-     * startup either. `@Volatile` because that live read happens on [SimulaScope] coroutines
-     * while the write happens on [initialize]'s calling thread.
+     * the startup's own session warm-up. Null before [initialize] (including declarative-only
+     * hosts). A declarative provider reads it live from its local store's gate provider so mixed
+     * hosts cannot race ahead of an imperative startup published before the request. `@Volatile`
+     * because reads happen on [SimulaScope] while the write happens on the initialize thread.
      */
     @Volatile
     internal var startupGate: CompletableDeferred<Unit>? = null
@@ -124,7 +123,33 @@ object SimulaAds {
         telemetryEnabled: Boolean = true,
         adContext: SimulaAdContext? = null,
     ) {
-        if (initialized) return
+        ProcessSdkEntryOrigin.markEntry()
+        initializeShared(
+            context = context,
+            apiKey = apiKey,
+            devMode = devMode,
+            primaryUserID = primaryUserID,
+            hasPrivacyConsent = hasPrivacyConsent,
+            privacy = privacy,
+            telemetryEnabled = telemetryEnabled,
+            adContext = adContext,
+        )
+    }
+
+    private fun initializeShared(
+        context: Context,
+        apiKey: String,
+        devMode: Boolean,
+        primaryUserID: String?,
+        hasPrivacyConsent: Boolean,
+        privacy: SimulaPrivacyConfig?,
+        telemetryEnabled: Boolean,
+        adContext: SimulaAdContext?,
+    ) {
+        if (initialized) {
+            Telemetry.recordDuplicateInitialize()
+            return
+        }
         require(apiKey.isNotBlank()) { "SimulaAds.initialize requires a non-blank apiKey" }
 
         // Monotonic start marker for the sdk_init telemetry duration (emitted once setup completes).
@@ -140,7 +165,10 @@ object SimulaAds {
         val gate = CompletableDeferred<Unit>()
         val launchSettledGate = ProcessLaunchSettledGate
         synchronized(this) {
-            if (initialized) return
+            if (initialized) {
+                Telemetry.recordDuplicateInitialize()
+                return
+            }
 
             appContext = context.applicationContext
             this.apiKey = apiKey
@@ -295,6 +323,13 @@ object SimulaAds {
 
             // Warm the session before the first load() so it's off the ad critical path.
             store.ensureSession()
+        }
+    }
+
+    /** Atomically preserve the mixed-host privacy rule relative to imperative initialization. */
+    internal fun applyProviderPrivacy(config: SimulaPrivacyConfig, explicit: Boolean) {
+        synchronized(this) {
+            if (explicit || !initialized) SimulaPrivacy.apply(config)
         }
     }
 
