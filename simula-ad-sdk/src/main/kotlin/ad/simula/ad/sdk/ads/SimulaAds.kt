@@ -1,15 +1,16 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
+import ad.simula.ad.sdk.core.ProcessApiKeyOwner
+import ad.simula.ad.sdk.core.ImperativeInitializationAttempt
+import ad.simula.ad.sdk.core.ImperativeInitializationGate
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.nativead.NativeAdPreloadCache
-import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.Ipv4Beacon
-import ad.simula.ad.sdk.network.RewardVerificationManager
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
@@ -17,10 +18,15 @@ import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
+import ad.simula.ad.sdk.privacy.ProcessPrivacyOwner
 import ad.simula.ad.sdk.provider.SimulaSessionStore
 import ad.simula.ad.sdk.provider.awaitInitialAdvertisingIdRefresh
-import ad.simula.ad.sdk.telemetry.SimulaCrashGuard
+import ad.simula.ad.sdk.telemetry.EffectiveTelemetryConfig
+import ad.simula.ad.sdk.telemetry.FirstWinsProcessTaskClaim
+import ad.simula.ad.sdk.telemetry.ProcessStartupInfrastructure
 import ad.simula.ad.sdk.telemetry.Telemetry
+import ad.simula.ad.sdk.telemetry.ProcessSdkEntryOrigin
+import ad.simula.ad.sdk.telemetry.ProcessTelemetryIdentityRouter
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.Application
@@ -34,6 +40,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
+
+private data class ImperativeStartup(
+    val telemetryClaim: FirstWinsProcessTaskClaim<EffectiveTelemetryConfig>,
+    val gate: CompletableDeferred<Unit>,
+    val startNanos: Long,
+)
 
 /**
  * Global entry point for the imperative ad API (mirrors the Swift `SimulaAds`).
@@ -50,8 +62,8 @@ import java.lang.ref.WeakReference
  */
 object SimulaAds {
 
-    @Volatile
-    private var initialized = false
+    private val initialization = ImperativeInitializationGate()
+    private val privacyOwnerToken = ProcessPrivacyOwner.createToken()
 
     internal lateinit var appContext: Context
         private set
@@ -65,12 +77,10 @@ object SimulaAds {
     /**
      * The deferred-startup gate of the current [initialize] run — completes once consent
      * (IAB attach), telemetry, and the durable beacon queue are in place, and always before
-     * the startup's own session warm-up. Null before [initialize] (e.g. declarative-only
-     * hosts). The declarative `SimulaProvider` reads it LIVE from its own [SimulaSessionStore]
-     * gate provider (a provider can be composed — and its store remembered — before this is
-     * published), so a session created from composition can't race ahead of the imperative
-     * startup either. `@Volatile` because that live read happens on [SimulaScope] coroutines
-     * while the write happens on [initialize]'s calling thread.
+     * the startup's own session warm-up. Null before [initialize] (including declarative-only
+     * hosts). A declarative provider reads it live from its local store's gate provider so mixed
+     * hosts cannot race ahead of an imperative startup published before the request. `@Volatile`
+     * because reads happen on [SimulaScope] while the write happens on the initialize thread.
      */
     @Volatile
     internal var startupGate: CompletableDeferred<Unit>? = null
@@ -83,7 +93,7 @@ object SimulaAds {
     internal val currentActivity: Activity? get() = currentActivityRef?.get()
 
     /** True once [initialize] has been called with a valid key. */
-    val isInitialized: Boolean get() = initialized
+    val isInitialized: Boolean get() = initialization.isInitialized
 
     /**
      * The custom User-Agent the SDK sets on its native HTTP requests (PRD). Null until the SDK is
@@ -124,64 +134,116 @@ object SimulaAds {
         telemetryEnabled: Boolean = true,
         adContext: SimulaAdContext? = null,
     ) {
-        if (initialized) return
+        initializeShared(
+            context = context,
+            apiKey = apiKey,
+            devMode = devMode,
+            primaryUserID = primaryUserID,
+            hasPrivacyConsent = hasPrivacyConsent,
+            privacy = privacy,
+            telemetryEnabled = telemetryEnabled,
+            adContext = adContext,
+        )
+    }
+
+    private fun initializeShared(
+        context: Context,
+        apiKey: String,
+        devMode: Boolean,
+        primaryUserID: String?,
+        hasPrivacyConsent: Boolean,
+        privacy: SimulaPrivacyConfig?,
+        telemetryEnabled: Boolean,
+        adContext: SimulaAdContext?,
+    ) {
         require(apiKey.isNotBlank()) { "SimulaAds.initialize requires a non-blank apiKey" }
-
-        // Monotonic start marker for the sdk_init telemetry duration (emitted once setup completes).
-        val startNanos = System.nanoTime()
-
-        // Double-checked under a lock so two concurrent initialize() calls can't both run the body
-        // and double-init (e.g. two session warm-ups, two activity-tracking registrations). The
-        // require() above stays outside the lock so a blank key still fails fast on every call.
-        //
-        // Gate released once the deferred startup has attached consent + installed telemetry
-        // (see SimulaSessionStore.startupGate) — a host ad-load fired immediately after this
-        // call returns still can't race a request out ahead of them.
-        val gate = CompletableDeferred<Unit>()
+        val applicationContext = context.applicationContext
+        val resolvedPrivacy = privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
         val launchSettledGate = ProcessLaunchSettledGate
-        synchronized(this) {
-            if (initialized) return
+        var reservedTelemetry: ad.simula.ad.sdk.telemetry.FirstWinsProcessTaskClaim<EffectiveTelemetryConfig>? = null
+        val attempt = initialization.initialize(
+            claimAndSeed = {
+                ProcessApiKeyOwner.claimAndSeedPrivacyThen(
+                    apiKey = apiKey,
+                    privacyOwnerToken = privacyOwnerToken,
+                    privacy = resolvedPrivacy,
+                    explicitPrivacy = privacy != null,
+                ) {
+                    Telemetry.claimInitialization(
+                        context = applicationContext,
+                        apiKey = apiKey,
+                        devMode = devMode,
+                        enabled = telemetryEnabled,
+                        launchSettledGate = launchSettledGate,
+                    )
+                }.also { reservedTelemetry = it.value }.ownership
+            },
+            onWinner = {
+                ProcessSdkEntryOrigin.markEntry()
+                val startNanos = System.nanoTime()
+                // Gate released once consent, telemetry, and billing infrastructure are ready.
+                val gate = CompletableDeferred<Unit>()
 
-            appContext = context.applicationContext
-            this.apiKey = apiKey
-            this.devMode = devMode
+                appContext = applicationContext
+                this.apiKey = apiKey
+                this.devMode = devMode
 
-            // Seed the process-wide native-ad targeting context so every POST /load/native carries it.
-            NativeAdContextStore.set(adContext)
+                // Seed the process-wide native-ad targeting context so every POST /load/native carries it.
+                NativeAdContextStore.set(adContext)
 
-            // Build the custom User-Agent once (cheap, Build statics); SimulaHttp stamps it on every
-            // request. The device id is a synchronous ContentProvider read, so it's resolved off the
-            // main thread via prime() to keep it off the app-start critical path.
-            SimulaUserAgent.build(appContext)
-            SimulaDeviceId.prime(appContext)
-            // Independent of telemetryEnabled: the X-Connection-Type header is a first-party-request
-            // signal, not a telemetry one, so it must work even when telemetry is disabled.
-            SimulaConnectionType.prime(appContext)
-            // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
-            // request. Also a first-party-request signal, primed off the critical path.
-            SimulaDeviceSignals.prime(appContext)
-            // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
-            // seeds it — identical resolution to SimulaProvider, so the imperative and
-            // declarative entry points present the same consent signals.
-            val resolved = privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
+                // Build the custom User-Agent once (cheap, Build statics); SimulaHttp stamps it on every
+                // request. The device id is a synchronous ContentProvider read, so it's resolved off the
+                // main thread via prime() to keep it off the app-start critical path.
+                SimulaUserAgent.build(appContext)
+                SimulaDeviceId.prime(appContext)
+                // Independent of telemetryEnabled: the X-Connection-Type header is a first-party-request
+                // signal, not a telemetry one, so it must work even when telemetry is disabled.
+                SimulaConnectionType.prime(appContext)
+                // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
+                // request. Also a first-party-request signal, primed off the critical path.
+                SimulaDeviceSignals.prime(appContext)
+                store = SimulaSessionStore(apiKey, devMode, primaryUserID)
+                // Publish the store identity in the same critical section as imperative initialization.
+                // Telemetry configuration remains first-wins. Envelopes prefer this live imperative
+                // identity only when its API key is compatible with the winning telemetry sender.
+                ProcessTelemetryIdentityRouter.bindImperative(
+                    apiKey = apiKey,
+                    sessionId = { store.sessionId },
+                    primaryUserId = { store.effectiveUserID },
+                )
+                store.startupGate = { gate }
+                this.startupGate = gate
 
-            // Seed the process-wide privacy store so the imperative path honors consent:
-            // SimulaApiClient reads SimulaPrivacy.current for the /session/create body and
-            // per-request consent headers. Kept synchronous (in-memory) so consent ordering
-            // is guaranteed; the IAB auto-read (disk) is deferred to the startup below.
-            SimulaPrivacy.apply(resolved)
+                registerActivityTracking()
+                seedWebViewRetentionState(context)
 
-            store = SimulaSessionStore(apiKey, devMode, primaryUserID)
-            store.startupGate = { gate }
-            this.startupGate = gate
+                // Reserve immutable telemetry configuration before publishing initialized=true. This
+                // only creates a lazy SimulaScope task: no I/O starts and the main thread never waits.
+                val claim = reservedTelemetry ?: Telemetry.claimInitialization(
+                    context = appContext,
+                    apiKey = apiKey,
+                    devMode = devMode,
+                    enabled = telemetryEnabled,
+                    launchSettledGate = launchSettledGate,
+                )
 
-            registerActivityTracking()
-            seedWebViewRetentionState(context)
-
-            // Publish last: a concurrent initialize() that observed the volatile flag as true
-            // is guaranteed to see all of the above writes (lateinit store/appContext etc.).
-            initialized = true
+                ImperativeStartup(claim, gate, startNanos)
+            },
+        )
+        val startup = when (attempt) {
+            ImperativeInitializationAttempt.Duplicate -> {
+                Telemetry.recordDuplicateInitialize()
+                return
+            }
+            ImperativeInitializationAttempt.Incompatible -> {
+                ProcessApiKeyOwner.warnIncompatibleEntry()
+                return
+            }
+            is ImperativeInitializationAttempt.Winner -> attempt.value
         }
+        val gate = startup.gate
+        val telemetryClaim = startup.telemetryClaim
+        val startNanos = startup.startNanos
 
         // Deferred startup, OFF the calling thread (typically the main thread when the host
         // initializes from Application.onCreate): the remaining steps do disk I/O
@@ -195,25 +257,16 @@ object SimulaAds {
         // as before. Each step fails open independently: telemetry/consent infrastructure
         // must never break ads.
         SimulaScope.launch {
+            var effectiveTelemetry: EffectiveTelemetryConfig? = null
             try {
                 // Wire IAB-standard CMP auto-read (default-SharedPreferences first access = disk).
                 runCatching { SimulaPrivacy.attach(appContext) }
 
                 // Install telemetry before the GAID read and the session warm-up: the read can
                 // then report a failure (privacy:gaid_read_failed), and /session/create (and
-                // every subsequent SDK request) is captured. The PPID is read live from the
-                // session store so a mid-session updatePrimaryUserID is honored.
-                runCatching {
-                    Telemetry.initialize(
-                        context = appContext,
-                        apiKey = apiKey,
-                        devMode = devMode,
-                        enabled = telemetryEnabled,
-                        sessionIdProvider = { store.sessionId },
-                        primaryUserIdProvider = { store.effectiveUserID },
-                        launchSettledGate = launchSettledGate,
-                    )
-                }
+                // every subsequent SDK request) is captured. Envelope identity is read live from
+                // the process router so mixed-host attribution follows the imperative store.
+                effectiveTelemetry = runCatching { telemetryClaim.startAndAwait() }.getOrNull()
 
                 // Initial GAID read (coalesced + throttled internally; no-op when the host
                 // didn't opt in via enableAdvertisingId, when the user limits ad tracking, or
@@ -224,13 +277,17 @@ object SimulaAds {
                     refreshAdvertisingId = { SimulaPrivacy.refreshAdvertisingId() },
                 )
 
-                // Build the durable impression/click beacon queue BEFORE the gate releases:
-                // a host load awaiting the gate can show an ad (and fire billing beacons) the
-                // moment it proceeds, and AdBeaconManager.enqueue is a silent no-op until the
-                // engine exists — building it here closes that drop window. Construction is
-                // off-main SQLite open/migration work. The prior-process DRAIN is triggered later
-                // through the launch-settled gate; these records are already self-contained.
-                runCatching { AdBeaconManager.init(appContext, apiKey) }
+                // Build process infrastructure from telemetry's effective first-wins config. This
+                // guarantees the durable beacon sender and crash capture cannot use a losing local
+                // key/enabled value. Recovery sends remain launch-settled-gated internally.
+                runCatching {
+                    ProcessStartupInfrastructure.initialize(
+                        context = appContext,
+                        apiKey = apiKey,
+                        telemetry = effectiveTelemetry,
+                        launchSettledGate = launchSettledGate,
+                    )
+                }
             } finally {
                 // Release session waiters (see SimulaSessionStore.startupGate) no matter what —
                 // a dead/cancelled startup coroutine must never leave ensureSession callers
@@ -240,41 +297,13 @@ object SimulaAds {
                 gate.complete(Unit)
             }
 
-            // Capture uncaught SDK crashes (+ ANR / native-renderer process exits on Android 11+)
-            // into telemetry. AFTER Telemetry.initialize: install replays any prior-process crash
-            // records into the pipeline, and a record landing before the manager exists would be
-            // permanently dropped (the ordering SimulaCrashGuard.install documents).
-            withContext(Dispatchers.Main) {
-                runCatching {
-                    SimulaCrashGuard.install(
-                        appContext,
-                        enabled = telemetryEnabled,
-                        launchSettledGate = launchSettledGate,
-                    )
-                }
-            }
-
-            // Independently of session warm-up (each queued verification carries its own
-            // session), drain any reward verifications a prior process left pending (e.g. a
-            // crash/kill before a verify could land) so their server-side SSV postbacks fire
-            // without waiting for the next rewarded play. After the IAB attach so recovery
-            // requests carry current consent headers.
-            runCatching {
-                RewardVerificationManager.triggerProcessQueue(appContext, launchSettledGate)
-            }
-
-            // Drain any impression/click beacons a prior process left undelivered
-            // (offline/killed). The queue was built inside the gated section above — any
-            // gated load can fire billing beacons the moment it releases — while these
-            // already-persisted entries can drain off the gated path.
-            runCatching { AdBeaconManager.triggerProcessQueue(launchSettledGate) }
-
             // SDK-init + SDK-upgrade beacons before session warm-up, so sdk_init excludes the
             // /session/create network round-trip (parity with iOS).
             val initMs = (System.nanoTime() - startNanos) / 1_000_000
             val configSummary = runCatching {
                 val c = SimulaPrivacy.current
-                "dev=$devMode tel=$telemetryEnabled consent=${c.hasPrivacyConsent} " +
+                val telemetry = effectiveTelemetry
+                "dev=${telemetry?.devMode ?: devMode} tel=${telemetry?.enabled ?: false} consent=${c.hasPrivacyConsent} " +
                     "coppa=${c.coppaApplies} adid=${c.advertisingId != null} ctx=${adContext != null}"
             }.getOrNull()
             Telemetry.recordOperation(
@@ -322,7 +351,7 @@ object SimulaAds {
      * failure is non-fatal because local state already reflects the new id.
      */
     fun updatePrimaryUserID(id: String?) {
-        if (!initialized) return
+        if (!initialization.isInitialized) return
         val normalized = id?.takeIf { it.isNotBlank() }
         store.updatePpid(normalized)
         // Reconcile the live server session toward the new id. Single-flight and serialized in the
@@ -357,7 +386,7 @@ object SimulaAds {
      * PRD) so repeated checks for the same ad unit + user don't re-hit the network.
      */
     suspend fun checkFrequencyCap(adUnitId: String, primaryUserID: String? = null): Boolean {
-        if (!initialized || adUnitId.isBlank()) return false
+        if (!initialization.isInitialized || adUnitId.isBlank()) return false
         val ppid = primaryUserID?.takeIf { it.isNotBlank() } ?: store.effectiveUserID
         // Capture the local day at the START of the check and attribute the result to it. The network
         // round-trip can cross local midnight; stamping the cache with the completion time would file
@@ -414,7 +443,7 @@ object SimulaAds {
         position: Int = 0,
         theme: String? = null,
     ): String? {
-        if (!initialized) return null
+        if (!initialization.isInitialized) return null
         val resolvedTheme = resolveThemeImperative(theme)
         return NativeAdPreloadCache.preload(
             adUnitId = adUnitId,

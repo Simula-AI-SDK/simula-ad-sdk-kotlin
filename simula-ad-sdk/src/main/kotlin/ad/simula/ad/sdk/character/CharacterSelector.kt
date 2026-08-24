@@ -114,6 +114,7 @@ fun CharacterSelector(
     var selectedId by remember { mutableStateOf<String?>(null) }
     val resolved = remember(theme) { theme.resolve() }
     val simula = useSimula()
+    if (simula.apiKey.isBlank()) return
 
     // Host roster is the source of truth, capped at the 4 grid slots; the backend
     // backfills only the gap (fill = 4 - host).

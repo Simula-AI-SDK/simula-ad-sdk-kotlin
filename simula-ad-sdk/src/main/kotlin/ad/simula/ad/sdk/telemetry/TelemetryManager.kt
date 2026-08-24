@@ -63,9 +63,7 @@ internal class TelemetryManager(
     private val ctx: TelemetryContext,
     private val store: TelemetryStore,
     private val sender: TelemetrySender,
-    private val sessionIdProvider: () -> String?,
-    private val primaryUserIdProvider: () -> String?,
-    private val advertisingIdProvider: () -> String?,
+    private val envelopeIdentityProvider: () -> TelemetryEnvelopeIdentity,
     // Resolved fresh on each flush (off the UI path). Must be best-effort/non-throwing.
     private val connectionTypeProvider: () -> String? = { null },
     // Compact diagnostics breadcrumb (memory/webview-pool/image-cache), sampled on flush. Best-effort.
@@ -91,6 +89,8 @@ internal class TelemetryManager(
     // `name` stays unchanged; crash/ANR sites add persisted fingerprint/stack context to this key
     // so two sites sharing one stable wire name cannot collapse into each other.
     private val errorAgg = LinkedHashMap<String, TelemetryEvent>()
+    // Stable process counters (currently duplicate initialize) aggregate by wire name.
+    private val metaAgg = LinkedHashMap<String, TelemetryEvent>()
     private var droppedCount = 0
     private var isFlushing = false
     private var flushRequested = false
@@ -111,25 +111,32 @@ internal class TelemetryManager(
     private var variantId: String? = null
 
     /** Recover any buffer left by a prior process, then attempt a flush. */
-    fun start() {
-        scope.launch {
-            mutex.withLock {
-                for (e in store.load()) {
-                    if (e.type == TYPE_ERROR && e.name.isNotEmpty()) {
-                        val key = telemetryErrorAggregationKey(e.name, e.breadcrumb, e.stack)
-                        val existing = errorAgg[key]
-                        if (existing == null) {
-                            errorAgg[key] = e
-                        } else {
-                            existing.count = (existing.count ?: 1) + (e.count ?: 1)
-                        }
+    suspend fun start() {
+        mutex.withLock {
+            for (e in store.load()) {
+                if (e.type == TYPE_ERROR && e.name.isNotEmpty()) {
+                    val key = telemetryErrorAggregationKey(e.name, e.breadcrumb, e.stack)
+                    val existing = errorAgg[key]
+                    if (existing == null) {
+                        errorAgg[key] = e
                     } else {
-                        buffer.addLast(e)
+                        existing.count = (existing.count ?: 1) + (e.count ?: 1)
                     }
+                } else if (e.type == TYPE_META && e.name.isNotEmpty()) {
+                    val existing = metaAgg[e.name]
+                    if (existing == null) {
+                        metaAgg[e.name] = e
+                    } else {
+                        existing.count = ((existing.count ?: 0).toLong() + (e.count ?: 0))
+                            .coerceAtMost(MAX_META_COUNT.toLong())
+                            .toInt()
+                    }
+                } else {
+                    buffer.addLast(e)
                 }
             }
-            flush()
         }
+        scope.launch { flush() }
     }
 
     /**
@@ -168,14 +175,73 @@ internal class TelemetryManager(
         success: Boolean,
         failureClass: String? = null,
         breadcrumb: String? = null,
+        timeSinceInitMs: Long? = null,
     ) = enqueuePerf(
         newEvent(TYPE_OPERATION, name).copy(
             durationMs = durationMs,
             success = success,
             failureClass = failureClass,
             breadcrumb = breadcrumb,
+            timeSinceInitMs = timeSinceInitMs?.coerceAtLeast(0L),
         ),
     )
+
+    /** Aggregate bounded process counters without emitting one event per occurrence. */
+    fun recordMetaCount(name: String, count: Int) {
+        recordMetaCountDurably(name, count) {}
+    }
+
+    /**
+     * Accept a claimed process counter only after its aggregate is in the durable snapshot. The
+     * callback lets the source retain/release its claim without clearing counts in the handoff gap.
+     */
+    fun recordMetaCountDurably(
+        name: String,
+        count: Int,
+        onPersisted: (TelemetryPersistenceOutcome) -> Unit,
+    ) {
+        if (!isEnabled || count <= 0) {
+            runCatching { onPersisted(TelemetryPersistenceOutcome.Disabled) }
+            return
+        }
+        scope.launch {
+            var shouldFlush = false
+            val persisted = runCatching {
+                mutex.withLock {
+                    val existing = metaAgg[name]
+                    val previous = existing?.copy()
+                    try {
+                        if (existing == null) {
+                            metaAgg[name] = newEvent(TYPE_META, name).copy(count = count.coerceAtMost(MAX_META_COUNT))
+                        } else {
+                            existing.count = ((existing.count ?: 0).toLong() + count)
+                                .coerceAtMost(MAX_META_COUNT.toLong())
+                                .toInt()
+                        }
+                        val saved = store.save(snapshot())
+                        if (!saved) {
+                            if (previous == null) metaAgg.remove(name) else metaAgg[name] = previous
+                            return@withLock false
+                        }
+                    } catch (error: Throwable) {
+                        if (previous == null) metaAgg.remove(name) else metaAgg[name] = previous
+                        throw error
+                    }
+                    shouldFlush = buffer.size + errorAgg.size + metaAgg.size >= FLUSH_THRESHOLD
+                    true
+                }
+            }.getOrDefault(false)
+            runCatching {
+                onPersisted(
+                    if (persisted) TelemetryPersistenceOutcome.Persisted
+                    else TelemetryPersistenceOutcome.RetryableFailure,
+                )
+            }
+            if (persisted) {
+                if (shouldFlush) flush() else scheduleTimedFlush()
+            }
+        }
+    }
 
     fun recordLifecycle(
         stage: String,
@@ -275,12 +341,12 @@ internal class TelemetryManager(
                     }
                     errorAgg.size < MAX_ERROR_SIGNATURES -> {
                         errorAgg[aggregationKey] = event
-                        store.save(snapshot()) // first occurrence is durable immediately
+                        store.save(snapshot()) // best-effort immediate durability for first occurrence
                         true
                     }
                     else -> {
                         droppedCount++
-                        store.save(snapshot()) // preserve existing cap/drop flush behavior
+                        store.save(snapshot()) // best-effort preservation of cap/drop state
                         true
                     }
                 }
@@ -381,7 +447,8 @@ internal class TelemetryManager(
     }
 
     /** Buffer + aggregated errors as one list for persistence / recovery. */
-    private fun snapshot(): List<TelemetryEvent> = buffer.toList() + errorAgg.values.toList()
+    private fun snapshot(): List<TelemetryEvent> =
+        buffer.toList() + errorAgg.values.toList() + metaAgg.values.toList()
 
     private suspend fun flush() {
         // Persistence and recovery happen before this point. Only outbound network delivery waits
@@ -390,6 +457,7 @@ internal class TelemetryManager(
 
         val pendingBuffer: List<TelemetryEvent>
         val pendingErrors: Map<String, Int>
+        val pendingMeta: Map<String, Int>
         val droppedSnap: Int
         val events: List<TelemetryEvent>
         mutex.withLock {
@@ -399,20 +467,23 @@ internal class TelemetryManager(
                 flushRequested = true
                 return
             }
-            if (buffer.isEmpty() && errorAgg.isEmpty()) return
+            if (buffer.isEmpty() && errorAgg.isEmpty() && metaAgg.isEmpty()) return
             isFlushing = true
             pendingBuffer = buffer.toList()
             // Deep-ish copy of error events so the in-flight count can't drift the payload.
             val errorEvents = errorAgg.map { (key, event) -> key to event.copy() }
             pendingErrors = errorEvents.associate { (key, event) -> key to (event.count ?: 1) }
+            val metaEvents = metaAgg.map { (key, event) -> key to event.copy() }
+            pendingMeta = metaEvents.associate { (key, event) -> key to (event.count ?: 0) }
             droppedSnap = droppedCount
             // Snapshot the events under the lock (the buffers are mutable shared state); the actual
             // JSON serialization happens AFTER releasing the lock so encoding a large batch can't
             // block concurrent record/flush calls. envelope() reads only external providers
             // (session/ppid/gaid) + immutable context, none of which are guarded by this mutex.
-            events = ArrayList<TelemetryEvent>(pendingBuffer.size + errorEvents.size + 1).apply {
+            events = ArrayList<TelemetryEvent>(pendingBuffer.size + errorEvents.size + metaEvents.size + 1).apply {
                 addAll(pendingBuffer)
                 addAll(errorEvents.map { it.second })
+                addAll(metaEvents.map { it.second })
                 if (droppedSnap > 0) add(newEvent(TYPE_META, "dropped").copy(count = droppedSnap))
             }
         }
@@ -441,6 +512,20 @@ internal class TelemetryManager(
                             val cur = errorAgg[sig] ?: continue
                             val remaining = (cur.count ?: 0) - cnt
                             if (remaining <= 0) errorAgg.remove(sig) else cur.count = remaining
+                        }
+                        for ((name, cnt) in pendingMeta) {
+                            val cur = metaAgg[name] ?: continue
+                            val remaining = (cur.count ?: 0) - cnt
+                            if (remaining <= 0) {
+                                metaAgg.remove(name)
+                            } else {
+                                // The accepted id now belongs to the sent aggregate. A surviving
+                                // remainder is a new wire event or backend idempotency would drop it.
+                                // This diagnostic remains best-effort: a process death after backend
+                                // acceptance but before the snapshot save below can recover the old
+                                // aggregate. Remote acceptance and local SQLite cannot be atomic.
+                                metaAgg[name] = newEvent(TYPE_META, name).copy(count = remaining)
+                            }
                         }
                         droppedCount = (droppedCount - droppedSnap).coerceAtLeast(0)
                         retryCount = 0
@@ -487,6 +572,7 @@ internal class TelemetryManager(
 
     private fun envelope(events: List<TelemetryEvent>): TelemetryEnvelope {
         // Resolve the flush-time providers once each (best-effort; null when unavailable).
+        val identity = envelopeIdentityProvider()
         val battery = batteryProvider()
         val carrier = carrierProvider()
         return TelemetryEnvelope(
@@ -496,10 +582,10 @@ internal class TelemetryManager(
             deviceModel = ctx.deviceModel,
             hostAppId = ctx.hostAppId,
             devMode = ctx.devMode,
-            sessionId = sessionIdProvider(),
+            sessionId = identity.sessionId,
             // PII providers are already consent-gated by the facade (re-checked at send time).
-            primaryUserId = primaryUserIdProvider(),
-            advertisingId = advertisingIdProvider(),
+            primaryUserId = identity.primaryUserId,
+            advertisingId = identity.advertisingId,
             connectionType = connectionTypeProvider(),
             experimentId = synchronized(auxLock) { experimentId },
             variantId = synchronized(auxLock) { variantId },
@@ -520,6 +606,7 @@ internal class TelemetryManager(
         const val FLUSH_THRESHOLD = 20
         const val FLUSH_INTERVAL_MS = 30_000L
         const val MAX_ERROR_SIGNATURES = 50
+        const val MAX_META_COUNT = 1_000_000
         const val MAX_MESSAGE_LEN = 300
 
         // Redaction patterns for free-text error messages.

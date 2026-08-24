@@ -32,9 +32,10 @@ class TelemetryManagerTest {
         var data: List<TelemetryEvent> = initial.map { it.copy() }
         var saveCount = 0
         override fun load(): List<TelemetryEvent> = data.map { it.copy() }
-        override fun save(events: List<TelemetryEvent>) {
+        override fun save(events: List<TelemetryEvent>): Boolean {
             saveCount++
             data = events.map { it.copy() }
+            return true
         }
     }
 
@@ -69,15 +70,15 @@ class TelemetryManagerTest {
         sessionId: String? = "sess",
         ppid: String? = null,
         gaid: String? = null,
+        envelopeIdentityProvider: (() -> TelemetryEnvelopeIdentity)? = null,
         debugLog: ((String) -> Unit)? = null,
         launchSettledGate: LaunchSettledGate = LaunchSettledGate.Open,
     ) = TelemetryManager(
         ctx = TelemetryContext(sdkVersion = "9.9", osVersion = "14", deviceModel = "Test Pixel", hostAppId = "com.test", devMode = true),
         store = store,
         sender = sender,
-        sessionIdProvider = { sessionId },
-        primaryUserIdProvider = { ppid },
-        advertisingIdProvider = { gaid },
+        envelopeIdentityProvider = envelopeIdentityProvider
+            ?: { TelemetryEnvelopeIdentity(sessionId, ppid, gaid) },
         enabled = enabled,
         sampleRate = sampleRate,
         clock = { 1_000L },
@@ -118,6 +119,29 @@ class TelemetryManagerTest {
         assertEquals("android", env.platform)
         assertEquals("com.test", env.hostAppId)
         assertEquals("sess-42", env.sessionId)
+    }
+
+    @Test
+    fun `one composite identity snapshot is read per envelope`() = runTest {
+        var identityReads = 0
+        val sender = FakeSender()
+        val m = build(
+            this,
+            FakeStore(),
+            sender,
+            envelopeIdentityProvider = {
+                identityReads++
+                TelemetryEnvelopeIdentity("session-$identityReads", "ppid-$identityReads", "gaid-$identityReads")
+            },
+        )
+
+        m.recordError("api:boom")
+        advanceUntilIdle()
+
+        assertEquals(1, identityReads)
+        assertEquals("session-1", sender.batches.single().sessionId)
+        assertEquals("ppid-1", sender.batches.single().primaryUserId)
+        assertEquals("gaid-1", sender.batches.single().advertisingId)
     }
 
     // ── Error dedup + eager flush ──────────────────────────────────────────────

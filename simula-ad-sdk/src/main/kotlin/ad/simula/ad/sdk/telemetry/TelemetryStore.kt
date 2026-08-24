@@ -15,7 +15,8 @@ import java.util.concurrent.TimeUnit
  */
 internal interface TelemetryStore {
     fun load(): List<TelemetryEvent>
-    fun save(events: List<TelemetryEvent>)
+    /** True only when the complete snapshot was durably committed. */
+    fun save(events: List<TelemetryEvent>): Boolean
 }
 
 /** Real store: a single `SharedPreferences` entry holding the JSON-encoded buffer. */
@@ -36,14 +37,14 @@ internal class SharedPrefsTelemetryStore(
         }
     }
 
-    override fun save(events: List<TelemetryEvent>) {
+    override fun save(events: List<TelemetryEvent>): Boolean = runCatching {
         val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         if (events.isEmpty()) {
-            prefs.edit().remove(key).apply()
+            prefs.edit().remove(key).commit()
         } else {
-            prefs.edit().putString(key, json.encodeToString(events)).apply()
+            prefs.edit().putString(key, json.encodeToString(events)).commit()
         }
-    }
+    }.getOrDefault(false)
 
     private companion object {
         const val PREFS_NAME = "simula_ad_sdk_telemetry_prefs"
@@ -56,11 +57,10 @@ internal class SharedPrefsTelemetryStore(
  * **whole** buffer on every save and flushes through `QueuedWork.waitToFinish()` on background/process
  * death — an ANR risk under load (PRD). SQLite instead does **row-level** upsert/delete keyed by
  * `event_id`, has no `QueuedWork` flush path, and prunes anything older than [maxAgeMs] on load (built-in
- * 24h expiry). The [TelemetryStore] interface is unchanged, so [TelemetryManager] is untouched.
+ * 24h expiry).
  *
- * Every operation is wrapped so a DB failure degrades to an empty load / no-op save and never throws
- * into the host. Access is serialized by [TelemetryManager]'s mutex (off the main thread); `SQLiteDatabase`
- * is itself internally synchronized.
+ * Every operation is wrapped so a DB failure degrades to an empty load / false save and never throws
+ * into the host. Access is serialized by [TelemetryManager]'s mutex (off the main thread).
  */
 internal class SqliteTelemetryStore(
     context: Context,
@@ -92,42 +92,46 @@ internal class SqliteTelemetryStore(
         out
     }.getOrDefault(emptyList())
 
-    override fun save(events: List<TelemetryEvent>) {
-        runCatching {
-            val db = helper.writableDatabase
-            db.beginTransaction()
-            try {
-                val keepIds = events.mapTo(HashSet()) { it.eventId }
-                // Row-level delete of events removed since the last save (acked/flushed).
-                val existing = ArrayList<String>()
-                db.query(TABLE, arrayOf(COL_ID), null, null, null, null, null).use { c ->
-                    val idx = c.getColumnIndexOrThrow(COL_ID)
-                    while (c.moveToNext()) existing.add(c.getString(idx))
-                }
-                for (id in existing) if (id !in keepIds) db.delete(TABLE, "$COL_ID = ?", arrayOf(id))
-                // Upsert the current events (per row — never a single whole-buffer blob).
-                val values = ContentValues()
-                for (e in events) {
-                    values.clear()
-                    values.put(COL_ID, e.eventId)
-                    values.put(COL_TS, e.timestamp)
-                    values.put(COL_JSON, json.encodeToString(e))
-                    db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE)
-                }
-                db.setTransactionSuccessful()
-            } finally {
-                db.endTransaction()
+    override fun save(events: List<TelemetryEvent>): Boolean = runCatching {
+        val db = helper.writableDatabase
+        db.beginTransaction()
+        var committed = false
+        try {
+            val keepIds = events.mapTo(HashSet()) { it.eventId }
+            // Row-level delete of events removed since the last save (acked/flushed).
+            val existing = ArrayList<String>()
+            db.query(TABLE, arrayOf(COL_ID), null, null, null, null, null).use { c ->
+                val idx = c.getColumnIndexOrThrow(COL_ID)
+                while (c.moveToNext()) existing.add(c.getString(idx))
             }
+            for (id in existing) if (id !in keepIds) db.delete(TABLE, "$COL_ID = ?", arrayOf(id))
+            // Upsert the current events (per row — never a single whole-buffer blob).
+            val values = ContentValues()
+            for (e in events) {
+                values.clear()
+                values.put(COL_ID, e.eventId)
+                values.put(COL_TS, e.timestamp)
+                values.put(COL_JSON, json.encodeToString(e))
+                if (db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE) < 0L) {
+                    return@runCatching false
+                }
+            }
+            db.setTransactionSuccessful()
+            committed = true
+        } finally {
+            db.endTransaction()
         }
-    }
+        committed
+    }.getOrDefault(false)
 
     private fun migrateFromSharedPrefs(context: Context) {
         val prefs = context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
         val jsonStr = prefs.getString(LEGACY_KEY, null) ?: return
-        runCatching {
+        val migrated = runCatching {
             val legacy = json.decodeFromString<List<TelemetryEvent>>(jsonStr)
             val db = helper.writableDatabase
             db.beginTransaction()
+            var committed = false
             try {
                 val values = ContentValues()
                 for (e in legacy) {
@@ -135,15 +139,36 @@ internal class SqliteTelemetryStore(
                     values.put(COL_ID, e.eventId)
                     values.put(COL_TS, e.timestamp)
                     values.put(COL_JSON, json.encodeToString(e))
-                    // IGNORE (not REPLACE) so a migration can never clobber rows already in SQLite.
-                    db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+                    // IGNORE (not REPLACE) so migration cannot clobber a row already in SQLite.
+                    // Android also returns -1 for non-conflict insertion failures, so only accept
+                    // that result after proving this exact stable event id already exists.
+                    val inserted = db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+                    val exactEventExists = if (inserted == -1L) {
+                        db.query(
+                            TABLE,
+                            arrayOf(COL_ID),
+                            "$COL_ID = ?",
+                            arrayOf(e.eventId),
+                            null,
+                            null,
+                            null,
+                            "1",
+                        ).use { it.moveToFirst() }
+                    } else {
+                        false
+                    }
+                    if (!telemetryMigrationInsertSucceeded(inserted, exactEventExists)) {
+                        return@runCatching false
+                    }
                 }
                 db.setTransactionSuccessful()
+                committed = true
             } finally {
                 db.endTransaction()
             }
-        }
-        prefs.edit().remove(LEGACY_KEY).apply()
+            committed
+        }.getOrDefault(false)
+        if (migrated) prefs.edit().remove(LEGACY_KEY).commit()
     }
 
     private class Helper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
@@ -178,3 +203,7 @@ internal class SqliteTelemetryStore(
         const val LEGACY_KEY = "pending_telemetry_events"
     }
 }
+
+/** Pure decision used by migration tests: ignored inserts succeed only for an exact id conflict. */
+internal fun telemetryMigrationInsertSucceeded(insertResult: Long, exactEventExists: Boolean): Boolean =
+    insertResult >= 0L || (insertResult == -1L && exactEventExists)

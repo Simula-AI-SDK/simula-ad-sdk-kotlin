@@ -5,16 +5,23 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.ads.SimulaAds
+import ad.simula.ad.sdk.core.PostCommitApiKeyClaim
+import ad.simula.ad.sdk.core.ProcessApiKeyOwner
+import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.model.SimulaContextValue
@@ -26,6 +33,12 @@ import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
+import ad.simula.ad.sdk.privacy.ProcessPrivacyOwner
+import ad.simula.ad.sdk.telemetry.ProcessSdkEntryOrigin
+import ad.simula.ad.sdk.telemetry.ProcessStartupInfrastructure
+import ad.simula.ad.sdk.telemetry.ProcessTelemetryIdentityRouter
+import ad.simula.ad.sdk.telemetry.EffectiveTelemetryConfig
+import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
@@ -42,9 +55,7 @@ import kotlinx.coroutines.withContext
  * warmed. That way every such slot reuses ONE session instead of minting one per
  * composition (mirrors iOS, where a `NativeAdSlot` reads `SimulaAds.shared`).
  */
-internal val LocalSimulaContext = staticCompositionLocalOf<SimulaContextValue> {
-    globalSimulaContext()
-}
+internal val LocalSimulaContext = staticCompositionLocalOf<SimulaContextValue?> { null }
 
 // Process-global ad caches backing the fallback context (used by the older imperative
 // menu ad path; native ads use the standalone NativeAdCache object). Kept tiny and
@@ -144,14 +155,14 @@ private fun emptySimulaContext(): SimulaContextValue {
         sessionId = null,
         hasPrivacyConsent = consent.hasPrivacyConsent,
         consent = consent,
-        updateConsent = { SimulaPrivacy.apply(it) },
+        updateConsent = {},
         ensureSession = { null },
-        getCachedAd = { slot, position -> globalAdCache[getCacheKey(slot, position)] },
-        cacheAd = { slot, position, ad -> globalAdCache[getCacheKey(slot, position)] = ad },
-        getCachedHeight = { slot, position -> globalHeightCache[getCacheKey(slot, position)] },
-        cacheHeight = { slot, position, height -> globalHeightCache[getCacheKey(slot, position)] = height },
-        hasNoFill = { slot, position -> globalNoFillSet.contains(getCacheKey(slot, position)) },
-        markNoFill = { slot, position -> globalNoFillSet.add(getCacheKey(slot, position)) },
+        getCachedAd = { _, _ -> null },
+        cacheAd = { _, _, _ -> },
+        getCachedHeight = { _, _ -> null },
+        cacheHeight = { _, _, _ -> },
+        hasNoFill = { _, _ -> false },
+        markNoFill = { _, _ -> },
     ).also { cachedEmptyContext = it }
 }
 
@@ -160,7 +171,7 @@ private fun emptySimulaContext(): SimulaContextValue {
  * Equivalent to React's useSimula() hook.
  */
 @Composable
-internal fun useSimula(): SimulaContextValue = LocalSimulaContext.current
+internal fun useSimula(): SimulaContextValue = LocalSimulaContext.current ?: globalSimulaContext()
 
 /**
  * Cache key helper — matches React's getCacheKey(slot, position).
@@ -184,6 +195,7 @@ private fun getCacheKey(slot: String, position: Int): String = "$slot:$position"
  * @param adContext     Native-ad targeting context auto-attached to every `POST /load/native`
  *                      (search term, tags, category, …). Updating it replaces the value in full;
  *                      can also be set at runtime via [ad.simula.ad.sdk.ads.SimulaAds.updateContext].
+ * @param telemetryEnabled Opt out of in-house SDK telemetry. Default true.
  * @param content       Child composable tree.
  */
 @OptIn(FlowPreview::class) // Flow.debounce — stable in practice, contained to this module.
@@ -195,10 +207,75 @@ fun SimulaProvider(
     hasPrivacyConsent: Boolean = true,
     privacy: SimulaPrivacyConfig? = null,
     adContext: SimulaAdContext? = null,
+    telemetryEnabled: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     // Validate props early (matches React's validateSimulaProviderProps)
     require(apiKey.isNotBlank()) { "SimulaProvider requires a valid \"apiKey\" (non-blank string)" }
+
+    val applicationContext = LocalContext.current.applicationContext
+    val resolvedConfig = remember(privacy, hasPrivacyConsent) {
+        privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
+    }
+    val privacyOwnerToken = remember { ProcessPrivacyOwner.createToken() }
+    DisposableEffect(privacyOwnerToken) {
+        onDispose { ProcessPrivacyOwner.release(privacyOwnerToken) }
+    }
+    val explicitPrivacy = privacy != null
+    val currentPrivacy by rememberUpdatedState(resolvedConfig)
+    val currentExplicitPrivacy by rememberUpdatedState(explicitPrivacy)
+    val entryClaim = remember(apiKey, devMode, telemetryEnabled, applicationContext, privacyOwnerToken) {
+        PostCommitApiKeyClaim {
+            ProcessApiKeyOwner.claimAndSeedPrivacyThen(
+                apiKey = apiKey,
+                privacyOwnerToken = privacyOwnerToken,
+                privacy = currentPrivacy,
+                explicitPrivacy = currentExplicitPrivacy,
+            ) {
+                Telemetry.claimInitialization(
+                    context = applicationContext,
+                    apiKey = apiKey,
+                    devMode = devMode,
+                    enabled = telemetryEnabled,
+                )
+            }
+        }
+    }
+    var entryCommit by remember(entryClaim) { mutableStateOf(entryClaim.result()) }
+    var committedPrivacy by remember(entryClaim) {
+        mutableStateOf<Pair<SimulaPrivacyConfig, Boolean>?>(null)
+    }
+    val requestedPrivacy = resolvedConfig to explicitPrivacy
+    val compositionPlan = providerCompositionPlan(
+        apiKeyOwnership = entryCommit?.ownership,
+        privacyIsCommitted = committedPrivacy == requestedPrivacy,
+    )
+    if (compositionPlan.children == ProviderChildrenPlan.Withhold) {
+        // A speculative/abandoned composition never executes this claim. Children are withheld so
+        // no SDK effect or request can run before key ownership and privacy seeding have committed.
+        SideEffect {
+            val commit = entryClaim.commit()
+            if (commit.ownership.isCompatible) {
+                committedPrivacy = currentPrivacy to currentExplicitPrivacy
+            }
+            entryCommit = commit
+        }
+        return
+    }
+    if (compositionPlan.children == ProviderChildrenPlan.Inert) {
+        SideEffect { ProcessApiKeyOwner.warnIncompatibleEntry() }
+        CompositionLocalProvider(LocalSimulaContext provides emptySimulaContext(), content = content)
+        return
+    }
+
+    if (compositionPlan.seedPrivacyAfterCommit) {
+        // Keep the provider subtree mounted while a committed prop update refreshes this entry.
+        SideEffect {
+            ProcessPrivacyOwner.seed(privacyOwnerToken, resolvedConfig, explicitPrivacy)
+            committedPrivacy = requestedPrivacy
+        }
+    }
+    ProcessSdkEntryOrigin.markEntry()
 
     // Seed the process-wide native-ad context so NativeAdSlot requests carry it. A full replace on
     // change (mirrors the privacy seed below); preloaded ads keep the value current at preload time.
@@ -206,62 +283,40 @@ fun SimulaProvider(
 
     val context = LocalContext.current
 
-    // Build the custom User-Agent synchronously during composition (cheap, Build statics) so it's set
-    // before the first /session/create. The device id is a synchronous ContentProvider read, so it's
-    // resolved off the main thread via prime() rather than blocking composition. The imperative
-    // SimulaAds.initialize() path primes them too; first wins.
+    // Build only the cheap Build/package-name User-Agent during composition. Every Binder/disk
+    // signal primes itself on SimulaScope, matching the imperative path without blocking Compose.
     remember(context) {
         SimulaUserAgent.build(context.applicationContext)
         SimulaDeviceId.prime(context.applicationContext)
-        // Independent of telemetry: the X-Connection-Type header must work even when a host
-        // never enables telemetry. Idempotent — the imperative SimulaAds.initialize() path
-        // primes it too; first wins.
         SimulaConnectionType.prime(context.applicationContext)
-        // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
-        // request. Idempotent; primed off the first frame like the signals above.
         SimulaDeviceSignals.prime(context.applicationContext)
     }
 
-    // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
-    // seeds it so existing call sites behave exactly as before.
-    val resolvedConfig = remember(privacy, hasPrivacyConsent) {
-        privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
-    }
-
-    // Seed the store synchronously during composition so the FIRST session
-    // reflects the explicit config (correct ppid gating) rather than the default
-    // snapshot — avoids an initial consent-less /session/create.
-    //
-    // Mixed hosts (SimulaAds.initialize + SimulaProvider): a provider WITHOUT an
-    // explicit privacy config must not re-seed defaults over the imperative config —
-    // apply() replaces the store wholesale, which would wipe enableAdvertisingId and
-    // any GAID the imperative startup already collected. An explicit provider config
-    // always wins (deliberate host choice); declarative-only hosts always seed.
-    remember(resolvedConfig) {
-        if (privacy != null || !SimulaAds.isInitialized) {
-            SimulaPrivacy.apply(resolvedConfig)
-        }
-        resolvedConfig
-    }
-
-    // Attach for IAB auto-read and settle the initial GAID read off the first frame. Keep one
-    // coordinator for the provider lifetime: replacing it on a config change could release a child
-    // waiting on the old generation before the initial preference attach has completed.
+    // Attach CMP state, install telemetry, and settle the initial GAID read off composition. The
+    // coordinator is the declarative startup gate: no provider-local session resolver can pass it.
     val privacySessionCoordinator = remember(context) { PrivacySessionCoordinator() }
     LaunchedEffect(privacySessionCoordinator) {
+        var effectiveTelemetry: EffectiveTelemetryConfig? = null
         privacySessionCoordinator.preparePrivacy(
             attach = { withContext(Dispatchers.IO) { SimulaPrivacy.attach(context) } },
+            installTelemetry = {
+                effectiveTelemetry = entryCommit?.value?.startAndAwait()
+            },
             refreshAdvertisingId = { SimulaPrivacy.refreshAdvertisingId() },
+            prepareInfrastructure = {
+                ProcessStartupInfrastructure.initialize(
+                    context = context.applicationContext,
+                    apiKey = apiKey,
+                    telemetry = effectiveTelemetry,
+                    launchSettledGate = ProcessLaunchSettledGate,
+                )
+            },
         )
     }
-    // Config changes still refresh the GAID, but only after the initial attach/readiness barrier.
-    // The first run is harmlessly coalesced by SimulaPrivacy's refresh TTL.
     LaunchedEffect(privacySessionCoordinator, resolvedConfig) {
         privacySessionCoordinator.awaitPrivacyReady()
         SimulaPrivacy.refreshAdvertisingId()
     }
-    // A LaunchedEffect cancelled before its scheduled body starts cannot run its own finally.
-    // Release any resolver that outlives this composition/config generation in that case.
     DisposableEffect(privacySessionCoordinator) {
         onDispose { privacySessionCoordinator.completeFailOpen() }
     }
@@ -284,28 +339,33 @@ fun SimulaProvider(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // CMPs write the IAB keys in a burst; debounce the snapshot that drives session
-    // re-sync so a settled consent state triggers one /session/create, not a race.
+    // CMPs write the IAB keys in a burst; debounce the snapshot that drives session re-sync.
     val sessionConsent by remember { SimulaPrivacy.snapshot.debounce(300L) }
         .collectAsState(initial = SimulaPrivacy.current)
 
-    // ppid is suppressed without consent and additionally under COPPA.
-    val effectiveUserID = primaryUserID
-
-    // Session holder — keyed on the (debounced) consent so a CMP refresh recreates
-    // the session and the backend sees current signals. Coalesces concurrent
-    // creation, retryable on failure.
-    val sessionStore = remember(apiKey, devMode, sessionConsent) {
-        SimulaSessionStore(apiKey, devMode, effectiveUserID).apply {
-            // A host that also called SimulaAds.initialize: hold this store's first session
-            // until the imperative startup has attached IAB consent AND installed telemetry
-            // (the same ordering SimulaAds.store gets). Read LIVE at ensureSession time —
-            // a mixed host can compose this provider before initialize() publishes the
-            // gate, and a value copied here would stay null on this remembered store
-            // forever (remember doesn't re-run when the gate appears). Null for
-            // declarative-only hosts — no gate, matching the pre-existing behavior.
+    // Provider-local ownership is deliberate: its key/dev mode/user must never resolve through an
+    // unrelated imperative store. Consent changes recreate only this provider's session holder.
+    val sessionStore = remember(apiKey, devMode, primaryUserID, sessionConsent) {
+        SimulaSessionStore(apiKey, devMode, primaryUserID).apply {
+            // Mixed hosts still wait for an imperative startup published before the request. This is
+            // resolved live because a provider can compose before SimulaAds.initialize is called.
             startupGate = { SimulaAds.startupGate }
         }
+    }
+    val telemetryIdentityToken = remember { ProcessTelemetryIdentityRouter.createProviderToken() }
+    SideEffect {
+        // Rebind the stable token after commit without first removing it. The router updates this
+        // mount in place, so an outer recomposition cannot steal precedence from a mounted inner.
+        ProcessTelemetryIdentityRouter.bindProvider(
+            token = telemetryIdentityToken,
+            apiKey = apiKey,
+            sessionId = { sessionStore.sessionId },
+            primaryUserId = { sessionStore.effectiveUserID },
+        )
+    }
+    DisposableEffect(telemetryIdentityToken) {
+        // Only actual provider disposal removes the token and restores the prior active provider.
+        onDispose { ProcessTelemetryIdentityRouter.unbindProvider(telemetryIdentityToken) }
     }
 
     // Delegate cache + context construction to the shared builder. The imperative
@@ -358,11 +418,8 @@ internal fun ProvideSimulaContext(
         }
     }
 
-    // Kick off session creation off the critical path (idempotent / coalesced). A
-    // SimulaProvider supplies a coordinator shared with every child resolver, so both paths
-    // wait for the same IAB attach + initial GAID refresh. Imperative Activities omit it and
-    // preserve their existing attach/refresh warm-up; their store's startupGate remains the
-    // authority for initial imperative startup ordering.
+    // Provider children wait for CMP + telemetry + GAID through the coordinator. Imperative
+    // Activities retain their existing attach/refresh behavior and shared startup gate.
     val context = LocalContext.current
     LaunchedEffect(store, privacySessionCoordinator) {
         if (privacySessionCoordinator == null) {

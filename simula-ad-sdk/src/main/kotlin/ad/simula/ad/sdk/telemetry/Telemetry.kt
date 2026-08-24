@@ -2,11 +2,13 @@ package ad.simula.ad.sdk.telemetry
 
 import ad.simula.ad.sdk.core.LaunchSettledGate
 import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
+import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.core.installSimulaScopeFailureReporter
 import ad.simula.ad.sdk.image.ImageCache
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
+import ad.simula.ad.sdk.privacy.ConsentSnapshot
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
@@ -17,16 +19,24 @@ import android.os.Build
 import android.telephony.TelephonyManager
 import android.util.Log
 import java.util.Locale
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 
 /**
  * SDK version stamped on every telemetry batch. Keep in sync with the `coordinates(...)`
  * version in `simula-ad-sdk/build.gradle.kts`.
  */
-internal const val SIMULA_SDK_VERSION = "1.1.9-dev.3"
+internal const val SIMULA_SDK_VERSION = "1.1.9-dev.4"
 
 /** logcat tag for the dev-mode telemetry mirror. */
 private const val LOG_TAG = "SimulaTelemetry"
+
+/** Immutable process configuration selected by the first telemetry initialization claim. */
+internal data class EffectiveTelemetryConfig(
+    val apiKey: String,
+    val devMode: Boolean,
+    val enabled: Boolean,
+)
 
 /**
  * Process-wide facade for in-house telemetry (handled errors + performance), mirroring the
@@ -43,65 +53,100 @@ internal object Telemetry {
     @Volatile
     private var manager: TelemetryManager? = null
 
+    private val initialization = FirstWinsProcessTask<EffectiveTelemetryConfig>(SimulaScope)
+    private val duplicateInitializeDrain = BoundedCounterRecoveryDrain(
+        counter = DuplicateImperativeInitializeCounter,
+        scope = SimulaScope,
+        sleep = { delay(it) },
+        recordDurably = { count, callback ->
+            val target = manager
+            if (target == null) callback(TelemetryPersistenceOutcome.Unavailable)
+            else target.recordMetaCountDurably(DUPLICATE_INITIALIZE_META_NAME, count, callback)
+        },
+    )
+
     /**
-     * Install the telemetry pipeline. Call once from `SimulaAds.initialize`. When [enabled]
-     * is false nothing is created (host opt-out). [primaryUserIdProvider] is read live on every
-     * flush so a mid-session `updatePrimaryUserID` is honored, and it is additionally gated by
-     * the live consent snapshot.
+     * Install the process telemetry pipeline from the first imperative or declarative startup.
+     * Subsequent entry points await that startup's construction/recovery completion and do not
+     * replace its immutable API key/dev-mode/enabled configuration. Envelope identity is resolved
+     * live through [ProcessTelemetryIdentityRouter], so mixed hosts prefer a compatible imperative
+     * store while provider-only hosts follow their latest compatible committed local store. When
+     * [enabled] is false nothing is created (host opt-out). Primary user identity is additionally
+     * gated by the live consent snapshot on every flush.
      */
-    fun initialize(
+    suspend fun initialize(
         context: Context,
         apiKey: String,
         devMode: Boolean,
         enabled: Boolean,
-        sessionIdProvider: () -> String?,
-        primaryUserIdProvider: () -> String?,
         launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
-    ) {
+    ): EffectiveTelemetryConfig =
+        claimInitialization(context, apiKey, devMode, enabled, launchSettledGate).startAndAwait()
+
+    /**
+     * Reserve immutable first-wins telemetry configuration without starting work. This is strictly
+     * in-memory so the imperative entry point can call it while atomically publishing its store and
+     * startup gate; the deferred startup starts the returned claim only after CMP attachment.
+     */
+    fun claimInitialization(
+        context: Context,
+        apiKey: String,
+        devMode: Boolean,
+        enabled: Boolean,
+        launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
+    ): FirstWinsProcessTaskClaim<EffectiveTelemetryConfig> = initialization.claim {
+        val effective = EffectiveTelemetryConfig(apiKey, devMode, enabled)
         if (!enabled) {
             manager = null
             installSimulaScopeFailureReporter(null)
-            return
+            return@claim effective
         }
-        val appCtx = context.applicationContext
-        val json = Json { encodeDefaults = false; ignoreUnknownKeys = true }
-        val ctx = TelemetryContext(
-            sdkVersion = SIMULA_SDK_VERSION,
-            osVersion = Build.VERSION.RELEASE ?: "",
-            deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
-            hostAppId = appCtx.packageName,
-            devMode = devMode,
-            // Always-on device diagnostics, resolved once (constant per process).
-            manufacturer = Build.MANUFACTURER,
-            locale = resolveLocale(),
-            deviceRamMb = resolveRamMb(appCtx),
-            buildType = if ((appCtx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) "debug" else "release",
-        )
-        manager = TelemetryManager(
-            ctx = ctx,
-            store = SqliteTelemetryStore(appCtx, json),
-            sender = ApiTelemetrySender(apiKey),
-            sessionIdProvider = sessionIdProvider,
-            // Re-gate on every flush: ppid only with consent (& not under COPPA); the
-            // advertising id is already nulled by the snapshot when not collectible.
-            primaryUserIdProvider = primaryUserIdProvider,
-            advertisingIdProvider = { SimulaPrivacy.current.advertisingId },
-            // Reads SimulaConnectionType's cached value (kept fresh by its own network callback —
-            // see SimulaConnectionType.prime) instead of a fresh binder call per flush.
-            connectionTypeProvider = { SimulaConnectionType.label },
-            diagnosticsProvider = { resolveDiagnostics() },
-            batteryProvider = { resolveBattery(appCtx) },
-            carrierProvider = { resolveCarrier(appCtx) },
-            launchSettledGate = launchSettledGate,
-            // In dev mode, mirror every (redacted) event to logcat for local verification.
-            debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
-        ).also { it.start() }
-        installSimulaScopeFailureReporter { failureSignature, throwable ->
-            recordError(
-                signature = "scope:uncaught:$failureSignature",
-                errorCode = throwable.javaClass.simpleName,
+        val installed = runCatching {
+            val appCtx = context.applicationContext
+            val json = Json { encodeDefaults = false; ignoreUnknownKeys = true }
+            val ctx = TelemetryContext(
+                sdkVersion = SIMULA_SDK_VERSION,
+                osVersion = Build.VERSION.RELEASE ?: "",
+                deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
+                hostAppId = appCtx.packageName,
+                devMode = devMode,
+                manufacturer = Build.MANUFACTURER,
+                locale = resolveLocale(),
+                deviceRamMb = resolveRamMb(appCtx),
+                buildType = if ((appCtx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) "debug" else "release",
             )
+            TelemetryManager(
+                ctx = ctx,
+                store = SqliteTelemetryStore(appCtx, json),
+                sender = ApiTelemetrySender(apiKey),
+                envelopeIdentityProvider = {
+                    resolveTelemetryEnvelopeIdentity(
+                        apiKey = apiKey,
+                        identityProvider = ProcessTelemetryIdentityRouter::identity,
+                        privacyProvider = { SimulaPrivacy.current },
+                    )
+                },
+                connectionTypeProvider = { SimulaConnectionType.label },
+                diagnosticsProvider = { resolveDiagnostics() },
+                batteryProvider = { resolveBattery(appCtx) },
+                carrierProvider = { resolveCarrier(appCtx) },
+                launchSettledGate = launchSettledGate,
+                debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
+            ).also { it.start() }
+        }.getOrNull()
+        manager = installed
+        if (installed == null) {
+            installSimulaScopeFailureReporter(null)
+        } else {
+            duplicateInitializeDrain.drain()
+            installSimulaScopeFailureReporter { failureSignature, throwable ->
+                recordError(
+                    signature = "scope:uncaught:$failureSignature",
+                    errorCode = throwable.javaClass.simpleName,
+                )
+            }
         }
+        effective
     }
 
     /** Apply a server-side directive (kill-switch / sampling) from `/session/create`. */
@@ -125,7 +170,21 @@ internal object Telemetry {
         success: Boolean,
         failureClass: String? = null,
         breadcrumb: String? = null,
-    ) = manager?.recordOperation(name, durationMs, success, failureClass, breadcrumb) ?: Unit
+        timeSinceInitMs: Long? = null,
+    ) = manager?.recordOperation(
+        name,
+        durationMs,
+        success,
+        failureClass,
+        breadcrumb,
+        timeSinceInitMs?.coerceAtLeast(0L),
+    ) ?: Unit
+
+    /** Count one losing imperative initialize call and drain it once a manager is available. */
+    fun recordDuplicateInitialize() {
+        DuplicateImperativeInitializeCounter.increment()
+        duplicateInitializeDrain.drain()
+    }
 
     fun recordLifecycle(
         stage: String,
@@ -225,4 +284,19 @@ internal object Telemetry {
             else -> null
         }
     }.getOrNull()
+}
+
+/** Resolve routing and all consent-gated PII from one immutable privacy generation. */
+internal fun resolveTelemetryEnvelopeIdentity(
+    apiKey: String,
+    identityProvider: (String) -> TelemetryIdentity,
+    privacyProvider: () -> ConsentSnapshot,
+): TelemetryEnvelopeIdentity {
+    val identity = identityProvider(apiKey)
+    val privacy = privacyProvider()
+    return TelemetryEnvelopeIdentity(
+        sessionId = identity.sessionId,
+        primaryUserId = identity.primaryUserId.takeIf { privacy.allowsPrimaryUserID },
+        advertisingId = privacy.advertisingId,
+    )
 }

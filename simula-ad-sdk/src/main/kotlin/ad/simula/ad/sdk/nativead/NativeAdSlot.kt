@@ -8,7 +8,7 @@ import ad.simula.ad.sdk.model.NativeAdData
 import ad.simula.ad.sdk.model.normalizeExtraParameters
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.SimulaApiClient
-import ad.simula.ad.sdk.provider.LocalSimulaContext
+import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.util.ParsedDimension
 import ad.simula.ad.sdk.util.clampMinWidth
@@ -105,10 +105,14 @@ fun NativeAdSlot(
     previewHtml: String? = null,
     metadata: Map<String, String> = emptyMap(),
 ) {
-    val ctx = LocalSimulaContext.current
+    val ctx = useSimula()
+    val currentOnError by rememberUpdatedState(onError)
+    if (ctx.apiKey.isBlank()) {
+        LaunchedEffect(Unit) { currentOnError(NativeAdError.NotInitialized) }
+        return
+    }
     val currentOnImpression by rememberUpdatedState(onImpression)
     val currentOnPaid by rememberUpdatedState(onPaid)
-    val currentOnError by rememberUpdatedState(onError)
     val currentOnClick by rememberUpdatedState(onClick)
     val normalizedMetadata = remember(metadata) { normalizeExtraParameters(metadata) }
     val resolvedTheme = resolveAdTheme(theme)

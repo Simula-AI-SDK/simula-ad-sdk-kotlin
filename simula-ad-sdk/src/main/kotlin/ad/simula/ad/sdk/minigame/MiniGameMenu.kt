@@ -122,6 +122,7 @@ fun MiniGameMenu(
     delegateChar: Boolean = true,
 ) {
     val simulaContext = useSimula()
+    if (simulaContext.apiKey.isBlank()) return
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val preloadedCatalog = LocalPreloadedCatalog.current
