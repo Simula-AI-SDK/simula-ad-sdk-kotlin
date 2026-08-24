@@ -64,6 +64,33 @@ class ProcessStartupInfrastructureTest {
     }
 
     @Test
+    fun `telemetry failure still initializes beacons and launches durable recovery`() = runTest {
+        val steps = mutableListOf<String>()
+        val coordinator = StartupInfrastructureCoordinator(
+            scope = backgroundScope,
+            initializeBeaconManager = { _: Unit, apiKey -> steps += "beacon:$apiKey" },
+            installCrashGuard = { _, _, _ -> steps += "crash" },
+            triggerRewardRecovery = { _, _ -> steps += "reward" },
+            triggerBeaconRecovery = { _ -> steps += "beacon_recovery" },
+        )
+
+        coordinator.initialize(
+            owner = Unit,
+            apiKey = "winning-key",
+            telemetryEnabled = null,
+            launchSettledGate = LaunchSettledGate.Open,
+        )
+        steps += "ready"
+        runCurrent()
+
+        assertEquals("beacon:winning-key", steps.first())
+        assertTrue("crash" !in steps)
+        assertTrue(steps.indexOf("beacon:winning-key") < steps.indexOf("ready"))
+        assertEquals(1, steps.count { it == "reward" })
+        assertEquals(1, steps.count { it == "beacon_recovery" })
+    }
+
+    @Test
     fun `concurrent callers share one readiness task and one recovery launch`() = runTest {
         val beaconEntered = CompletableDeferred<Unit>()
         val releaseBeacon = CompletableDeferred<Unit>()

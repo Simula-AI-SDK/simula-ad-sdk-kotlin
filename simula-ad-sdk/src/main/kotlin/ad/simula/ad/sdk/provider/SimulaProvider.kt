@@ -304,13 +304,12 @@ fun SimulaProvider(
             },
             refreshAdvertisingId = { SimulaPrivacy.refreshAdvertisingId() },
             prepareInfrastructure = {
-                effectiveTelemetry?.let { telemetry ->
-                    ProcessStartupInfrastructure.initialize(
-                        context.applicationContext,
-                        telemetry,
-                        ProcessLaunchSettledGate,
-                    )
-                }
+                ProcessStartupInfrastructure.initialize(
+                    context = context.applicationContext,
+                    apiKey = apiKey,
+                    telemetry = effectiveTelemetry,
+                    launchSettledGate = ProcessLaunchSettledGate,
+                )
             },
         )
     }

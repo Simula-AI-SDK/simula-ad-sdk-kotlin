@@ -280,10 +280,13 @@ object SimulaAds {
                 // Build process infrastructure from telemetry's effective first-wins config. This
                 // guarantees the durable beacon sender and crash capture cannot use a losing local
                 // key/enabled value. Recovery sends remain launch-settled-gated internally.
-                effectiveTelemetry?.let { telemetry ->
-                    runCatching {
-                        ProcessStartupInfrastructure.initialize(appContext, telemetry, launchSettledGate)
-                    }
+                runCatching {
+                    ProcessStartupInfrastructure.initialize(
+                        context = appContext,
+                        apiKey = apiKey,
+                        telemetry = effectiveTelemetry,
+                        launchSettledGate = launchSettledGate,
+                    )
                 }
             } finally {
                 // Release session waiters (see SimulaSessionStore.startupGate) no matter what —

@@ -24,19 +24,38 @@ internal class StartupInfrastructureCoordinator<T>(
     private val triggerRewardRecovery: suspend (T, LaunchSettledGate) -> Unit,
     private val triggerBeaconRecovery: suspend (LaunchSettledGate) -> Unit,
 ) {
-    private val initialization = FirstWinsProcessTask<Unit>(scope)
+    private val beaconInitialization = FirstWinsProcessTask<Unit>(scope)
+    private val crashInitialization = FirstWinsProcessTask<Unit>(scope)
+    private val recoveryInitialization = FirstWinsProcessTask<Unit>(scope)
 
     suspend fun initialize(
         owner: T,
         telemetry: EffectiveTelemetryConfig,
         launchSettledGate: LaunchSettledGate,
+    ) = initialize(
+        owner = owner,
+        apiKey = telemetry.apiKey,
+        telemetryEnabled = telemetry.enabled,
+        launchSettledGate = launchSettledGate,
+    )
+
+    suspend fun initialize(
+        owner: T,
+        apiKey: String,
+        telemetryEnabled: Boolean?,
+        launchSettledGate: LaunchSettledGate,
     ) {
-        initialization.runOnce {
-            settle { initializeBeaconManager(owner, telemetry.apiKey) }
-            settle { installCrashGuard(owner, telemetry.enabled, launchSettledGate) }
-            // Queue construction above is readiness-critical. Prior-process drains are not: launch
-            // them process-owned so the startup gate remains limited to consent, telemetry, and
-            // beacon availability while their outbound work still waits on the launch-settled gate.
+        beaconInitialization.runOnce {
+            settle { initializeBeaconManager(owner, apiKey) }
+        }
+        if (telemetryEnabled != null) {
+            crashInitialization.runOnce {
+                settle { installCrashGuard(owner, telemetryEnabled, launchSettledGate) }
+            }
+        }
+        // Recovery is independent of telemetry availability. Its outbound work still waits on the
+        // launch-settled gate, while this process-owned launch does not hold startup readiness.
+        recoveryInitialization.runOnce {
             scope.launch {
                 settle { triggerRewardRecovery(owner, launchSettledGate) }
                 settle { triggerBeaconRecovery(launchSettledGate) }
@@ -80,7 +99,13 @@ internal object ProcessStartupInfrastructure {
 
     suspend fun initialize(
         context: Context,
-        telemetry: EffectiveTelemetryConfig,
+        apiKey: String,
+        telemetry: EffectiveTelemetryConfig?,
         launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
-    ) = coordinator.initialize(context.applicationContext, telemetry, launchSettledGate)
+    ) = coordinator.initialize(
+        owner = context.applicationContext,
+        apiKey = apiKey,
+        telemetryEnabled = telemetry?.enabled,
+        launchSettledGate = launchSettledGate,
+    )
 }
