@@ -31,6 +31,7 @@ internal class PrivacySessionCoordinator(
         attach: suspend () -> Unit,
         installTelemetry: suspend () -> Unit = {},
         refreshAdvertisingId: suspend () -> Unit,
+        prepareInfrastructure: suspend () -> Unit = {},
     ) {
         try {
             settleStep(attach)
@@ -43,6 +44,7 @@ internal class PrivacySessionCoordinator(
                     recordTimeout = recordAdvertisingIdTimeout,
                 )
             }
+            settleStep(prepareInfrastructure)
         } finally {
             privacyReady.complete(Unit)
         }

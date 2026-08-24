@@ -63,8 +63,7 @@ internal class TelemetryManager(
     private val ctx: TelemetryContext,
     private val store: TelemetryStore,
     private val sender: TelemetrySender,
-    private val identityProvider: () -> TelemetryIdentity,
-    private val advertisingIdProvider: () -> String?,
+    private val envelopeIdentityProvider: () -> TelemetryEnvelopeIdentity,
     // Resolved fresh on each flush (off the UI path). Must be best-effort/non-throwing.
     private val connectionTypeProvider: () -> String? = { null },
     // Compact diagnostics breadcrumb (memory/webview-pool/image-cache), sampled on flush. Best-effort.
@@ -196,9 +195,13 @@ internal class TelemetryManager(
      * Accept a claimed process counter only after its aggregate is in the durable snapshot. The
      * callback lets the source retain/release its claim without clearing counts in the handoff gap.
      */
-    fun recordMetaCountDurably(name: String, count: Int, onPersisted: (Boolean) -> Unit) {
+    fun recordMetaCountDurably(
+        name: String,
+        count: Int,
+        onPersisted: (TelemetryPersistenceOutcome) -> Unit,
+    ) {
         if (!isEnabled || count <= 0) {
-            runCatching { onPersisted(false) }
+            runCatching { onPersisted(TelemetryPersistenceOutcome.Disabled) }
             return
         }
         scope.launch {
@@ -228,7 +231,12 @@ internal class TelemetryManager(
                     true
                 }
             }.getOrDefault(false)
-            runCatching { onPersisted(persisted) }
+            runCatching {
+                onPersisted(
+                    if (persisted) TelemetryPersistenceOutcome.Persisted
+                    else TelemetryPersistenceOutcome.RetryableFailure,
+                )
+            }
             if (persisted) {
                 if (shouldFlush) flush() else scheduleTimedFlush()
             }
@@ -564,7 +572,7 @@ internal class TelemetryManager(
 
     private fun envelope(events: List<TelemetryEvent>): TelemetryEnvelope {
         // Resolve the flush-time providers once each (best-effort; null when unavailable).
-        val identity = identityProvider()
+        val identity = envelopeIdentityProvider()
         val battery = batteryProvider()
         val carrier = carrierProvider()
         return TelemetryEnvelope(
@@ -577,7 +585,7 @@ internal class TelemetryManager(
             sessionId = identity.sessionId,
             // PII providers are already consent-gated by the facade (re-checked at send time).
             primaryUserId = identity.primaryUserId,
-            advertisingId = advertisingIdProvider(),
+            advertisingId = identity.advertisingId,
             connectionType = connectionTypeProvider(),
             experimentId = synchronized(auxLock) { experimentId },
             variantId = synchronized(auxLock) { variantId },

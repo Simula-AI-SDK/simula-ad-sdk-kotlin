@@ -8,14 +8,21 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.ads.SimulaAds
+import ad.simula.ad.sdk.core.ApiKeyOwnership
+import ad.simula.ad.sdk.core.PostCommitApiKeyClaim
+import ad.simula.ad.sdk.core.ProcessApiKeyOwner
+import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.model.SimulaContextValue
@@ -27,8 +34,11 @@ import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
+import ad.simula.ad.sdk.privacy.ProcessPrivacyOwner
 import ad.simula.ad.sdk.telemetry.ProcessSdkEntryOrigin
+import ad.simula.ad.sdk.telemetry.ProcessStartupInfrastructure
 import ad.simula.ad.sdk.telemetry.ProcessTelemetryIdentityRouter
+import ad.simula.ad.sdk.telemetry.EffectiveTelemetryConfig
 import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -148,14 +158,14 @@ private fun emptySimulaContext(): SimulaContextValue {
         sessionId = null,
         hasPrivacyConsent = consent.hasPrivacyConsent,
         consent = consent,
-        updateConsent = { SimulaPrivacy.apply(it) },
+        updateConsent = {},
         ensureSession = { null },
-        getCachedAd = { slot, position -> globalAdCache[getCacheKey(slot, position)] },
-        cacheAd = { slot, position, ad -> globalAdCache[getCacheKey(slot, position)] = ad },
-        getCachedHeight = { slot, position -> globalHeightCache[getCacheKey(slot, position)] },
-        cacheHeight = { slot, position, height -> globalHeightCache[getCacheKey(slot, position)] = height },
-        hasNoFill = { slot, position -> globalNoFillSet.contains(getCacheKey(slot, position)) },
-        markNoFill = { slot, position -> globalNoFillSet.add(getCacheKey(slot, position)) },
+        getCachedAd = { _, _ -> null },
+        cacheAd = { _, _, _ -> },
+        getCachedHeight = { _, _ -> null },
+        cacheHeight = { _, _, _ -> },
+        hasNoFill = { _, _ -> false },
+        markNoFill = { _, _ -> },
     ).also { cachedEmptyContext = it }
 }
 
@@ -203,9 +213,61 @@ fun SimulaProvider(
     telemetryEnabled: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    ProcessSdkEntryOrigin.markEntry()
     // Validate props early (matches React's validateSimulaProviderProps)
     require(apiKey.isNotBlank()) { "SimulaProvider requires a valid \"apiKey\" (non-blank string)" }
+
+    val resolvedConfig = remember(privacy, hasPrivacyConsent) {
+        privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
+    }
+    val privacyOwnerToken = remember { ProcessPrivacyOwner.createToken() }
+    DisposableEffect(privacyOwnerToken) {
+        onDispose { ProcessPrivacyOwner.release(privacyOwnerToken) }
+    }
+    val explicitPrivacy = privacy != null
+    val currentPrivacy by rememberUpdatedState(resolvedConfig)
+    val currentExplicitPrivacy by rememberUpdatedState(explicitPrivacy)
+    val entryClaim = remember(apiKey, privacyOwnerToken) {
+        PostCommitApiKeyClaim {
+            ProcessApiKeyOwner.claimAndSeedPrivacy(
+                apiKey = apiKey,
+                privacyOwnerToken = privacyOwnerToken,
+                privacy = currentPrivacy,
+                explicitPrivacy = currentExplicitPrivacy,
+            )
+        }
+    }
+    var apiKeyOwnership by remember(entryClaim) { mutableStateOf(entryClaim.result()) }
+    var committedPrivacy by remember(entryClaim) {
+        mutableStateOf<Pair<SimulaPrivacyConfig, Boolean>?>(null)
+    }
+    if (apiKeyOwnership == null) {
+        // A speculative/abandoned composition never executes this claim. Children are withheld so
+        // no SDK effect or request can run before key ownership and privacy seeding have committed.
+        SideEffect {
+            val ownership = entryClaim.commit()
+            if (ownership.isCompatible) {
+                committedPrivacy = currentPrivacy to currentExplicitPrivacy
+            }
+            apiKeyOwnership = ownership
+        }
+        return
+    }
+    if (apiKeyOwnership == ApiKeyOwnership.Incompatible) {
+        SideEffect { ProcessApiKeyOwner.warnIncompatibleEntry() }
+        CompositionLocalProvider(LocalSimulaContext provides emptySimulaContext(), content = content)
+        return
+    }
+
+    val requestedPrivacy = resolvedConfig to explicitPrivacy
+    if (committedPrivacy != requestedPrivacy) {
+        // Keep the disposal registration mounted while a committed prop update refreshes this entry.
+        SideEffect {
+            ProcessPrivacyOwner.seed(privacyOwnerToken, resolvedConfig, explicitPrivacy)
+            committedPrivacy = requestedPrivacy
+        }
+        return
+    }
+    ProcessSdkEntryOrigin.markEntry()
 
     // Seed the process-wide native-ad context so NativeAdSlot requests carry it. A full replace on
     // change (mirrors the privacy seed below); preloaded ads keep the value current at preload time.
@@ -222,34 +284,15 @@ fun SimulaProvider(
         SimulaDeviceSignals.prime(context.applicationContext)
     }
 
-    // An explicit privacy config wins; otherwise the legacy hasPrivacyConsent flag
-    // seeds it so existing call sites behave exactly as before.
-    val resolvedConfig = remember(privacy, hasPrivacyConsent) {
-        privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
-    }
-
-    // Seed the store synchronously during composition so the FIRST session
-    // reflects the explicit config (correct ppid gating) rather than the default
-    // snapshot — avoids an initial consent-less /session/create.
-    //
-    // Mixed hosts (SimulaAds.initialize + SimulaProvider): a provider WITHOUT an
-    // explicit privacy config must not re-seed defaults over the imperative config —
-    // apply() replaces the store wholesale, which would wipe enableAdvertisingId and
-    // any GAID the imperative startup already collected. An explicit provider config
-    // always wins (deliberate host choice); declarative-only hosts always seed.
-    remember(resolvedConfig, privacy) {
-        SimulaAds.applyProviderPrivacy(resolvedConfig, explicit = privacy != null)
-        resolvedConfig
-    }
-
     // Attach CMP state, install telemetry, and settle the initial GAID read off composition. The
     // coordinator is the declarative startup gate: no provider-local session resolver can pass it.
     val privacySessionCoordinator = remember(context) { PrivacySessionCoordinator() }
     LaunchedEffect(privacySessionCoordinator) {
+        var effectiveTelemetry: EffectiveTelemetryConfig? = null
         privacySessionCoordinator.preparePrivacy(
             attach = { withContext(Dispatchers.IO) { SimulaPrivacy.attach(context) } },
             installTelemetry = {
-                Telemetry.initialize(
+                effectiveTelemetry = Telemetry.initialize(
                     context = context.applicationContext,
                     apiKey = apiKey,
                     devMode = devMode,
@@ -257,6 +300,15 @@ fun SimulaProvider(
                 )
             },
             refreshAdvertisingId = { SimulaPrivacy.refreshAdvertisingId() },
+            prepareInfrastructure = {
+                effectiveTelemetry?.let { telemetry ->
+                    ProcessStartupInfrastructure.initialize(
+                        context.applicationContext,
+                        telemetry,
+                        ProcessLaunchSettledGate,
+                    )
+                }
+            },
         )
     }
     LaunchedEffect(privacySessionCoordinator, resolvedConfig) {
@@ -300,10 +352,11 @@ fun SimulaProvider(
     }
     val telemetryIdentityToken = remember { ProcessTelemetryIdentityRouter.createProviderToken() }
     SideEffect {
-        // Rebind the stable token after commit without first removing it. The router replaces and
-        // reorders the source atomically, so flushes cannot fall through during session replacement.
+        // Rebind the stable token after commit without first removing it. The router updates this
+        // mount in place, so an outer recomposition cannot steal precedence from a mounted inner.
         ProcessTelemetryIdentityRouter.bindProvider(
             token = telemetryIdentityToken,
+            apiKey = apiKey,
             sessionId = { sessionStore.sessionId },
             primaryUserId = { sessionStore.effectiveUserID },
         )

@@ -139,10 +139,27 @@ internal class SqliteTelemetryStore(
                     values.put(COL_ID, e.eventId)
                     values.put(COL_TS, e.timestamp)
                     values.put(COL_JSON, json.encodeToString(e))
-                    // IGNORE (not REPLACE) so a migration can never clobber rows already in SQLite.
-                    // A duplicate returns -1 under CONFLICT_IGNORE and is still a successful,
-                    // idempotent migration outcome.
-                    db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+                    // IGNORE (not REPLACE) so migration cannot clobber a row already in SQLite.
+                    // Android also returns -1 for non-conflict insertion failures, so only accept
+                    // that result after proving this exact stable event id already exists.
+                    val inserted = db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+                    val exactEventExists = if (inserted == -1L) {
+                        db.query(
+                            TABLE,
+                            arrayOf(COL_ID),
+                            "$COL_ID = ?",
+                            arrayOf(e.eventId),
+                            null,
+                            null,
+                            null,
+                            "1",
+                        ).use { it.moveToFirst() }
+                    } else {
+                        false
+                    }
+                    if (!telemetryMigrationInsertSucceeded(inserted, exactEventExists)) {
+                        return@runCatching false
+                    }
                 }
                 db.setTransactionSuccessful()
                 committed = true
@@ -186,3 +203,7 @@ internal class SqliteTelemetryStore(
         const val LEGACY_KEY = "pending_telemetry_events"
     }
 }
+
+/** Pure decision used by migration tests: ignored inserts succeed only for an exact id conflict. */
+internal fun telemetryMigrationInsertSucceeded(insertResult: Long, exactEventExists: Boolean): Boolean =
+    insertResult >= 0L || (insertResult == -1L && exactEventExists)

@@ -106,6 +106,7 @@ fun NativeAdSlot(
     metadata: Map<String, String> = emptyMap(),
 ) {
     val ctx = LocalSimulaContext.current
+    if (ctx.apiKey.isBlank()) return
     val currentOnImpression by rememberUpdatedState(onImpression)
     val currentOnPaid by rememberUpdatedState(onPaid)
     val currentOnError by rememberUpdatedState(onError)

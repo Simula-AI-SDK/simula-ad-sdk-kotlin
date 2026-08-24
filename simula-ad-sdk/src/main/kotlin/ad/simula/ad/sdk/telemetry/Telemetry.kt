@@ -8,6 +8,7 @@ import ad.simula.ad.sdk.image.ImageCache
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
+import ad.simula.ad.sdk.privacy.ConsentSnapshot
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
@@ -18,6 +19,7 @@ import android.os.Build
 import android.telephony.TelephonyManager
 import android.util.Log
 import java.util.Locale
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 
 /**
@@ -28,6 +30,13 @@ internal const val SIMULA_SDK_VERSION = "1.1.9-dev.4"
 
 /** logcat tag for the dev-mode telemetry mirror. */
 private const val LOG_TAG = "SimulaTelemetry"
+
+/** Immutable process configuration selected by the first telemetry initialization claim. */
+internal data class EffectiveTelemetryConfig(
+    val apiKey: String,
+    val devMode: Boolean,
+    val enabled: Boolean,
+)
 
 /**
  * Process-wide facade for in-house telemetry (handled errors + performance), mirroring the
@@ -44,14 +53,24 @@ internal object Telemetry {
     @Volatile
     private var manager: TelemetryManager? = null
 
-    private val initialization = FirstWinsProcessTask(SimulaScope)
+    private val initialization = FirstWinsProcessTask<EffectiveTelemetryConfig>(SimulaScope)
+    private val duplicateInitializeDrain = BoundedCounterRecoveryDrain(
+        counter = DuplicateImperativeInitializeCounter,
+        scope = SimulaScope,
+        sleep = { delay(it) },
+        recordDurably = { count, callback ->
+            val target = manager
+            if (target == null) callback(TelemetryPersistenceOutcome.Unavailable)
+            else target.recordMetaCountDurably(DUPLICATE_INITIALIZE_META_NAME, count, callback)
+        },
+    )
 
     /**
      * Install the process telemetry pipeline from the first imperative or declarative startup.
      * Subsequent entry points await that startup's construction/recovery completion and do not
      * replace its immutable API key/dev-mode/enabled configuration. Envelope identity is resolved
-     * live through [ProcessTelemetryIdentityRouter], so mixed hosts prefer the imperative store
-     * once initialized while provider-only hosts follow their latest committed local store. When
+     * live through [ProcessTelemetryIdentityRouter], so mixed hosts prefer a compatible imperative
+     * store while provider-only hosts follow their latest compatible committed local store. When
      * [enabled] is false nothing is created (host opt-out). Primary user identity is additionally
      * gated by the live consent snapshot on every flush.
      */
@@ -61,7 +80,8 @@ internal object Telemetry {
         devMode: Boolean,
         enabled: Boolean,
         launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
-    ) = claimInitialization(context, apiKey, devMode, enabled, launchSettledGate).startAndAwait()
+    ): EffectiveTelemetryConfig =
+        claimInitialization(context, apiKey, devMode, enabled, launchSettledGate).startAndAwait()
 
     /**
      * Reserve immutable first-wins telemetry configuration without starting work. This is strictly
@@ -74,61 +94,59 @@ internal object Telemetry {
         devMode: Boolean,
         enabled: Boolean,
         launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate,
-    ): FirstWinsProcessTaskClaim = initialization.claim {
+    ): FirstWinsProcessTaskClaim<EffectiveTelemetryConfig> = initialization.claim {
+        val effective = EffectiveTelemetryConfig(apiKey, devMode, enabled)
         if (!enabled) {
             manager = null
             installSimulaScopeFailureReporter(null)
-            return@claim
+            return@claim effective
         }
-        val appCtx = context.applicationContext
-        val json = Json { encodeDefaults = false; ignoreUnknownKeys = true }
-        val ctx = TelemetryContext(
-            sdkVersion = SIMULA_SDK_VERSION,
-            osVersion = Build.VERSION.RELEASE ?: "",
-            deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
-            hostAppId = appCtx.packageName,
-            devMode = devMode,
-            // Always-on device diagnostics, resolved once (constant per process).
-            manufacturer = Build.MANUFACTURER,
-            locale = resolveLocale(),
-            deviceRamMb = resolveRamMb(appCtx),
-            buildType = if ((appCtx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) "debug" else "release",
-        )
-        val installed = TelemetryManager(
-            ctx = ctx,
-            store = SqliteTelemetryStore(appCtx, json),
-            sender = ApiTelemetrySender(apiKey),
-            identityProvider = {
-                val identity = ProcessTelemetryIdentityRouter.identity()
-                val consent = SimulaPrivacy.current
-                identity.copy(
-                    primaryUserId = identity.primaryUserId.takeIf { consent.allowsPrimaryUserID },
-                )
-            },
-            // Re-gate on every flush: ppid only with consent (& not under COPPA); the advertising
-            // id is already nulled by the live snapshot when not collectible.
-            advertisingIdProvider = { SimulaPrivacy.current.advertisingId },
-            // Reads SimulaConnectionType's cached value (kept fresh by its own network callback —
-            // see SimulaConnectionType.prime) instead of a fresh binder call per flush.
-            connectionTypeProvider = { SimulaConnectionType.label },
-            diagnosticsProvider = { resolveDiagnostics() },
-            batteryProvider = { resolveBattery(appCtx) },
-            carrierProvider = { resolveCarrier(appCtx) },
-            launchSettledGate = launchSettledGate,
-            // In dev mode, mirror every (redacted) event to logcat for local verification.
-            debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
-        )
-        installed.start()
-        // Publication precedes claim completion, so every losing initializer observes a fully
-        // recovered manager (or the completed disabled/failure outcome) before its startup proceeds.
-        manager = installed
-        drainDuplicateInitializeCount(installed)
-        installSimulaScopeFailureReporter { failureSignature, throwable ->
-            recordError(
-                signature = "scope:uncaught:$failureSignature",
-                errorCode = throwable.javaClass.simpleName,
+        val installed = runCatching {
+            val appCtx = context.applicationContext
+            val json = Json { encodeDefaults = false; ignoreUnknownKeys = true }
+            val ctx = TelemetryContext(
+                sdkVersion = SIMULA_SDK_VERSION,
+                osVersion = Build.VERSION.RELEASE ?: "",
+                deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
+                hostAppId = appCtx.packageName,
+                devMode = devMode,
+                manufacturer = Build.MANUFACTURER,
+                locale = resolveLocale(),
+                deviceRamMb = resolveRamMb(appCtx),
+                buildType = if ((appCtx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) "debug" else "release",
             )
+            TelemetryManager(
+                ctx = ctx,
+                store = SqliteTelemetryStore(appCtx, json),
+                sender = ApiTelemetrySender(apiKey),
+                envelopeIdentityProvider = {
+                    resolveTelemetryEnvelopeIdentity(
+                        apiKey = apiKey,
+                        identityProvider = ProcessTelemetryIdentityRouter::identity,
+                        privacyProvider = { SimulaPrivacy.current },
+                    )
+                },
+                connectionTypeProvider = { SimulaConnectionType.label },
+                diagnosticsProvider = { resolveDiagnostics() },
+                batteryProvider = { resolveBattery(appCtx) },
+                carrierProvider = { resolveCarrier(appCtx) },
+                launchSettledGate = launchSettledGate,
+                debugLog = if (devMode) { line -> Log.d(LOG_TAG, line) } else null,
+            ).also { it.start() }
+        }.getOrNull()
+        manager = installed
+        if (installed == null) {
+            installSimulaScopeFailureReporter(null)
+        } else {
+            duplicateInitializeDrain.drain()
+            installSimulaScopeFailureReporter { failureSignature, throwable ->
+                recordError(
+                    signature = "scope:uncaught:$failureSignature",
+                    errorCode = throwable.javaClass.simpleName,
+                )
+            }
         }
+        effective
     }
 
     /** Apply a server-side directive (kill-switch / sampling) from `/session/create`. */
@@ -165,13 +183,7 @@ internal object Telemetry {
     /** Count one losing imperative initialize call and drain it once a manager is available. */
     fun recordDuplicateInitialize() {
         DuplicateImperativeInitializeCounter.increment()
-        manager?.let(::drainDuplicateInitializeCount)
-    }
-
-    private fun drainDuplicateInitializeCount(target: TelemetryManager) {
-        transferBoundedCounter(DuplicateImperativeInitializeCounter) { count, onPersisted ->
-            target.recordMetaCountDurably(DUPLICATE_INITIALIZE_META_NAME, count, onPersisted)
-        }
+        duplicateInitializeDrain.drain()
     }
 
     fun recordLifecycle(
@@ -272,4 +284,19 @@ internal object Telemetry {
             else -> null
         }
     }.getOrNull()
+}
+
+/** Resolve routing and all consent-gated PII from one immutable privacy generation. */
+internal fun resolveTelemetryEnvelopeIdentity(
+    apiKey: String,
+    identityProvider: (String) -> TelemetryIdentity,
+    privacyProvider: () -> ConsentSnapshot,
+): TelemetryEnvelopeIdentity {
+    val identity = identityProvider(apiKey)
+    val privacy = privacyProvider()
+    return TelemetryEnvelopeIdentity(
+        sessionId = identity.sessionId,
+        primaryUserId = identity.primaryUserId.takeIf { privacy.allowsPrimaryUserID },
+        advertisingId = privacy.advertisingId,
+    )
 }

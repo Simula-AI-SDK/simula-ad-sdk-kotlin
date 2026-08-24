@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 
 /** First-wins process origin used for monotonic time since either public SDK entry point. */
 internal class MonotonicSdkEntryOrigin(
@@ -34,27 +35,25 @@ internal val ProcessSdkEntryOrigin = MonotonicSdkEntryOrigin(System::nanoTime)
  * First-wins process task. The first block is reserved lazily in [scope], so cancelling a caller
  * only abandons that caller's wait; later callers still start/await the same process-owned work.
  */
-internal class FirstWinsProcessTask(
+internal class FirstWinsProcessTask<T>(
     private val scope: CoroutineScope,
 ) {
     private val lock = Any()
-    private var task: Deferred<Result<Unit>>? = null
+    private var task: Deferred<Result<T>>? = null
 
     /** Atomically reserve the first block without starting it. This performs no suspension or I/O. */
-    fun claim(block: suspend () -> Unit): FirstWinsProcessTaskClaim {
+    fun claim(block: suspend () -> T): FirstWinsProcessTaskClaim<T> {
         val shared = synchronized(lock) {
             task ?: scope.async(start = CoroutineStart.LAZY) { runCatching { block() } }.also { task = it }
         }
         return FirstWinsProcessTaskClaim(shared)
     }
 
-    suspend fun runOnce(block: suspend () -> Unit) {
-        claim(block).startAndAwait()
-    }
+    suspend fun runOnce(block: suspend () -> T): T = claim(block).startAndAwait()
 }
 
-internal class FirstWinsProcessTaskClaim internal constructor(
-    private val task: Deferred<Result<Unit>>,
+internal class FirstWinsProcessTaskClaim<T> internal constructor(
+    private val task: Deferred<Result<T>>,
 ) {
     /** Start outside the owner's monitor. The task remains owned by the process scope. */
     fun start() {
@@ -62,13 +61,11 @@ internal class FirstWinsProcessTaskClaim internal constructor(
     }
 
     /** Await the shared first-wins result without holding a monitor. */
-    suspend fun await() {
-        task.await().getOrThrow()
-    }
+    suspend fun await(): T = task.await().getOrThrow()
 
-    suspend fun startAndAwait() {
+    suspend fun startAndAwait(): T {
         start()
-        await()
+        return await()
     }
 }
 
@@ -126,22 +123,92 @@ internal class BoundedCounterClaim internal constructor(
  * Move one counter claim into durable telemetry. The claim remains owned by the counter until the
  * recorder confirms persistence; increments arriving meanwhile remain pending and drain next.
  */
-internal fun transferBoundedCounter(
-    counter: BoundedCounter,
-    recordDurably: (count: Int, onPersisted: (Boolean) -> Unit) -> Unit,
-) {
-    val claim = counter.claim() ?: return
-    val started = runCatching {
-        recordDurably(claim.count) { persisted ->
-            if (persisted) {
-                if (counter.acknowledge(claim)) transferBoundedCounter(counter, recordDurably)
-            } else {
-                counter.release(claim)
-            }
-        }
-    }.isSuccess
-    if (!started) counter.release(claim)
+internal enum class TelemetryPersistenceOutcome {
+    Persisted,
+    RetryableFailure,
+    Disabled,
+    Unavailable,
 }
 
+/**
+ * Moves bounded process counters into durable telemetry and owns retry scheduling. At most one
+ * recovery delay is active; retryable storage failures release the exact claim and retry without
+ * requiring another public initialize call. Disabled/unavailable pipelines retain the bounded
+ * count but deliberately do not loop.
+ */
+internal class BoundedCounterRecoveryDrain(
+    private val counter: BoundedCounter,
+    private val scope: CoroutineScope,
+    private val sleep: suspend (Long) -> Unit,
+    private val backoffMs: (Int) -> Long = ::telemetryBackoffMs,
+    private val maxAutomaticAttempts: Int = MAX_DUPLICATE_PERSISTENCE_RECOVERY_ATTEMPTS,
+    private val recordDurably: (count: Int, onPersisted: (TelemetryPersistenceOutcome) -> Unit) -> Unit,
+) {
+    private val lock = Any()
+    private var recoveryScheduled = false
+    private var automaticAttempts = 0
+    private var cycleExhausted = false
+
+    fun drain() {
+        synchronized(lock) {
+            if (recoveryScheduled) return
+            if (cycleExhausted) {
+                cycleExhausted = false
+                automaticAttempts = 0
+            }
+        }
+        drainAttempt()
+    }
+
+    private fun drainAttempt() {
+        val claim = counter.claim() ?: return
+        val started = runCatching {
+            recordDurably(claim.count) { outcome ->
+                when (outcome) {
+                    TelemetryPersistenceOutcome.Persisted -> {
+                        if (counter.acknowledge(claim)) {
+                            synchronized(lock) {
+                                automaticAttempts = 0
+                                cycleExhausted = false
+                            }
+                            drain()
+                        }
+                    }
+                    TelemetryPersistenceOutcome.RetryableFailure -> {
+                        if (counter.release(claim)) scheduleRecovery()
+                    }
+                    TelemetryPersistenceOutcome.Disabled,
+                    TelemetryPersistenceOutcome.Unavailable,
+                    -> if (counter.release(claim)) stopAutomaticCycle()
+                }
+            }
+        }.isSuccess
+        if (!started && counter.release(claim)) scheduleRecovery()
+    }
+
+    private fun scheduleRecovery() {
+        val delayMs = synchronized(lock) {
+            if (recoveryScheduled) return
+            if (automaticAttempts >= maxAutomaticAttempts) {
+                cycleExhausted = true
+                return
+            }
+            recoveryScheduled = true
+            automaticAttempts++
+            backoffMs(automaticAttempts)
+        }
+        scope.launch {
+            sleep(delayMs)
+            synchronized(lock) { recoveryScheduled = false }
+            drainAttempt()
+        }
+    }
+
+    private fun stopAutomaticCycle() {
+        synchronized(lock) { cycleExhausted = true }
+    }
+}
+
+internal const val MAX_DUPLICATE_PERSISTENCE_RECOVERY_ATTEMPTS = 3
 internal const val DUPLICATE_INITIALIZE_META_NAME = "duplicate_initialize"
 internal val DuplicateImperativeInitializeCounter = BoundedCounter(maxCount = 1_000_000)

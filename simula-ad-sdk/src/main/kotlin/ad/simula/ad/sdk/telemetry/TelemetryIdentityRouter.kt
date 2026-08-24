@@ -8,57 +8,68 @@ internal data class TelemetryIdentity(
     val primaryUserId: String?,
 )
 
+/** One generation-coherent identity snapshot attached to a telemetry envelope. */
+internal data class TelemetryEnvelopeIdentity(
+    val sessionId: String?,
+    val primaryUserId: String?,
+    val advertisingId: String?,
+)
+
 internal class ProviderTelemetryIdentityToken internal constructor()
 
 /**
  * Routes telemetry envelope identity without tying the process pipeline to its first entry point.
- * Once present, the imperative store wins because an envelope has one process-wide identity;
- * provider-only hosts use the latest active provider store committed by Compose.
+ * Identity is compatible with the telemetry pipeline's first-wins API key: a different-key entry
+ * point can never label batches sent through the winning key. A compatible imperative store wins;
+ * otherwise provider-only hosts use the latest compatible active provider committed by Compose.
  */
 internal class TelemetryIdentityRouter {
     private class Source(
+        val apiKey: String,
         val sessionId: () -> String?,
         val primaryUserId: () -> String?,
     )
 
     private val providerLock = Any()
     private val providers = LinkedHashMap<ProviderTelemetryIdentityToken, Source>()
-    private val provider = AtomicReference<Source?>(null)
+    private val providerSnapshot = AtomicReference<List<Source>>(emptyList())
     private val imperative = AtomicReference<Source?>(null)
 
     fun createProviderToken(): ProviderTelemetryIdentityToken = ProviderTelemetryIdentityToken()
 
     fun bindProvider(
         token: ProviderTelemetryIdentityToken,
+        apiKey: String,
         sessionId: () -> String?,
         primaryUserId: () -> String?,
     ) {
-        val source = Source(sessionId, primaryUserId)
+        val source = Source(apiKey, sessionId, primaryUserId)
         synchronized(providerLock) {
-            // LinkedHashMap does not reorder an existing key, so remove first to make a committed
-            // replacement the latest active provider.
-            providers.remove(token)
+            // Replacing an existing token updates its source without changing mount/lifetime order.
+            // Only a genuinely new provider token becomes the latest active provider.
             providers[token] = source
-            provider.set(source)
+            providerSnapshot.set(providers.values.toList())
         }
     }
 
     fun unbindProvider(token: ProviderTelemetryIdentityToken) {
         synchronized(providerLock) {
             if (providers.remove(token) == null) return
-            provider.set(providers.entries.lastOrNull()?.value)
+            providerSnapshot.set(providers.values.toList())
         }
     }
 
     fun bindImperative(
+        apiKey: String,
         sessionId: () -> String?,
         primaryUserId: () -> String?,
     ) {
-        imperative.set(Source(sessionId, primaryUserId))
+        imperative.set(Source(apiKey, sessionId, primaryUserId))
     }
 
-    fun identity(): TelemetryIdentity {
-        val source = imperative.get() ?: provider.get()
+    fun identity(apiKey: String): TelemetryIdentity {
+        val source = imperative.get()?.takeIf { it.apiKey == apiKey }
+            ?: providerSnapshot.get().lastOrNull { it.apiKey == apiKey }
         if (source == null) return TelemetryIdentity(null, null)
         return TelemetryIdentity(
             sessionId = runCatching { source.sessionId() }.getOrNull(),

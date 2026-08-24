@@ -20,8 +20,10 @@ class TelemetryEnrichmentTest {
 
     private class FakeStore : TelemetryStore {
         var data: List<TelemetryEvent> = emptyList()
+        var saveCount = 0
         override fun load(): List<TelemetryEvent> = data
         override fun save(events: List<TelemetryEvent>): Boolean {
+            saveCount++
             data = events.toList()
             return true
         }
@@ -50,8 +52,7 @@ class TelemetryEnrichmentTest {
         ctx = ctx,
         store = store,
         sender = sender,
-        identityProvider = { TelemetryIdentity("sess", null) },
-        advertisingIdProvider = { null },
+        envelopeIdentityProvider = { TelemetryEnvelopeIdentity("sess", null, null) },
         connectionTypeProvider = connectionType,
         diagnosticsProvider = diagnostics,
         batteryProvider = battery,
@@ -189,7 +190,7 @@ class TelemetryEnrichmentTest {
         }
         runCurrent()
 
-        assertEquals(listOf("saved", "callback:true"), order)
+        assertEquals(listOf("saved", "callback:Persisted"), order)
         assertEquals(4, store.data.single { it.name == DUPLICATE_INITIALIZE_META_NAME }.count)
     }
 
@@ -205,19 +206,33 @@ class TelemetryEnrichmentTest {
                 return true
             }
         }
-        var accepted: Boolean? = null
+        var accepted: TelemetryPersistenceOutcome? = null
         val m = build(this, store, FakeSender(), clock = { 1_000L })
 
         m.recordMetaCountDurably(DUPLICATE_INITIALIZE_META_NAME, 4) { accepted = it }
         runCurrent()
-        assertEquals(false, accepted)
+        assertEquals(TelemetryPersistenceOutcome.RetryableFailure, accepted)
 
         store.allowSave = true
         m.recordMetaCountDurably(DUPLICATE_INITIALIZE_META_NAME, 4) { accepted = it }
         runCurrent()
 
-        assertEquals(true, accepted)
+        assertEquals(TelemetryPersistenceOutcome.Persisted, accepted)
         assertEquals(4, store.data.single { it.name == DUPLICATE_INITIALIZE_META_NAME }.count)
+    }
+
+    @Test
+    fun `server-disabled manager rejects durable meta without touching storage`() = runTest {
+        val store = FakeStore()
+        val m = build(this, store, FakeSender(), clock = { 1_000L })
+        var outcome: TelemetryPersistenceOutcome? = null
+        m.applyServerConfig(enabled = false, sampleRate = 1.0)
+
+        m.recordMetaCountDurably(DUPLICATE_INITIALIZE_META_NAME, 1) { outcome = it }
+        runCurrent()
+
+        assertEquals(TelemetryPersistenceOutcome.Disabled, outcome)
+        assertEquals(0, store.saveCount)
     }
 
     @Test

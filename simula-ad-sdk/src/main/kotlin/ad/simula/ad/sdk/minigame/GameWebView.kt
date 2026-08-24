@@ -95,6 +95,7 @@ fun GameWebView(
     onDimensionsOnClose: ((heightDp: Float, isBottomSheet: Boolean) -> Unit)? = null,
 ) {
     val simulaContext = useSimula()
+    if (simulaContext.apiKey.isBlank()) return
     val context = LocalContext.current
     val config = LocalConfiguration.current
 

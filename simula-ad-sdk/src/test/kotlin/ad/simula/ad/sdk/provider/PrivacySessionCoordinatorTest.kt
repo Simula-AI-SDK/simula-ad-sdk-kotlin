@@ -64,6 +64,7 @@ class PrivacySessionCoordinatorTest {
             attach = { steps += "attach" },
             installTelemetry = { steps += "telemetry" },
             refreshAdvertisingId = { steps += "gaid" },
+            prepareInfrastructure = { steps += "infrastructure" },
         )
         val session = coordinator.ensureSession {
             steps += "session"
@@ -71,7 +72,7 @@ class PrivacySessionCoordinatorTest {
         }
 
         assertEquals("session-id", session)
-        assertEquals(listOf("attach", "telemetry", "gaid", "session"), steps)
+        assertEquals(listOf("attach", "telemetry", "gaid", "infrastructure", "session"), steps)
     }
 
     @Test
