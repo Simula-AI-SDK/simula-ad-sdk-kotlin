@@ -106,10 +106,13 @@ fun NativeAdSlot(
     metadata: Map<String, String> = emptyMap(),
 ) {
     val ctx = useSimula()
-    if (ctx.apiKey.isBlank()) return
+    val currentOnError by rememberUpdatedState(onError)
+    if (ctx.apiKey.isBlank()) {
+        LaunchedEffect(Unit) { currentOnError(NativeAdError.NotInitialized) }
+        return
+    }
     val currentOnImpression by rememberUpdatedState(onImpression)
     val currentOnPaid by rememberUpdatedState(onPaid)
-    val currentOnError by rememberUpdatedState(onError)
     val currentOnClick by rememberUpdatedState(onClick)
     val normalizedMetadata = remember(metadata) { normalizeExtraParameters(metadata) }
     val resolvedTheme = resolveAdTheme(theme)
