@@ -19,7 +19,6 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import ad.simula.ad.sdk.ads.SimulaAds
-import ad.simula.ad.sdk.core.ApiKeyOwnership
 import ad.simula.ad.sdk.core.PostCommitApiKeyClaim
 import ad.simula.ad.sdk.core.ProcessApiKeyOwner
 import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
@@ -240,7 +239,12 @@ fun SimulaProvider(
     var committedPrivacy by remember(entryClaim) {
         mutableStateOf<Pair<SimulaPrivacyConfig, Boolean>?>(null)
     }
-    if (apiKeyOwnership == null) {
+    val requestedPrivacy = resolvedConfig to explicitPrivacy
+    val compositionPlan = providerCompositionPlan(
+        apiKeyOwnership = apiKeyOwnership,
+        privacyIsCommitted = committedPrivacy == requestedPrivacy,
+    )
+    if (compositionPlan.children == ProviderChildrenPlan.Withhold) {
         // A speculative/abandoned composition never executes this claim. Children are withheld so
         // no SDK effect or request can run before key ownership and privacy seeding have committed.
         SideEffect {
@@ -252,20 +256,18 @@ fun SimulaProvider(
         }
         return
     }
-    if (apiKeyOwnership == ApiKeyOwnership.Incompatible) {
+    if (compositionPlan.children == ProviderChildrenPlan.Inert) {
         SideEffect { ProcessApiKeyOwner.warnIncompatibleEntry() }
         CompositionLocalProvider(LocalSimulaContext provides emptySimulaContext(), content = content)
         return
     }
 
-    val requestedPrivacy = resolvedConfig to explicitPrivacy
-    if (committedPrivacy != requestedPrivacy) {
-        // Keep the disposal registration mounted while a committed prop update refreshes this entry.
+    if (compositionPlan.seedPrivacyAfterCommit) {
+        // Keep the provider subtree mounted while a committed prop update refreshes this entry.
         SideEffect {
             ProcessPrivacyOwner.seed(privacyOwnerToken, resolvedConfig, explicitPrivacy)
             committedPrivacy = requestedPrivacy
         }
-        return
     }
     ProcessSdkEntryOrigin.markEntry()
 

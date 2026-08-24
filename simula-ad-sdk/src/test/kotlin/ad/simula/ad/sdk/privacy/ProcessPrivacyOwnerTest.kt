@@ -23,7 +23,7 @@ class ProcessPrivacyOwnerTest {
     }
 
     @Test
-    fun `owner unmount applies latest active fallback without reordering updates`() {
+    fun `owner unmount transfers ownership without applying latest active entry`() {
         val applied = mutableListOf<SimulaPrivacyConfig>()
         val owner = FirstPrivacyConfigOwner(applied::add)
         val outer = PrivacyOwnerToken()
@@ -36,8 +36,12 @@ class ProcessPrivacyOwnerTest {
         owner.seed(inner, innerConfig, explicit = false)
         owner.seed(outer, outerUpdated, explicit = false)
 
-        assertEquals(PrivacyReleaseResult.FallbackApplied, owner.release(outer))
-        assertEquals(listOf(outerInitial, outerUpdated, innerConfig), applied)
+        assertEquals(PrivacyReleaseResult.Released, owner.release(outer))
+        assertEquals(listOf(outerInitial, outerUpdated), applied)
+
+        val innerUpdated = innerConfig.copy(coppaApplies = true)
+        assertEquals(PrivacySeedResult.OwnerUpdated, owner.seed(inner, innerUpdated, explicit = false))
+        assertEquals(listOf(outerInitial, outerUpdated, innerUpdated), applied)
     }
 
     @Test
@@ -71,7 +75,7 @@ class ProcessPrivacyOwnerTest {
     }
 
     @Test
-    fun `explicit owner unmount restores prior active config`() {
+    fun `explicit owner unmount does not restore prior active config`() {
         val applied = mutableListOf<SimulaPrivacyConfig>()
         val owner = FirstPrivacyConfigOwner(applied::add)
         val prior = PrivacyOwnerToken()
@@ -81,9 +85,48 @@ class ProcessPrivacyOwnerTest {
 
         owner.seed(prior, priorConfig, explicit = false)
         owner.seed(explicit, explicitConfig, explicit = true)
-        assertEquals(PrivacyReleaseResult.FallbackApplied, owner.release(explicit))
+        assertEquals(PrivacyReleaseResult.Released, owner.release(explicit))
 
-        assertEquals(listOf(priorConfig, explicitConfig, priorConfig), applied)
+        assertEquals(listOf(priorConfig, explicitConfig), applied)
+
+        val priorUpdated = priorConfig.copy(coppaApplies = true)
+        assertEquals(PrivacySeedResult.OwnerUpdated, owner.seed(prior, priorUpdated, explicit = false))
+        assertEquals(listOf(priorConfig, explicitConfig, priorUpdated), applied)
+    }
+
+    @Test
+    fun `release never restores consent from ignored defaults or a previous explicit entry`() {
+        val applied = mutableListOf<SimulaPrivacyConfig>()
+        val owner = FirstPrivacyConfigOwner(applied::add)
+        val previousExplicit = PrivacyOwnerToken()
+        val deniedOwner = PrivacyOwnerToken()
+        val imperativeDefault = PrivacyOwnerToken()
+        val providerDefault = PrivacyOwnerToken()
+        val allowed = SimulaPrivacyConfig(hasPrivacyConsent = true)
+        val denied = SimulaPrivacyConfig(hasPrivacyConsent = false)
+
+        owner.seed(previousExplicit, allowed, explicit = true)
+        owner.seed(deniedOwner, denied, explicit = true)
+        assertEquals(
+            PrivacySeedResult.IgnoredDefault,
+            owner.seed(imperativeDefault, SimulaPrivacyConfig(), explicit = false),
+        )
+        assertEquals(
+            PrivacySeedResult.IgnoredDefault,
+            owner.seed(providerDefault, SimulaPrivacyConfig(), explicit = false),
+        )
+
+        owner.release(deniedOwner)
+        owner.release(providerDefault)
+        owner.release(imperativeDefault)
+        assertEquals(listOf(allowed, denied), applied)
+
+        val updated = denied.copy(coppaApplies = true)
+        assertEquals(
+            PrivacySeedResult.OwnerUpdated,
+            owner.seed(previousExplicit, updated, explicit = false),
+        )
+        assertEquals(listOf(allowed, denied, updated), applied)
     }
 
     @Test
@@ -206,7 +249,7 @@ class ProcessPrivacyOwnerTest {
     }
 
     @Test
-    fun `concurrent owner update and release leave coherent fallback ownership`() {
+    fun `concurrent owner update and release never applies fallback and leaves coherent ownership`() {
         val applied = mutableListOf<SimulaPrivacyConfig>()
         val owner = FirstPrivacyConfigOwner(applied::add)
         val current = PrivacyOwnerToken()
@@ -234,6 +277,12 @@ class ProcessPrivacyOwnerTest {
         start.countDown()
         workers.forEach { it.join() }
 
-        assertEquals(fallbackConfig, applied.last())
+        assertTrue(fallbackConfig !in applied)
+        val fallbackUpdated = fallbackConfig.copy(coppaApplies = true)
+        assertEquals(
+            PrivacySeedResult.OwnerUpdated,
+            owner.seed(fallback, fallbackUpdated, explicit = false),
+        )
+        assertEquals(fallbackUpdated, applied.last())
     }
 }

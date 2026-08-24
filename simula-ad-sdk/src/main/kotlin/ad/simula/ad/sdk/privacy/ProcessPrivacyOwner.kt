@@ -11,8 +11,6 @@ internal enum class PrivacySeedResult {
 internal enum class PrivacyReleaseResult {
     NotActive,
     Released,
-    FallbackApplied,
-    FallbackFailed,
 }
 
 internal class PrivacyOwnerToken internal constructor()
@@ -59,12 +57,10 @@ internal class FirstPrivacyConfigOwner(
         if (active.remove(token) == null) return@synchronized PrivacyReleaseResult.NotActive
         if (owner !== token) return@synchronized PrivacyReleaseResult.Released
 
-        owner = null
-        val fallback = active.entries.lastOrNull() ?: return@synchronized PrivacyReleaseResult.Released
-        val applied = runCatching { applyConfig(fallback.value.config) }.isSuccess
-        if (!applied) return@synchronized PrivacyReleaseResult.FallbackFailed
-        owner = fallback.key
-        PrivacyReleaseResult.FallbackApplied
+        // Releasing an entry must not restore a stale or previously ignored config. The process
+        // snapshot remains unchanged until the next explicit takeover or logical-owner update.
+        owner = active.keys.lastOrNull()
+        PrivacyReleaseResult.Released
     }
 }
 
