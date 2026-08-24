@@ -31,15 +31,15 @@ internal class FirstApiKeyOwner {
 }
 
 /** Defers a process-mutating ownership claim until a committed Compose side effect invokes it. */
-internal class PostCommitApiKeyClaim(
-    private val claim: () -> ApiKeyOwnership,
+internal class PostCommitApiKeyClaim<T>(
+    private val claim: () -> T,
 ) {
     private val lock = Any()
-    private var committed: ApiKeyOwnership? = null
+    private var committed: T? = null
 
-    fun result(): ApiKeyOwnership? = synchronized(lock) { committed }
+    fun result(): T? = synchronized(lock) { committed }
 
-    fun commit(): ApiKeyOwnership = synchronized(lock) {
+    fun commit(): T = synchronized(lock) {
         committed ?: claim().also { committed = it }
     }
 }
@@ -66,7 +66,28 @@ internal class ApiKeyPrivacyEntryOwner(
             }
         }
     }
+
+    fun <T> claimAndSeedPrivacyThen(
+        apiKey: String,
+        privacyOwnerToken: PrivacyOwnerToken,
+        privacy: SimulaPrivacyConfig,
+        explicitPrivacy: Boolean,
+        onCompatible: () -> T,
+    ): ApiKeyEntryClaim<T> = synchronized(lock) {
+        val ownership = apiKeyOwner.claim(apiKey)
+        if (!ownership.isCompatible) {
+            releasePrivacy(privacyOwnerToken)
+            return@synchronized ApiKeyEntryClaim(ownership, null)
+        }
+        seedPrivacy(privacyOwnerToken, privacy, explicitPrivacy)
+        ApiKeyEntryClaim(ownership, onCompatible())
+    }
 }
+
+internal data class ApiKeyEntryClaim<T>(
+    val ownership: ApiKeyOwnership,
+    val value: T?,
+)
 
 internal sealed class ImperativeInitializationAttempt<out T> {
     internal data class Winner<T>(val value: T) : ImperativeInitializationAttempt<T>()
@@ -117,6 +138,20 @@ internal object ProcessApiKeyOwner {
         privacyOwnerToken,
         privacy,
         explicitPrivacy,
+    )
+
+    fun <T> claimAndSeedPrivacyThen(
+        apiKey: String,
+        privacyOwnerToken: PrivacyOwnerToken,
+        privacy: SimulaPrivacyConfig,
+        explicitPrivacy: Boolean,
+        onCompatible: () -> T,
+    ): ApiKeyEntryClaim<T> = entryOwner.claimAndSeedPrivacyThen(
+        apiKey,
+        privacyOwnerToken,
+        privacy,
+        explicitPrivacy,
+        onCompatible,
     )
 
     fun warnIncompatibleEntry() {

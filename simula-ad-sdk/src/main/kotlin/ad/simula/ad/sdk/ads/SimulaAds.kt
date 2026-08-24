@@ -157,16 +157,26 @@ object SimulaAds {
         adContext: SimulaAdContext?,
     ) {
         require(apiKey.isNotBlank()) { "SimulaAds.initialize requires a non-blank apiKey" }
+        val applicationContext = context.applicationContext
         val resolvedPrivacy = privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
         val launchSettledGate = ProcessLaunchSettledGate
+        var reservedTelemetry: ad.simula.ad.sdk.telemetry.FirstWinsProcessTaskClaim<EffectiveTelemetryConfig>? = null
         val attempt = initialization.initialize(
             claimAndSeed = {
-                ProcessApiKeyOwner.claimAndSeedPrivacy(
+                ProcessApiKeyOwner.claimAndSeedPrivacyThen(
                     apiKey = apiKey,
                     privacyOwnerToken = privacyOwnerToken,
                     privacy = resolvedPrivacy,
                     explicitPrivacy = privacy != null,
-                )
+                ) {
+                    Telemetry.claimInitialization(
+                        context = applicationContext,
+                        apiKey = apiKey,
+                        devMode = devMode,
+                        enabled = telemetryEnabled,
+                        launchSettledGate = launchSettledGate,
+                    )
+                }.also { reservedTelemetry = it.value }.ownership
             },
             onWinner = {
                 ProcessSdkEntryOrigin.markEntry()
@@ -174,7 +184,7 @@ object SimulaAds {
                 // Gate released once consent, telemetry, and billing infrastructure are ready.
                 val gate = CompletableDeferred<Unit>()
 
-                appContext = context.applicationContext
+                appContext = applicationContext
                 this.apiKey = apiKey
                 this.devMode = devMode
 
@@ -209,7 +219,7 @@ object SimulaAds {
 
                 // Reserve immutable telemetry configuration before publishing initialized=true. This
                 // only creates a lazy SimulaScope task: no I/O starts and the main thread never waits.
-                val claim = Telemetry.claimInitialization(
+                val claim = reservedTelemetry ?: Telemetry.claimInitialization(
                     context = appContext,
                     apiKey = apiKey,
                     devMode = devMode,

@@ -55,9 +55,7 @@ import kotlinx.coroutines.withContext
  * warmed. That way every such slot reuses ONE session instead of minting one per
  * composition (mirrors iOS, where a `NativeAdSlot` reads `SimulaAds.shared`).
  */
-internal val LocalSimulaContext = staticCompositionLocalOf<SimulaContextValue> {
-    globalSimulaContext()
-}
+internal val LocalSimulaContext = staticCompositionLocalOf<SimulaContextValue?> { null }
 
 // Process-global ad caches backing the fallback context (used by the older imperative
 // menu ad path; native ads use the standalone NativeAdCache object). Kept tiny and
@@ -173,7 +171,7 @@ private fun emptySimulaContext(): SimulaContextValue {
  * Equivalent to React's useSimula() hook.
  */
 @Composable
-internal fun useSimula(): SimulaContextValue = LocalSimulaContext.current
+internal fun useSimula(): SimulaContextValue = LocalSimulaContext.current ?: globalSimulaContext()
 
 /**
  * Cache key helper — matches React's getCacheKey(slot, position).
@@ -215,6 +213,7 @@ fun SimulaProvider(
     // Validate props early (matches React's validateSimulaProviderProps)
     require(apiKey.isNotBlank()) { "SimulaProvider requires a valid \"apiKey\" (non-blank string)" }
 
+    val applicationContext = LocalContext.current.applicationContext
     val resolvedConfig = remember(privacy, hasPrivacyConsent) {
         privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
     }
@@ -225,34 +224,41 @@ fun SimulaProvider(
     val explicitPrivacy = privacy != null
     val currentPrivacy by rememberUpdatedState(resolvedConfig)
     val currentExplicitPrivacy by rememberUpdatedState(explicitPrivacy)
-    val entryClaim = remember(apiKey, privacyOwnerToken) {
+    val entryClaim = remember(apiKey, devMode, telemetryEnabled, applicationContext, privacyOwnerToken) {
         PostCommitApiKeyClaim {
-            ProcessApiKeyOwner.claimAndSeedPrivacy(
+            ProcessApiKeyOwner.claimAndSeedPrivacyThen(
                 apiKey = apiKey,
                 privacyOwnerToken = privacyOwnerToken,
                 privacy = currentPrivacy,
                 explicitPrivacy = currentExplicitPrivacy,
-            )
+            ) {
+                Telemetry.claimInitialization(
+                    context = applicationContext,
+                    apiKey = apiKey,
+                    devMode = devMode,
+                    enabled = telemetryEnabled,
+                )
+            }
         }
     }
-    var apiKeyOwnership by remember(entryClaim) { mutableStateOf(entryClaim.result()) }
+    var entryCommit by remember(entryClaim) { mutableStateOf(entryClaim.result()) }
     var committedPrivacy by remember(entryClaim) {
         mutableStateOf<Pair<SimulaPrivacyConfig, Boolean>?>(null)
     }
     val requestedPrivacy = resolvedConfig to explicitPrivacy
     val compositionPlan = providerCompositionPlan(
-        apiKeyOwnership = apiKeyOwnership,
+        apiKeyOwnership = entryCommit?.ownership,
         privacyIsCommitted = committedPrivacy == requestedPrivacy,
     )
     if (compositionPlan.children == ProviderChildrenPlan.Withhold) {
         // A speculative/abandoned composition never executes this claim. Children are withheld so
         // no SDK effect or request can run before key ownership and privacy seeding have committed.
         SideEffect {
-            val ownership = entryClaim.commit()
-            if (ownership.isCompatible) {
+            val commit = entryClaim.commit()
+            if (commit.ownership.isCompatible) {
                 committedPrivacy = currentPrivacy to currentExplicitPrivacy
             }
-            apiKeyOwnership = ownership
+            entryCommit = commit
         }
         return
     }
@@ -294,12 +300,7 @@ fun SimulaProvider(
         privacySessionCoordinator.preparePrivacy(
             attach = { withContext(Dispatchers.IO) { SimulaPrivacy.attach(context) } },
             installTelemetry = {
-                effectiveTelemetry = Telemetry.initialize(
-                    context = context.applicationContext,
-                    apiKey = apiKey,
-                    devMode = devMode,
-                    enabled = telemetryEnabled,
-                )
+                effectiveTelemetry = entryCommit?.value?.startAndAwait()
             },
             refreshAdvertisingId = { SimulaPrivacy.refreshAdvertisingId() },
             prepareInfrastructure = {

@@ -133,6 +133,44 @@ class ProcessApiKeyOwnerTest {
     }
 
     @Test
+    fun `entry transaction reserves compatible process work before another entry proceeds`() {
+        val owner = ApiKeyPrivacyEntryOwner(
+            apiKeyOwner = FirstApiKeyOwner(),
+            seedPrivacy = { _, _, _ -> },
+        )
+        val firstEntered = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val secondEntered = CountDownLatch(1)
+
+        val first = thread(start = true) {
+            owner.claimAndSeedPrivacyThen(
+                "key",
+                PrivacyOwnerToken(),
+                SimulaPrivacyConfig(),
+                false,
+            ) {
+                firstEntered.countDown()
+                releaseFirst.await()
+            }
+        }
+        firstEntered.await()
+        val second = thread(start = true) {
+            owner.claimAndSeedPrivacyThen(
+                "key",
+                PrivacyOwnerToken(),
+                SimulaPrivacyConfig(),
+                false,
+            ) { secondEntered.countDown() }
+        }
+
+        assertEquals(1L, secondEntered.count)
+        releaseFirst.countDown()
+        first.join()
+        second.join()
+        assertEquals(0L, secondEntered.count)
+    }
+
+    @Test
     fun `incompatible provider transition releases old privacy entry and cannot reseed`() {
         val keyOwner = FirstApiKeyOwner()
         val applied = mutableListOf<SimulaPrivacyConfig>()

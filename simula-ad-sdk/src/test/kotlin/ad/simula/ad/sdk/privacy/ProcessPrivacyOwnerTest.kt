@@ -95,6 +95,35 @@ class ProcessPrivacyOwnerTest {
     }
 
     @Test
+    fun `permissive explicit owner unmount restores restrictive active config`() {
+        val applied = mutableListOf<SimulaPrivacyConfig>()
+        val owner = FirstPrivacyConfigOwner(applied::add)
+        val restrictive = PrivacyOwnerToken()
+        val permissive = PrivacyOwnerToken()
+        val denied = SimulaPrivacyConfig(hasPrivacyConsent = false)
+        val allowed = SimulaPrivacyConfig(hasPrivacyConsent = true)
+
+        owner.seed(restrictive, denied, explicit = false)
+        owner.seed(permissive, allowed, explicit = true)
+        owner.release(permissive)
+
+        assertEquals(listOf(denied, allowed, denied), applied)
+    }
+
+    @Test
+    fun `privacy fallback comparison rejects broader permissions`() {
+        val restricted = SimulaPrivacyConfig(
+            hasPrivacyConsent = false,
+            gdprApplies = true,
+            tcfPurpose1Consent = false,
+            coppaApplies = true,
+        )
+
+        assertEquals(false, doesNotBroadenPrivacy(SimulaPrivacyConfig(), restricted))
+        assertEquals(true, doesNotBroadenPrivacy(restricted, SimulaPrivacyConfig()))
+    }
+
+    @Test
     fun `release never restores consent from ignored defaults or a previous explicit entry`() {
         val applied = mutableListOf<SimulaPrivacyConfig>()
         val owner = FirstPrivacyConfigOwner(applied::add)
@@ -249,7 +278,7 @@ class ProcessPrivacyOwnerTest {
     }
 
     @Test
-    fun `concurrent owner update and release never applies fallback and leaves coherent ownership`() {
+    fun `concurrent owner update and release leaves coherent fallback ownership`() {
         val applied = mutableListOf<SimulaPrivacyConfig>()
         val owner = FirstPrivacyConfigOwner(applied::add)
         val current = PrivacyOwnerToken()
@@ -277,7 +306,6 @@ class ProcessPrivacyOwnerTest {
         start.countDown()
         workers.forEach { it.join() }
 
-        assertTrue(fallbackConfig !in applied)
         val fallbackUpdated = fallbackConfig.copy(coppaApplies = true)
         assertEquals(
             PrivacySeedResult.OwnerUpdated,

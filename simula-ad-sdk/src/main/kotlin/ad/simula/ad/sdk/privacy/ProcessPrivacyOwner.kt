@@ -30,6 +30,7 @@ internal class FirstPrivacyConfigOwner(
     private val lock = Any()
     private val active = LinkedHashMap<PrivacyOwnerToken, ActiveEntry>()
     private var owner: PrivacyOwnerToken? = null
+    private var appliedConfig: SimulaPrivacyConfig? = null
 
     fun seed(
         token: PrivacyOwnerToken,
@@ -50,18 +51,42 @@ internal class FirstPrivacyConfigOwner(
             else -> PrivacySeedResult.ExplicitReplaced
         }
         owner = token
+        appliedConfig = config
         result
     }
 
     fun release(token: PrivacyOwnerToken): PrivacyReleaseResult = synchronized(lock) {
-        if (active.remove(token) == null) return@synchronized PrivacyReleaseResult.NotActive
+        val released = active.remove(token) ?: return@synchronized PrivacyReleaseResult.NotActive
         if (owner !== token) return@synchronized PrivacyReleaseResult.Released
 
-        // Releasing an entry must not restore a stale or previously ignored config. The process
-        // snapshot remains unchanged until the next explicit takeover or logical-owner update.
-        owner = active.keys.lastOrNull()
+        val fallback = active.entries.lastOrNull()
+        owner = fallback?.key
+        val current = appliedConfig ?: released.config
+        if (fallback != null && doesNotBroadenPrivacy(fallback.value.config, current)) {
+            if (runCatching { applyConfig(fallback.value.config) }.isSuccess) {
+                appliedConfig = fallback.value.config
+            }
+        }
         PrivacyReleaseResult.Released
     }
+}
+
+/** A disposed owner may restore a remaining entry only when every privacy gate stays as strict. */
+internal fun doesNotBroadenPrivacy(
+    candidate: SimulaPrivacyConfig,
+    current: SimulaPrivacyConfig,
+): Boolean {
+    val candidateAllowsPpid = candidate.hasPrivacyConsent && !candidate.coppaApplies
+    val currentAllowsPpid = current.hasPrivacyConsent && !current.coppaApplies
+    val candidateAllowsGaid = candidate.enableAdvertisingId && !candidate.coppaApplies
+    val currentAllowsGaid = current.enableAdvertisingId && !current.coppaApplies
+    val candidateAllowsStorage = candidate.gdprApplies != true || candidate.tcfPurpose1Consent == true
+    val currentAllowsStorage = current.gdprApplies != true || current.tcfPurpose1Consent == true
+    return (!candidateAllowsPpid || currentAllowsPpid) &&
+        (!candidateAllowsGaid || currentAllowsGaid) &&
+        (!candidateAllowsStorage || currentAllowsStorage) &&
+        (!current.coppaApplies || candidate.coppaApplies) &&
+        (current.gdprApplies != true || candidate.gdprApplies == true)
 }
 
 internal object ProcessPrivacyOwner {
