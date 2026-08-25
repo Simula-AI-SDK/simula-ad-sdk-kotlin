@@ -65,6 +65,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -128,6 +129,7 @@ fun MiniGameMenu(
     if (simulaContext.apiKey.isBlank()) return
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
     val preloadedCatalog = LocalPreloadedCatalog.current
 
     // ── State ────────────────────────────────────────────────────────────────
@@ -274,7 +276,6 @@ fun MiniGameMenu(
 
     // ── Dialog 1: Menu Card ──────────────────────────────────────────────
         if (isOpen && selectedGameId == null && currentFallbackAd == null) {
-            val configuration = LocalConfiguration.current
             val screenWidthDp = configuration.screenWidthDp
             val isMobile = screenWidthDp < 768
 
@@ -654,7 +655,10 @@ fun MiniGameMenu(
                 ),
             ) {
                 FullscreenDialogWindowConfig(
-                    opaqueBackground = !isBottomSheetPlayableHeight(theme.playableHeight),
+                    opaqueBackground = !isBottomSheetPlayableHeight(
+                        theme.playableHeight,
+                        configuration.screenHeightDp,
+                    ),
                 )
                 GameWebView(
                     gameId = currentGameId,
@@ -814,10 +818,12 @@ private fun AdIframeOverlay(
             Box(modifier = Modifier.fillMaxSize().weight(1f)) {
                 AndroidView(
                     factory = { ctx ->
+                        var realLoadStarted = false
                         WebViewPool.acquire(
                             context = ctx,
                             client = object : WebViewClient() {
                                 override fun onPageStarted(view: WebView?, startedUrl: String?, favicon: Bitmap?) {
+                                    if (!realLoadStarted) return
                                     adPageLoaded = false
                                     if (!startedUrl.isNullOrBlank() &&
                                         (startedUrl != "about:blank" || inlineHtml != null)
@@ -826,6 +832,7 @@ private fun AdIframeOverlay(
                                     }
                                 }
                                 override fun onPageCommitVisible(view: WebView?, committedUrl: String?) {
+                                    if (!realLoadStarted) return
                                     if (!committedUrl.isNullOrBlank() &&
                                         (committedUrl != "about:blank" || inlineHtml != null) &&
                                         !adPageFailed
@@ -838,6 +845,7 @@ private fun AdIframeOverlay(
                                     request: WebResourceRequest?,
                                     error: WebResourceError?,
                                 ) {
+                                    if (!realLoadStarted) return
                                     if (request?.isForMainFrame == true) {
                                         adPageFailed = true
                                         adPageLoaded = false
@@ -848,6 +856,7 @@ private fun AdIframeOverlay(
                                     request: WebResourceRequest?,
                                     errorResponse: WebResourceResponse?,
                                 ) {
+                                    if (!realLoadStarted) return
                                     if (request?.isForMainFrame == true) {
                                         adPageFailed = true
                                         adPageLoaded = false
@@ -858,10 +867,26 @@ private fun AdIframeOverlay(
                                     request: WebResourceRequest?,
                                 ): Boolean {
                                     val requestUrl = request?.url?.toString() ?: return false
-                                    if (requestUrl == url) return false
-                                    val originalHost = runCatching { Uri.parse(url).host }.getOrNull()
-                                    val requestHost = runCatching { Uri.parse(requestUrl).host }.getOrNull()
-                                    if (originalHost == requestHost) return false
+                                    val requestUri = runCatching { Uri.parse(requestUrl) }.getOrNull() ?: return true
+                                    if (requestUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
+                                    if (request?.isForMainFrame != true) return false
+                                    val originalUri = runCatching { Uri.parse(url) }.getOrNull()
+                                    val originalPort = originalUri?.port?.takeIf { it >= 0 } ?: when (originalUri?.scheme?.lowercase()) {
+                                        "http" -> 80
+                                        "https" -> 443
+                                        else -> -1
+                                    }
+                                    val requestPort = requestUri.port.takeIf { it >= 0 } ?: when (requestUri.scheme?.lowercase()) {
+                                        "http" -> 80
+                                        "https" -> 443
+                                        else -> -1
+                                    }
+                                    val sameOrigin = originalUri?.host != null &&
+                                        originalUri.scheme.equals(requestUri.scheme, ignoreCase = true) &&
+                                        originalUri.host.equals(requestUri.host, ignoreCase = true) &&
+                                        originalPort == requestPort
+                                    if (sameOrigin) return false
+                                    if (!request.hasGesture()) return true
                                     // Consume the navigation either way; runCatching so a custom-scheme
                                     // link with no installed handler can't throw ActivityNotFoundException
                                     // into the host (matches the other CTA sites).
@@ -883,6 +908,7 @@ private fun AdIframeOverlay(
                             },
                         ).apply {
                             if (inlineHtml != null) {
+                                realLoadStarted = true
                                 loadDataWithBaseURL(
                                     url.takeIf { it.isNotBlank() },
                                     inlineHtml,
@@ -891,6 +917,7 @@ private fun AdIframeOverlay(
                                     null,
                                 )
                             } else if (url.isNotBlank()) {
+                                realLoadStarted = true
                                 loadUrl(url)
                             }
                         }
@@ -900,11 +927,19 @@ private fun AdIframeOverlay(
                 )
 
                 if (!adPageLoaded) {
+                    // Fail blank: keep WebView error pages hidden without spinning forever.
                     Box(
-                        modifier = Modifier.fillMaxSize().background(Color.White),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.White)
+                            .pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                                }
+                            },
                         contentAlignment = Alignment.Center,
                     ) {
-                        CircularProgressIndicator(color = Color(0xFF6B7280))
+                        if (!adPageFailed) CircularProgressIndicator(color = Color(0xFF6B7280))
                     }
                 }
 

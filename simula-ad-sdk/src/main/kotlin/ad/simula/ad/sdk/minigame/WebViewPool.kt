@@ -138,6 +138,8 @@ internal object WebViewPool {
         // host. Mirrors NativeAdWebViewStore.attach().
         (webView.parent as? ViewGroup)?.removeView(webView)
         (webView.context as? MutableContextWrapper)?.baseContext = context
+        // Cancel the pool reset before handing callbacks to the real consumer.
+        webView.stopLoading()
         webView.webViewClient = client
         // Drop any WebChromeClient left by a prior consumer so it can't outlive its surface (e.g. a
         // creative's telemetry chrome client mislabeling a later minigame/fallback iframe's JS errors).

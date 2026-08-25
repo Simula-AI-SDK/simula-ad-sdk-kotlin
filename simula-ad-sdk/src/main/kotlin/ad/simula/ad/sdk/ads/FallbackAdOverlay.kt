@@ -45,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -242,6 +243,7 @@ private fun FallbackAdOverlay(
     ) {
         AndroidView(
             factory = { ctx ->
+                var realLoadStarted = false
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : WebViewClient() {
@@ -249,12 +251,14 @@ private fun FallbackAdOverlay(
                         // more than one navigation (e.g. window.open from the inline srcdoc creative).
                         var lastClickMs = 0L
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                            if (!realLoadStarted) return
                             pageCommitted = false
                             if (!url.isNullOrBlank() && (url != "about:blank" || inlineHtml != null)) {
                                 pageLoadFailed = false
                             }
                         }
                         override fun onPageCommitVisible(view: WebView?, url: String?) {
+                            if (!realLoadStarted) return
                             if (!url.isNullOrBlank() &&
                                 (url != "about:blank" || inlineHtml != null) &&
                                 !pageLoadFailed
@@ -267,6 +271,7 @@ private fun FallbackAdOverlay(
                             request: WebResourceRequest?,
                             error: WebResourceError?,
                         ) {
+                            if (!realLoadStarted) return
                             if (request?.isForMainFrame == true) {
                                 pageLoadFailed = true
                                 pageCommitted = false
@@ -277,6 +282,7 @@ private fun FallbackAdOverlay(
                             request: WebResourceRequest?,
                             errorResponse: WebResourceResponse?,
                         ) {
+                            if (!realLoadStarted) return
                             if (request?.isForMainFrame == true) {
                                 pageLoadFailed = true
                                 pageCommitted = false
@@ -284,12 +290,28 @@ private fun FallbackAdOverlay(
                         }
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val target = request?.url?.toString() ?: return false
-                            // Inline-html (srcdoc) internal navigations aren't click-throughs.
-                            if (target.startsWith("about:")) return false
-                            // Same-origin stays in the webview; cross-origin opens externally. (When the
-                            // creative is inline html, iframeUrl is still the page's base origin.)
-                            val originHost = iframeUrl?.let { Uri.parse(it).host }
-                            if (originHost != null && originHost == Uri.parse(target).host) return false
+                            val targetUri = runCatching { Uri.parse(target) }.getOrNull() ?: return true
+                            if (targetUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
+                            // Subframes stay inside the creative and automatic cross-origin redirects
+                            // are blocked rather than opening external UI.
+                            if (request.isForMainFrame != true) return false
+                            val originUri = iframeUrl?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                            val originPort = originUri?.port?.takeIf { it >= 0 } ?: when (originUri?.scheme?.lowercase()) {
+                                "http" -> 80
+                                "https" -> 443
+                                else -> -1
+                            }
+                            val targetPort = targetUri.port.takeIf { it >= 0 } ?: when (targetUri.scheme?.lowercase()) {
+                                "http" -> 80
+                                "https" -> 443
+                                else -> -1
+                            }
+                            val sameOrigin = originUri?.host != null &&
+                                originUri.scheme.equals(targetUri.scheme, ignoreCase = true) &&
+                                originUri.host.equals(targetUri.host, ignoreCase = true) &&
+                                originPort == targetPort
+                            if (sameOrigin) return false
+                            if (!request.hasGesture()) return true
                             // Route through the shared CTA router: the tapped tracker opens
                             // verbatim (referrer-preserving); the serve's raw store link is the
                             // deterministic fallback when it can't be launched. A failed launch
@@ -310,10 +332,8 @@ private fun FallbackAdOverlay(
                             // A genuine user tap on the end-screen CTA is a click (parity with the creative
                             // CTAs; programmatic redirects don't fire onClicked). The iframe self-reports its
                             // own click beacon, so fire the publisher callback only — no SDK beacon here.
-                            if (request?.hasGesture() == true) {
-                                val now = SystemClock.elapsedRealtime()
-                                if (now - lastClickMs >= 500) { lastClickMs = now; onAdClick() }
-                            }
+                            val now = SystemClock.elapsedRealtime()
+                            if (now - lastClickMs >= 500) { lastClickMs = now; onAdClick() }
                             return true
                         }
                         // Absorb a renderer-process death so a crashing end-screen creative can't take
@@ -326,8 +346,10 @@ private fun FallbackAdOverlay(
                     if (inlineHtml != null) {
                         // Inline html (preferred). baseUrl = the iframe origin so the end screen's own
                         // click beacon (fetch to the API) stays same-origin, exactly as loadUrl did.
+                        realLoadStarted = true
                         loadDataWithBaseURL(iframeUrl, inlineHtml, "text/html", "UTF-8", null)
                     } else if (!iframeUrl.isNullOrBlank()) {
+                        realLoadStarted = true
                         loadUrl(iframeUrl)
                     }
                     fallbackWebView = this
@@ -344,7 +366,16 @@ private fun FallbackAdOverlay(
         )
 
         if (!pageCommitted) {
-            Box(Modifier.fillMaxSize().background(Color.Black))
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                        }
+                    },
+            )
         }
 
         Box(
