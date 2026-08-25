@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.network
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -32,6 +33,51 @@ class ClickTrackingTest {
         assertNull(duplicate)
         assertEquals("event-2", later?.id)
         assertNotEquals(first?.id, later?.id)
+    }
+
+    @Test
+    fun `failed click claim releases admission without starting duplicate window`() {
+        var now = 1_000L
+        var nextId = 0
+        val gate = ClickInteractionGate(clockMs = { now }, idFactory = { "event-${++nextId}" })
+
+        val failed = gate.claim(ClickSources.PRIMARY_CTA)
+        assertNull("an in-flight open owns admission", gate.claim(ClickSources.PRIMARY_CTA))
+        assertTrue(failed?.release() == true)
+
+        now = 1_100L
+        val fallback = gate.claim(ClickSources.PRIMARY_CTA)
+        assertEquals("event-2", fallback?.interaction?.id)
+        assertTrue(fallback?.commit() == true)
+    }
+
+    @Test
+    fun `successful click claim commits one interaction and suppresses duplicate callback`() {
+        var now = 1_000L
+        val gate = ClickInteractionGate(clockMs = { now }, idFactory = { "event" })
+
+        val successful = gate.claim(ClickSources.FALLBACK_CTA)
+        assertTrue(successful?.commit() == true)
+        assertEquals(ClickSources.FALLBACK_CTA, successful?.interaction?.source)
+
+        now = 1_100L
+        assertNull(gate.claim(ClickSources.FALLBACK_CTA))
+        assertFalse(successful?.release() == true)
+    }
+
+    @Test
+    fun `duplicate window begins when a delayed claim commits`() {
+        var now = 1_000L
+        val gate = ClickInteractionGate(clockMs = { now }, idFactory = { "event-$now" })
+
+        val delayed = gate.claim(ClickSources.PRIMARY_CTA)
+        now = 5_000L
+        assertTrue(delayed?.commit() == true)
+
+        now = 5_100L
+        assertNull("an immediate post-commit duplicate is suppressed", gate.claim(ClickSources.PRIMARY_CTA))
+        now = 5_500L
+        assertEquals("event-5500", gate.claim(ClickSources.PRIMARY_CTA)?.interaction?.id)
     }
 
     @Test

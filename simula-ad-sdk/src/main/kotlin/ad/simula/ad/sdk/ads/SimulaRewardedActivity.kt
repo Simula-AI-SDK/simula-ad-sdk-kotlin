@@ -128,7 +128,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     // prompt): surface the PARENT rewarded ad to onAdClicked. The end-screen iframe
                     // self-reports its own click beacon, so fire the callback only — no SDK beacon here.
                     onAdClick = { interaction -> p.callbacks.onClicked(interaction) },
-                    admitClick = p::admitClick,
+                    claimClick = p::claimClick,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
                         storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
@@ -213,10 +213,20 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             // the SSV postback is permanently lost and the durable queue has nothing to retry. Fired
             // after onClose to preserve the normal close→complete callback order. (A truly abrupt
             // process kill won't call onDestroy at all; this closes the common finish/teardown window.)
-            if (!completed && presentation?.rewardEarned == true) {
+            val currentPresentation = presentation
+            if (!completed && currentPresentation?.rewardEarned == true) {
                 completed = true
-                presentation?.let { p -> p.callbacks.onRewardCompleted(p.rewardEarned, elapsedSeconds(p)) }
-                Telemetry.recordLifecycle(stage = "reward_salvaged_on_teardown", adFormat = "rewarded")
+                currentPresentation.callbacks.onRewardCompleted(
+                    currentPresentation.rewardEarned,
+                    elapsedSeconds(currentPresentation),
+                )
+                val serveId = currentPresentation.impressionId.takeIf { it.isNotBlank() }
+                Telemetry.recordLifecycle(
+                    stage = "reward_salvaged_on_teardown",
+                    adFormat = "rewarded",
+                    adId = serveId,
+                    serveId = serveId,
+                )
             }
             token?.let { RewardedHandoff.remove(it) }
         }
@@ -508,8 +518,8 @@ private fun RewardedMinigame(
                             // pre-router failure behavior). Only a user-gesture navigation counts
                             // as a click (parity with the interstitial); auto-redirects open the
                             // store but don't fire CLICKED.
-                            val interaction = if (request?.hasGesture() == true) {
-                                presentation.admitClick(ClickSources.PRIMARY_CTA) ?: return true
+                            val claim = if (request?.hasGesture() == true) {
+                                presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
                             } else null
                             val target = CreativeCtaRouter.preferredClickUrl(
                                 presentation.trackingUrl,
@@ -522,8 +532,11 @@ private fun RewardedMinigame(
                                 presentation.adBehavior?.storeOpen,
                                 presentation.androidStoreUrl,
                             )
-                            if (!opened) return false
-                            if (interaction != null) presentation.callbacks.onClicked(interaction)
+                            if (!opened) {
+                                claim?.release()
+                                return false
+                            }
+                            if (claim?.commit() == true) presentation.callbacks.onClicked(claim.interaction)
                             recordStoreOpen(ClickSources.PRIMARY_CTA)
                             return true
                         }

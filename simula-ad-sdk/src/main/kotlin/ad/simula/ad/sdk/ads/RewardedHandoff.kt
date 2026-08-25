@@ -4,6 +4,7 @@ import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import java.util.concurrent.ConcurrentHashMap
 
@@ -63,6 +64,8 @@ internal class RewardedPresentation(
     private val clickInteractionGate = ClickInteractionGate()
 
     fun admitClick(source: String): ClickInteraction? = clickInteractionGate.admit(source)
+
+    fun claimClick(source: String): ClickInteractionClaim? = clickInteractionGate.claim(source)
 
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */
     var displayedReported = false

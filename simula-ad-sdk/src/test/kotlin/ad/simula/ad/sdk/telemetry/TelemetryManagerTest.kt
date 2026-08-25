@@ -411,6 +411,115 @@ class TelemetryManagerTest {
         assertTrue("errors always sent", events.any { it.type == TYPE_ERROR })
     }
 
+    @Test
+    fun `sampled-out critical lifecycle persists and sends while ordinary lifecycle is dropped`() = runTest {
+        val store = FakeStore()
+        val sender = FakeSender()
+        val m = build(this, store, sender, sampleRate = 0.5, random = { 0.9 })
+        var persistedAtHandoff = false
+
+        m.recordLifecycle("displayed", "rewarded", "unit", "serve", "serve", null, null)
+        m.recordLifecycle(
+            stage = "click",
+            adFormat = "rewarded",
+            adUnitId = "unit",
+            adId = "serve",
+            serveId = "serve",
+            durationMs = null,
+            errorCode = null,
+            interactionId = "interaction",
+            clickSource = "primary_cta",
+            critical = true,
+            onPersisted = {
+                persistedAtHandoff = store.data.any { it.interactionId == "interaction" }
+            },
+        )
+        advanceUntilIdle()
+
+        val lifecycle = sender.batches.allEvents().filter { it.type == TYPE_LIFECYCLE }
+        assertTrue(persistedAtHandoff)
+        assertEquals(listOf("click"), lifecycle.map { it.name })
+        assertEquals("critical events have an unsampled admission rate", 1.0, lifecycle.single().sampleRate ?: -1.0, 0.0)
+        assertEquals(1.0, sender.batches.single().sampleRate ?: -1.0, 0.0)
+    }
+
+    @Test
+    fun `confirmed critical click survives later ordinary capacity pressure`() = runTest {
+        val store = FakeStore()
+        val sender = FakeSender().apply { gateFirst() }
+        val m = build(this, store, sender)
+        var confirmed = false
+
+        m.recordLifecycle(
+            stage = "click",
+            adFormat = "interstitial",
+            adUnitId = "unit",
+            adId = "serve",
+            serveId = "serve",
+            durationMs = null,
+            errorCode = null,
+            interactionId = "critical-1",
+            clickSource = "primary_cta",
+            critical = true,
+            onPersisted = { confirmed = true },
+        )
+        runCurrent()
+        assertTrue(confirmed)
+
+        repeat(250) { index ->
+            m.recordOperation("ordinary-$index", 1L, success = true)
+        }
+        runCurrent()
+        m.flushNow()
+        runCurrent()
+
+        assertTrue(store.data.size <= 200)
+        assertTrue("confirmed critical row remains in the durable bounded snapshot", store.data.any {
+            it.interactionId == "critical-1"
+        })
+
+        sender.release()
+        advanceUntilIdle()
+        assertEquals(1, sender.batches.allEvents().count { it.interactionId == "critical-1" })
+    }
+
+    @Test
+    fun `all-critical capacity rejects new click without confirming persistence`() = runTest {
+        val store = FakeStore()
+        val sender = FakeSender().apply { gateFirst() }
+        val m = build(this, store, sender)
+        val confirmed = mutableListOf<String>()
+
+        repeat(201) { index ->
+            val interactionId = "critical-$index"
+            m.recordLifecycle(
+                stage = "click",
+                adFormat = "rewarded",
+                adUnitId = "unit",
+                adId = "serve",
+                serveId = "serve",
+                durationMs = null,
+                errorCode = null,
+                interactionId = interactionId,
+                clickSource = "store_prompt",
+                critical = true,
+                onPersisted = { confirmed += interactionId },
+            )
+        }
+        runCurrent()
+
+        assertEquals(200, store.data.size)
+        assertEquals(200, confirmed.size)
+        assertFalse(confirmed.contains("critical-200"))
+        assertTrue(store.data.none { it.interactionId == "critical-200" })
+
+        sender.release()
+        advanceUntilIdle()
+        val sentIds = sender.batches.allEvents().mapNotNull { it.interactionId }.toSet()
+        assertEquals(200, sentIds.size)
+        assertFalse(sentIds.contains("critical-200"))
+    }
+
     // ── Dev-mode console log + redaction ───────────────────────────────────────
 
     @Test
@@ -457,8 +566,21 @@ class TelemetryManagerTest {
 
         m.recordNetwork("/load", "POST", 200, 5, 0, 10, null)
         m.recordError("api:err", "err", "x")
+        var disabledHandoffReleased = false
+        m.recordLifecycle(
+            stage = "click",
+            adFormat = "rewarded",
+            adUnitId = null,
+            adId = "serve",
+            serveId = "serve",
+            durationMs = null,
+            errorCode = null,
+            critical = true,
+            onPersisted = { disabledHandoffReleased = true },
+        )
         advanceUntilIdle()
 
+        assertTrue("a disabled pipeline must not wedge external handoff", disabledHandoffReleased)
         assertTrue(sender.batches.isEmpty())
         assertTrue(store.data.isEmpty())
     }

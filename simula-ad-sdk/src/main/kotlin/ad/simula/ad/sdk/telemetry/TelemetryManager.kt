@@ -50,9 +50,9 @@ internal data class CarrierInfo(val carrier: String?, val radio: String?)
  *   with the next timed/manual flush. Perf events persist on each flush. Recovered on start.
  * - **Batched**: flushes at [FLUSH_THRESHOLD] events, every [FLUSH_INTERVAL_MS], or eagerly
  *   for a new error signature. Failed batches retry with exponential backoff.
- * - **Bounded**: the buffer caps at [MAX_BUFFER] (oldest dropped) and distinct error
- *   signatures at [MAX_ERROR_SIGNATURES]; both surface a `dropped` meta event rather than
- *   silently truncating.
+ * - **Bounded**: the buffer caps at [MAX_BUFFER] (oldest non-critical dropped; new events rejected
+ *   when every slot is a critical click) and distinct error signatures at [MAX_ERROR_SIGNATURES];
+ *   both surface a `dropped` meta event rather than silently truncating.
  * - **Sampled / killable**: perf is sampled per session at [sampleRate]; the whole pipeline
  *   honors [enabled] (host opt-out always wins; the server can additionally disable it).
  *
@@ -83,7 +83,8 @@ internal class TelemetryManager(
     private val json = Json { encodeDefaults = false; ignoreUnknownKeys = true }
 
     private val mutex = Mutex()
-    // Perf/network/lifecycle/operation events, FIFO.
+    // Perf/network/lifecycle/operation events. FIFO among ordinary events; durably confirmed
+    // critical clicks are protected from later capacity eviction.
     private val buffer = ArrayDeque<TelemetryEvent>()
     // Handled errors aggregated by an internal key within the flush window. The event's wire
     // `name` stays unchanged; crash/ANR sites add persisted fingerprint/stack context to this key
@@ -133,7 +134,7 @@ internal class TelemetryManager(
                             .toInt()
                     }
                 } else {
-                    buffer.addLast(e)
+                    admitBufferedEvent(e)
                 }
             }
         }
@@ -275,6 +276,8 @@ internal class TelemetryManager(
                 breadcrumb = breadcrumb,
                 interactionId = interactionId,
                 clickSource = clickSource,
+                // Critical lifecycle events are admitted independently of session perf sampling.
+                sampleRate = if (critical) 1.0 else effectiveSampleRate,
             ),
             persistAndFlush = critical,
             onPersisted = onPersisted,
@@ -452,24 +455,45 @@ internal class TelemetryManager(
         persistAndFlush: Boolean = false,
         onPersisted: (() -> Unit)? = null,
     ) {
-        if (!isEnabled || !perfSampledIn) {
+        if (!isEnabled) {
             runCatching { onPersisted?.invoke() }
             return
         }
+        if (!persistAndFlush && !perfSampledIn) return
         debugLog?.invoke(formatForLog(event))
         scope.launch {
-            val shouldFlush = mutex.withLock {
-                buffer.addLast(event)
-                while (buffer.size > MAX_BUFFER) {
-                    buffer.removeFirst()
-                    droppedCount++
+            var persisted = !persistAndFlush
+            val shouldFlush = runCatching {
+                mutex.withLock {
+                    if (!admitBufferedEvent(event)) return@withLock false
+                    if (persistAndFlush) persisted = store.save(snapshot())
+                    persistAndFlush || buffer.size >= FLUSH_THRESHOLD
                 }
-                if (persistAndFlush) store.save(snapshot())
-                persistAndFlush || buffer.size >= FLUSH_THRESHOLD
-            }
-            runCatching { onPersisted?.invoke() }
+            }.getOrDefault(false)
+            if (persisted) runCatching { onPersisted?.invoke() }
             if (shouldFlush) flush() else scheduleTimedFlush()
         }
+    }
+
+    /**
+     * Keep the shared FIFO bounded without invalidating a critical click's durability callback.
+     * Critical identity is derived from stable wire fields so recovered rows receive the same
+     * protection without adding a persistence-only field to the payload.
+     */
+    private fun admitBufferedEvent(event: TelemetryEvent): Boolean {
+        if (buffer.size < MAX_BUFFER) {
+            buffer.addLast(event)
+            return true
+        }
+        val evictable = buffer.firstOrNull { !it.isCriticalClickLifecycle() }
+        if (evictable == null) {
+            droppedCount++
+            return false
+        }
+        buffer.remove(evictable)
+        droppedCount++
+        buffer.addLast(event)
+        return true
     }
 
     /** Buffer + aggregated errors as one list for persistence / recovery. */
@@ -644,6 +668,10 @@ internal class TelemetryManager(
         val SECRET_RE = Regex("(?i)(api[_-]?key|token|secret|password)([=:])\\S+")
     }
 }
+
+/** Critical click rows remain recognizable after JSON/SQLite recovery. */
+internal fun TelemetryEvent.isCriticalClickLifecycle(): Boolean =
+    type == TYPE_LIFECYCLE && (name == "click" || name == "click_fired")
 
 /**
  * Internal-only aggregation key for handled errors. The stable wire [name] is always the prefix and

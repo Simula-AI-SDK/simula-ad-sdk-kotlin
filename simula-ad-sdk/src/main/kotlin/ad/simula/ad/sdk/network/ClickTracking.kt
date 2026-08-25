@@ -53,24 +53,66 @@ internal class ClickPersistenceBarrier(
 
 internal const val CLICK_PERSISTENCE_WAIT_MS = 750L
 
+/** A provisional click admission that only starts the duplicate window after [commit]. */
+internal class ClickInteractionClaim internal constructor(
+    val interaction: ClickInteraction,
+    private val gate: ClickInteractionGate,
+    private val token: Long,
+) {
+    fun commit(): Boolean = gate.commit(token)
+
+    fun release(): Boolean = gate.release(token)
+}
+
 /**
  * Presentation-scoped admission for click dispatch. WebView/navigation callbacks can fan one tap
- * out more than once; only the first callback inside the short duplicate window is accepted.
+ * out more than once; a claim blocks concurrent duplicates, but only a committed successful action
+ * starts the short duplicate window. Failed actions release their claim so fallback navigation and
+ * later callbacks remain eligible.
  */
 internal class ClickInteractionGate(
     private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },
     private val idFactory: () -> String = { UUID.randomUUID().toString() },
     private val duplicateWindowMs: Long = DUPLICATE_CLICK_WINDOW_MS,
 ) {
-    private var lastAcceptedAtMs = Long.MIN_VALUE
+    private var lastCommittedAtMs = Long.MIN_VALUE
+    private var pendingToken: Long? = null
+    private var nextToken = 0L
 
     @Synchronized
-    fun admit(source: String): ClickInteraction? {
+    fun claim(source: String): ClickInteractionClaim? {
         val now = clockMs()
-        if (lastAcceptedAtMs != Long.MIN_VALUE && now - lastAcceptedAtMs < duplicateWindowMs) return null
-        lastAcceptedAtMs = now
+        if (pendingToken != null) return null
+        if (lastCommittedAtMs != Long.MIN_VALUE && now - lastCommittedAtMs < duplicateWindowMs) return null
+        val token = ++nextToken
+        pendingToken = token
         // UUIDs stay well within the backend's 64-character click-event-id bound.
-        return ClickInteraction(id = idFactory().take(64), source = ClickSources.normalize(source))
+        return ClickInteractionClaim(
+            interaction = ClickInteraction(id = idFactory().take(64), source = ClickSources.normalize(source)),
+            gate = this,
+            token = token,
+        )
+    }
+
+    /** Immediate admission for taps whose action cannot fail after admission. */
+    fun admit(source: String): ClickInteraction? {
+        val claim = claim(source) ?: return null
+        return claim.interaction.takeIf { claim.commit() }
+    }
+
+    @Synchronized
+    internal fun commit(token: Long): Boolean {
+        if (pendingToken != token) return false
+        pendingToken = null
+        lastCommittedAtMs = clockMs()
+        return true
+    }
+
+    @Synchronized
+    internal fun release(token: Long): Boolean {
+        if (pendingToken != token) return false
+        pendingToken = null
+        return true
     }
 }
 

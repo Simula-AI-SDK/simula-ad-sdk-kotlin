@@ -20,6 +20,7 @@ import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
@@ -162,7 +163,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     // prompt): surface the PARENT interstitial ad to onAdClicked. The end-screen iframe
                     // self-reports its own click beacon, so fire the callback only — no SDK beacon here.
                     onAdClick = { interaction -> p.callbacks.onClicked(interaction) },
-                    admitClick = p::admitClick,
+                    claimClick = p::claimClick,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
                         storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
@@ -499,7 +500,7 @@ private fun CreativeInterstitial(
                 destination = ad.destination,
                 storeUrl = ad.androidStoreUrl,
                 bridge = bridge,
-                admitClick = { presentation.admitClick(ClickSources.PRIMARY_CTA) },
+                claimClick = { presentation.claimClick(ClickSources.PRIMARY_CTA) },
                 onAdClick = { interaction ->
                     presentation.callbacks.onClicked(interaction)
                     // The creative CTA opens the advertiser store (CreativeCtaRouter.open in CreativeHtml).
@@ -633,7 +634,7 @@ private fun CreativeHtml(
     destination: String,
     storeUrl: String? = null,
     bridge: CreativeBridge,
-    admitClick: () -> ClickInteraction?,
+    claimClick: () -> ClickInteractionClaim?,
     onAdClick: (ClickInteraction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -692,7 +693,7 @@ private fun CreativeHtml(
                         // Only a user gesture counts as the ad click-through; pixels
                         // and auto-redirects (no gesture) navigate normally.
                         if (!request.hasGesture()) return false
-                        val interaction = admitClick() ?: return true
+                        val claim = claimClick() ?: return true
                         // Tapped tracker opens verbatim (referrer-preserving); the raw store
                         // link is the deterministic fallback when it can't be launched. CLICKED
                         // (and the caller's primary_cta store-exit tracking / install banner) is gated on
@@ -701,8 +702,11 @@ private fun CreativeHtml(
                         // false then lets the WebView navigate in place.
                         val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, url)
                         val opened = CreativeCtaRouter.open(appContext, target, destination, null, storeUrl)
-                        if (!opened) return false
-                        onAdClick(interaction) // CLICKED
+                        if (!opened) {
+                            claim.release()
+                            return false
+                        }
+                        if (claim.commit()) onAdClick(claim.interaction) // CLICKED
                         return true
                     }
                 },

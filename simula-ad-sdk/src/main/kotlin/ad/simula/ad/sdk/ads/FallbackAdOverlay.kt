@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickSources
 import android.graphics.Bitmap
@@ -78,7 +79,7 @@ internal fun FallbackAdHost(
     autoStoreRedirect: AutoStoreRedirect? = null,
     onAutoStoreRedirect: () -> Unit = {},
     onAdClick: (ClickInteraction) -> Unit = {},
-    admitClick: ((String) -> ClickInteraction?)? = null,
+    claimClick: ((String) -> ClickInteractionClaim?)? = null,
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
     // through the shared router (tracker verbatim, raw store link as the deterministic fallback).
     // Defaults preserve today's behavior when no context is available.
@@ -89,7 +90,7 @@ internal fun FallbackAdHost(
 ) {
     var phase by remember { mutableStateOf<FallbackPhase>(FallbackPhase.Content) }
     val fallbackClickGate = remember(impressionId) { ClickInteractionGate() }
-    val clickAdmission = admitClick ?: fallbackClickGate::admit
+    val clickClaim = claimClick ?: fallbackClickGate::claim
     // auto_store_redirect END_SCREEN_N: open the primary ad's store once, when the fallback screen
     // whose index matches the configured trigger is presented (index 0 = END SCREEN 1, index 1 = 2).
     var autoRedirectFired by remember { mutableStateOf(false) }
@@ -150,7 +151,7 @@ internal fun FallbackAdHost(
                         html = ad.html,
                         adId = ad.adId,
                         onAdClick = onAdClick,
-                        admitClick = clickAdmission,
+                        claimClick = clickClaim,
                         ctaTrackingUrl = ctaTrackingUrl,
                         ctaDestination = ctaDestination,
                         ctaStoreUrl = ctaStoreUrl,
@@ -183,7 +184,7 @@ private fun FallbackAdOverlay(
     html: String? = null,
     adId: String,
     onAdClick: (ClickInteraction) -> Unit = {},
-    admitClick: (String) -> ClickInteraction?,
+    claimClick: (String) -> ClickInteractionClaim?,
     ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
@@ -317,7 +318,7 @@ private fun FallbackAdOverlay(
                                 originPort == targetPort
                             if (sameOrigin) return false
                             if (!request.hasGesture()) return true
-                            val interaction = admitClick(ClickSources.FALLBACK_CTA) ?: return true
+                            val claim = claimClick(ClickSources.FALLBACK_CTA) ?: return true
                             // Route through the shared CTA router: the tapped tracker opens
                             // verbatim (referrer-preserving); the serve's raw store link is the
                             // deterministic fallback when it can't be launched. A failed launch
@@ -334,13 +335,16 @@ private fun FallbackAdOverlay(
                                 null,
                                 ctaStoreUrl,
                             )
-                            if (!opened) return false
+                            if (!opened) {
+                                claim.release()
+                                return false
+                            }
                             // A genuine user tap on the end-screen CTA is a click (parity with the creative
                             // CTAs; programmatic redirects don't fire onClicked). The iframe self-reports its
                             // own click beacon, so fire the publisher callback/lifecycle only — no SDK
                             // beacon here. Its self-report cannot yet share the native interaction UUID;
                             // preserve this ownership until a staged creative/native contract migration.
-                            onAdClick(interaction)
+                            if (claim.commit()) onAdClick(claim.interaction)
                             return true
                         }
                         // Absorb a renderer-process death so a crashing end-screen creative can't take

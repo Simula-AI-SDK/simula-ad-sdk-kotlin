@@ -53,7 +53,7 @@ class SdkEntryTelemetryTest {
             serveId = "serve-1",
             interactionId = "interaction-1",
             clickSource = "fallback_cta",
-            sampleRate = 0.25,
+            sampleRate = 1.0,
         )
         val envelope = TelemetryEnvelope(
             sdkVersion = "1.0",
@@ -62,7 +62,7 @@ class SdkEntryTelemetryTest {
             deviceModel = "Pixel",
             hostAppId = "app",
             devMode = false,
-            sampleRate = 0.25,
+            sampleRate = 1.0,
             events = listOf(event),
         )
 
@@ -72,7 +72,55 @@ class SdkEntryTelemetryTest {
         assertTrue(encoded.contains("\"click_source\":\"fallback_cta\""))
         assertTrue(encoded.contains("\"serve_id\":\"serve-1\""))
         assertTrue(encoded.contains("\"ad_id\":\"serve-1\""))
-        assertTrue(encoded.contains("\"sample_rate\":0.25"))
+        assertTrue(encoded.contains("\"sample_rate\":1.0"))
+        assertTrue("critical identity survives serialization for disk recovery", event.isCriticalClickLifecycle())
+        assertTrue(
+            json.decodeFromString<TelemetryEnvelope>(encoded)
+                .events.single().isCriticalClickLifecycle(),
+        )
+    }
+
+    @Test
+    fun `rewarded lifecycle serializes merged impression handle for serve and store events`() {
+        val stages = listOf(
+            "load_success",
+            "displayed",
+            "impression",
+            "paid",
+            "click",
+            "closed",
+            "reward_earned",
+            "reward_verified",
+            "reward_verification_failed",
+            "reward_salvaged_on_teardown",
+            "store_opened",
+            "store_returned",
+            "store_abandoned",
+        )
+        val envelope = TelemetryEnvelope(
+            sdkVersion = "1.0",
+            platform = "android",
+            osVersion = "14",
+            deviceModel = "Pixel",
+            hostAppId = "app",
+            devMode = false,
+            events = stages.mapIndexed { index, stage ->
+                TelemetryEvent(
+                    type = TYPE_LIFECYCLE,
+                    name = stage,
+                    eventId = "event-$index",
+                    timestamp = 123L,
+                    adFormat = "rewarded",
+                    adId = "serve-1",
+                    serveId = "serve-1",
+                )
+            },
+        )
+
+        val decoded = json.decodeFromString<TelemetryEnvelope>(json.encodeToString(envelope))
+
+        assertEquals(stages, decoded.events.map { it.name })
+        assertTrue(decoded.events.all { it.adId == "serve-1" && it.serveId == "serve-1" })
     }
 
     @Test
