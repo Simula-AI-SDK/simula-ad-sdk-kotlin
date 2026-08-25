@@ -11,6 +11,8 @@ import android.content.Context
 import android.content.MutableContextWrapper
 import android.content.res.Configuration
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -22,6 +24,9 @@ import androidx.annotation.MainThread
 
 /** Shared limit for all SDK-owned WebView retention, backed by production renderer-OOM data. */
 private const val CONSTRAINED_HEAP_BYTES = 256L * 1024 * 1024
+private const val RESET_TIMEOUT_MS = 2_000L
+private const val RESET_URL_PREFIX = "https://sdk.simula.invalid/webview-reset"
+private const val RESET_HTML = "<html><body></body></html>"
 
 /**
  * Prewarms and recycles [WebView] instances so the game / post-game ad iframe
@@ -46,10 +51,15 @@ internal object WebViewPool {
     /** Avoid recreating an idle renderer immediately after Android killed it or signalled pressure. */
     private const val POOL_COOLDOWN_MS = 5L * 60 * 1000
 
-    private val idle = ArrayDeque<WebView>()
+    private val poolState = WebViewResetPoolState<WebView>()
+    private val resetTimeouts = mutableMapOf<WebView, Runnable>()
+    private val resetCompletions = mutableMapOf<WebView, (Boolean) -> Unit>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var resetGeneration = 0L
+    @Volatile private var retainedCountSnapshot = 0
 
-    /** Count of idle pooled WebViews — for telemetry diagnostics. A benign cross-thread int read. */
-    val pooledCount: Int get() = idle.size
+    /** Count of retained idle/resetting WebViews — for telemetry diagnostics. */
+    val pooledCount: Int get() = retainedCountSnapshot
 
     @Volatile private var callbacksRegistered = false
     @Volatile private var maxIdle = MAX_IDLE
@@ -57,23 +67,6 @@ internal object WebViewPool {
     // still acquire cold; only speculative/idle retention is suppressed before that signal.
     private val retentionState = WebViewRetentionState(initiallyActive = false)
     private val prewarmSkipGate = WebViewPrewarmSkipGate()
-
-    /** Swallows the prewarm `about:blank` navigation so consumers never see it. */
-    private val blankIgnoringClient = object : WebViewClient() {
-        override fun onPageFinished(view: WebView?, url: String?) { /* ignore about:blank */ }
-        // A pooled view can sit idle on about:blank for a while; absorb a renderer death here too so
-        // it can't kill the host process before the view is handed to a consumer. Every WebView
-        // attached to the dead renderer is unusable, so destroy the whole idle pool and pause
-        // prewarming; retaining the callback's dead view would later hand out a permanently blank ad.
-        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-            val absorbed = recordRenderProcessGone("pool_idle", detail)
-            if (view != null && view in idle) {
-                suspendPooling()
-                trimIdle()
-            }
-            return absorbed
-        }
-    }
 
     /**
      * Create and warm an idle WebView if there's room. An actual creation attempt emits the existing
@@ -86,7 +79,7 @@ internal object WebViewPool {
         registerTrimCallbacks(context)
         val decision = webViewPrewarmDecision(
             maxIdle = maxIdle,
-            idleCount = idle.size,
+            idleCount = poolState.retainedCount,
             nowMs = SystemClock.elapsedRealtime(),
             blockedUntilMs = retentionState.blockedUntilMs,
             applicationActive = retentionState.applicationActive,
@@ -107,8 +100,16 @@ internal object WebViewPool {
         val created = runCatching { create(context) }
         val webView = created.getOrNull()
         if (webView != null) {
-            idle.addLast(webView)
-            recordPrewarm(startNanos, trigger, success = true, result = "warmed")
+            val started = beginReset(webView) { retained ->
+                recordPrewarm(
+                    startNanos,
+                    trigger,
+                    success = retained,
+                    result = if (retained) "warmed" else "failed",
+                    failureClass = if (retained) null else "ResetFailed",
+                )
+            }
+            if (!started) runCatching { webView.destroy() }
         } else {
             recordPrewarm(
                 startNanos,
@@ -129,7 +130,7 @@ internal object WebViewPool {
     fun acquire(context: Context, client: WebViewClient, surface: String = "unspecified"): WebView {
         val startNanos = System.nanoTime()
         registerTrimCallbacks(context)
-        val pooled = idle.removeFirstOrNull()
+        val pooled = poolState.acquire().also { publishRetainedCount() }
         val webView = pooled ?: create(context)
         // Defensive detach: a consumer's Compose AndroidView inserts this view into its holder via
         // addView, which throws "child already has a parent" if the view is still attached. A pooled
@@ -161,24 +162,23 @@ internal object WebViewPool {
         // Guard against a double release: enqueuing the same instance twice would let two acquire()
         // calls hand out one live WebView, and the second addView would crash with "child already has
         // a parent". If it's already idle it was reset on the first release, so this is a safe no-op.
-        if (webView in idle) return
+        if (poolState.contains(webView)) return
         webView.stopLoading()
         (webView.parent as? ViewGroup)?.removeView(webView)
         // Drop the Activity reference so a pooled WebView can't leak it.
         (webView.context as? MutableContextWrapper)?.let { it.baseContext = it.applicationContext }
         if (canRetainPooledWebView(
                 maxIdle,
-                idle.size,
+                poolState.retainedCount,
                 SystemClock.elapsedRealtime(),
                 retentionState.blockedUntilMs,
                 retentionState.applicationActive,
             )
         ) {
-            // Re-pooling: reset to about:blank so a recycled view never flashes the prior creative.
-            // about:blank tears down the page's DOM/JS context; clearHistory drops back/forward state.
+            // Keep the detached view quarantined until its reset document fully finishes. Adding it
+            // to the acquirable pool earlier can forward a queued reset callback into the next client.
             // (No clearCache — that flushes the app-global RAM cache and would undercut prewarming
             // without adding isolation.)
-            webView.webViewClient = blankIgnoringClient
             // Restore the scroll chrome + viewport tweaks a consumer applied (the native-ad path
             // disables scrollbars/overscroll and widens the viewport) so the next consumer of this
             // shared instance (minigame, interstitial, rewarded, fallback) starts from the same
@@ -188,9 +188,7 @@ internal object WebViewPool {
             webView.overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
             webView.settings.useWideViewPort = false
             webView.settings.loadWithOverviewMode = false
-            webView.loadUrl("about:blank")
-            webView.clearHistory()
-            idle.addLast(webView)
+            if (!beginReset(webView)) runCatching { webView.destroy() }
         } else {
             // Discarding: destroy WITHOUT first kicking off an about:blank load. That load completes
             // asynchronously, and its loadingStateChanged callback would fire into the just-destroyed
@@ -200,10 +198,96 @@ internal object WebViewPool {
         }
     }
 
-    /** Destroy warm idle WebViews under memory pressure (callbacks arrive on the main thread). */
+    /** Destroy warm idle/resetting WebViews under memory pressure. */
     @MainThread
     internal fun trimIdle() {
-        while (idle.isNotEmpty()) idle.removeFirst().destroy()
+        poolState.evictAll().forEach { webView ->
+            resetTimeouts.remove(webView)?.let(mainHandler::removeCallbacks)
+            resetCompletions.remove(webView)?.invoke(false)
+            runCatching { webView.destroy() }
+        }
+        publishRetainedCount()
+    }
+
+    /**
+     * Reset a detached view under an SDK-only URL and expose it to [acquire] only after
+     * [WebViewClient.onPageFinished]. Waiting through finish prevents both commit and finish events
+     * from the reset navigation being delivered to the next consumer.
+     */
+    @MainThread
+    private fun beginReset(webView: WebView, onComplete: ((Boolean) -> Unit)? = null): Boolean {
+        if (!poolState.beginReset(webView, maxIdle)) {
+            onComplete?.invoke(false)
+            return false
+        }
+        publishRetainedCount()
+        if (onComplete != null) resetCompletions[webView] = onComplete
+
+        val timeout = Runnable { failReset(webView) }
+        resetTimeouts[webView] = timeout
+        mainHandler.postDelayed(timeout, RESET_TIMEOUT_MS)
+        val resetUrl = "$RESET_URL_PREFIX/${++resetGeneration}"
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                if (view === webView && url == resetUrl) finishReset(webView)
+            }
+
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                val absorbed = recordRenderProcessGone("pool_idle", detail)
+                if (view != null && poolState.contains(view)) {
+                    suspendPooling()
+                    trimIdle()
+                }
+                return absorbed
+            }
+        }
+        return runCatching {
+            webView.loadDataWithBaseURL(resetUrl, RESET_HTML, "text/html", "UTF-8", resetUrl)
+        }.fold(
+            onSuccess = { true },
+            onFailure = {
+                resetTimeouts.remove(webView)?.let(mainHandler::removeCallbacks)
+                poolState.failReset(webView)
+                publishRetainedCount()
+                resetCompletions.remove(webView)?.invoke(false)
+                false
+            },
+        )
+    }
+
+    @MainThread
+    private fun finishReset(webView: WebView) {
+        if (!poolState.contains(webView)) return
+        resetTimeouts.remove(webView)?.let(mainHandler::removeCallbacks)
+        val retain = canRetainPooledWebView(
+            maxIdle = maxIdle,
+            idleCount = poolState.readyCount,
+            nowMs = SystemClock.elapsedRealtime(),
+            blockedUntilMs = retentionState.blockedUntilMs,
+            applicationActive = retentionState.applicationActive,
+        )
+        val retained = poolState.completeReset(webView, retain)
+        publishRetainedCount()
+        resetCompletions.remove(webView)?.invoke(retained)
+        if (retained) {
+            webView.clearHistory()
+        } else if (!poolState.contains(webView)) {
+            runCatching { webView.destroy() }
+        }
+    }
+
+    @MainThread
+    private fun failReset(webView: WebView) {
+        resetTimeouts.remove(webView)?.let(mainHandler::removeCallbacks)
+        if (poolState.failReset(webView)) {
+            publishRetainedCount()
+            resetCompletions.remove(webView)?.invoke(false)
+            runCatching { webView.destroy() }
+        }
+    }
+
+    private fun publishRetainedCount() {
+        retainedCountSnapshot = poolState.retainedCount
     }
 
     private fun suspendPooling() {
@@ -319,9 +403,39 @@ internal object WebViewPool {
             settings.domStorageEnabled = true
             settings.mediaPlaybackRequiresUserGesture = false
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            webViewClient = blankIgnoringClient
-            loadUrl("about:blank")
         }
+    }
+}
+
+/** Pure reset/ready ownership used by [WebViewPool] and JVM policy tests. */
+internal class WebViewResetPoolState<T> {
+    private val ready = ArrayDeque<T>()
+    private val resetting = linkedSetOf<T>()
+
+    val readyCount: Int get() = ready.size
+    val retainedCount: Int get() = ready.size + resetting.size
+
+    fun contains(value: T): Boolean = value in ready || value in resetting
+
+    fun acquire(): T? = ready.removeFirstOrNull()
+
+    fun beginReset(value: T, capacity: Int): Boolean {
+        if (capacity <= retainedCount || contains(value)) return false
+        return resetting.add(value)
+    }
+
+    fun completeReset(value: T, retain: Boolean): Boolean {
+        if (!resetting.remove(value) || !retain) return false
+        ready.addLast(value)
+        return true
+    }
+
+    fun failReset(value: T): Boolean = resetting.remove(value)
+
+    fun evictAll(): List<T> = buildList {
+        while (ready.isNotEmpty()) add(ready.removeFirst())
+        addAll(resetting)
+        resetting.clear()
     }
 }
 
