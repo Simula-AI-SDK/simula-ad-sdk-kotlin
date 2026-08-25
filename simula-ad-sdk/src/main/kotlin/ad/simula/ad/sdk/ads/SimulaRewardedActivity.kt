@@ -305,6 +305,15 @@ private fun RewardedMinigame(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val clickHandoffHandler = remember { Handler(Looper.getMainLooper()) }
+    var clickHandoffPending by remember(presentation) {
+        mutableStateOf(presentation.hasPendingClick())
+    }
+    DisposableEffect(presentation) {
+        val subscription = presentation.pendingClickHandoff()?.addResultListener {
+            clickHandoffPending = false
+        }
+        onDispose { subscription?.cancel() }
+    }
     val autoRedirectScope = remember(presentation) { Any() }
     DisposableEffect(presentation.autoRedirectCoordinator, autoRedirectScope) {
         presentation.autoRedirectCoordinator.activate(autoRedirectScope)
@@ -490,7 +499,9 @@ private fun RewardedMinigame(
     }
 
     // No early exit: Back does nothing until the reward is earned, then it closes (earned).
-    BackHandler(enabled = true) { if (rewardEarned) onFinish(true) }
+    BackHandler(enabled = true) {
+        if (canDismissFullscreen(rewardEarned, presentation.hasPendingClick())) onFinish(true)
+    }
 
     Box(
         modifier = Modifier
@@ -599,10 +610,12 @@ private fun RewardedMinigame(
             position = close.position,
             progressBarColor = close.progressBarColor,
             isRewardCopy = true,
-            enabled = rewardEarned,
+            enabled = canDismissFullscreen(rewardEarned, clickHandoffPending),
             remaining = secondsLeft,
             progress = closeProgress.value,
-            onClose = { onFinish(true) },
+            onClose = {
+                if (canDismissFullscreen(rewardEarned, presentation.hasPendingClick())) onFinish(true)
+            },
         )
 
         // Mid-ad store prompt — appears at half the play-to-earn gate and is removed the instant the
@@ -648,8 +661,14 @@ private fun RewardedMinigame(
                             if (opened) recordStoreOpen(committedInteraction.source)
                             opened
                         },
-                        onCreated = presentation::trackClickHandoff,
-                        onFinished = presentation::clearClickHandoff,
+                        onCreated = { handoff ->
+                            presentation.trackClickHandoff(handoff)
+                            clickHandoffPending = true
+                        },
+                        onFinished = { handoff ->
+                            presentation.clearClickHandoff(handoff)
+                            clickHandoffPending = presentation.hasPendingClick()
+                        },
                     )
                 },
             )

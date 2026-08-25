@@ -329,6 +329,15 @@ private fun CreativeInterstitial(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val clickHandoffHandler = remember { Handler(Looper.getMainLooper()) }
+    var clickHandoffPending by remember(presentation) {
+        mutableStateOf(presentation.hasPendingClick())
+    }
+    DisposableEffect(presentation) {
+        val subscription = presentation.pendingClickHandoff()?.addResultListener {
+            clickHandoffPending = false
+        }
+        onDispose { subscription?.cancel() }
+    }
     val autoRedirectScope = remember(presentation) { Any() }
     DisposableEffect(presentation.autoRedirectCoordinator, autoRedirectScope) {
         presentation.autoRedirectCoordinator.activate(autoRedirectScope)
@@ -499,7 +508,9 @@ private fun CreativeInterstitial(
     // advanced to its end-screen phase. (The end-screen phase has its own BackHandler in
     // FallbackAdOverlay; this one is only composed during the primary creative.) Mirrors
     // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
-    BackHandler(enabled = true) { if (closeEnabled) onFinish() }
+    BackHandler(enabled = true) {
+        if (canDismissFullscreen(closeEnabled, presentation.hasPendingClick())) onFinish()
+    }
 
     Box(
         modifier = Modifier
@@ -545,10 +556,12 @@ private fun CreativeInterstitial(
             position = close.position,
             progressBarColor = close.progressBarColor,
             isRewardCopy = isRewardCopy,
-            enabled = closeEnabled,
+            enabled = canDismissFullscreen(closeEnabled, clickHandoffPending),
             remaining = closeRemaining,
             progress = closeProgress.value,
-            onClose = onFinish,
+            onClose = {
+                if (canDismissFullscreen(closeEnabled, presentation.hasPendingClick())) onFinish()
+            },
         )
 
         // Mid-ad store prompt — pinned to the corner opposite the close button (the SDK mirrors the
@@ -587,8 +600,14 @@ private fun CreativeInterstitial(
                             if (opened) recordStoreOpen(committedInteraction.source)
                             opened
                         },
-                        onCreated = presentation::trackClickHandoff,
-                        onFinished = presentation::clearClickHandoff,
+                        onCreated = { handoff ->
+                            presentation.trackClickHandoff(handoff)
+                            clickHandoffPending = true
+                        },
+                        onFinished = { handoff ->
+                            presentation.clearClickHandoff(handoff)
+                            clickHandoffPending = presentation.hasPendingClick()
+                        },
                     )
                 },
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
@@ -625,8 +644,14 @@ private fun CreativeInterstitial(
                             if (opened) recordStoreOpen(committedInteraction.source)
                             opened
                         },
-                        onCreated = presentation::trackClickHandoff,
-                        onFinished = presentation::clearClickHandoff,
+                        onCreated = { handoff ->
+                            presentation.trackClickHandoff(handoff)
+                            clickHandoffPending = true
+                        },
+                        onFinished = { handoff ->
+                            presentation.clearClickHandoff(handoff)
+                            clickHandoffPending = presentation.hasPendingClick()
+                        },
                     )
                 },
                 onDismiss = { installBannerVisible = false },

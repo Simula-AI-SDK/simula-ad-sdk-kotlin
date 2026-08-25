@@ -58,6 +58,9 @@ internal fun coordinateClickPersistence(
     return handoff
 }
 
+internal fun canDismissFullscreen(dismissUnlocked: Boolean, hasPendingClick: Boolean): Boolean =
+    dismissUnlocked && !hasPendingClick
+
 /**
  * Tracks the store-exit funnel for a single full-screen ad presentation: which click type sent the
  * user to the store, how long they were away, and whether they came back. Emits `store_opened`,
