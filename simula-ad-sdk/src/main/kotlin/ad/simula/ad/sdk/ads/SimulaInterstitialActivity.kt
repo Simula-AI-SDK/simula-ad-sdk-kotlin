@@ -19,6 +19,8 @@ import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.network.AdBeaconManager
+import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import ad.simula.ad.sdk.util.ColorUtil
@@ -26,6 +28,8 @@ import android.app.Activity
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.WindowManager
 import android.webkit.WebResourceRequest
@@ -157,10 +161,11 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     // A user tap on an end-screen CTA is a click (parity with the creative CTA / store
                     // prompt): surface the PARENT interstitial ad to onAdClicked. The end-screen iframe
                     // self-reports its own click beacon, so fire the callback only — no SDK beacon here.
-                    onAdClick = { p.callbacks.onClicked() },
+                    onAdClick = { interaction -> p.callbacks.onClicked(interaction) },
+                    admitClick = p::admitClick,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
-                        storeExit?.recordStoreOpen("auto_redirect")
+                        storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
                         CreativeCtaRouter.open(
                             applicationContext,
                             p.ad.trackingUrl,
@@ -317,6 +322,7 @@ private fun CreativeInterstitial(
     // bypassing the close-delay gate.
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val clickHandoffHandler = remember { Handler(Looper.getMainLooper()) }
     // auto_store_redirect: open the advertiser store once (no user tap). PLAYABLE_END fires when the
     // close button appears (below); END_SCREEN_1/2_OPEN fire when the creative navigates to the
     // matching end-screen marker (handled in the WebView client). A disabled/missing config no-ops.
@@ -325,7 +331,7 @@ private fun CreativeInterstitial(
     fun fireAutoStoreRedirect() {
         if (!autoRedirectFired) {
             autoRedirectFired = true
-            recordStoreOpen("auto_redirect")
+            recordStoreOpen(ClickSources.AUTO_REDIRECT)
             openDestination(ad)
         }
     }
@@ -493,10 +499,11 @@ private fun CreativeInterstitial(
                 destination = ad.destination,
                 storeUrl = ad.androidStoreUrl,
                 bridge = bridge,
-                onAdClick = {
-                    presentation.callbacks.onClicked()
+                admitClick = { presentation.admitClick(ClickSources.PRIMARY_CTA) },
+                onAdClick = { interaction ->
+                    presentation.callbacks.onClicked(interaction)
                     // The creative CTA opens the advertiser store (CreativeCtaRouter.open in CreativeHtml).
-                    recordStoreOpen("cta")
+                    recordStoreOpen(interaction.source)
                     // Play install banner timed to the click (independent of the store the CTA opens).
                     if (skoverlay != null && skoverlay.enabled &&
                         skoverlay.timing == OverlayTiming.ON_CLICK && Build.VERSION.SDK_INT >= 21
@@ -541,10 +548,27 @@ private fun CreativeInterstitial(
                     // onClicked), then the durable click beacon — only on a real user tap.
                     // openDestination is reused by auto_store_redirect (no tap), so the click
                     // signal lives here on the badge, not in openDestination.
-                    presentation.callbacks.onClicked()
-                    AdBeaconManager.enqueue(ad.impressionId, "click", adFormat = "interstitial")
-                    recordStoreOpen("store_prompt")
-                    openDestination(ad)
+                    val interaction = presentation.admitClick(ClickSources.STORE_PROMPT) ?: return@StorePromptBadge
+                    coordinateClickPersistence(
+                        mainHandler = clickHandoffHandler,
+                        enqueueBeacon = { completion ->
+                            AdBeaconManager.enqueue(
+                                ad.impressionId,
+                                "click",
+                                adFormat = "interstitial",
+                                interactionId = interaction.id,
+                                clickSource = interaction.source,
+                                onPersistenceComplete = completion,
+                            )
+                        },
+                        recordTelemetry = { completion ->
+                            presentation.callbacks.onClicked(interaction, completion)
+                        },
+                        onReady = {
+                            recordStoreOpen(interaction.source)
+                            openDestination(ad)
+                        },
+                    )
                 },
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
             )
@@ -557,10 +581,27 @@ private fun CreativeInterstitial(
                 onTap = {
                     // A user tap on the install banner opens the primary ad's store — surface the click
                     // (parity with the store-prompt badge / creative CTA) plus the durable click beacon.
-                    presentation.callbacks.onClicked()
-                    AdBeaconManager.enqueue(ad.impressionId, "click", adFormat = "interstitial")
-                    recordStoreOpen("store_prompt")
-                    openDestination(ad)
+                    val interaction = presentation.admitClick(ClickSources.INSTALL_BANNER) ?: return@PlayInstallBanner
+                    coordinateClickPersistence(
+                        mainHandler = clickHandoffHandler,
+                        enqueueBeacon = { completion ->
+                            AdBeaconManager.enqueue(
+                                ad.impressionId,
+                                "click",
+                                adFormat = "interstitial",
+                                interactionId = interaction.id,
+                                clickSource = interaction.source,
+                                onPersistenceComplete = completion,
+                            )
+                        },
+                        recordTelemetry = { completion ->
+                            presentation.callbacks.onClicked(interaction, completion)
+                        },
+                        onReady = {
+                            recordStoreOpen(interaction.source)
+                            openDestination(ad)
+                        },
+                    )
                 },
                 onDismiss = { installBannerVisible = false },
             )
@@ -592,7 +633,8 @@ private fun CreativeHtml(
     destination: String,
     storeUrl: String? = null,
     bridge: CreativeBridge,
-    onAdClick: () -> Unit,
+    admitClick: () -> ClickInteraction?,
+    onAdClick: (ClickInteraction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // applicationContext so the store/browser open survives if the interstitial is
@@ -650,16 +692,17 @@ private fun CreativeHtml(
                         // Only a user gesture counts as the ad click-through; pixels
                         // and auto-redirects (no gesture) navigate normally.
                         if (!request.hasGesture()) return false
+                        val interaction = admitClick() ?: return true
                         // Tapped tracker opens verbatim (referrer-preserving); the raw store
                         // link is the deterministic fallback when it can't be launched. CLICKED
-                        // (and the caller's recordStoreOpen("cta") / install banner) is gated on
+                        // (and the caller's primary_cta store-exit tracking / install banner) is gated on
                         // the launch actually succeeding — parity with the rewarded playable — so
                         // a failed launch is never recorded as a click/store visit; returning
                         // false then lets the WebView navigate in place.
                         val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, url)
                         val opened = CreativeCtaRouter.open(appContext, target, destination, null, storeUrl)
                         if (!opened) return false
-                        onAdClick() // CLICKED
+                        onAdClick(interaction) // CLICKED
                         return true
                     }
                 },

@@ -326,11 +326,13 @@ fun NativeAdSlot(
                             )
                         }
                     },
-                    onAdClick = {
+                    onAdClick = { interaction ->
                         // Surface the click to the publisher (parity with the interstitial's
                         // onAdClicked; CAI consumes this) BEFORE recording telemetry.
                         currentOnClick()
-                        // click lifecycle parity with interstitial/rewarded (was a reserved no-op).
+                        // character_ad HTML owns its backend click beacon for backward compatibility.
+                        // Native only emits the publisher callback + lifecycle telemetry here; adding
+                        // an SDK beacon would double-count the creative's self-report.
                         Telemetry.recordLifecycle(
                             stage = "click",
                             adFormat = result.adFormat,
@@ -339,6 +341,9 @@ fun NativeAdSlot(
                             serveId = null,
                             durationMs = null,
                             errorCode = null,
+                            interactionId = interaction.id,
+                            clickSource = interaction.source,
+                            critical = true,
                         )
                     },
                     onLoadError = {

@@ -32,13 +32,22 @@ internal data class PendingBeacon(
     val impressionId: String,
     val action: String,
     val metadata: Map<String, String>? = null,
+    val interactionId: String? = null,
+    val clickSource: String? = null,
     var retryCount: Int = 0,
     var lastAttemptTimestamp: Long = 0L,
     val rowId: String = UUID.randomUUID().toString(),
     val createdTimestamp: Long = 0L,
 )
 
-internal fun beaconActionKey(impressionId: String, action: String): String = "$impressionId\u0000$action"
+internal fun beaconActionKey(impressionId: String, action: String, interactionId: String? = null): String =
+    if (action == "click" && !interactionId.isNullOrBlank()) {
+        "$impressionId\u0000$action\u0000$interactionId"
+    } else {
+        "$impressionId\u0000$action"
+    }
+
+private fun PendingBeacon.actionKey(): String = beaconActionKey(impressionId, action, interactionId)
 
 /** Persists the pending-beacon queue. Abstracted so the queue engine is unit-testable. */
 internal interface BeaconStore {
@@ -53,7 +62,7 @@ internal interface BeaconStore {
         }
         for (record in records) {
             val index = queue.indexOfFirst {
-                it.impressionId == record.impressionId && it.action == record.action
+                it.actionKey() == record.actionKey()
             }
             if (index == -1) queue += record else queue[index] = record
         }
@@ -66,7 +75,7 @@ internal interface BeaconStore {
             DurableLoadResult.Failed -> return DurableMutationResult.Failed
         }
         val index = queue.indexOfFirst {
-            it.impressionId == beacon.impressionId && it.action == beacon.action
+            it.actionKey() == beacon.actionKey()
         }
         if (index == -1) queue += beacon else queue[index] = beacon
         return save(queue)
@@ -100,7 +109,14 @@ internal interface BeaconStore {
 
 /** Sends one impression-action beacon; returns the HTTP status, or throws on a connectivity failure. */
 internal interface BeaconSender {
-    suspend fun send(impressionId: String, action: String, metadata: Map<String, String>?): Int
+    suspend fun send(beacon: PendingBeacon): Int
+}
+
+internal enum class BeaconPersistenceOutcome {
+    Persisted,
+    RetryableFailure,
+    Rejected,
+    Unavailable,
 }
 
 /**
@@ -108,11 +124,8 @@ internal interface BeaconSender {
  * reliably and off the UI path — the same durable, conflict-free design as
  * [RewardVerificationQueue]. The ad fires-and-forgets into this queue; the queue owns delivery.
  *
- * - **Deduped**: at most one in-flight entry per `(impressionId, action)`, so a beacon is never
- *   enqueued twice. Retries only happen for sends that did NOT get a 2xx, so a beacon the server
- *   already accepted is not re-sent. (The billable `/seen` is deduped server-side per impression;
- *   `/click` increments a counter, so a lost-response retry carries a small over-count risk —
- *   acceptable vs. today's silent loss, and removable once the endpoint takes an idempotency key.)
+ * - **Deduped**: shown/seen use `(impressionId, action)`; clicks additionally use their stable
+ *   interaction id, so one interaction survives retry without suppressing a genuinely later click.
  * - **Durable**: persisted via [BeaconStore]; survives process death, recovered on the next trigger.
  * - **Backed off**: failed attempts retry with the shared exponential backoff (5s → 60s cap).
  *
@@ -135,18 +148,33 @@ internal class AdBeaconQueue(
     private var storageFailureReported = false
 
     /** Enqueue a beacon and start draining. Duplicate metadata is merged for the same action. */
-    fun queue(impressionId: String, action: String, metadata: Map<String, String>? = null) {
-        if (impressionId.isBlank()) return
+    fun queue(
+        impressionId: String,
+        action: String,
+        metadata: Map<String, String>? = null,
+        interactionId: String? = null,
+        clickSource: String? = null,
+        onPersistenceComplete: (BeaconPersistenceOutcome) -> Unit = {},
+    ) {
+        if (impressionId.isBlank()) {
+            runCatching { onPersistenceComplete(BeaconPersistenceOutcome.Rejected) }
+            return
+        }
         val metadataSnapshot = metadata?.takeIf { action == "seen" }?.let { normalizeExtraParameters(it) }
+        val stableInteractionId = if (action == "click") interactionId?.takeIf { it.isNotBlank() }
+            ?: UUID.randomUUID().toString() else null
+        val normalizedClickSource = clickSource?.takeIf { action == "click" }?.let(ClickSources::normalize)
         scope.launch {
+            var persistenceOutcome = BeaconPersistenceOutcome.RetryableFailure
             val shouldProcess = mutex.withLock {
-                val key = beaconActionKey(impressionId, action)
+                val key = beaconActionKey(impressionId, action, stableInteractionId)
                 val existing = pendingEnqueues[key]
                 if (existing == null && pendingEnqueues.size >= maxPendingEnqueues.coerceAtLeast(0)) {
                     Telemetry.recordError(
                         signature = "durable_queue:pending_full",
                         breadcrumb = "queue=beacon",
                     )
+                    persistenceOutcome = BeaconPersistenceOutcome.Rejected
                     return@withLock false
                 }
                 pendingEnqueues[key] = if (existing == null) {
@@ -154,6 +182,8 @@ internal class AdBeaconQueue(
                         impressionId = impressionId,
                         action = action,
                         metadata = metadataSnapshot,
+                        interactionId = stableInteractionId,
+                        clickSource = normalizedClickSource,
                         createdTimestamp = clock(),
                     )
                 } else if (!metadataSnapshot.isNullOrEmpty()) {
@@ -164,11 +194,19 @@ internal class AdBeaconQueue(
                     existing
                 }
                 if (storageRecoveryJob?.isActive == true) {
+                    persistenceOutcome = BeaconPersistenceOutcome.RetryableFailure
                     false
                 } else {
-                    recoverStorageLocked()
+                    recoverStorageLocked().also { persisted ->
+                        persistenceOutcome = if (persisted) {
+                            BeaconPersistenceOutcome.Persisted
+                        } else {
+                            BeaconPersistenceOutcome.RetryableFailure
+                        }
+                    }
                 }
             }
+            runCatching { onPersistenceComplete(persistenceOutcome) }
             if (shouldProcess) processQueue()
         }
     }
@@ -186,7 +224,7 @@ internal class AdBeaconQueue(
         val records = ArrayList<PendingBeacon>(pendingEnqueues.size)
         for ((key, pending) in pendingEnqueues) {
             val existing = durable.firstOrNull {
-                beaconActionKey(it.impressionId, it.action) == key
+                it.actionKey() == key
             }
             if (existing == null) {
                 records += pending
@@ -290,7 +328,7 @@ internal class AdBeaconQueue(
                 }
 
                 val delivered = try {
-                    val code = sender.send(task.impressionId, task.action, task.metadata)
+                    val code = sender.send(task)
                     when {
                         code in 200..299 -> true // accepted
                         code in 400..499 && code != 408 && code != 429 -> true // permanent client error → drop
@@ -426,27 +464,56 @@ internal object AdBeaconManager {
         adFormat: String? = null,
         adUnitId: String? = null,
         metadata: Map<String, String>? = null,
+        interactionId: String? = null,
+        clickSource: String? = null,
+        onPersistenceComplete: (BeaconPersistenceOutcome) -> Unit = {},
     ) {
-        if (impressionId.isBlank()) return
+        if (impressionId.isBlank()) {
+            runCatching { onPersistenceComplete(BeaconPersistenceOutcome.Rejected) }
+            return
+        }
         when (action) {
             "seen" -> Telemetry.recordLifecycle(
                 stage = "impression_fired", adFormat = adFormat, adUnitId = adUnitId, adId = impressionId,
+                serveId = impressionId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
             )
             "click" -> Telemetry.recordLifecycle(
                 stage = "click_fired", adFormat = adFormat, adUnitId = adUnitId, adId = impressionId,
+                serveId = impressionId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
+                interactionId = interactionId,
+                clickSource = clickSource?.let(ClickSources::normalize),
+                critical = true,
             )
         }
-        engine?.queue(impressionId, action, metadata)
+        val activeEngine = engine
+        if (activeEngine == null) {
+            runCatching { onPersistenceComplete(BeaconPersistenceOutcome.Unavailable) }
+        } else {
+            activeEngine.queue(
+                impressionId,
+                action,
+                metadata,
+                interactionId,
+                clickSource,
+                onPersistenceComplete,
+            )
+        }
     }
 }
 
 /** Real sender: a no-body impression beacon, surfacing the HTTP status so the queue can retry/drop. */
 private class ApiBeaconSender(private val apiKey: String) : BeaconSender {
-    override suspend fun send(impressionId: String, action: String, metadata: Map<String, String>?): Int =
-        SimulaApiClient.sendImpressionBeacon(impressionId, action, apiKey, metadata)
+    override suspend fun send(beacon: PendingBeacon): Int = SimulaApiClient.sendImpressionBeacon(
+        impressionId = beacon.impressionId,
+        action = beacon.action,
+        apiKey = apiKey,
+        metadata = beacon.metadata,
+        interactionId = beacon.interactionId ?: beacon.rowId.takeIf { beacon.action == "click" },
+        clickSource = beacon.clickSource ?: ClickSources.PRIMARY_CTA.takeIf { beacon.action == "click" },
+    )
 }
 
-/** WAL SQLite rows keyed by the stable `(impressionId, action)` action key. */
+/** WAL SQLite rows keyed by the stable action key (plus interaction id for clicks). */
 internal class SqliteBeaconStore internal constructor(
     private val rows: DurableQueueRows,
     private val legacy: LegacyQueueSource,
@@ -475,7 +542,7 @@ internal class SqliteBeaconStore internal constructor(
                 for (row in loaded.value) {
                     val beacon = runCatching { json.decodeFromString<PendingBeacon>(row.payload) }.getOrNull()
                         ?: return DurableLoadResult.Failed
-                    if (beaconActionKey(beacon.impressionId, beacon.action) != row.key || beacon.rowId != row.rowId) {
+                    if (beacon.actionKey() != row.key || beacon.rowId != row.rowId) {
                         return DurableLoadResult.Failed
                     }
                     decoded += beacon
@@ -499,7 +566,7 @@ internal class SqliteBeaconStore internal constructor(
     }
 
     override fun remove(beacon: PendingBeacon): DurableMutationResult = mutation {
-        rows.removeIfRevision(beaconActionKey(beacon.impressionId, beacon.action), beacon.rowId)
+        rows.removeIfRevision(beacon.actionKey(), beacon.rowId)
     }
 
     override fun replaceIfRevision(
@@ -507,7 +574,7 @@ internal class SqliteBeaconStore internal constructor(
         replacement: PendingBeacon,
     ): DurableMutationResult = mutation {
         rows.replaceIfRevision(
-            beaconActionKey(previous.impressionId, previous.action), previous.rowId, row(replacement),
+            previous.actionKey(), previous.rowId, row(replacement),
         )
     }
 
@@ -517,7 +584,7 @@ internal class SqliteBeaconStore internal constructor(
     private fun row(beacon: PendingBeacon): DurableQueueRow {
         val normalized = if (beacon.createdTimestamp > 0L) beacon else beacon.copy(createdTimestamp = clock())
         return DurableQueueRow(
-            key = beaconActionKey(normalized.impressionId, normalized.action),
+            key = normalized.actionKey(),
             rowId = normalized.rowId,
             createdAt = normalized.createdTimestamp,
             payload = json.encodeToString(normalized),

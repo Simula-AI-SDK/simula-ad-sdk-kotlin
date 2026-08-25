@@ -3,6 +3,8 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdValue
+import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionGate
 import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the rewarded Activity back to the [SimulaRewardedAd] instance. */
@@ -17,7 +19,7 @@ internal interface RewardedCallbacks {
     fun onPaid(adValue: AdValue)
 
     /** A user-gesture CTA / store-prompt tap (the CLICKED signal). Mirrors [InterstitialCallbacks.onClicked]. */
-    fun onClicked()
+    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
 
     /**
      * The minigame (playable) surface was dismissed. [earned] is whether the play reached the
@@ -58,6 +60,10 @@ internal class RewardedPresentation(
     val adValue: AdValue = AdValue.fromBidCpm(0.0),
     val metadata: Map<String, String>? = null,
 ) {
+    private val clickInteractionGate = ClickInteractionGate()
+
+    fun admitClick(source: String): ClickInteraction? = clickInteractionGate.admit(source)
+
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */
     var displayedReported = false
 

@@ -2,6 +2,8 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdValue
+import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.SimulaApiClient
 import java.util.concurrent.ConcurrentHashMap
 
@@ -16,7 +18,7 @@ internal interface InterstitialCallbacks {
     /** The paid event — fired together with [onImpression], carrying the on-device estimate. */
     fun onPaid(adValue: AdValue)
 
-    fun onClicked()
+    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
     fun onClosed()
 }
 
@@ -27,6 +29,10 @@ internal class InterstitialPresentation(
     val callbacks: InterstitialCallbacks,
     val metadata: Map<String, String>? = null,
 ) {
+    private val clickInteractionGate = ClickInteractionGate()
+
+    fun admitClick(source: String): ClickInteraction? = clickInteractionGate.admit(source)
+
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */
     var displayedReported = false
 

@@ -6,6 +6,9 @@ import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionGate
+import ad.simula.ad.sdk.network.ClickSources
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.SystemClock
@@ -74,7 +77,8 @@ internal fun FallbackAdHost(
     onFullyClosed: () -> Unit,
     autoStoreRedirect: AutoStoreRedirect? = null,
     onAutoStoreRedirect: () -> Unit = {},
-    onAdClick: () -> Unit = {},
+    onAdClick: (ClickInteraction) -> Unit = {},
+    admitClick: ((String) -> ClickInteraction?)? = null,
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
     // through the shared router (tracker verbatim, raw store link as the deterministic fallback).
     // Defaults preserve today's behavior when no context is available.
@@ -84,6 +88,8 @@ internal fun FallbackAdHost(
     content: @Composable (onClose: () -> Unit) -> Unit,
 ) {
     var phase by remember { mutableStateOf<FallbackPhase>(FallbackPhase.Content) }
+    val fallbackClickGate = remember(impressionId) { ClickInteractionGate() }
+    val clickAdmission = admitClick ?: fallbackClickGate::admit
     // auto_store_redirect END_SCREEN_N: open the primary ad's store once, when the fallback screen
     // whose index matches the configured trigger is presented (index 0 = END SCREEN 1, index 1 = 2).
     var autoRedirectFired by remember { mutableStateOf(false) }
@@ -144,6 +150,7 @@ internal fun FallbackAdHost(
                         html = ad.html,
                         adId = ad.adId,
                         onAdClick = onAdClick,
+                        admitClick = clickAdmission,
                         ctaTrackingUrl = ctaTrackingUrl,
                         ctaDestination = ctaDestination,
                         ctaStoreUrl = ctaStoreUrl,
@@ -175,7 +182,8 @@ private fun FallbackAdOverlay(
     iframeUrl: String?,
     html: String? = null,
     adId: String,
-    onAdClick: () -> Unit = {},
+    onAdClick: (ClickInteraction) -> Unit = {},
+    admitClick: (String) -> ClickInteraction?,
     ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
@@ -247,9 +255,6 @@ private fun FallbackAdOverlay(
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : WebViewClient() {
-                        // Monotonic time of the last fired CTA click — de-dupes a single tap that surfaces
-                        // more than one navigation (e.g. window.open from the inline srcdoc creative).
-                        var lastClickMs = 0L
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             if (!realLoadStarted) return
                             pageCommitted = false
@@ -312,6 +317,7 @@ private fun FallbackAdOverlay(
                                 originPort == targetPort
                             if (sameOrigin) return false
                             if (!request.hasGesture()) return true
+                            val interaction = admitClick(ClickSources.FALLBACK_CTA) ?: return true
                             // Route through the shared CTA router: the tapped tracker opens
                             // verbatim (referrer-preserving); the serve's raw store link is the
                             // deterministic fallback when it can't be launched. A failed launch
@@ -331,9 +337,10 @@ private fun FallbackAdOverlay(
                             if (!opened) return false
                             // A genuine user tap on the end-screen CTA is a click (parity with the creative
                             // CTAs; programmatic redirects don't fire onClicked). The iframe self-reports its
-                            // own click beacon, so fire the publisher callback only — no SDK beacon here.
-                            val now = SystemClock.elapsedRealtime()
-                            if (now - lastClickMs >= 500) { lastClickMs = now; onAdClick() }
+                            // own click beacon, so fire the publisher callback/lifecycle only — no SDK
+                            // beacon here. Its self-report cannot yet share the native interaction UUID;
+                            // preserve this ownership until a staged creative/native contract migration.
+                            onAdClick(interaction)
                             return true
                         }
                         // Absorb a renderer-process death so a crashing end-screen creative can't take

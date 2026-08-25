@@ -13,6 +13,7 @@ import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.network.AdBeaconManager
+import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
@@ -20,6 +21,8 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.WindowManager
 import android.webkit.WebResourceRequest
@@ -124,10 +127,11 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     // A user tap on an end-screen CTA is a click (parity with the playable CTA / store
                     // prompt): surface the PARENT rewarded ad to onAdClicked. The end-screen iframe
                     // self-reports its own click beacon, so fire the callback only — no SDK beacon here.
-                    onAdClick = { p.callbacks.onClicked() },
+                    onAdClick = { interaction -> p.callbacks.onClicked(interaction) },
+                    admitClick = p::admitClick,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
-                        storeExit?.recordStoreOpen("auto_redirect")
+                        storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
                         CreativeCtaRouter.open(
                             applicationContext,
                             p.trackingUrl,
@@ -285,6 +289,7 @@ private fun RewardedMinigame(
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val clickHandoffHandler = remember { Handler(Looper.getMainLooper()) }
 
     // Suspend the creative's JS/timers/video while the host is backgrounded — AndroidView won't pause
     // a WebView on its own, so a rewarded ad left open behind the home screen would keep running.
@@ -324,7 +329,7 @@ private fun RewardedMinigame(
     fun fireAutoStoreRedirect() {
         if (!autoRedirectFired) {
             autoRedirectFired = true
-            recordStoreOpen("auto_redirect")
+            recordStoreOpen(ClickSources.AUTO_REDIRECT)
             CreativeCtaRouter.open(
                 context.applicationContext,
                 presentation.trackingUrl,
@@ -503,6 +508,9 @@ private fun RewardedMinigame(
                             // pre-router failure behavior). Only a user-gesture navigation counts
                             // as a click (parity with the interstitial); auto-redirects open the
                             // store but don't fire CLICKED.
+                            val interaction = if (request?.hasGesture() == true) {
+                                presentation.admitClick(ClickSources.PRIMARY_CTA) ?: return true
+                            } else null
                             val target = CreativeCtaRouter.preferredClickUrl(
                                 presentation.trackingUrl,
                                 requestUrl,
@@ -515,8 +523,8 @@ private fun RewardedMinigame(
                                 presentation.androidStoreUrl,
                             )
                             if (!opened) return false
-                            if (request?.hasGesture() == true) presentation.callbacks.onClicked()
-                            recordStoreOpen("cta")
+                            if (interaction != null) presentation.callbacks.onClicked(interaction)
+                            recordStoreOpen(ClickSources.PRIMARY_CTA)
                             return true
                         }
                     },
@@ -576,15 +584,33 @@ private fun RewardedMinigame(
                 onTap = {
                     // Surface the click to the publisher first (parity with the interstitial), then
                     // the durable click beacon — only on a real user tap (not auto_store_redirect).
-                    presentation.callbacks.onClicked()
-                    AdBeaconManager.enqueue(presentation.impressionId, "click", adFormat = "rewarded")
-                    recordStoreOpen("store_prompt")
-                    CreativeCtaRouter.open(
-                        context.applicationContext,
-                        presentation.trackingUrl,
-                        presentation.destination,
-                        presentation.adBehavior?.storeOpen,
-                        presentation.androidStoreUrl,
+                    val interaction = presentation.admitClick(ClickSources.STORE_PROMPT)
+                        ?: return@StorePromptBadge
+                    coordinateClickPersistence(
+                        mainHandler = clickHandoffHandler,
+                        enqueueBeacon = { completion ->
+                            AdBeaconManager.enqueue(
+                                presentation.impressionId,
+                                "click",
+                                adFormat = "rewarded",
+                                interactionId = interaction.id,
+                                clickSource = interaction.source,
+                                onPersistenceComplete = completion,
+                            )
+                        },
+                        recordTelemetry = { completion ->
+                            presentation.callbacks.onClicked(interaction, completion)
+                        },
+                        onReady = {
+                            recordStoreOpen(interaction.source)
+                            CreativeCtaRouter.open(
+                                context.applicationContext,
+                                presentation.trackingUrl,
+                                presentation.destination,
+                                presentation.adBehavior?.storeOpen,
+                                presentation.androidStoreUrl,
+                            )
+                        },
                     )
                 },
             )

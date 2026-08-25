@@ -43,6 +43,39 @@ class SdkEntryTelemetryTest {
     }
 
     @Test
+    fun `click telemetry and envelope serialize coordinated tracking fields`() {
+        val event = TelemetryEvent(
+            type = TYPE_LIFECYCLE,
+            name = "click",
+            eventId = "telemetry-1",
+            timestamp = 123L,
+            adId = "serve-1",
+            serveId = "serve-1",
+            interactionId = "interaction-1",
+            clickSource = "fallback_cta",
+            sampleRate = 0.25,
+        )
+        val envelope = TelemetryEnvelope(
+            sdkVersion = "1.0",
+            platform = "android",
+            osVersion = "14",
+            deviceModel = "Pixel",
+            hostAppId = "app",
+            devMode = false,
+            sampleRate = 0.25,
+            events = listOf(event),
+        )
+
+        val encoded = json.encodeToString(envelope)
+
+        assertTrue(encoded.contains("\"interaction_id\":\"interaction-1\""))
+        assertTrue(encoded.contains("\"click_source\":\"fallback_cta\""))
+        assertTrue(encoded.contains("\"serve_id\":\"serve-1\""))
+        assertTrue(encoded.contains("\"ad_id\":\"serve-1\""))
+        assertTrue(encoded.contains("\"sample_rate\":0.25"))
+    }
+
+    @Test
     fun `entry origin is first wins monotonic and clamps clock regressions`() {
         var now = 1_000_000L
         val origin = MonotonicSdkEntryOrigin { now }

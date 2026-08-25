@@ -98,7 +98,8 @@ internal class TelemetryManager(
     private var retryCount = 0
 
     @Volatile private var isEnabled: Boolean = enabled
-    @Volatile private var perfSampledIn: Boolean = enabled && random() < sampleRate
+    @Volatile private var effectiveSampleRate: Double = if (enabled) sampleRate.coerceIn(0.0, 1.0) else 0.0
+    @Volatile private var perfSampledIn: Boolean = enabled && random() < effectiveSampleRate
 
     // Aux session state for the funnel / time-to-first-ad / experiment, guarded by a plain lock
     // (recordLifecycle is non-suspend, so it can't take the coroutine `mutex`).
@@ -146,7 +147,8 @@ internal class TelemetryManager(
      */
     fun applyServerConfig(enabled: Boolean, sampleRate: Double) {
         isEnabled = enabled
-        perfSampledIn = enabled && random() < sampleRate.coerceIn(0.0, 1.0)
+        effectiveSampleRate = if (enabled) sampleRate.coerceIn(0.0, 1.0) else 0.0
+        perfSampledIn = enabled && random() < effectiveSampleRate
     }
 
     // ── Record entry points (cheap; offload to the scope) ──────────────────────
@@ -254,6 +256,10 @@ internal class TelemetryManager(
         trigger: String? = null,
         cacheSource: String? = null,
         breadcrumb: String? = null,
+        interactionId: String? = null,
+        clickSource: String? = null,
+        critical: Boolean = false,
+        onPersisted: (() -> Unit)? = null,
     ) {
         accumulate(stage, adFormat, cacheSource, errorCode)
         enqueuePerf(
@@ -267,7 +273,11 @@ internal class TelemetryManager(
                 trigger = trigger,
                 cacheSource = cacheSource,
                 breadcrumb = breadcrumb,
+                interactionId = interactionId,
+                clickSource = clickSource,
             ),
+            persistAndFlush = critical,
+            onPersisted = onPersisted,
         )
     }
 
@@ -396,8 +406,13 @@ internal class TelemetryManager(
 
     // ── Internals ──────────────────────────────────────────────────────────────
 
-    private fun newEvent(type: String, name: String) =
-        TelemetryEvent(type = type, name = name, eventId = UUID.randomUUID().toString(), timestamp = clock())
+    private fun newEvent(type: String, name: String) = TelemetryEvent(
+        type = type,
+        name = name,
+        eventId = UUID.randomUUID().toString(),
+        timestamp = clock(),
+        sampleRate = effectiveSampleRate,
+    )
 
     /** Compact one-line view for the dev console. Carries only non-sensitive event fields —
      * never the envelope's apiKey/ppid/advertising-id — and the message is already redacted. */
@@ -414,6 +429,8 @@ internal class TelemetryManager(
         e.adUnitId?.let { append(" unit=").append(it) }
         e.adId?.let { append(" ad=").append(it) }
         e.serveId?.let { append(" serve=").append(it) }
+        e.interactionId?.let { append(" interaction=").append(it) }
+        e.clickSource?.let { append(" source=").append(it) }
         e.errorCode?.let { append(" code=").append(it) }
         e.count?.let { append(" count=").append(it) }
         e.message?.let { append(" msg=").append(it) }
@@ -430,8 +447,15 @@ internal class TelemetryManager(
         return r.take(MAX_MESSAGE_LEN)
     }
 
-    private fun enqueuePerf(event: TelemetryEvent) {
-        if (!isEnabled || !perfSampledIn) return
+    private fun enqueuePerf(
+        event: TelemetryEvent,
+        persistAndFlush: Boolean = false,
+        onPersisted: (() -> Unit)? = null,
+    ) {
+        if (!isEnabled || !perfSampledIn) {
+            runCatching { onPersisted?.invoke() }
+            return
+        }
         debugLog?.invoke(formatForLog(event))
         scope.launch {
             val shouldFlush = mutex.withLock {
@@ -440,8 +464,10 @@ internal class TelemetryManager(
                     buffer.removeFirst()
                     droppedCount++
                 }
-                buffer.size >= FLUSH_THRESHOLD
+                if (persistAndFlush) store.save(snapshot())
+                persistAndFlush || buffer.size >= FLUSH_THRESHOLD
             }
+            runCatching { onPersisted?.invoke() }
             if (shouldFlush) flush() else scheduleTimedFlush()
         }
     }
@@ -582,6 +608,9 @@ internal class TelemetryManager(
             deviceModel = ctx.deviceModel,
             hostAppId = ctx.hostAppId,
             devMode = ctx.devMode,
+            // A mixed-epoch batch has no single accurate envelope rate; every new event carries its
+            // own admission rate, while this compatibility field remains useful for homogeneous batches.
+            sampleRate = events.map { it.sampleRate }.distinct().singleOrNull(),
             sessionId = identity.sessionId,
             // PII providers are already consent-gated by the facade (re-checked at send time).
             primaryUserId = identity.primaryUserId,

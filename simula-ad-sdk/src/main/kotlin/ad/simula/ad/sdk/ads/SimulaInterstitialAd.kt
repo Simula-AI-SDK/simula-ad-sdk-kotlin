@@ -210,7 +210,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     adFormat = AD_FORMAT,
                     adUnitId = adUnitId,
                     adId = ad.impressionId,
-                    serveId = null,
+                    serveId = ad.impressionId,
                     durationMs = elapsedSinceLoad(),
                     errorCode = null,
                 )
@@ -374,7 +374,13 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     override fun onDisplayed() { listener?.onAdDisplayed(this@SimulaInterstitialAd) }
                     override fun onImpression() { listener?.onAdImpression(this@SimulaInterstitialAd) }
                     override fun onPaid(adValue: AdValue) { listener?.onAdPaid(this@SimulaInterstitialAd, adValue) }
-                    override fun onClicked() { listener?.onAdClicked(this@SimulaInterstitialAd) }
+                    override fun onClicked(
+                        interaction: ad.simula.ad.sdk.network.ClickInteraction,
+                        onTelemetryPersisted: () -> Unit,
+                    ) {
+                        listener?.onAdClicked(this@SimulaInterstitialAd)
+                        onTelemetryPersisted()
+                    }
                     override fun onClosed() {
                         state = State.Idle
                         listener?.onAdClosed(this@SimulaInterstitialAd)
@@ -445,28 +451,41 @@ class SimulaInterstitialAd(val adUnitId: String) {
 
     private fun bridge(adId: String): InterstitialCallbacks = object : InterstitialCallbacks {
         override fun onDisplayed() {
-            Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, null, elapsedSinceShow(), null)
+            Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, adId, elapsedSinceShow(), null)
             listener?.onAdDisplayed(this@SimulaInterstitialAd)
         }
 
         override fun onImpression() {
-            Telemetry.recordLifecycle("impression", AD_FORMAT, adUnitId, adId, null, elapsedSinceShow(), null)
+            Telemetry.recordLifecycle("impression", AD_FORMAT, adUnitId, adId, adId, elapsedSinceShow(), null)
             listener?.onAdImpression(this@SimulaInterstitialAd)
         }
 
         override fun onPaid(adValue: AdValue) {
-            Telemetry.recordLifecycle("paid", AD_FORMAT, adUnitId, adId, null, null, null)
+            Telemetry.recordLifecycle("paid", AD_FORMAT, adUnitId, adId, adId, null, null)
             listener?.onAdPaid(this@SimulaInterstitialAd, adValue)
         }
 
-        override fun onClicked() {
-            Telemetry.recordLifecycle("click", AD_FORMAT, adUnitId, adId, null, null, null)
+        override fun onClicked(
+            interaction: ad.simula.ad.sdk.network.ClickInteraction,
+            onTelemetryPersisted: () -> Unit,
+        ) {
+            Telemetry.recordLifecycle(
+                stage = "click",
+                adFormat = AD_FORMAT,
+                adUnitId = adUnitId,
+                adId = adId,
+                serveId = adId,
+                interactionId = interaction.id,
+                clickSource = interaction.source,
+                critical = true,
+                onPersisted = onTelemetryPersisted,
+            )
             listener?.onAdClicked(this@SimulaInterstitialAd)
         }
 
         override fun onClosed() {
             state = State.Idle
-            Telemetry.recordLifecycle("closed", AD_FORMAT, adUnitId, adId, null, null, null)
+            Telemetry.recordLifecycle("closed", AD_FORMAT, adUnitId, adId, adId, null, null)
             listener?.onAdClosed(this@SimulaInterstitialAd)
             // Auto-preload the next ad (iOS parity), reusing the last character context.
             load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
