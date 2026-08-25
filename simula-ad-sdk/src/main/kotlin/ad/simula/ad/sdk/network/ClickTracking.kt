@@ -26,29 +26,88 @@ internal data class ClickInteraction(
 
 internal enum class ClickPersistencePart { TELEMETRY, BEACON }
 
-/** Releases an external handoff once both durable writes complete, or once its caller times out. */
-internal class ClickPersistenceBarrier(
-    private val onReady: (timedOut: Boolean) -> Unit,
+/** Holds click admission until both durable writes complete or timeout explicitly fails open. */
+internal class ClickPersistenceHandoff(
+    private val claim: ClickInteractionClaim,
+    onReady: (timedOut: Boolean) -> Unit,
 ) {
     private val completed = HashSet<ClickPersistencePart>(2)
-    private var released = false
+    private var state = State.PENDING
+    private var readyCallback: ((Boolean) -> Unit)? = onReady
 
-    @Synchronized
     fun complete(part: ClickPersistencePart) {
-        if (released) return
-        completed += part
-        if (completed.size == ClickPersistencePart.entries.size) release(timedOut = false)
+        val becameReady = synchronized(this) {
+            if (state != State.PENDING) return
+            completed += part
+            if (completed.size != ClickPersistencePart.entries.size) false else {
+                state = State.READY
+                true
+            }
+        }
+        if (becameReady) dispatchReady(timedOut = false)
+    }
+
+    fun timeout(): Boolean {
+        val becameReady = synchronized(this) {
+            if (state != State.PENDING) return false
+            state = State.READY
+            true
+        }
+        if (becameReady) dispatchReady(timedOut = true)
+        return becameReady
+    }
+
+    fun cancel(): Boolean {
+        val shouldRelease = synchronized(this) {
+            if (state == State.FINISHED || state == State.CANCELLED) return false
+            state = State.CANCELLED
+            readyCallback = null
+            true
+        }
+        return shouldRelease && claim.release()
     }
 
     @Synchronized
-    fun timeout() {
-        if (!released) release(timedOut = true)
+    fun isTerminal(): Boolean = state == State.FINISHED || state == State.CANCELLED
+
+    /** Commit immediately before the external route; a failed route rolls the gate back for retry. */
+    fun handoff(route: (ClickInteraction) -> Boolean): Boolean {
+        val shouldRoute = synchronized(this) {
+            if (state != State.READY) return false
+            state = State.FINISHED
+            readyCallback = null
+            true
+        }
+        if (!shouldRoute || !claim.commit()) return false
+        val opened = runCatching { route(claim.interaction) }.getOrDefault(false)
+        if (!opened) claim.rollbackCommit()
+        return opened
     }
 
-    private fun release(timedOut: Boolean) {
-        released = true
-        onReady(timedOut)
+    private fun dispatchReady(timedOut: Boolean) {
+        val callback = synchronized(this) { readyCallback.also { readyCallback = null } }
+        runCatching { callback?.invoke(timedOut) }.onFailure { cancel() }
     }
+
+    private enum class State { PENDING, READY, FINISHED, CANCELLED }
+}
+
+internal enum class ClickRouteOutcome { BLOCKED, OPEN_FAILED, OPENED }
+
+/** Route a synchronous CTA without consuming admission when the external open fails. */
+internal fun routeClaimedClick(
+    claim: ClickInteractionClaim?,
+    open: () -> Boolean,
+    onOpened: (ClickInteraction) -> Unit,
+): ClickRouteOutcome {
+    claim ?: return ClickRouteOutcome.BLOCKED
+    if (!runCatching(open).getOrDefault(false)) {
+        claim.release()
+        return ClickRouteOutcome.OPEN_FAILED
+    }
+    if (!claim.commit()) return ClickRouteOutcome.BLOCKED
+    onOpened(claim.interaction)
+    return ClickRouteOutcome.OPENED
 }
 
 internal const val CLICK_PERSISTENCE_WAIT_MS = 750L
@@ -62,6 +121,8 @@ internal class ClickInteractionClaim internal constructor(
     fun commit(): Boolean = gate.commit(token)
 
     fun release(): Boolean = gate.release(token)
+
+    internal fun rollbackCommit(): Boolean = gate.rollbackCommit(token)
 }
 
 /**
@@ -76,6 +137,7 @@ internal class ClickInteractionGate(
     private val duplicateWindowMs: Long = DUPLICATE_CLICK_WINDOW_MS,
 ) {
     private var lastCommittedAtMs = Long.MIN_VALUE
+    private var lastCommittedToken: Long? = null
     private var pendingToken: Long? = null
     private var nextToken = 0L
 
@@ -105,6 +167,7 @@ internal class ClickInteractionGate(
         if (pendingToken != token) return false
         pendingToken = null
         lastCommittedAtMs = clockMs()
+        lastCommittedToken = token
         return true
     }
 
@@ -114,6 +177,17 @@ internal class ClickInteractionGate(
         pendingToken = null
         return true
     }
+
+    @Synchronized
+    internal fun rollbackCommit(token: Long): Boolean {
+        if (lastCommittedToken != token) return false
+        lastCommittedToken = null
+        lastCommittedAtMs = Long.MIN_VALUE
+        return true
+    }
+
+    @Synchronized
+    fun hasPendingClaim(): Boolean = pendingToken != null
 }
 
 private const val DUPLICATE_CLICK_WINDOW_MS = 500L

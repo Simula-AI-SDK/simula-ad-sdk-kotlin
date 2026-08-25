@@ -5,6 +5,7 @@ import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
+import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.SimulaApiClient
 import java.util.concurrent.ConcurrentHashMap
 
@@ -31,10 +32,27 @@ internal class InterstitialPresentation(
     val metadata: Map<String, String>? = null,
 ) {
     private val clickInteractionGate = ClickInteractionGate()
-
-    fun admitClick(source: String): ClickInteraction? = clickInteractionGate.admit(source)
+    private var pendingClickHandoff: ClickPersistenceHandoff? = null
 
     fun claimClick(source: String): ClickInteractionClaim? = clickInteractionGate.claim(source)
+
+    fun hasPendingClick(): Boolean = clickInteractionGate.hasPendingClaim()
+
+    @Synchronized
+    fun trackClickHandoff(handoff: ClickPersistenceHandoff) {
+        pendingClickHandoff = handoff
+    }
+
+    @Synchronized
+    fun clearClickHandoff(handoff: ClickPersistenceHandoff) {
+        if (pendingClickHandoff === handoff) pendingClickHandoff = null
+    }
+
+    @Synchronized
+    fun cancelPendingClickHandoff() {
+        pendingClickHandoff?.cancel()
+        pendingClickHandoff = null
+    }
 
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */
     var displayedReported = false
@@ -78,7 +96,7 @@ internal object InterstitialHandoff {
     }
 
     fun remove(token: String) {
-        pending.remove(token)
+        pending.remove(token)?.cancelPendingClickHandoff()
         FullscreenPresentationRegistry.release("interstitial:$token")
     }
 }

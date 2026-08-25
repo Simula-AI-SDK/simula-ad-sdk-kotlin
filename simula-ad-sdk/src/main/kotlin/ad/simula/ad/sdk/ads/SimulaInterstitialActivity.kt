@@ -21,8 +21,10 @@ import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
+import ad.simula.ad.sdk.network.ClickRouteOutcome
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.network.routeClaimedClick
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import ad.simula.ad.sdk.util.ColorUtil
 import android.app.Activity
@@ -166,14 +168,15 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     claimClick = p::claimClick,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
-                        storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
-                        CreativeCtaRouter.open(
+                        if (p.hasPendingClick()) return@FallbackAdHost
+                        val opened = CreativeCtaRouter.open(
                             applicationContext,
                             p.ad.trackingUrl,
                             p.ad.destination,
                             p.ad.adBehavior?.storeOpen,
                             p.ad.androidStoreUrl,
                         )
+                        if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
                     },
                     // End-screen CTA routing context (deterministic store fallback).
                     ctaTrackingUrl = p.ad.trackingUrl,
@@ -283,7 +286,7 @@ private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
     onFinish: () -> Unit,
     recordStoreOpen: (String) -> Unit,
-    openDestination: (SimulaApiClient.AdLoadResult) -> Unit,
+    openDestination: (SimulaApiClient.AdLoadResult) -> Boolean,
 ) {
     val ad = presentation.ad
     // The server-rendered HTML creative is the sole creative. load() only readies an
@@ -332,8 +335,9 @@ private fun CreativeInterstitial(
     fun fireAutoStoreRedirect() {
         if (!autoRedirectFired) {
             autoRedirectFired = true
-            recordStoreOpen(ClickSources.AUTO_REDIRECT)
-            openDestination(ad)
+            if (!presentation.hasPendingClick() && openDestination(ad)) {
+                recordStoreOpen(ClickSources.AUTO_REDIRECT)
+            }
         }
     }
     val bridge = remember {
@@ -549,9 +553,11 @@ private fun CreativeInterstitial(
                     // onClicked), then the durable click beacon — only on a real user tap.
                     // openDestination is reused by auto_store_redirect (no tap), so the click
                     // signal lives here on the badge, not in openDestination.
-                    val interaction = presentation.admitClick(ClickSources.STORE_PROMPT) ?: return@StorePromptBadge
+                    val claim = presentation.claimClick(ClickSources.STORE_PROMPT) ?: return@StorePromptBadge
+                    val interaction = claim.interaction
                     coordinateClickPersistence(
                         mainHandler = clickHandoffHandler,
+                        claim = claim,
                         enqueueBeacon = { completion ->
                             AdBeaconManager.enqueue(
                                 ad.impressionId,
@@ -565,10 +571,13 @@ private fun CreativeInterstitial(
                         recordTelemetry = { completion ->
                             presentation.callbacks.onClicked(interaction, completion)
                         },
-                        onReady = {
-                            recordStoreOpen(interaction.source)
-                            openDestination(ad)
+                        onHandoff = { committedInteraction ->
+                            val opened = openDestination(ad)
+                            if (opened) recordStoreOpen(committedInteraction.source)
+                            opened
                         },
+                        onCreated = presentation::trackClickHandoff,
+                        onFinished = presentation::clearClickHandoff,
                     )
                 },
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
@@ -582,9 +591,11 @@ private fun CreativeInterstitial(
                 onTap = {
                     // A user tap on the install banner opens the primary ad's store — surface the click
                     // (parity with the store-prompt badge / creative CTA) plus the durable click beacon.
-                    val interaction = presentation.admitClick(ClickSources.INSTALL_BANNER) ?: return@PlayInstallBanner
+                    val claim = presentation.claimClick(ClickSources.INSTALL_BANNER) ?: return@PlayInstallBanner
+                    val interaction = claim.interaction
                     coordinateClickPersistence(
                         mainHandler = clickHandoffHandler,
+                        claim = claim,
                         enqueueBeacon = { completion ->
                             AdBeaconManager.enqueue(
                                 ad.impressionId,
@@ -598,10 +609,13 @@ private fun CreativeInterstitial(
                         recordTelemetry = { completion ->
                             presentation.callbacks.onClicked(interaction, completion)
                         },
-                        onReady = {
-                            recordStoreOpen(interaction.source)
-                            openDestination(ad)
+                        onHandoff = { committedInteraction ->
+                            val opened = openDestination(ad)
+                            if (opened) recordStoreOpen(committedInteraction.source)
+                            opened
                         },
+                        onCreated = presentation::trackClickHandoff,
+                        onFinished = presentation::clearClickHandoff,
                     )
                 },
                 onDismiss = { installBannerVisible = false },
@@ -693,21 +707,23 @@ private fun CreativeHtml(
                         // Only a user gesture counts as the ad click-through; pixels
                         // and auto-redirects (no gesture) navigate normally.
                         if (!request.hasGesture()) return false
-                        val claim = claimClick() ?: return true
                         // Tapped tracker opens verbatim (referrer-preserving); the raw store
                         // link is the deterministic fallback when it can't be launched. CLICKED
                         // (and the caller's primary_cta store-exit tracking / install banner) is gated on
                         // the launch actually succeeding — parity with the rewarded playable — so
                         // a failed launch is never recorded as a click/store visit; returning
                         // false then lets the WebView navigate in place.
-                        val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, url)
-                        val opened = CreativeCtaRouter.open(appContext, target, destination, null, storeUrl)
-                        if (!opened) {
-                            claim.release()
-                            return false
+                        return when (routeClaimedClick(
+                            claim = claimClick(),
+                            open = {
+                                val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, url)
+                                CreativeCtaRouter.open(appContext, target, destination, null, storeUrl)
+                            },
+                            onOpened = onAdClick,
+                        )) {
+                            ClickRouteOutcome.OPEN_FAILED -> false
+                            ClickRouteOutcome.BLOCKED, ClickRouteOutcome.OPENED -> true
                         }
-                        if (claim.commit()) onAdClick(claim.interaction) // CLICKED
-                        return true
                     }
                 },
                 surface = "interstitial",

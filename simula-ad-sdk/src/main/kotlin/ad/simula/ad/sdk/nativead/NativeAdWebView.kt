@@ -15,6 +15,7 @@ import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickSources
+import ad.simula.ad.sdk.network.routeClaimedClick
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.MutableContextWrapper
@@ -816,11 +817,14 @@ internal class NativeAdWiring(
      * rides along so the router can deterministically land an appstore CTA on the store when the
      * tracker can't be launched (parity with the interstitial/rewarded CTAs). */
     fun openExternal(tappedUrl: String) {
-        val interaction = clickInteractionGate.admit(ClickSources.PRIMARY_CTA) ?: return
-        val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, tappedUrl)
-        if (CreativeCtaRouter.open(appContext, target, destination, storeUrl = storeUrl)) {
-            onAdClick(interaction)
-        }
+        routeClaimedClick(
+            claim = clickInteractionGate.claim(ClickSources.PRIMARY_CTA),
+            open = {
+                val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, tappedUrl)
+                CreativeCtaRouter.open(appContext, target, destination, storeUrl = storeUrl)
+            },
+            onOpened = onAdClick,
+        )
     }
 }
 

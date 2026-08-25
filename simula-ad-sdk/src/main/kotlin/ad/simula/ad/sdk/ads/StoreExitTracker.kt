@@ -2,7 +2,9 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.network.BeaconPersistenceOutcome
 import ad.simula.ad.sdk.network.CLICK_PERSISTENCE_WAIT_MS
-import ad.simula.ad.sdk.network.ClickPersistenceBarrier
+import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionClaim
+import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickPersistencePart
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.os.Handler
@@ -15,35 +17,44 @@ import android.os.SystemClock
  */
 internal fun coordinateClickPersistence(
     mainHandler: Handler,
+    claim: ClickInteractionClaim,
     enqueueBeacon: ((BeaconPersistenceOutcome) -> Unit) -> Unit,
     recordTelemetry: (() -> Unit) -> Unit,
-    onReady: () -> Unit,
-) {
-    lateinit var barrier: ClickPersistenceBarrier
-    val timeout = Runnable { barrier.timeout() }
-    barrier = ClickPersistenceBarrier { timedOut ->
-        mainHandler.removeCallbacks(timeout)
-        if (timedOut) {
-            Telemetry.recordError(
-                signature = "click:persistence_timeout",
-                breadcrumb = "handoff=external",
-            )
-        }
-        mainHandler.post(onReady)
+    onHandoff: (ClickInteraction) -> Boolean,
+    onCreated: (ClickPersistenceHandoff) -> Unit = {},
+    onFinished: (ClickPersistenceHandoff) -> Unit = {},
+): ClickPersistenceHandoff {
+    lateinit var handoff: ClickPersistenceHandoff
+    lateinit var timeout: Runnable
+    val route = Runnable {
+        handoff.handoff(onHandoff)
+        runCatching { onFinished(handoff) }
     }
+    timeout = Runnable {
+        if (!handoff.timeout()) return@Runnable
+        Telemetry.recordError(
+            signature = "click:persistence_timeout",
+            breadcrumb = "handoff=external",
+        )
+    }
+    handoff = ClickPersistenceHandoff(claim) {
+        mainHandler.removeCallbacks(timeout)
+        mainHandler.post(route)
+    }
+    runCatching { onCreated(handoff) }.onFailure { handoff.cancel() }
+    if (handoff.isTerminal()) return handoff
     mainHandler.postDelayed(timeout, CLICK_PERSISTENCE_WAIT_MS)
     runCatching {
         enqueueBeacon { outcome ->
             if (outcome == BeaconPersistenceOutcome.Persisted) {
-                barrier.complete(ClickPersistencePart.BEACON)
+                handoff.complete(ClickPersistencePart.BEACON)
             }
         }
     }
     runCatching {
-        recordTelemetry { barrier.complete(ClickPersistencePart.TELEMETRY) }
-    }.onFailure {
-        barrier.complete(ClickPersistencePart.TELEMETRY)
+        recordTelemetry { handoff.complete(ClickPersistencePart.TELEMETRY) }
     }
+    return handoff
 }
 
 /**

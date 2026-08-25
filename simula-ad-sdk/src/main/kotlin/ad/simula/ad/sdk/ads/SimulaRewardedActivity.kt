@@ -13,8 +13,10 @@ import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.network.AdBeaconManager
+import ad.simula.ad.sdk.network.ClickRouteOutcome
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.network.routeClaimedClick
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
 import android.graphics.Bitmap
@@ -131,14 +133,15 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     claimClick = p::claimClick,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
-                        storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
-                        CreativeCtaRouter.open(
+                        if (p.hasPendingClick()) return@FallbackAdHost
+                        val opened = CreativeCtaRouter.open(
                             applicationContext,
                             p.trackingUrl,
                             p.destination,
                             p.adBehavior?.storeOpen,
                             p.androidStoreUrl,
                         )
+                        if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
                     },
                     // End-screen CTA routing context (deterministic store fallback).
                     ctaTrackingUrl = p.trackingUrl,
@@ -339,14 +342,16 @@ private fun RewardedMinigame(
     fun fireAutoStoreRedirect() {
         if (!autoRedirectFired) {
             autoRedirectFired = true
-            recordStoreOpen(ClickSources.AUTO_REDIRECT)
-            CreativeCtaRouter.open(
-                context.applicationContext,
-                presentation.trackingUrl,
-                presentation.destination,
-                presentation.adBehavior?.storeOpen,
-                presentation.androidStoreUrl,
-            )
+            if (!presentation.hasPendingClick()) {
+                val opened = CreativeCtaRouter.open(
+                    context.applicationContext,
+                    presentation.trackingUrl,
+                    presentation.destination,
+                    presentation.adBehavior?.storeOpen,
+                    presentation.androidStoreUrl,
+                )
+                if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
+            }
         }
     }
     val bridge = remember {
@@ -518,27 +523,36 @@ private fun RewardedMinigame(
                             // pre-router failure behavior). Only a user-gesture navigation counts
                             // as a click (parity with the interstitial); auto-redirects open the
                             // store but don't fire CLICKED.
-                            val claim = if (request?.hasGesture() == true) {
-                                presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
-                            } else null
-                            val target = CreativeCtaRouter.preferredClickUrl(
-                                presentation.trackingUrl,
-                                requestUrl,
-                            )
-                            val opened = CreativeCtaRouter.open(
-                                ctx.applicationContext,
-                                target,
-                                presentation.destination,
-                                presentation.adBehavior?.storeOpen,
-                                presentation.androidStoreUrl,
-                            )
-                            if (!opened) {
-                                claim?.release()
-                                return false
+                            val open = {
+                                val target = CreativeCtaRouter.preferredClickUrl(
+                                    presentation.trackingUrl,
+                                    requestUrl,
+                                )
+                                CreativeCtaRouter.open(
+                                    ctx.applicationContext,
+                                    target,
+                                    presentation.destination,
+                                    presentation.adBehavior?.storeOpen,
+                                    presentation.androidStoreUrl,
+                                )
                             }
-                            if (claim?.commit() == true) presentation.callbacks.onClicked(claim.interaction)
-                            recordStoreOpen(ClickSources.PRIMARY_CTA)
-                            return true
+                            if (request?.hasGesture() != true) {
+                                if (presentation.hasPendingClick()) return true
+                                val opened = open()
+                                if (opened) recordStoreOpen(ClickSources.PRIMARY_CTA)
+                                return opened
+                            }
+                            return when (routeClaimedClick(
+                                claim = presentation.claimClick(ClickSources.PRIMARY_CTA),
+                                open = open,
+                                onOpened = { interaction ->
+                                    presentation.callbacks.onClicked(interaction)
+                                    recordStoreOpen(interaction.source)
+                                },
+                            )) {
+                                ClickRouteOutcome.OPEN_FAILED -> false
+                                ClickRouteOutcome.BLOCKED, ClickRouteOutcome.OPENED -> true
+                            }
                         }
                     },
                     surface = "rewarded",
@@ -597,10 +611,11 @@ private fun RewardedMinigame(
                 onTap = {
                     // Surface the click to the publisher first (parity with the interstitial), then
                     // the durable click beacon — only on a real user tap (not auto_store_redirect).
-                    val interaction = presentation.admitClick(ClickSources.STORE_PROMPT)
-                        ?: return@StorePromptBadge
+                    val claim = presentation.claimClick(ClickSources.STORE_PROMPT) ?: return@StorePromptBadge
+                    val interaction = claim.interaction
                     coordinateClickPersistence(
                         mainHandler = clickHandoffHandler,
+                        claim = claim,
                         enqueueBeacon = { completion ->
                             AdBeaconManager.enqueue(
                                 presentation.impressionId,
@@ -614,16 +629,19 @@ private fun RewardedMinigame(
                         recordTelemetry = { completion ->
                             presentation.callbacks.onClicked(interaction, completion)
                         },
-                        onReady = {
-                            recordStoreOpen(interaction.source)
-                            CreativeCtaRouter.open(
+                        onHandoff = { committedInteraction ->
+                            val opened = CreativeCtaRouter.open(
                                 context.applicationContext,
                                 presentation.trackingUrl,
                                 presentation.destination,
                                 presentation.adBehavior?.storeOpen,
                                 presentation.androidStoreUrl,
                             )
+                            if (opened) recordStoreOpen(committedInteraction.source)
+                            opened
                         },
+                        onCreated = presentation::trackClickHandoff,
+                        onFinished = presentation::clearClickHandoff,
                     )
                 },
             )

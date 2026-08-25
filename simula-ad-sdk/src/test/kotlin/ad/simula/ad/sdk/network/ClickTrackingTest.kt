@@ -81,29 +81,97 @@ class ClickTrackingTest {
     }
 
     @Test
-    fun `persistence barrier releases once after both completions`() {
-        val releases = mutableListOf<Boolean>()
-        val barrier = ClickPersistenceBarrier { releases += it }
+    fun `pending persistence blocks cross-surface claim and success commits once at handoff`() {
+        var now = 1_000L
+        val gate = ClickInteractionGate(clockMs = { now }, idFactory = { "store-click" })
+        val claim = gate.claim(ClickSources.STORE_PROMPT)
+        val ready = mutableListOf<Boolean>()
+        val handoff = ClickPersistenceHandoff(requireNotNull(claim)) { ready += it }
 
-        barrier.complete(ClickPersistencePart.TELEMETRY)
-        assertTrue(releases.isEmpty())
-        barrier.complete(ClickPersistencePart.BEACON)
-        barrier.complete(ClickPersistencePart.BEACON)
-        barrier.timeout()
+        handoff.complete(ClickPersistencePart.TELEMETRY)
+        assertTrue(ready.isEmpty())
+        assertNull("primary CTA stays blocked while beacon persistence is pending", gate.claim(ClickSources.PRIMARY_CTA))
+        assertNull("fallback CTA shares the presentation gate", gate.claim(ClickSources.FALLBACK_CTA))
 
-        assertEquals(listOf(false), releases)
+        handoff.complete(ClickPersistencePart.BEACON)
+        assertEquals(listOf(false), ready)
+        assertTrue("durability alone does not commit before the scheduled route", gate.hasPendingClaim())
+        var routes = 0
+        assertTrue(handoff.handoff {
+            assertFalse(gate.hasPendingClaim())
+            routes++
+            true
+        })
+        assertFalse(handoff.handoff { routes++; true })
+        assertEquals(1, routes)
+        now = 1_100L
+        assertNull("successful handoff starts the duplicate window", gate.claim(ClickSources.INSTALL_BANNER))
     }
 
     @Test
-    fun `persistence barrier timeout releases once when a completion is wedged`() {
-        val releases = mutableListOf<Boolean>()
-        val barrier = ClickPersistenceBarrier { releases += it }
+    fun `failed and cancelled persistence handoffs release their presentation claim`() {
+        val gate = ClickInteractionGate(idFactory = { "event" })
+        val failed = ClickPersistenceHandoff(
+            requireNotNull(gate.claim(ClickSources.STORE_PROMPT)),
+        ) {}
+        failed.complete(ClickPersistencePart.TELEMETRY)
+        failed.complete(ClickPersistencePart.BEACON)
+        assertFalse(failed.handoff { false })
+        val retryAfterFailure = gate.claim(ClickSources.PRIMARY_CTA)
+        assertTrue(retryAfterFailure != null)
+        assertTrue(retryAfterFailure?.release() == true)
 
-        barrier.complete(ClickPersistencePart.TELEMETRY)
-        barrier.timeout()
-        barrier.complete(ClickPersistencePart.BEACON)
+        val cancelled = ClickPersistenceHandoff(
+            requireNotNull(gate.claim(ClickSources.INSTALL_BANNER)),
+        ) {}
+        assertTrue(cancelled.cancel())
+        assertFalse(cancelled.handoff { true })
+        assertTrue("teardown cancellation frees fallback admission", gate.claim(ClickSources.FALLBACK_CTA) != null)
+    }
 
-        assertEquals(listOf(true), releases)
+    @Test
+    fun `persistence timeout commits and routes exactly once`() {
+        val gate = ClickInteractionGate(idFactory = { "event" })
+        val ready = mutableListOf<Boolean>()
+        val handoff = ClickPersistenceHandoff(
+            requireNotNull(gate.claim(ClickSources.STORE_PROMPT)),
+        ) { ready += it }
+        handoff.complete(ClickPersistencePart.TELEMETRY)
+
+        assertTrue(handoff.timeout())
+        assertFalse(handoff.timeout())
+        assertEquals(listOf(true), ready)
+        assertTrue("timeout makes the handoff ready without committing early", gate.hasPendingClaim())
+        var routes = 0
+        assertTrue(handoff.handoff {
+            assertFalse(gate.hasPendingClaim())
+            routes++
+            true
+        })
+        assertFalse(handoff.handoff { routes++; true })
+        handoff.complete(ClickPersistencePart.BEACON)
+        assertEquals(1, routes)
+    }
+
+    @Test
+    fun `synchronous native route failure releases claim for immediate retry`() {
+        val gate = ClickInteractionGate(idFactory = { "event" })
+        var clicks = 0
+
+        val failed = routeClaimedClick(
+            claim = gate.claim(ClickSources.PRIMARY_CTA),
+            open = { false },
+            onOpened = { clicks++ },
+        )
+        val retried = routeClaimedClick(
+            claim = gate.claim(ClickSources.PRIMARY_CTA),
+            open = { true },
+            onOpened = { clicks++ },
+        )
+
+        assertEquals(ClickRouteOutcome.OPEN_FAILED, failed)
+        assertEquals(ClickRouteOutcome.OPENED, retried)
+        assertEquals(1, clicks)
     }
 
     @Test
