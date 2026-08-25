@@ -131,9 +131,10 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     // self-reports its own click beacon, so fire the callback only — no SDK beacon here.
                     onAdClick = { interaction -> p.callbacks.onClicked(interaction) },
                     claimClick = p::claimClick,
+                    autoRedirectCoordinator = p.autoRedirectCoordinator,
+                    pendingClickHandoff = p::pendingClickHandoff,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
-                        if (p.hasPendingClick()) return@FallbackAdHost
                         val opened = CreativeCtaRouter.open(
                             applicationContext,
                             p.trackingUrl,
@@ -142,6 +143,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                             p.androidStoreUrl,
                         )
                         if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
+                        opened
                     },
                     // End-screen CTA routing context (deterministic store fallback).
                     ctaTrackingUrl = p.trackingUrl,
@@ -303,6 +305,11 @@ private fun RewardedMinigame(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val clickHandoffHandler = remember { Handler(Looper.getMainLooper()) }
+    val autoRedirectScope = remember(presentation) { Any() }
+    DisposableEffect(presentation.autoRedirectCoordinator, autoRedirectScope) {
+        presentation.autoRedirectCoordinator.activate(autoRedirectScope)
+        onDispose { presentation.autoRedirectCoordinator.deactivate(autoRedirectScope) }
+    }
 
     // Suspend the creative's JS/timers/video while the host is backgrounded — AndroidView won't pause
     // a WebView on its own, so a rewarded ad left open behind the home screen would keep running.
@@ -337,21 +344,21 @@ private fun RewardedMinigame(
     // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE (e.g. survey finished) grants the reward and
     // reveals the close button immediately, bypassing the play timer.
     val autoRedirect = presentation.adBehavior?.autoStoreRedirect
-    var autoRedirectFired by remember { mutableStateOf(false) }
     // auto_store_redirect: open the advertiser store once (no user tap). A disabled/missing config no-ops.
     fun fireAutoStoreRedirect() {
-        if (!autoRedirectFired) {
-            autoRedirectFired = true
-            if (!presentation.hasPendingClick()) {
-                val opened = CreativeCtaRouter.open(
-                    context.applicationContext,
-                    presentation.trackingUrl,
-                    presentation.destination,
-                    presentation.adBehavior?.storeOpen,
-                    presentation.androidStoreUrl,
-                )
-                if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
-            }
+        presentation.autoRedirectCoordinator.request(
+            scope = autoRedirectScope,
+            pendingHandoff = presentation.pendingClickHandoff(),
+        ) {
+            val opened = CreativeCtaRouter.open(
+                context.applicationContext,
+                presentation.trackingUrl,
+                presentation.destination,
+                presentation.adBehavior?.storeOpen,
+                presentation.androidStoreUrl,
+            )
+            if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
+            opened
         }
     }
     val bridge = remember {
@@ -546,6 +553,7 @@ private fun RewardedMinigame(
                                 claim = presentation.claimClick(ClickSources.PRIMARY_CTA),
                                 open = open,
                                 onOpened = { interaction ->
+                                    presentation.autoRedirectCoordinator.recordUserRouteOpened()
                                     presentation.callbacks.onClicked(interaction)
                                     recordStoreOpen(interaction.source)
                                 },

@@ -5,10 +5,12 @@ import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
+import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
+import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickRouteOutcome
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.routeClaimedClick
@@ -79,9 +81,11 @@ internal fun FallbackAdHost(
     impressionId: String,
     onFullyClosed: () -> Unit,
     autoStoreRedirect: AutoStoreRedirect? = null,
-    onAutoStoreRedirect: () -> Unit = {},
+    onAutoStoreRedirect: () -> Boolean = { false },
     onAdClick: (ClickInteraction) -> Unit = {},
     claimClick: ((String) -> ClickInteractionClaim?)? = null,
+    autoRedirectCoordinator: AutoRedirectCoordinator? = null,
+    pendingClickHandoff: () -> ClickPersistenceHandoff? = { null },
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
     // through the shared router (tracker verbatim, raw store link as the deterministic fallback).
     // Defaults preserve today's behavior when no context is available.
@@ -93,9 +97,18 @@ internal fun FallbackAdHost(
     var phase by remember { mutableStateOf<FallbackPhase>(FallbackPhase.Content) }
     val fallbackClickGate = remember(impressionId) { ClickInteractionGate() }
     val clickClaim = claimClick ?: fallbackClickGate::claim
+    // Fullscreen presentations pass their shared coordinator; the local instance is only for the
+    // standalone/default host and must not replace presentation state across end-screen indices.
+    val localAutoRedirectCoordinator = remember(impressionId) { AutoRedirectCoordinator() }
+    val redirects = autoRedirectCoordinator ?: localAutoRedirectCoordinator
+    DisposableEffect(localAutoRedirectCoordinator, autoRedirectCoordinator) {
+        onDispose {
+            if (autoRedirectCoordinator == null) localAutoRedirectCoordinator.dispose()
+        }
+    }
     // auto_store_redirect END_SCREEN_N: open the primary ad's store once, when the fallback screen
     // whose index matches the configured trigger is presented (index 0 = END SCREEN 1, index 1 = 2).
-    var autoRedirectFired by remember { mutableStateOf(false) }
+    // Scope replacement drops deferred callbacks from an end screen that has already closed.
 
     // Prefetch the fallback screens in the background while the primary creative is on screen, so
     // they present instantly on close instead of fetching then (which flashed the host behind).
@@ -136,13 +149,21 @@ internal fun FallbackAdHost(
             }
             is FallbackPhase.Showing -> {
                 val ad = p.ads[p.index]
+                val autoRedirectScope = remember(impressionId, p.index) { Any() }
+                DisposableEffect(redirects, autoRedirectScope) {
+                    redirects.activate(autoRedirectScope)
+                    onDispose { redirects.deactivate(autoRedirectScope) }
+                }
                 // Fire the auto store redirect when the END_SCREEN_N fallback screen is presented.
                 LaunchedEffect(p.index) {
-                    if (!autoRedirectFired && autoStoreRedirect?.enabled == true &&
+                    if (autoStoreRedirect?.enabled == true &&
                         autoStoreRedirect.trigger == endScreenTriggerForIndex(p.index)
                     ) {
-                        autoRedirectFired = true
-                        onAutoStoreRedirect()
+                        redirects.request(
+                            scope = autoRedirectScope,
+                            pendingHandoff = pendingClickHandoff(),
+                            route = onAutoStoreRedirect,
+                        )
                     }
                 }
                 // key() so each screen gets fresh overlay state (countdown, WebView) — without it the
@@ -152,7 +173,10 @@ internal fun FallbackAdHost(
                         iframeUrl = ad.iframeUrl,
                         html = ad.html,
                         adId = ad.adId,
-                        onAdClick = onAdClick,
+                        onAdClick = { interaction ->
+                            redirects.recordUserRouteOpened()
+                            onAdClick(interaction)
+                        },
                         claimClick = clickClaim,
                         ctaTrackingUrl = ctaTrackingUrl,
                         ctaDestination = ctaDestination,

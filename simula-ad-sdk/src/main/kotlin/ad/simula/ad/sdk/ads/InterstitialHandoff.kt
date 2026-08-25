@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdValue
+import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
@@ -33,14 +34,19 @@ internal class InterstitialPresentation(
 ) {
     private val clickInteractionGate = ClickInteractionGate()
     private var pendingClickHandoff: ClickPersistenceHandoff? = null
+    val autoRedirectCoordinator = AutoRedirectCoordinator()
 
     fun claimClick(source: String): ClickInteractionClaim? = clickInteractionGate.claim(source)
 
     fun hasPendingClick(): Boolean = clickInteractionGate.hasPendingClaim()
 
     @Synchronized
+    fun pendingClickHandoff(): ClickPersistenceHandoff? = pendingClickHandoff
+
+    @Synchronized
     fun trackClickHandoff(handoff: ClickPersistenceHandoff) {
         pendingClickHandoff = handoff
+        autoRedirectCoordinator.observeUserHandoff(handoff)
     }
 
     @Synchronized
@@ -50,6 +56,7 @@ internal class InterstitialPresentation(
 
     @Synchronized
     fun cancelPendingClickHandoff() {
+        autoRedirectCoordinator.dispose()
         pendingClickHandoff?.cancel()
         pendingClickHandoff = null
     }

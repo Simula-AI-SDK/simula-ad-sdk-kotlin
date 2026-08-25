@@ -175,6 +175,221 @@ class ClickTrackingTest {
     }
 
     @Test
+    fun `pending user handoff success suppresses deferred auto redirect`() {
+        val gate = ClickInteractionGate(idFactory = { "user" })
+        val handoff = ClickPersistenceHandoff(
+            requireNotNull(gate.claim(ClickSources.STORE_PROMPT)),
+        ) {}
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        var autoRoutes = 0
+        coordinator.activate(scope)
+
+        assertEquals(
+            AutoRedirectResult.DEFERRED,
+            coordinator.request(scope, handoff) { autoRoutes++; true },
+        )
+        handoff.complete(ClickPersistencePart.TELEMETRY)
+        handoff.complete(ClickPersistencePart.BEACON)
+        assertTrue(handoff.handoff { true })
+
+        assertEquals(0, autoRoutes)
+        assertEquals(
+            AutoRedirectResult.SUPPRESSED,
+            coordinator.request(scope, null) { autoRoutes++; true },
+        )
+        assertEquals(0, autoRoutes)
+    }
+
+    @Test
+    fun `user handoff success before trigger still suppresses later auto redirect`() {
+        val gate = ClickInteractionGate(idFactory = { "user" })
+        val handoff = ClickPersistenceHandoff(
+            requireNotNull(gate.claim(ClickSources.STORE_PROMPT)),
+        ) {}
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        var autoRoutes = 0
+        coordinator.observeUserHandoff(handoff)
+
+        handoff.complete(ClickPersistencePart.TELEMETRY)
+        handoff.complete(ClickPersistencePart.BEACON)
+        assertTrue(handoff.handoff { true })
+        coordinator.activate(scope)
+
+        assertEquals(
+            AutoRedirectResult.SUPPRESSED,
+            coordinator.request(scope, null) { autoRoutes++; true },
+        )
+        assertEquals(0, autoRoutes)
+    }
+
+    @Test
+    fun `direct primary CTA success suppresses future presentation auto redirect`() {
+        val coordinator = AutoRedirectCoordinator()
+        val playableScope = Any()
+        val fallbackScope = Any()
+        var autoRoutes = 0
+        coordinator.activate(playableScope)
+
+        coordinator.recordUserRouteOpened()
+        coordinator.deactivate(playableScope)
+        coordinator.activate(fallbackScope)
+
+        assertEquals(
+            AutoRedirectResult.SUPPRESSED,
+            coordinator.request(fallbackScope, null) { autoRoutes++; true },
+        )
+        assertEquals(0, autoRoutes)
+    }
+
+    @Test
+    fun `fallback direct CTA success suppresses its end-screen auto redirect`() {
+        val coordinator = AutoRedirectCoordinator()
+        val firstEndScreen = Any()
+        val secondEndScreen = Any()
+        var autoRoutes = 0
+        coordinator.activate(firstEndScreen)
+        coordinator.deactivate(firstEndScreen)
+        coordinator.activate(secondEndScreen)
+
+        coordinator.recordUserRouteOpened()
+
+        assertEquals(
+            AutoRedirectResult.SUPPRESSED,
+            coordinator.request(secondEndScreen, null) { autoRoutes++; true },
+        )
+        assertEquals(0, autoRoutes)
+    }
+
+    @Test
+    fun `pending user handoff failure retries auto redirect while scope is active`() {
+        val gate = ClickInteractionGate(idFactory = { "user" })
+        val handoff = ClickPersistenceHandoff(
+            requireNotNull(gate.claim(ClickSources.INSTALL_BANNER)),
+        ) {}
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        var autoRoutes = 0
+        coordinator.activate(scope)
+        coordinator.request(scope, handoff) { autoRoutes++; true }
+
+        handoff.complete(ClickPersistencePart.TELEMETRY)
+        handoff.complete(ClickPersistencePart.BEACON)
+        assertFalse(handoff.handoff { false })
+
+        assertEquals(1, autoRoutes)
+        assertEquals(
+            AutoRedirectResult.SUPPRESSED,
+            coordinator.request(scope, null) { autoRoutes++; true },
+        )
+    }
+
+    @Test
+    fun `pending user handoff cancellation retries auto redirect while scope is active`() {
+        val gate = ClickInteractionGate(idFactory = { "user" })
+        val handoff = ClickPersistenceHandoff(
+            requireNotNull(gate.claim(ClickSources.STORE_PROMPT)),
+        ) {}
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        var autoRoutes = 0
+        coordinator.activate(scope)
+        coordinator.request(scope, handoff) { autoRoutes++; true }
+
+        assertTrue(handoff.cancel())
+
+        assertEquals(1, autoRoutes)
+    }
+
+    @Test
+    fun `stale screen and disposed presentation suppress deferred callbacks`() {
+        val firstGate = ClickInteractionGate(idFactory = { "first" })
+        val staleScreenHandoff = ClickPersistenceHandoff(
+            requireNotNull(firstGate.claim(ClickSources.STORE_PROMPT)),
+        ) {}
+        val coordinator = AutoRedirectCoordinator()
+        val firstScreen = Any()
+        val secondScreen = Any()
+        var autoRoutes = 0
+        coordinator.activate(firstScreen)
+        coordinator.request(firstScreen, staleScreenHandoff) { autoRoutes++; true }
+
+        coordinator.activate(secondScreen)
+        staleScreenHandoff.complete(ClickPersistencePart.TELEMETRY)
+        staleScreenHandoff.complete(ClickPersistencePart.BEACON)
+        assertFalse(staleScreenHandoff.handoff { false })
+        assertEquals(0, autoRoutes)
+        assertEquals(
+            AutoRedirectResult.STALE,
+            coordinator.request(firstScreen, null) { autoRoutes++; true },
+        )
+
+        val secondGate = ClickInteractionGate(idFactory = { "second" })
+        val stalePresentationHandoff = ClickPersistenceHandoff(
+            requireNotNull(secondGate.claim(ClickSources.STORE_PROMPT)),
+        ) {}
+        coordinator.request(secondScreen, stalePresentationHandoff) { autoRoutes++; true }
+        coordinator.dispose()
+        assertTrue(stalePresentationHandoff.cancel())
+        assertEquals(0, autoRoutes)
+        assertEquals(
+            AutoRedirectResult.STALE,
+            coordinator.request(secondScreen, null) { autoRoutes++; true },
+        )
+    }
+
+    @Test
+    fun `direct auto redirect failure is one best-effort attempt and a new trigger may retry`() {
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        var attempts = 0
+        coordinator.activate(scope)
+
+        assertEquals(
+            AutoRedirectResult.FAILED,
+            coordinator.request(scope, null) { attempts++; false },
+        )
+        assertEquals("failure does not schedule an automatic retry", 1, attempts)
+        assertEquals(
+            AutoRedirectResult.OPENED,
+            coordinator.request(scope, null) { attempts++; true },
+        )
+        assertEquals(
+            AutoRedirectResult.SUPPRESSED,
+            coordinator.request(scope, null) { attempts++; true },
+        )
+        assertEquals(2, attempts)
+    }
+
+    @Test
+    fun `duplicate deferred requests produce exactly one auto redirect`() {
+        val gate = ClickInteractionGate(idFactory = { "user" })
+        val handoff = ClickPersistenceHandoff(
+            requireNotNull(gate.claim(ClickSources.STORE_PROMPT)),
+        ) {}
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        var autoRoutes = 0
+        coordinator.activate(scope)
+
+        assertEquals(
+            AutoRedirectResult.DEFERRED,
+            coordinator.request(scope, handoff) { autoRoutes++; true },
+        )
+        assertEquals(
+            AutoRedirectResult.DEFERRED,
+            coordinator.request(scope, handoff) { autoRoutes++; true },
+        )
+        handoff.complete(ClickPersistencePart.TELEMETRY)
+        handoff.complete(ClickPersistencePart.BEACON)
+        assertFalse(handoff.handoff { false })
+        assertFalse(handoff.handoff { false })
+
+        assertEquals(1, autoRoutes)
+    }
+
+    @Test
     fun `generated interaction id respects backend length bound`() {
         val gate = ClickInteractionGate(idFactory = { "x".repeat(100) })
 
