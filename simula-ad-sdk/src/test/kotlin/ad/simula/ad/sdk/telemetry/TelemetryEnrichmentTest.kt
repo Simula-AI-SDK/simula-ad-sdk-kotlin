@@ -243,7 +243,7 @@ class TelemetryEnrichmentTest {
 
         m.recordLifecycle(
             "store_opened", "interstitial", null, "ad1", "ad1", 1500L, null,
-            trigger = "primary_cta",
+            trigger = "cta",
             cacheSource = null,
             interactionId = "interaction-1",
             clickSource = "primary_cta",
@@ -254,7 +254,7 @@ class TelemetryEnrichmentTest {
         val events = sender.batches.flatMap { it.events }
         val opened = events.single { it.name == "store_opened" }
         assertEquals(TYPE_LIFECYCLE, opened.type)
-        assertEquals("primary_cta", opened.trigger)
+        assertEquals("cta", opened.trigger)
         assertEquals("interaction-1", opened.interactionId)
         assertEquals("primary_cta", opened.clickSource)
         assertEquals("ad1", opened.serveId)

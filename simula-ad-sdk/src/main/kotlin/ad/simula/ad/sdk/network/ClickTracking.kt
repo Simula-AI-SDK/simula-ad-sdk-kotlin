@@ -18,6 +18,11 @@ internal object ClickSources {
         AUTO_REDIRECT, "auto_store_redirect" -> AUTO_REDIRECT
         else -> PRIMARY_CTA
     }
+
+    fun storeExitTrigger(source: String): String = when (val normalized = normalize(source)) {
+        PRIMARY_CTA -> "cta"
+        else -> normalized
+    }
 }
 
 internal data class ClickInteraction(
@@ -92,7 +97,7 @@ internal class ClickPersistenceHandoff(
     @Synchronized
     fun isTerminal(): Boolean = state == State.FINISHED || state == State.CANCELLED
 
-    /** Commit immediately before the external route; a failed route rolls the gate back for retry. */
+    /** Commit immediately before routing. Persistence has already made this interaction billable. */
     @MainThread
     fun handoff(route: (ClickInteraction) -> Boolean): Boolean {
         val shouldRoute = synchronized(this) {
@@ -107,7 +112,6 @@ internal class ClickPersistenceHandoff(
             return false
         }
         val opened = runCatching { route(claim.interaction) }.getOrDefault(false)
-        if (!opened) claim.rollbackCommit()
         finish(if (opened) ClickHandoffResult.ROUTED else ClickHandoffResult.FAILED)
         return opened
     }
@@ -326,8 +330,6 @@ internal class ClickInteractionClaim internal constructor(
     fun commit(): Boolean = gate.commit(token)
 
     fun release(): Boolean = gate.release(token)
-
-    internal fun rollbackCommit(): Boolean = gate.rollbackCommit(token)
 }
 
 /**
@@ -342,7 +344,6 @@ internal class ClickInteractionGate(
     private val duplicateWindowMs: Long = DUPLICATE_CLICK_WINDOW_MS,
 ) {
     private var lastCommittedAtMs = Long.MIN_VALUE
-    private var lastCommittedToken: Long? = null
     private var pendingToken: Long? = null
     private var nextToken = 0L
 
@@ -372,7 +373,6 @@ internal class ClickInteractionGate(
         if (pendingToken != token) return false
         pendingToken = null
         lastCommittedAtMs = clockMs()
-        lastCommittedToken = token
         return true
     }
 
@@ -380,14 +380,6 @@ internal class ClickInteractionGate(
     internal fun release(token: Long): Boolean {
         if (pendingToken != token) return false
         pendingToken = null
-        return true
-    }
-
-    @Synchronized
-    internal fun rollbackCommit(token: Long): Boolean {
-        if (lastCommittedToken != token) return false
-        lastCommittedToken = null
-        lastCommittedAtMs = Long.MIN_VALUE
         return true
     }
 

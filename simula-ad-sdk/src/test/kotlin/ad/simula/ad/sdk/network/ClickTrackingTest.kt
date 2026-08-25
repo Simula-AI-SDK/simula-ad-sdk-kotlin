@@ -15,6 +15,9 @@ class ClickTrackingTest {
         assertEquals(ClickSources.INSTALL_BANNER, ClickSources.normalize("install_banner"))
         assertEquals(ClickSources.FALLBACK_CTA, ClickSources.normalize("fallback_cta"))
         assertEquals(ClickSources.AUTO_REDIRECT, ClickSources.normalize("auto_store_redirect"))
+        assertEquals("cta", ClickSources.storeExitTrigger(ClickSources.PRIMARY_CTA))
+        assertEquals("cta", ClickSources.storeExitTrigger("cta"))
+        assertEquals(ClickSources.STORE_PROMPT, ClickSources.storeExitTrigger(ClickSources.STORE_PROMPT))
     }
 
     @Test
@@ -109,17 +112,25 @@ class ClickTrackingTest {
     }
 
     @Test
-    fun `failed and cancelled persistence handoffs release their presentation claim`() {
-        val gate = ClickInteractionGate(idFactory = { "event" })
+    fun `failed persisted handoff retains duplicate window while cancellation releases claim`() {
+        var now = 1_000L
+        var nextId = 0
+        val gate = ClickInteractionGate(
+            clockMs = { now },
+            idFactory = { "event-${++nextId}" },
+        )
         val failed = ClickPersistenceHandoff(
             requireNotNull(gate.claim(ClickSources.STORE_PROMPT)),
         ) {}
         failed.complete(ClickPersistencePart.TELEMETRY)
         failed.complete(ClickPersistencePart.BEACON)
         assertFalse(failed.handoff { false })
-        val retryAfterFailure = gate.claim(ClickSources.PRIMARY_CTA)
-        assertTrue(retryAfterFailure != null)
-        assertTrue(retryAfterFailure?.release() == true)
+        assertNull("a billed failed route remains deduped", gate.claim(ClickSources.PRIMARY_CTA))
+
+        now = 1_500L
+        val retryAfterWindow = gate.claim(ClickSources.PRIMARY_CTA)
+        assertEquals("event-2", retryAfterWindow?.interaction?.id)
+        assertTrue(retryAfterWindow?.release() == true)
 
         val cancelled = ClickPersistenceHandoff(
             requireNotNull(gate.claim(ClickSources.INSTALL_BANNER)),

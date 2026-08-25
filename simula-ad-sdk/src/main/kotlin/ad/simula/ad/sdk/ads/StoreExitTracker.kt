@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickPersistencePart
+import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.os.Handler
 import android.os.SystemClock
@@ -110,15 +111,15 @@ internal class StoreExitTracker(
     }
 
     /**
-     * A CTA / store-prompt / auto-redirect opened the store. [trigger] is one of
-     * `primary_cta` / `store_prompt` / `install_banner` / `auto_redirect`. `durationMs` carries the
-     * foreground dwell at open.
+     * A CTA / store-prompt / auto-redirect opened the store. The legacy store-exit dimension keeps
+     * `cta` while the separate click-source contract uses `primary_cta`.
      */
     fun recordStoreOpen(trigger: String) {
         val now = SystemClock.elapsedRealtime()
         val dwellMs = foregroundMs + if (inForeground) (now - resumedAt).coerceAtLeast(0L) else 0L
+        val storeExitTrigger = ClickSources.storeExitTrigger(trigger)
         openedAt = now
-        pendingTrigger = trigger
+        pendingTrigger = storeExitTrigger
         Telemetry.recordLifecycle(
             stage = "store_opened",
             adFormat = adFormat,
@@ -127,7 +128,7 @@ internal class StoreExitTracker(
             serveId = adId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
             durationMs = dwellMs, // foreground time before leaving
             errorCode = null,
-            trigger = trigger,
+            trigger = storeExitTrigger,
         )
     }
 
