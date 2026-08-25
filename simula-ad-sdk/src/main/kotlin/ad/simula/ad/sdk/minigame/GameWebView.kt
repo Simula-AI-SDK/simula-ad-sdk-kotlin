@@ -101,8 +101,7 @@ fun GameWebView(
 
     val density = LocalDensity.current.density
     val screenHeightDp = config.screenHeightDp.toFloat()
-    val isFullScreenPercent = playableHeight is String && playableHeight.removeSuffix("%").toFloatOrNull() == 100f
-    val isBottomSheet = playableHeight != null && !isFullScreenPercent
+    val isBottomSheet = isBottomSheetPlayableHeight(playableHeight)
 
     var iframeUrl by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
@@ -372,6 +371,12 @@ fun GameWebView(
             }
         }
     }
+}
+
+internal fun isBottomSheetPlayableHeight(playableHeight: Any?): Boolean {
+    val isFullScreenPercent = playableHeight is String &&
+        playableHeight.removeSuffix("%").toFloatOrNull() == 100f
+    return playableHeight != null && !isFullScreenPercent
 }
 
 /**

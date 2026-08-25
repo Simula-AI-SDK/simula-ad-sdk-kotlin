@@ -2,13 +2,16 @@ package ad.simula.ad.sdk.minigame
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.graphics.Bitmap
 import android.os.Build
 import android.content.Intent
 import android.net.Uri
 import android.view.WindowManager
 import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -616,6 +619,7 @@ fun MiniGameMenu(
 
         // ── Dialog 2: Ad Overlay ─────────────────────────────────────────────
         if (currentFallbackAd != null) {
+            val fallbackPlayableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null
             Dialog(
                 onDismissRequest = { handleAdIframeClose() },
                 properties = DialogProperties(
@@ -623,13 +627,14 @@ fun MiniGameMenu(
                     decorFitsSystemWindows = false,
                 ),
             ) {
-                FullscreenDialogWindowConfig()
+                FullscreenDialogWindowConfig(opaqueBackground = fallbackPlayableHeightDp == null)
                 // key() so each revealed screen gets fresh overlay state (countdown, WebView).
                 key(fallbackAdIndex) {
                     AdIframeOverlay(
                         url = currentFallbackAd.iframeUrl ?: "",
+                        html = currentFallbackAd.html,
                         onClose = { handleAdIframeClose() },
-                        playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
+                        playableHeightDp = fallbackPlayableHeightDp,
                         playableBorderColor = theme.playableBorderColor ?: "#262626",
                         adId = currentFallbackAd.adId,
                     )
@@ -648,7 +653,9 @@ fun MiniGameMenu(
                     decorFitsSystemWindows = false,
                 ),
             ) {
-                FullscreenDialogWindowConfig()
+                FullscreenDialogWindowConfig(
+                    opaqueBackground = !isBottomSheetPlayableHeight(theme.playableHeight),
+                )
                 GameWebView(
                     gameId = currentGameId,
                     charID = charID,
@@ -674,13 +681,15 @@ fun MiniGameMenu(
 // ── Fullscreen Dialog Window Config ──────────────────────────────────────────
 
 @Composable
-private fun FullscreenDialogWindowConfig() {
+private fun FullscreenDialogWindowConfig(opaqueBackground: Boolean = false) {
     val view = LocalView.current
     val dialogWindow = (view.parent as? DialogWindowProvider)?.window
     SideEffect {
         dialogWindow?.let { window ->
             window.setDimAmount(0f)
-            window.setBackgroundDrawableResource(android.R.color.transparent)
+            window.setBackgroundDrawableResource(
+                if (opaqueBackground) android.R.color.black else android.R.color.transparent,
+            )
             WindowCompat.setDecorFitsSystemWindows(window, false)
             window.statusBarColor = android.graphics.Color.TRANSPARENT
             window.navigationBarColor = android.graphics.Color.TRANSPARENT
@@ -708,6 +717,7 @@ private fun FullscreenDialogWindowConfig() {
 @Composable
 private fun AdIframeOverlay(
     url: String,
+    html: String? = null,
     onClose: () -> Unit,
     playableHeightDp: Float? = null,
     playableBorderColor: String = "#262626",
@@ -715,11 +725,13 @@ private fun AdIframeOverlay(
 ) {
     val context = LocalContext.current
     val view = LocalView.current
+    val inlineHtml = html?.takeIf { it.isNotBlank() }
 
     var adCountdown by remember { mutableStateOf(5) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ringProgress = remember { Animatable(0f) }
     var adPageLoaded by remember { mutableStateOf(false) }
+    var adPageFailed by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         launch { ringProgress.animateTo(1f, tween(5000, easing = LinearEasing)) }
@@ -805,9 +817,41 @@ private fun AdIframeOverlay(
                         WebViewPool.acquire(
                             context = ctx,
                             client = object : WebViewClient() {
-                                override fun onPageFinished(view: WebView?, finishedUrl: String?) {
-                                    if (finishedUrl == "about:blank") return
-                                    adPageLoaded = true
+                                override fun onPageStarted(view: WebView?, startedUrl: String?, favicon: Bitmap?) {
+                                    adPageLoaded = false
+                                    if (!startedUrl.isNullOrBlank() &&
+                                        (startedUrl != "about:blank" || inlineHtml != null)
+                                    ) {
+                                        adPageFailed = false
+                                    }
+                                }
+                                override fun onPageCommitVisible(view: WebView?, committedUrl: String?) {
+                                    if (!committedUrl.isNullOrBlank() &&
+                                        (committedUrl != "about:blank" || inlineHtml != null) &&
+                                        !adPageFailed
+                                    ) {
+                                        adPageLoaded = true
+                                    }
+                                }
+                                override fun onReceivedError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    error: WebResourceError?,
+                                ) {
+                                    if (request?.isForMainFrame == true) {
+                                        adPageFailed = true
+                                        adPageLoaded = false
+                                    }
+                                }
+                                override fun onReceivedHttpError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    errorResponse: WebResourceResponse?,
+                                ) {
+                                    if (request?.isForMainFrame == true) {
+                                        adPageFailed = true
+                                        adPageLoaded = false
+                                    }
                                 }
                                 override fun shouldOverrideUrlLoading(
                                     view: WebView?,
@@ -815,8 +859,8 @@ private fun AdIframeOverlay(
                                 ): Boolean {
                                     val requestUrl = request?.url?.toString() ?: return false
                                     if (requestUrl == url) return false
-                                    val originalHost = Uri.parse(url).host
-                                    val requestHost = Uri.parse(requestUrl).host
+                                    val originalHost = runCatching { Uri.parse(url).host }.getOrNull()
+                                    val requestHost = runCatching { Uri.parse(requestUrl).host }.getOrNull()
                                     if (originalHost == requestHost) return false
                                     // Consume the navigation either way; runCatching so a custom-scheme
                                     // link with no installed handler can't throw ActivityNotFoundException
@@ -837,7 +881,19 @@ private fun AdIframeOverlay(
                                 override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
                                     recordRenderProcessGone("minigame_ad", detail)
                             },
-                        ).apply { loadUrl(url) }
+                        ).apply {
+                            if (inlineHtml != null) {
+                                loadDataWithBaseURL(
+                                    url.takeIf { it.isNotBlank() },
+                                    inlineHtml,
+                                    "text/html",
+                                    "UTF-8",
+                                    null,
+                                )
+                            } else if (url.isNotBlank()) {
+                                loadUrl(url)
+                            }
+                        }
                     },
                     modifier = Modifier.fillMaxSize(),
                     onRelease = { webView -> WebViewPool.release(webView) },
@@ -845,7 +901,7 @@ private fun AdIframeOverlay(
 
                 if (!adPageLoaded) {
                     Box(
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxSize().background(Color.White),
                         contentAlignment = Alignment.Center,
                     ) {
                         CircularProgressIndicator(color = Color(0xFF6B7280))

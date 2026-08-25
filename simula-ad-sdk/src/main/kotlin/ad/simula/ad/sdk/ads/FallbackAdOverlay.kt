@@ -6,10 +6,13 @@ import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.network.SimulaApiClient
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.SystemClock
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -106,49 +109,52 @@ internal fun FallbackAdHost(
         }
     }
 
-    when (val p = phase) {
-        FallbackPhase.Content -> content { onPrimaryClosed() }
-        // Prefetch wasn't ready at close — hold on a black backdrop and advance the instant it lands.
-        FallbackPhase.Fetching -> {
-            Box(Modifier.fillMaxSize().background(Color.Black))
-            // Swallow back during this brief settle window so a fast back-press can't finish the
-            // Activity before the end screens are revealed (parity with the gated close).
-            BackHandler(enabled = true) {}
-            LaunchedEffect(prefetched) {
-                val ads = prefetched ?: return@LaunchedEffect
-                phase = if (ads.isNotEmpty()) FallbackPhase.Showing(ads, index = 0) else FallbackPhase.Done
-            }
-        }
-        is FallbackPhase.Showing -> {
-            val ad = p.ads[p.index]
-            // Fire the auto store redirect when the END_SCREEN_N fallback screen is presented.
-            LaunchedEffect(p.index) {
-                if (!autoRedirectFired && autoStoreRedirect?.enabled == true &&
-                    autoStoreRedirect.trigger == endScreenTriggerForIndex(p.index)
-                ) {
-                    autoRedirectFired = true
-                    onAutoStoreRedirect()
+    // This root survives every phase, including Done's final callback frame, so no transition can
+    // expose the Activity window or host beneath it.
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        when (val p = phase) {
+            FallbackPhase.Content -> content { onPrimaryClosed() }
+            // Prefetch wasn't ready at close — hold on the black backdrop and advance when it lands.
+            FallbackPhase.Fetching -> {
+                // Swallow back during this brief settle window so a fast back-press can't finish the
+                // Activity before the end screens are revealed (parity with the gated close).
+                BackHandler(enabled = true) {}
+                LaunchedEffect(prefetched) {
+                    val ads = prefetched ?: return@LaunchedEffect
+                    phase = if (ads.isNotEmpty()) FallbackPhase.Showing(ads, index = 0) else FallbackPhase.Done
                 }
             }
-            // key() so each screen gets fresh overlay state (countdown, WebView) — without it the
-            // next screen would inherit the previous one's elapsed countdown and loaded page.
-            key(p.index) {
-                FallbackAdOverlay(
-                    iframeUrl = ad.iframeUrl,
-                    html = ad.html,
-                    adId = ad.adId,
-                    onAdClick = onAdClick,
-                    ctaTrackingUrl = ctaTrackingUrl,
-                    ctaDestination = ctaDestination,
-                    ctaStoreUrl = ctaStoreUrl,
-                    onClose = {
-                        // Reveal the next screen on each close tap; done after the last one.
-                        phase = if (p.index + 1 < p.ads.size) p.copy(index = p.index + 1) else FallbackPhase.Done
-                    },
-                )
+            is FallbackPhase.Showing -> {
+                val ad = p.ads[p.index]
+                // Fire the auto store redirect when the END_SCREEN_N fallback screen is presented.
+                LaunchedEffect(p.index) {
+                    if (!autoRedirectFired && autoStoreRedirect?.enabled == true &&
+                        autoStoreRedirect.trigger == endScreenTriggerForIndex(p.index)
+                    ) {
+                        autoRedirectFired = true
+                        onAutoStoreRedirect()
+                    }
+                }
+                // key() so each screen gets fresh overlay state (countdown, WebView) — without it the
+                // next screen would inherit the previous one's elapsed countdown and loaded page.
+                key(p.index) {
+                    FallbackAdOverlay(
+                        iframeUrl = ad.iframeUrl,
+                        html = ad.html,
+                        adId = ad.adId,
+                        onAdClick = onAdClick,
+                        ctaTrackingUrl = ctaTrackingUrl,
+                        ctaDestination = ctaDestination,
+                        ctaStoreUrl = ctaStoreUrl,
+                        onClose = {
+                            // Reveal the next screen on each close tap; done after the last one.
+                            phase = if (p.index + 1 < p.ads.size) p.copy(index = p.index + 1) else FallbackPhase.Done
+                        },
+                    )
+                }
             }
+            FallbackPhase.Done -> LaunchedEffect(Unit) { onFullyClosed() }
         }
-        FallbackPhase.Done -> LaunchedEffect(Unit) { onFullyClosed() }
     }
 }
 
@@ -175,6 +181,7 @@ private fun FallbackAdOverlay(
     onClose: () -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val inlineHtml = html?.takeIf { it.isNotBlank() }
     // The pooled fallback WebView, captured from the AndroidView factory below so we can pause/resume
     // it with the host and force a repaint on foreground return — AndroidView won't pause a WebView, and
     // a hardware-accelerated WebView returns black/blank after the window loses visibility (background).
@@ -200,6 +207,10 @@ private fun FallbackAdOverlay(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     var countdown by remember { mutableStateOf(5) }
+    // A pooled WebView is transparent and may still contain about:blank. Keep an opaque layer above
+    // this one WebView until its current creative has actually committed a visible frame.
+    var pageCommitted by remember { mutableStateOf(false) }
+    var pageLoadFailed by remember { mutableStateOf(false) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ring = remember { Animatable(0f) }
     // Foreground-only 5s gate: time accrues only while the Activity is RESUMED, so leaving the app
@@ -237,6 +248,40 @@ private fun FallbackAdOverlay(
                         // Monotonic time of the last fired CTA click — de-dupes a single tap that surfaces
                         // more than one navigation (e.g. window.open from the inline srcdoc creative).
                         var lastClickMs = 0L
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                            pageCommitted = false
+                            if (!url.isNullOrBlank() && (url != "about:blank" || inlineHtml != null)) {
+                                pageLoadFailed = false
+                            }
+                        }
+                        override fun onPageCommitVisible(view: WebView?, url: String?) {
+                            if (!url.isNullOrBlank() &&
+                                (url != "about:blank" || inlineHtml != null) &&
+                                !pageLoadFailed
+                            ) {
+                                pageCommitted = true
+                            }
+                        }
+                        override fun onReceivedError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            error: WebResourceError?,
+                        ) {
+                            if (request?.isForMainFrame == true) {
+                                pageLoadFailed = true
+                                pageCommitted = false
+                            }
+                        }
+                        override fun onReceivedHttpError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            errorResponse: WebResourceResponse?,
+                        ) {
+                            if (request?.isForMainFrame == true) {
+                                pageLoadFailed = true
+                                pageCommitted = false
+                            }
+                        }
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val target = request?.url?.toString() ?: return false
                             // Inline-html (srcdoc) internal navigations aren't click-throughs.
@@ -278,11 +323,10 @@ private fun FallbackAdOverlay(
                             recordRenderProcessGone("fallback_ad", detail)
                     },
                 ).apply {
-                    val creative = html
-                    if (!creative.isNullOrBlank()) {
+                    if (inlineHtml != null) {
                         // Inline html (preferred). baseUrl = the iframe origin so the end screen's own
                         // click beacon (fetch to the API) stays same-origin, exactly as loadUrl did.
-                        loadDataWithBaseURL(iframeUrl, creative, "text/html", "UTF-8", null)
+                        loadDataWithBaseURL(iframeUrl, inlineHtml, "text/html", "UTF-8", null)
                     } else if (!iframeUrl.isNullOrBlank()) {
                         loadUrl(iframeUrl)
                     }
@@ -298,6 +342,10 @@ private fun FallbackAdOverlay(
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
             onRelease = { webView -> WebViewPool.release(webView) },
         )
+
+        if (!pageCommitted) {
+            Box(Modifier.fillMaxSize().background(Color.Black))
+        }
 
         Box(
             modifier = Modifier
