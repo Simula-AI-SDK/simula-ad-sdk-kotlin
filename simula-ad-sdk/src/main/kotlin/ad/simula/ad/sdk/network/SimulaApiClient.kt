@@ -38,6 +38,19 @@ import java.net.URLEncoder
  */
 internal class AdUnitNotFoundException(message: String) : Exception(message)
 
+private val sessionBodyJson = Json { encodeDefaults = true }
+
+internal fun sessionCreateBody(
+    privacy: JsonObject,
+    capabilities: ApiDeviceCapabilities,
+): String = buildJsonObject {
+    put("privacy", privacy)
+    put(
+        "capabilities",
+        sessionBodyJson.encodeToJsonElement(ApiDeviceCapabilities.serializer(), capabilities),
+    )
+}.toString()
+
 /**
  * API client for Simula ad platform.
  * All functions are suspend and safe to call from coroutine scopes.
@@ -133,9 +146,10 @@ internal object SimulaApiClient {
 
             // Establish consent at session creation: the backend ties the `privacy`
             // block to the session and inherits it on subsequent calls.
-            val body = buildJsonObject {
-                put("privacy", SimulaPrivacy.current.privacyJson())
-            }.toString()
+            val body = sessionCreateBody(
+                privacy = SimulaPrivacy.current.privacyJson(),
+                capabilities = currentDeviceCapabilities(),
+            )
 
             val response = SimulaHttp.request(
                 url = url,
@@ -752,27 +766,26 @@ internal object SimulaApiClient {
      * Side-effect-free on the backend; best-effort here — an empty list on any failure.
      */
     suspend fun fetchFallbacks(impressionId: String): List<FallbackAd> =
+        runCatching { fetchFallbacksStrict(impressionId) }.getOrDefault(emptyList())
+
+    internal suspend fun fetchFallbacksStrict(impressionId: String): List<FallbackAd> =
         coalesce("fallbacks:$impressionId") {
             withContext(Dispatchers.IO) {
-                try {
-                    val response = SimulaHttp.request(
-                        url = "$API_BASE_URL/load/fallbacks/$impressionId",
-                        method = "GET",
-                        headers = jsonHeaders(),
-                    )
-                    if (!response.isSuccessful) return@withContext emptyList()
+                val response = SimulaHttp.request(
+                    url = "$API_BASE_URL/load/fallbacks/$impressionId",
+                    method = "GET",
+                    headers = jsonHeaders(),
+                )
+                if (!response.isSuccessful) throw IllegalStateException("Fallback request failed")
 
-                    val data = json.decodeFromString<FallbackAdsApiResponse>(response.body)
-                    data.ads.mapNotNull { ad ->
-                        // Prefer the inline html (rendered in FallbackAdOverlay); keep the iframe url as
-                        // the same-origin base + url fallback. Drop only when neither is present.
-                        val html = ad.html?.takeIf { it.isNotBlank() }
-                        val url = ad.iframeUrl?.takeIf { it.isNotBlank() }
-                        if (html == null && url == null) null
-                        else FallbackAd(adId = ad.adId, iframeUrl = url, html = html)
-                    }
-                } catch (_: Exception) {
-                    emptyList()
+                val data = json.decodeFromString<FallbackAdsApiResponse>(response.body)
+                data.ads.mapNotNull { ad ->
+                    // Prefer the inline html (rendered in FallbackAdOverlay); keep the iframe url as
+                    // the same-origin base + url fallback. Drop only when neither is present.
+                    val html = ad.html?.takeIf { it.isNotBlank() }
+                    val url = ad.iframeUrl?.takeIf { it.isNotBlank() }
+                    if (html == null && url == null) null
+                    else FallbackAd(adId = ad.adId, iframeUrl = url, html = html)
                 }
             }
         }

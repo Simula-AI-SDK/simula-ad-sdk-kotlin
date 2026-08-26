@@ -3,6 +3,11 @@ package ad.simula.ad.sdk.network
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -35,6 +40,30 @@ class ApiModelsSerializationTest {
     fun `session response tolerates missing and unknown fields`() {
         val r = json.decodeFromString<SessionResponse>("""{"other":1}""")
         assertNull(r.sessionId)
+    }
+
+    @Test
+    fun `session create advertises native click beacon capability`() {
+        val root = json.parseToJsonElement(
+            sessionCreateBody(
+                privacy = buildJsonObject { put("hasPrivacyConsent", true) },
+                capabilities = ApiDeviceCapabilities(),
+            ),
+        ).jsonObject
+
+        assertTrue(root.getValue("capabilities").jsonObject
+            .getValue("native_click_beacon_v1").jsonPrimitive.boolean)
+        assertTrue(root.containsKey("privacy"))
+    }
+
+    @Test
+    fun `load request preserves native click beacon capability`() {
+        val root = json.parseToJsonElement(
+            json.encodeToString(AdLoadRequestBody(adUnitId = "unit")),
+        ).jsonObject
+
+        assertTrue(root.getValue("capabilities").jsonObject
+            .getValue("native_click_beacon_v1").jsonPrimitive.boolean)
     }
 
     // ── Error body (4xx {code, message}) ─────────────────────────────────────

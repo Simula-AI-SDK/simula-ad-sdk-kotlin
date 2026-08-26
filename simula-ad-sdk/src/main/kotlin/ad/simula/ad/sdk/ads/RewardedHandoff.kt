@@ -8,6 +8,9 @@ import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
+import ad.simula.ad.sdk.network.PresentationRouteResult
+import ad.simula.ad.sdk.network.ResumedPresentationRoute
+import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the rewarded Activity back to the [SimulaRewardedAd] instance. */
@@ -21,8 +24,14 @@ internal interface RewardedCallbacks {
     /** The paid event — fired together with [onImpression], carrying the on-device estimate. */
     fun onPaid(adValue: AdValue)
 
-    /** A user-gesture CTA / store-prompt tap (the CLICKED signal). Mirrors [InterstitialCallbacks.onClicked]. */
-    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
+    fun persistClick(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
+    fun notifyClicked()
+
+    /** A successfully routed CTA. Fallback HTML still owns its backend beacon. */
+    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {}) {
+        persistClick(interaction, onTelemetryPersisted)
+        notifyClicked()
+    }
 
     /**
      * The minigame (playable) surface was dismissed. [earned] is whether the play reached the
@@ -65,11 +74,66 @@ internal class RewardedPresentation(
 ) {
     private val clickInteractionGate = ClickInteractionGate()
     private var pendingClickHandoff: ClickPersistenceHandoff? = null
+    private val clickRoute = ResumedPresentationRoute<SimulaRewardedActivity>()
+    private var fallbackOwner: Any? = null
+    private var fallbackActivity: WeakReference<SimulaRewardedActivity>? = null
+    private var primaryFallback: ((String) -> Unit)? = null
+    val fallbackState = FallbackPresentationState()
+    val storeExit by lazy(LazyThreadSafetyMode.NONE) {
+        StoreExitTracker(
+            adId = impressionId.takeIf { it.isNotBlank() },
+            adFormat = "rewarded",
+        )
+    }
     val autoRedirectCoordinator = AutoRedirectCoordinator()
 
     fun claimClick(source: String): ClickInteractionClaim? = clickInteractionGate.claim(source)
 
     fun hasPendingClick(): Boolean = clickInteractionGate.hasPendingClaim()
+
+    fun attachActivity(activity: SimulaRewardedActivity) {
+        clickRoute.attach(activity)
+    }
+
+    fun resumeActivity(activity: SimulaRewardedActivity) {
+        clickRoute.resume(activity)
+    }
+
+    fun pauseActivity(activity: SimulaRewardedActivity) {
+        clickRoute.pause(activity)
+    }
+
+    fun detachActivity(activity: SimulaRewardedActivity) {
+        clickRoute.detach(activity)
+    }
+
+    fun routeClick(
+        route: (SimulaRewardedActivity) -> Boolean,
+        completion: (Boolean) -> Unit,
+    ): PresentationRouteResult = clickRoute.request(route, completion)
+
+    @Synchronized
+    fun setPrimaryFallback(owner: Any, activity: SimulaRewardedActivity, fallback: (String) -> Unit) {
+        fallbackOwner = owner
+        fallbackActivity = WeakReference(activity)
+        primaryFallback = fallback
+    }
+
+    @Synchronized
+    fun clearPrimaryFallback(owner: Any) {
+        if (fallbackOwner === owner) {
+            fallbackOwner = null
+            fallbackActivity = null
+            primaryFallback = null
+        }
+    }
+
+    fun openPrimaryFallback(url: String, activity: SimulaRewardedActivity) {
+        val fallback = synchronized(this) {
+            primaryFallback.takeIf { fallbackActivity?.get() === activity }
+        }
+        runCatching { fallback?.invoke(url) }
+    }
 
     @Synchronized
     fun pendingClickHandoff(): ClickPersistenceHandoff? = pendingClickHandoff
@@ -90,6 +154,10 @@ internal class RewardedPresentation(
         autoRedirectCoordinator.dispose()
         pendingClickHandoff?.cancel()
         pendingClickHandoff = null
+        clickRoute.cancel()
+        fallbackOwner = null
+        fallbackActivity = null
+        primaryFallback = null
     }
 
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */

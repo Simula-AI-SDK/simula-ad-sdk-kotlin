@@ -164,6 +164,50 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun trustedCtaMessageRequiresThePresentationNonce() {
+        val message = """{"type":"SIMULA_CTA_OPEN","url":"https://tracker.example/click","activation_nonce":"nonce-1"}"""
+
+        assertEquals("https://tracker.example/click", trustedCtaUrl(message, "nonce-1"))
+        assertNull(trustedCtaUrl(message, "other-presentation"))
+        assertNull(trustedCtaUrl(message, null))
+        assertNull("disabled installation rejects an already queued message", trustedCtaUrl(message, "nonce-1", false))
+    }
+
+    @Test
+    fun trustedCtaMessageRejectsMalformedOrNonStringFields() {
+        assertNull(trustedCtaUrl("malformed", "nonce"))
+        assertNull(trustedCtaUrl("""{"type":"SIMULA_CTA_OPEN","url":7,"activation_nonce":"nonce"}""", "nonce"))
+        assertNull(trustedCtaUrl("""{"type":"SIMULA_CTA_OPEN","url":"","activation_nonce":"nonce"}""", "nonce"))
+        assertNull(trustedCtaUrl("""{"type":"AD_EARLY_COMPLETE","url":"https://x","activation_nonce":"nonce"}""", "nonce"))
+    }
+
+    @Test
+    fun trustedCtaMessageBoundsUrlAndWholeEnvelope() {
+        val acceptedUrl = "x".repeat(8 * 1024)
+        val oversizedUrl = "$acceptedUrl?"
+
+        assertEquals(
+            acceptedUrl,
+            trustedCtaUrl(
+                """{"type":"SIMULA_CTA_OPEN","url":"$acceptedUrl","activation_nonce":"nonce"}""",
+                "nonce",
+            ),
+        )
+        assertNull(
+            trustedCtaUrl(
+                """{"type":"SIMULA_CTA_OPEN","url":"$oversizedUrl","activation_nonce":"nonce"}""",
+                "nonce",
+            ),
+        )
+        assertNull(
+            trustedCtaUrl(
+                """{"type":"SIMULA_CTA_OPEN","url":"https://x","activation_nonce":"nonce","padding":"${"x".repeat(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS)}"}""",
+                "nonce",
+            ),
+        )
+    }
+
+    @Test
     fun getAudioStateReplyShape() {
         val reply = capture("""{"type":"GET_AUDIO_STATE","requestId":"42"}""")
         assertEquals("GET_AUDIO_STATE", reply["type"]!!.jsonPrimitive.content)

@@ -374,12 +374,14 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     override fun onDisplayed() { listener?.onAdDisplayed(this@SimulaInterstitialAd) }
                     override fun onImpression() { listener?.onAdImpression(this@SimulaInterstitialAd) }
                     override fun onPaid(adValue: AdValue) { listener?.onAdPaid(this@SimulaInterstitialAd, adValue) }
-                    override fun onClicked(
+                    override fun persistClick(
                         interaction: ad.simula.ad.sdk.network.ClickInteraction,
                         onTelemetryPersisted: () -> Unit,
                     ) {
-                        listener?.onAdClicked(this@SimulaInterstitialAd)
                         onTelemetryPersisted()
+                    }
+                    override fun notifyClicked() {
+                        notifyPublisherClick { listener?.onAdClicked(this@SimulaInterstitialAd) }
                     }
                     override fun onClosed() {
                         state = State.Idle
@@ -465,7 +467,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
             listener?.onAdPaid(this@SimulaInterstitialAd, adValue)
         }
 
-        override fun onClicked(
+        override fun persistClick(
             interaction: ad.simula.ad.sdk.network.ClickInteraction,
             onTelemetryPersisted: () -> Unit,
         ) {
@@ -480,7 +482,10 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 critical = true,
                 onPersisted = onTelemetryPersisted,
             )
-            listener?.onAdClicked(this@SimulaInterstitialAd)
+        }
+
+        override fun notifyClicked() {
+            notifyPublisherClick { listener?.onAdClicked(this@SimulaInterstitialAd) }
         }
 
         override fun onClosed() {

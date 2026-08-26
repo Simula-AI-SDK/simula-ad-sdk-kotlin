@@ -342,13 +342,16 @@ class SimulaRewardedAd(val adUnitId: String) {
                         listener?.onAdPaid(this@SimulaRewardedAd, adValue)
                     }
 
-                    // Preview is local-only: surface the click callback, no telemetry.
-                    override fun onClicked(
+                    // Preview is local-only: complete persistence immediately, without telemetry.
+                    override fun persistClick(
                         interaction: ad.simula.ad.sdk.network.ClickInteraction,
                         onTelemetryPersisted: () -> Unit,
                     ) {
-                        listener?.onAdClicked(this@SimulaRewardedAd)
                         onTelemetryPersisted()
+                    }
+
+                    override fun notifyClicked() {
+                        notifyPublisherClick { listener?.onAdClicked(this@SimulaRewardedAd) }
                     }
 
                     override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
@@ -447,7 +450,7 @@ class SimulaRewardedAd(val adUnitId: String) {
             listener?.onAdPaid(this@SimulaRewardedAd, adValue)
         }
 
-        override fun onClicked(
+        override fun persistClick(
             interaction: ad.simula.ad.sdk.network.ClickInteraction,
             onTelemetryPersisted: () -> Unit,
         ) {
@@ -462,7 +465,10 @@ class SimulaRewardedAd(val adUnitId: String) {
                 critical = true,
                 onPersisted = onTelemetryPersisted,
             )
-            listener?.onAdClicked(this@SimulaRewardedAd)
+        }
+
+        override fun notifyClicked() {
+            notifyPublisherClick { listener?.onAdClicked(this@SimulaRewardedAd) }
         }
 
         override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {

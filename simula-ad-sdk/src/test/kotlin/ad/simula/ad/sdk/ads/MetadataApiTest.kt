@@ -77,10 +77,11 @@ class MetadataApiTest {
                 override fun onDisplayed() = Unit
                 override fun onImpression() = Unit
                 override fun onPaid(adValue: AdValue) = Unit
-                override fun onClicked(
+                override fun persistClick(
                     interaction: ad.simula.ad.sdk.network.ClickInteraction,
                     onTelemetryPersisted: () -> Unit,
                 ) = Unit
+                override fun notifyClicked() = Unit
                 override fun onClosed() = Unit
             },
             metadata = snapshot,
@@ -93,10 +94,11 @@ class MetadataApiTest {
                 override fun onDisplayed() = Unit
                 override fun onImpression() = Unit
                 override fun onPaid(adValue: AdValue) = Unit
-                override fun onClicked(
+                override fun persistClick(
                     interaction: ad.simula.ad.sdk.network.ClickInteraction,
                     onTelemetryPersisted: () -> Unit,
                 ) = Unit
+                override fun notifyClicked() = Unit
                 override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
                 override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
             },

@@ -177,6 +177,7 @@ internal data class ApiDeviceCapabilities(
     @SerialName("api_level") val apiLevel: Int = 0,
     @SerialName("play_services_available") val playServicesAvailable: Boolean = false,
     @SerialName("install_referrer_available") val installReferrerAvailable: Boolean = false,
+    @SerialName("native_click_beacon_v1") val nativeClickBeaconV1: Boolean = true,
 )
 
 /** Reads the running device's capabilities (Android framework). Called from the ad path only —
@@ -187,6 +188,7 @@ internal fun currentDeviceCapabilities(): ApiDeviceCapabilities = ApiDeviceCapab
     // Play Install Prompt requires API 21+; refine with a GoogleApiAvailability check if the dep is present.
     playServicesAvailable = android.os.Build.VERSION.SDK_INT >= 21,
     installReferrerAvailable = android.os.Build.VERSION.SDK_INT >= 21,
+    nativeClickBeaconV1 = true,
 )
 
 // ── Ad behavior (server-driven A/B render config) ─────────────────────────────

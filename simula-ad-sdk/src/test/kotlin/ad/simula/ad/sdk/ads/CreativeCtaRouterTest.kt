@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.ads
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -29,6 +30,24 @@ class CreativeCtaRouterTest {
         assertEquals(embedded, CreativeCtaRouter.preferredClickUrl(null, embedded))
         assertEquals(embedded, CreativeCtaRouter.preferredClickUrl("", embedded))
         assertEquals(embedded, CreativeCtaRouter.preferredClickUrl("   ", embedded))
+    }
+
+    @Test
+    fun `invalid top-level tracker falls back to admitted tapped URL`() {
+        val tapped = "https://creative.example/click?encoded=a%2Fb%3Fc&sig=x%2By"
+
+        assertEquals(tapped, CreativeCtaRouter.preferredClickUrl("javascript:alert(1)", tapped))
+        assertEquals(tapped, CreativeCtaRouter.preferredClickUrl("/relative", tapped))
+        assertEquals(tapped, CreativeCtaRouter.preferredClickUrl("https:///missing-host", tapped))
+    }
+
+    @Test
+    fun `admitted URL preserves encoded query bytes exactly`() {
+        val url = "https://tracker.example/click?a=x%2Fy&sig=a%2Bb%3D%3D"
+
+        assertEquals(url, CreativeCtaRouter.admittedHttpUrl(url))
+        assertNull(CreativeCtaRouter.admittedHttpUrl("market://details?id=app"))
+        assertNull(CreativeCtaRouter.admittedHttpUrl("//tracker.example/click"))
     }
 
     @Test
@@ -72,5 +91,60 @@ class CreativeCtaRouterTest {
         assertNull(CreativeCtaRouter.targetUrl("   "))
         assertNull(CreativeCtaRouter.targetUrl(null, null))
         assertNull(CreativeCtaRouter.targetUrl("", "  "))
+    }
+
+    @Test
+    fun `failed MMP route attempts raw store fallback with low cardinality diagnostics`() {
+        val launched = mutableListOf<String>()
+        val diagnostics = mutableListOf<String>()
+        val store = "https://play.google.com/store/apps/details?id=app"
+
+        val opened = CreativeCtaRouter.routeCta(
+            trackingUrl = "https://tracker.example/click?x=1%2F2",
+            destination = "appstore",
+            storeUrl = store,
+            launch = { url -> launched += url; url == store },
+            record = diagnostics::add,
+        )
+
+        assertTrue(opened)
+        assertEquals(listOf("https://tracker.example/click?x=1%2F2", store), launched)
+        assertEquals(listOf("mmp_route_attempted", "mmp_raw_store_fallback"), diagnostics)
+    }
+
+    @Test
+    fun `failed MMP and store routes report terminal failure`() {
+        val diagnostics = mutableListOf<String>()
+
+        assertEquals(
+            false,
+            CreativeCtaRouter.routeCta(
+                trackingUrl = "https://tracker.example/click",
+                destination = "appstore",
+                storeUrl = "https://play.google.com/store/apps/details?id=app",
+                launch = { false },
+                record = diagnostics::add,
+            ),
+        )
+        assertEquals(
+            listOf("mmp_route_attempted", "mmp_raw_store_fallback", "mmp_route_failed"),
+            diagnostics,
+        )
+    }
+
+    @Test
+    fun `missing tracker records direct raw store fallback`() {
+        val diagnostics = mutableListOf<String>()
+
+        assertTrue(
+            CreativeCtaRouter.routeCta(
+                trackingUrl = null,
+                destination = "appstore",
+                storeUrl = "https://play.google.com/store/apps/details?id=app",
+                launch = { true },
+                record = diagnostics::add,
+            ),
+        )
+        assertEquals(listOf("mmp_raw_store_fallback", "mmp_route_attempted"), diagnostics)
     }
 }

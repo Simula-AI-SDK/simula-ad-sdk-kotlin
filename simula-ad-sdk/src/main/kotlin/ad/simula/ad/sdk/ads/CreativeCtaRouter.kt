@@ -1,9 +1,11 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.StoreOpen
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import java.net.URI
 
 /**
  * Routes a creative's call-to-action tap to its advertiser destination.
@@ -47,8 +49,18 @@ internal object CreativeCtaRouter {
 
     /** Prefer the attribution URL carried outside rendered HTML, whose script text may HTML-escape
      * query separators. Older payloads without that field keep using the creative's tapped URL. */
-    internal fun preferredClickUrl(trackingUrl: String?, embeddedUrl: String): String =
-        trackingUrl?.takeIf { it.isNotBlank() } ?: embeddedUrl
+    internal fun preferredClickUrl(trackingUrl: String?, embeddedUrl: String): String? =
+        admittedHttpUrl(trackingUrl) ?: admittedHttpUrl(embeddedUrl)
+
+    internal fun admittedHttpUrl(value: String?): String? {
+        if (value.isNullOrBlank()) return null
+        val uri = runCatching { URI(value) }.getOrNull() ?: return null
+        return value.takeIf {
+            uri.isAbsolute &&
+                uri.host?.isNotBlank() == true &&
+                (uri.scheme.equals("http", true) || uri.scheme.equals("https", true))
+        }
+    }
 
     /**
      * The URL a creative CTA should open: the tracking link itself, trimmed and **verbatim**
@@ -63,8 +75,8 @@ internal object CreativeCtaRouter {
         storeUrl: String? = null,
         destination: String = "appstore",
     ): String? =
-        trackingUrl?.trim()?.takeIf { it.isNotEmpty() }
-            ?: storeUrl?.trim()?.takeIf { it.isNotEmpty() && destination == "appstore" }
+        admittedHttpUrl(trackingUrl)
+            ?: admittedHttpUrl(storeUrl).takeIf { destination == "appstore" }
 
     /**
      * Opens the advertiser destination for a creative CTA by handing [targetUrl] to the browser.
@@ -83,13 +95,47 @@ internal object CreativeCtaRouter {
         storeOpen: StoreOpen? = null,
         storeUrl: String? = null,
     ): Boolean {
-        val url = targetUrl(trackingUrl, storeUrl, destination) ?: return false
-        if (launch(context, url)) return true
+        return routeCta(
+            trackingUrl = trackingUrl,
+            destination = destination,
+            storeUrl = storeUrl,
+            launch = { launch(context, it) },
+            record = { name -> Telemetry.recordOperation(name, 0L, success = name != "mmp_route_failed") },
+        )
+    }
+
+    internal fun routeCta(
+        trackingUrl: String?,
+        destination: String,
+        storeUrl: String?,
+        launch: (String) -> Boolean,
+        record: (String) -> Unit = {},
+    ): Boolean {
+        val admittedTracking = admittedHttpUrl(trackingUrl)
+        val admittedStore = admittedHttpUrl(storeUrl).takeIf { destination == "appstore" }
+        val url = targetUrl(trackingUrl, storeUrl, destination) ?: run {
+            runCatching { record("mmp_route_failed") }
+            return false
+        }
+        if (admittedTracking == null && admittedStore == url) {
+            runCatching { record("mmp_raw_store_fallback") }
+        }
+        runCatching { record("mmp_route_attempted") }
+        if (runCatching { launch(url) }.getOrDefault(false)) return true
         // Deterministic fallback (appstore destinations only): the tracker had no handler / was
         // malformed — land the CTA on the raw store link instead of dropping it.
-        if (destination != "appstore") return false
-        val fallback = storeUrl?.trim()?.takeIf { it.isNotEmpty() && it != url } ?: return false
-        return launch(context, fallback)
+        if (destination != "appstore") {
+            runCatching { record("mmp_route_failed") }
+            return false
+        }
+        val fallback = admittedHttpUrl(storeUrl)?.takeIf { it != url } ?: run {
+            runCatching { record("mmp_route_failed") }
+            return false
+        }
+        runCatching { record("mmp_raw_store_fallback") }
+        val opened = runCatching { launch(fallback) }.getOrDefault(false)
+        if (!opened) runCatching { record("mmp_route_failed") }
+        return opened
     }
 
     private fun launch(context: Context, url: String): Boolean = runCatching {

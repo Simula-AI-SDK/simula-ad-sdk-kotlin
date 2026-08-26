@@ -13,10 +13,13 @@ import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.network.AdBeaconManager
-import ad.simula.ad.sdk.network.ClickRouteOutcome
+import ad.simula.ad.sdk.network.AutoRedirectResult
+import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.ClickSources
+import ad.simula.ad.sdk.network.PresentationRouteResult
+import ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission
+import ad.simula.ad.sdk.network.PrimaryCtaRoute
 import ad.simula.ad.sdk.network.SimulaApiClient
-import ad.simula.ad.sdk.network.routeClaimedClick
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
 import android.graphics.Bitmap
@@ -104,11 +107,9 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             return
         }
         presentation = p
+        p.attachActivity(this)
         token?.let { RewardedHandoff.markPresented(it) }
-        storeExit = StoreExitTracker(
-            adId = p.impressionId.takeIf { it.isNotBlank() },
-            adFormat = "rewarded",
-        )
+        storeExit = p.storeExit
 
         configureWindow()
         @Suppress("DEPRECATION")
@@ -124,13 +125,36 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                 // reported when the minigame closes; the Activity finishes after the fallback.
                 FallbackAdHost(
                     impressionId = p.impressionId,
+                    adFormat = "rewarded",
+                    presentationState = p.fallbackState,
                     onFullyClosed = ::completeReward,
                     autoStoreRedirect = p.adBehavior?.autoStoreRedirect,
-                    // A user tap on an end-screen CTA is a click (parity with the playable CTA / store
-                    // prompt): surface the PARENT rewarded ad to onAdClicked. The end-screen iframe
-                    // self-reports its own click beacon, so fire the callback only — no SDK beacon here.
-                    onAdClick = { interaction -> p.callbacks.onClicked(interaction) },
+                    // Capable sessions use the native fallback_cta beacon; the backend suppresses the
+                    // legacy HTML self-beacon using native_click_beacon_v1.
+                    onAdClick = { interaction ->
+                        p.callbacks.notifyClicked()
+                        p.storeExit.recordStoreOpen(interaction.source)
+                    },
+                    persistClick = p.callbacks::persistClick,
                     claimClick = p::claimClick,
+                    routeClick = { route, completion ->
+                        val result = p.routeClick(
+                            route = { activity ->
+                                if (!canRouteFromCurrentFullscreenActivity(
+                                        activity.isFinishing,
+                                        activity.isDestroyed,
+                                    )) false else route(activity.applicationContext)
+                            },
+                            completion = completion,
+                        )
+                        if (result == PresentationRouteResult.REJECTED) {
+                            ClickRouteStart.REJECTED
+                        } else {
+                            ClickRouteStart.STARTED
+                        }
+                    },
+                    onClickHandoffCreated = p::trackClickHandoff,
+                    onClickHandoffFinished = p::clearClickHandoff,
                     autoRedirectCoordinator = p.autoRedirectCoordinator,
                     pendingClickHandoff = p::pendingClickHandoff,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
@@ -177,9 +201,11 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         storeExit?.onResume()
+        presentation?.resumeActivity(this)
     }
 
     override fun onPause() {
+        presentation?.pauseActivity(this)
         super.onPause()
         storeExit?.onPause()
     }
@@ -207,6 +233,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        presentation?.detachActivity(this)
         super.onDestroy()
         // Only act when finishing for good; on a config-change recreation we keep the
         // handoff so the new instance can read it and must NOT report CLOSE.
@@ -254,6 +281,10 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller.hide(WindowInsetsCompat.Type.systemBars())
+    }
+
+    internal fun recordClickStoreOpen(source: String) {
+        storeExit?.recordStoreOpen(source)
     }
 }
 
@@ -324,6 +355,21 @@ private fun RewardedMinigame(
     // a WebView on its own, so a rewarded ad left open behind the home screen would keep running.
     // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
+    val primaryCtaAdmission = remember(presentation) { PrimaryCtaDocumentAdmission() }
+    val fallbackOwner = remember(presentation) { Any() }
+    val fallbackActivity = LocalContext.current as? SimulaRewardedActivity
+    DisposableEffect(presentation, fallbackOwner, fallbackActivity) {
+        if (fallbackActivity == null) return@DisposableEffect onDispose {}
+        presentation.setPrimaryFallback(fallbackOwner, fallbackActivity) fallback@{ url ->
+            val webView = creativeWebView ?: return@fallback
+            if (!primaryCtaAdmission.disable()) return@fallback
+            BridgeWebViewInstaller.disableTrustedCta(webView)
+            webView.post {
+                if (creativeWebView === webView) runCatching { webView.loadUrl(url) }
+            }
+        }
+        onDispose { presentation.clearPrimaryFallback(fallbackOwner) }
+    }
     DisposableEffect(lifecycleOwner, creativeWebView) {
         val wv = creativeWebView
         // Track a real background (ON_STOP) so the repaint below fires only when the window actually
@@ -503,6 +549,63 @@ private fun RewardedMinigame(
         if (canDismissFullscreen(rewardEarned, presentation.hasPendingClick())) onFinish(true)
     }
 
+    fun beginPrimaryCta(tappedUrl: String): Boolean {
+        val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
+        val interaction = claim.interaction
+        val route = PrimaryCtaRoute(
+            tappedUrl = CreativeCtaRouter.admittedHttpUrl(tappedUrl),
+            externalTarget = CreativeCtaRouter.preferredClickUrl(presentation.trackingUrl, tappedUrl),
+        )
+        coordinateDeferredClickPersistence(
+            mainHandler = clickHandoffHandler,
+            claim = claim,
+            enqueueBeacon = { completion ->
+                AdBeaconManager.enqueue(
+                    presentation.impressionId,
+                    "click",
+                    adFormat = "rewarded",
+                    interactionId = interaction.id,
+                    clickSource = interaction.source,
+                    onPersistenceComplete = completion,
+                )
+            },
+            recordTelemetry = { completion -> presentation.callbacks.persistClick(interaction, completion) },
+            onHandoff = { committedInteraction, completion ->
+                val result = presentation.routeClick({ routeActivity ->
+                    if (!canRouteFromCurrentFullscreenActivity(
+                            routeActivity.isFinishing,
+                            routeActivity.isDestroyed,
+                        )) return@routeClick false
+                    val opened = CreativeCtaRouter.open(
+                        routeActivity.applicationContext,
+                        route.externalTarget,
+                        presentation.destination,
+                        presentation.adBehavior?.storeOpen,
+                        presentation.androidStoreUrl,
+                    )
+                    if (opened) {
+                        presentation.autoRedirectCoordinator.recordUserRouteOpened()
+                        presentation.callbacks.notifyClicked()
+                        routeActivity.recordClickStoreOpen(committedInteraction.source)
+                    } else {
+                        route.tappedUrl?.let { presentation.openPrimaryFallback(it, routeActivity) }
+                    }
+                    opened
+                }, completion)
+                if (result == PresentationRouteResult.REJECTED) ClickRouteStart.REJECTED else ClickRouteStart.STARTED
+            },
+            onCreated = { handoff ->
+                presentation.trackClickHandoff(handoff)
+                clickHandoffPending = true
+            },
+            onFinished = { handoff ->
+                presentation.clearClickHandoff(handoff)
+                clickHandoffPending = presentation.hasPendingClick()
+            },
+        )
+        return true
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -529,6 +632,7 @@ private fun RewardedMinigame(
                             request: WebResourceRequest?,
                         ): Boolean {
                             val requestUrl = request?.url?.toString() ?: return false
+                            if (!primaryCtaAdmission.isEnabled()) return false
                             if (requestUrl == url) return false
                             // Allow same-origin navigation; open external links externally.
                             if (Uri.parse(url).host == Uri.parse(requestUrl).host) return false
@@ -556,28 +660,28 @@ private fun RewardedMinigame(
                             }
                             if (request?.hasGesture() != true) {
                                 if (presentation.hasPendingClick()) return true
-                                val opened = open()
-                                if (opened) recordStoreOpen(ClickSources.PRIMARY_CTA)
-                                return opened
+                                return when (presentation.autoRedirectCoordinator.request(
+                                    scope = autoRedirectScope,
+                                    pendingHandoff = presentation.pendingClickHandoff(),
+                                ) {
+                                    val opened = open()
+                                    if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
+                                    opened
+                                }) {
+                                    AutoRedirectResult.OPENED, AutoRedirectResult.DEFERRED,
+                                    AutoRedirectResult.SUPPRESSED -> true
+                                    AutoRedirectResult.FAILED, AutoRedirectResult.STALE -> false
+                                }
                             }
-                            return when (routeClaimedClick(
-                                claim = presentation.claimClick(ClickSources.PRIMARY_CTA),
-                                open = open,
-                                onOpened = { interaction ->
-                                    presentation.autoRedirectCoordinator.recordUserRouteOpened()
-                                    presentation.callbacks.onClicked(interaction)
-                                    recordStoreOpen(interaction.source)
-                                },
-                            )) {
-                                ClickRouteOutcome.OPEN_FAILED -> false
-                                ClickRouteOutcome.BLOCKED, ClickRouteOutcome.OPENED -> true
-                            }
+                            return beginPrimaryCta(requestUrl)
                         }
                     },
                     surface = "rewarded",
                 ).apply {
                     webChromeClient = CreativeTelemetryWebChromeClient("rewarded", SimulaAds.devMode)
-                    BridgeWebViewInstaller.install(this, bridge)
+                    BridgeWebViewInstaller.install(this, bridge) { url ->
+                        if (primaryCtaAdmission.isEnabled()) beginPrimaryCta(url)
+                    }
                     // Prefer the server-rendered HTML when present (parity with the interstitial,
                     // which fills the surface); fall back to the iframe URL.
                     if (html.isNotBlank()) {
@@ -630,11 +734,11 @@ private fun RewardedMinigame(
                 edgePadding = 8.dp,
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
                 onTap = {
-                    // Surface the click to the publisher first (parity with the interstitial), then
-                    // the durable click beacon — only on a real user tap (not auto_store_redirect).
+                    // Persist telemetry + beacon before routing; notify the publisher only after
+                    // the external destination opens (never for auto_store_redirect).
                     val claim = presentation.claimClick(ClickSources.STORE_PROMPT) ?: return@StorePromptBadge
                     val interaction = claim.interaction
-                    coordinateClickPersistence(
+                    coordinateDeferredClickPersistence(
                         mainHandler = clickHandoffHandler,
                         claim = claim,
                         enqueueBeacon = { completion ->
@@ -648,18 +752,29 @@ private fun RewardedMinigame(
                             )
                         },
                         recordTelemetry = { completion ->
-                            presentation.callbacks.onClicked(interaction, completion)
+                            presentation.callbacks.persistClick(interaction, completion)
                         },
-                        onHandoff = { committedInteraction ->
-                            val opened = CreativeCtaRouter.open(
-                                context.applicationContext,
-                                presentation.trackingUrl,
-                                presentation.destination,
-                                presentation.adBehavior?.storeOpen,
-                                presentation.androidStoreUrl,
-                            )
-                            if (opened) recordStoreOpen(committedInteraction.source)
-                            opened
+                        onHandoff = { committedInteraction, completion ->
+                            val result = presentation.routeClick({ routeActivity ->
+                                if (!canRouteFromCurrentFullscreenActivity(
+                                        routeActivity.isFinishing,
+                                        routeActivity.isDestroyed,
+                                    )
+                                ) return@routeClick false
+                                val opened = CreativeCtaRouter.open(
+                                    routeActivity.applicationContext,
+                                    presentation.trackingUrl,
+                                    presentation.destination,
+                                    presentation.adBehavior?.storeOpen,
+                                    presentation.androidStoreUrl,
+                                )
+                                if (opened) {
+                                    presentation.callbacks.notifyClicked()
+                                    routeActivity.recordClickStoreOpen(committedInteraction.source)
+                                }
+                                opened
+                            }, completion)
+                            if (result == PresentationRouteResult.REJECTED) ClickRouteStart.REJECTED else ClickRouteStart.STARTED
                         },
                         onCreated = { handoff ->
                             presentation.trackClickHandoff(handoff)

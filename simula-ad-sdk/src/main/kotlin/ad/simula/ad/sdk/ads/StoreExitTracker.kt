@@ -6,10 +6,25 @@ import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickPersistencePart
+import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.os.Handler
 import android.os.SystemClock
+
+internal interface ClickHandoffScheduler {
+    fun post(block: Runnable)
+    fun postDelayed(block: Runnable, delayMs: Long)
+    fun remove(block: Runnable)
+}
+
+private class HandlerClickHandoffScheduler(
+    private val handler: Handler,
+) : ClickHandoffScheduler {
+    override fun post(block: Runnable) { handler.post(block) }
+    override fun postDelayed(block: Runnable, delayMs: Long) { handler.postDelayed(block, delayMs) }
+    override fun remove(block: Runnable) { handler.removeCallbacks(block) }
+}
 
 /**
  * Wait for both click durability attempts without doing I/O on the caller thread. Every queue
@@ -18,6 +33,24 @@ import android.os.SystemClock
  */
 internal fun coordinateClickPersistence(
     mainHandler: Handler,
+    claim: ClickInteractionClaim,
+    enqueueBeacon: ((BeaconPersistenceOutcome) -> Unit) -> Unit,
+    recordTelemetry: (() -> Unit) -> Unit,
+    onHandoff: (ClickInteraction) -> Boolean,
+    onCreated: (ClickPersistenceHandoff) -> Unit = {},
+    onFinished: (ClickPersistenceHandoff) -> Unit = {},
+): ClickPersistenceHandoff = coordinateClickPersistence(
+    scheduler = HandlerClickHandoffScheduler(mainHandler),
+    claim = claim,
+    enqueueBeacon = enqueueBeacon,
+    recordTelemetry = recordTelemetry,
+    onHandoff = onHandoff,
+    onCreated = onCreated,
+    onFinished = onFinished,
+)
+
+internal fun coordinateClickPersistence(
+    scheduler: ClickHandoffScheduler,
     claim: ClickInteractionClaim,
     enqueueBeacon: ((BeaconPersistenceOutcome) -> Unit) -> Unit,
     recordTelemetry: (() -> Unit) -> Unit,
@@ -39,16 +72,98 @@ internal fun coordinateClickPersistence(
         )
     }
     handoff = ClickPersistenceHandoff(claim) {
-        mainHandler.removeCallbacks(timeout)
-        mainHandler.post(route)
+        scheduler.remove(timeout)
+        scheduler.post(route)
     }
     runCatching { onCreated(handoff) }.onFailure { handoff.cancel() }
     if (handoff.isTerminal()) return handoff
-    mainHandler.postDelayed(timeout, CLICK_PERSISTENCE_WAIT_MS)
+    scheduler.postDelayed(timeout, CLICK_PERSISTENCE_WAIT_MS)
     runCatching {
         enqueueBeacon { outcome ->
             if (outcome == BeaconPersistenceOutcome.Persisted) {
                 handoff.complete(ClickPersistencePart.BEACON)
+            }
+        }
+    }
+    runCatching {
+        recordTelemetry { handoff.complete(ClickPersistencePart.TELEMETRY) }
+    }
+    return handoff
+}
+
+internal fun coordinateDeferredClickPersistence(
+    mainHandler: Handler,
+    claim: ClickInteractionClaim,
+    enqueueBeacon: ((BeaconPersistenceOutcome) -> Unit) -> Unit,
+    recordTelemetry: (() -> Unit) -> Unit,
+    onHandoff: (ClickInteraction, (Boolean) -> Unit) -> ClickRouteStart,
+    onCreated: (ClickPersistenceHandoff) -> Unit = {},
+    onFinished: (ClickPersistenceHandoff) -> Unit = {},
+    recordPersistenceIssue: (String, String) -> Unit = { signature, breadcrumb ->
+        Telemetry.recordError(signature = signature, breadcrumb = breadcrumb)
+    },
+): ClickPersistenceHandoff = coordinateDeferredClickPersistence(
+    scheduler = HandlerClickHandoffScheduler(mainHandler),
+    claim = claim,
+    enqueueBeacon = enqueueBeacon,
+    recordTelemetry = recordTelemetry,
+    onHandoff = onHandoff,
+    onCreated = onCreated,
+    onFinished = onFinished,
+    recordPersistenceIssue = recordPersistenceIssue,
+)
+
+internal fun coordinateDeferredClickPersistence(
+    scheduler: ClickHandoffScheduler,
+    claim: ClickInteractionClaim,
+    enqueueBeacon: ((BeaconPersistenceOutcome) -> Unit) -> Unit,
+    recordTelemetry: (() -> Unit) -> Unit,
+    onHandoff: (ClickInteraction, (Boolean) -> Unit) -> ClickRouteStart,
+    onCreated: (ClickPersistenceHandoff) -> Unit = {},
+    onFinished: (ClickPersistenceHandoff) -> Unit = {},
+    recordPersistenceIssue: (String, String) -> Unit = { signature, breadcrumb ->
+        Telemetry.recordError(signature = signature, breadcrumb = breadcrumb)
+    },
+): ClickPersistenceHandoff {
+    lateinit var handoff: ClickPersistenceHandoff
+    lateinit var timeout: Runnable
+    val route = Runnable { handoff.handoffAsync(onHandoff) }
+    timeout = Runnable {
+        if (!handoff.timeout()) return@Runnable
+        Telemetry.recordError(
+            signature = "click:persistence_timeout",
+            breadcrumb = "handoff=external",
+        )
+    }
+    handoff = ClickPersistenceHandoff(claim) {
+        scheduler.remove(timeout)
+        scheduler.post(route)
+    }
+    val subscription = handoff.addResultListener {
+        scheduler.post(Runnable { runCatching { onFinished(handoff) } })
+    }
+    runCatching { onCreated(handoff) }.onFailure { handoff.cancel() }
+    if (handoff.isTerminal()) {
+        subscription.cancel()
+        return handoff
+    }
+    scheduler.postDelayed(timeout, CLICK_PERSISTENCE_WAIT_MS)
+    runCatching {
+        enqueueBeacon { outcome ->
+            when (outcome) {
+                BeaconPersistenceOutcome.Persisted -> handoff.complete(ClickPersistencePart.BEACON)
+                BeaconPersistenceOutcome.Rejected, BeaconPersistenceOutcome.Unavailable -> {
+                    runCatching {
+                        recordPersistenceIssue(
+                            "click:persistence_rejected",
+                            "part=beacon;outcome=${outcome.name.lowercase()}",
+                        )
+                    }
+                    handoff.complete(ClickPersistencePart.BEACON)
+                }
+                BeaconPersistenceOutcome.RetryableFailure -> runCatching {
+                    recordPersistenceIssue("click:persistence_retryable", "part=beacon")
+                }
             }
         }
     }

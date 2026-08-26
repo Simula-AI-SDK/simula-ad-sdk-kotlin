@@ -7,7 +7,10 @@ import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
+import ad.simula.ad.sdk.network.PresentationRouteResult
+import ad.simula.ad.sdk.network.ResumedPresentationRoute
 import ad.simula.ad.sdk.network.SimulaApiClient
+import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the interstitial Activity back to the [SimulaInterstitialAd] instance. */
@@ -21,8 +24,18 @@ internal interface InterstitialCallbacks {
     /** The paid event — fired together with [onImpression], carrying the on-device estimate. */
     fun onPaid(adValue: AdValue)
 
-    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
+    fun persistClick(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
+    fun notifyClicked()
+
+    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {}) {
+        persistClick(interaction, onTelemetryPersisted)
+        notifyClicked()
+    }
     fun onClosed()
+}
+
+internal fun notifyPublisherClick(callback: () -> Unit) {
+    runCatching(callback)
 }
 
 /** Everything [SimulaInterstitialActivity] needs to render one presentation. */
@@ -34,11 +47,71 @@ internal class InterstitialPresentation(
 ) {
     private val clickInteractionGate = ClickInteractionGate()
     private var pendingClickHandoff: ClickPersistenceHandoff? = null
+    private val clickRoute = ResumedPresentationRoute<SimulaInterstitialActivity>()
+    private var fallbackOwner: Any? = null
+    private var fallbackActivity: WeakReference<SimulaInterstitialActivity>? = null
+    private var primaryFallback: ((String) -> Unit)? = null
+    val fallbackState = FallbackPresentationState()
+    val storeExit by lazy(LazyThreadSafetyMode.NONE) {
+        StoreExitTracker(
+            adId = ad.impressionId.takeIf { it.isNotBlank() },
+            adFormat = "interstitial",
+        )
+    }
     val autoRedirectCoordinator = AutoRedirectCoordinator()
 
     fun claimClick(source: String): ClickInteractionClaim? = clickInteractionGate.claim(source)
 
     fun hasPendingClick(): Boolean = clickInteractionGate.hasPendingClaim()
+
+    @Synchronized
+    fun attachActivity(activity: SimulaInterstitialActivity) {
+        clickRoute.attach(activity)
+    }
+
+    fun resumeActivity(activity: SimulaInterstitialActivity) {
+        clickRoute.resume(activity)
+    }
+
+    fun pauseActivity(activity: SimulaInterstitialActivity) {
+        clickRoute.pause(activity)
+    }
+
+    fun detachActivity(activity: SimulaInterstitialActivity) {
+        clickRoute.detach(activity)
+    }
+
+    fun routeClick(
+        route: (SimulaInterstitialActivity) -> Boolean,
+        completion: (Boolean) -> Unit,
+    ): PresentationRouteResult = clickRoute.request(route, completion)
+
+    @Synchronized
+    fun setPrimaryFallback(
+        owner: Any,
+        activity: SimulaInterstitialActivity,
+        fallback: (String) -> Unit,
+    ) {
+        fallbackOwner = owner
+        fallbackActivity = WeakReference(activity)
+        primaryFallback = fallback
+    }
+
+    @Synchronized
+    fun clearPrimaryFallback(owner: Any) {
+        if (fallbackOwner === owner) {
+            fallbackOwner = null
+            fallbackActivity = null
+            primaryFallback = null
+        }
+    }
+
+    fun openPrimaryFallback(url: String, activity: SimulaInterstitialActivity) {
+        val fallback = synchronized(this) {
+            primaryFallback.takeIf { fallbackActivity?.get() === activity }
+        }
+        runCatching { fallback?.invoke(url) }
+    }
 
     @Synchronized
     fun pendingClickHandoff(): ClickPersistenceHandoff? = pendingClickHandoff
@@ -59,6 +132,10 @@ internal class InterstitialPresentation(
         autoRedirectCoordinator.dispose()
         pendingClickHandoff?.cancel()
         pendingClickHandoff = null
+        clickRoute.cancel()
+        fallbackOwner = null
+        fallbackActivity = null
+        primaryFallback = null
     }
 
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */
