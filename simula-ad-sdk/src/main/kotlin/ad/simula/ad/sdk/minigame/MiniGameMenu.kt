@@ -679,6 +679,7 @@ fun MiniGameMenu(
                         playableHeightDp = fallbackPlayableHeightDp,
                         playableBorderColor = theme.playableBorderColor ?: "#262626",
                         adId = currentFallbackAd.adId,
+                        parentServeId = currentServeId,
                         nativeClickBeaconV1Enabled = currentFallbackAd.nativeClickBeaconV1Enabled,
                     )
                 }
@@ -768,6 +769,7 @@ private fun AdIframeOverlay(
     playableHeightDp: Float? = null,
     playableBorderColor: String = "#262626",
     adId: String = "",
+    parentServeId: String? = null,
     nativeClickBeaconV1Enabled: Boolean = false,
 ) {
     val context = LocalContext.current
@@ -968,7 +970,8 @@ private fun AdIframeOverlay(
                                         originalPort == requestPort
                                     if (sameOrigin) return false
                                     if (!request.hasGesture()) return true
-                                    val admittedUrl = CreativeCtaRouter.admittedHttpUrl(requestUrl) ?: return true
+                                    val admittedUrl = CreativeCtaRouter.normalizeTappedDestination(requestUrl)
+                                        ?: return true
                                     val claim = clickGate.claim(ClickSources.FALLBACK_CTA) ?: return true
                                     clickAdmission.disable()
                                     val interaction = claim.interaction
@@ -985,6 +988,7 @@ private fun AdIframeOverlay(
                                                     beaconId,
                                                     "click",
                                                     adFormat = "interstitial",
+                                                    telemetryServeId = parentServeId.orEmpty(),
                                                     interactionId = interaction.id,
                                                     clickSource = interaction.source,
                                                     onPersistenceComplete = completion,

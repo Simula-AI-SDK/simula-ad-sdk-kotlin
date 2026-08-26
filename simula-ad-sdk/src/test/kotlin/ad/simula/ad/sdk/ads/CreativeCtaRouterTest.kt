@@ -81,6 +81,88 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `strict market details destination becomes Play HTTPS with raw query preserved`() {
+        val market = "market://details?id=com.example.app&referrer=utm_source%3Dsimula%26click_id%3Dabc%2B123"
+
+        assertEquals(
+            "https://play.google.com/store/apps/details?id=com.example.app&referrer=utm_source%3Dsimula%26click_id%3Dabc%2B123",
+            CreativeCtaRouter.normalizeTappedDestination(market),
+        )
+    }
+
+    @Test
+    fun `market normalization rejects anything except strict details links with package id`() {
+        listOf(
+            "market://details",
+            "market://details?id=",
+            "market://details?id=%20",
+            "market://details/?id=com.example.app",
+            "market://details?id=com.example.app#fragment",
+            "market://search?q=example",
+            "market://details?referrer=abc",
+            "market://details?id=%ZZ",
+            "market://details?id=com.example.app\nnext=true",
+        ).forEach { assertNull(it, CreativeCtaRouter.normalizeTappedDestination(it)) }
+    }
+
+    @Test
+    fun `intent destination uses only decoded admitted browser fallback`() {
+        val intent = "intent://details#Intent;scheme=market;package=com.android.vending;" +
+            "S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.example.app%26referrer%3Dclick%252Bvalue;end"
+
+        assertEquals(
+            "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%2Bvalue",
+            CreativeCtaRouter.normalizeTappedDestination(intent),
+        )
+    }
+
+    @Test
+    fun `intent fallback percent decoding preserves literal and encoded plus signs`() {
+        val literalPlus = "intent://details#Intent;" +
+            "S.browser_fallback_url=https%3A%2F%2Ftracker.example%2Fclick%3Fsig%3Da+b;end"
+        val encodedPlus = "intent://details#Intent;" +
+            "S.browser_fallback_url=https%3A%2F%2Ftracker.example%2Fclick%3Fsig%3Da%2Bb;end"
+
+        assertEquals(
+            "https://tracker.example/click?sig=a+b",
+            CreativeCtaRouter.normalizeTappedDestination(literalPlus),
+        )
+        assertEquals(
+            "https://tracker.example/click?sig=a+b",
+            CreativeCtaRouter.normalizeTappedDestination(encodedPlus),
+        )
+    }
+
+    @Test
+    fun `intent normalization rejects direct launch explicit targets and unsafe fallbacks`() {
+        val safeFallback =
+            "S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dapp"
+        listOf(
+            "intent://details#Intent;scheme=market;end",
+            "intent://details#Intent;scheme=market;component=com.example/.Main;$safeFallback;end",
+            "intent://details#Intent;scheme=market;selector=com.example/.Main;$safeFallback;end",
+            "intent://details#Intent;scheme=market;SEL;$safeFallback;end",
+            "intent://details#Intent;S.browser_fallback_url=javascript%3Aalert%281%29;end",
+            "intent://details#Intent;S.browser_fallback_url=market%3A%2F%2Fdetails%3Fid%3Dapp;end",
+            "intent://details#Intent;S.browser_fallback_url=https%3A%2F%2Fgood.example%2F%0Aevil;end",
+            "intent://details#Intent;$safeFallback;$safeFallback;end",
+            "intent://details#Intent;$safeFallback;end trailing",
+            "intent://details#Intent;$safeFallback;end\u0000",
+        ).forEach { assertNull(it, CreativeCtaRouter.normalizeTappedDestination(it)) }
+    }
+
+    @Test
+    fun `tapped destination keeps HTTP bytes and never admits arbitrary schemes`() {
+        val http = "https://tracker.example/click?campaign=Summer Sale&macro={click_id}"
+
+        assertEquals(http, CreativeCtaRouter.normalizeTappedDestination("  $http  "))
+        assertNull(CreativeCtaRouter.normalizeTappedDestination("javascript:alert(1)"))
+        assertNull(CreativeCtaRouter.normalizeTappedDestination("custom://open/app"))
+        assertNull(CreativeCtaRouter.admittedHttpUrl("market://details?id=app"))
+        assertNull(CreativeCtaRouter.admittedHttpUrl("intent://details#Intent;end"))
+    }
+
+    @Test
     fun `lenient top-level tracker wins and is launched byte-for-byte`() {
         val tracker = "https://tracker.example/click?pid=partner|affiliate&campaign=Summer Sale&id={click_id}"
         val store = "https://play.google.com/store/apps/details?id=app"

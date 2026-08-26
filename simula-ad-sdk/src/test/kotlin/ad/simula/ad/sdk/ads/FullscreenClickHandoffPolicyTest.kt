@@ -362,9 +362,10 @@ class FullscreenClickHandoffPolicyTest {
 
     @Test
     fun `pending fallback navigation stays blocked after document admission disables`() {
-        assertEquals(true, fallbackNavigationOverride(true, documentAdmissionEnabled = false))
-        assertEquals(false, fallbackNavigationOverride(false, documentAdmissionEnabled = false))
-        assertNull(fallbackNavigationOverride(false, documentAdmissionEnabled = true))
+        assertEquals(true, fallbackNavigationOverride(true, false, fallbackNavigationStarted = false))
+        assertEquals(true, fallbackNavigationOverride(false, false, fallbackNavigationStarted = false))
+        assertEquals(false, fallbackNavigationOverride(false, false, fallbackNavigationStarted = true))
+        assertNull(fallbackNavigationOverride(false, true, fallbackNavigationStarted = false))
     }
 
     @Test
@@ -464,13 +465,82 @@ class FullscreenClickHandoffPolicyTest {
         val oldOwner = Any()
         val replacement = Any()
         val calls = mutableListOf<String>()
-        state.bindNavigation(oldOwner) { calls += "old:$it" }
-        state.bindNavigation(replacement) { calls += "new:$it" }
+        state.bindNavigation(oldOwner) { calls.add("old:$it") }
+        state.bindNavigation(replacement) { calls.add("new:$it") }
 
         state.unbindNavigation(oldOwner)
-        state.navigate("https://tracker.example")
+        assertTrue(state.retainNavigation("https://tracker.example"))
 
         assertEquals(listOf("new:https://tracker.example"), calls)
+    }
+
+    @Test
+    fun `fallback route failure waits for terminal handoff and replacement WebView`() {
+        val state = FallbackPresentationState()
+        val oldOwner = Any()
+        val replacementOwner = Any()
+        val calls = mutableListOf<String>()
+        state.bindNavigation(oldOwner) { calls.add("old:$it") }
+        state.setClickPending(true)
+
+        assertTrue(state.retainNavigation("https://creative.example/fallback"))
+        state.unbindNavigation(oldOwner)
+        state.setClickPending(false)
+        assertTrue(calls.isEmpty())
+        assertTrue(state.hasRetainedNavigation())
+
+        state.bindNavigation(replacementOwner) { calls.add("new:$it") }
+        assertEquals(listOf("new:https://creative.example/fallback"), calls)
+        assertFalse(state.hasRetainedNavigation())
+        state.bindNavigation(Any()) { calls.add("duplicate:$it") }
+        assertEquals("fallback delivery is one-shot", 1, calls.size)
+    }
+
+    @Test
+    fun `stale fallback owner cannot clear replacement and teardown drops pending navigation`() {
+        val state = FallbackPresentationState()
+        val staleOwner = Any()
+        val replacementOwner = Any()
+        val calls = mutableListOf<String>()
+        state.bindNavigation(staleOwner) { calls.add("stale:$it") }
+        state.bindNavigation(replacementOwner) { calls.add("new:$it") }
+        state.unbindNavigation(staleOwner)
+        state.setClickPending(true)
+        assertTrue(state.retainNavigation("https://creative.example/fallback"))
+        state.setClickPending(false)
+
+        assertEquals(listOf("new:https://creative.example/fallback"), calls)
+
+        state.setClickPending(true)
+        assertTrue(state.retainNavigation("https://creative.example/dropped"))
+        state.clear()
+        state.setClickPending(false)
+        assertEquals(1, calls.size)
+        assertFalse(state.hasRetainedNavigation())
+    }
+
+    @Test
+    fun `failed fallback delivery blocks advance until a replacement accepts it`() {
+        val state = FallbackPresentationState()
+        val failedOwner = Any()
+        val replacementOwner = Any()
+        val calls = mutableListOf<String>()
+        state.showing(0)
+        assertTrue(state.clickAdmission(0).disable())
+        state.bindNavigation(failedOwner) { false }
+        state.setClickPending(true)
+        assertTrue(state.retainNavigation("https://creative.example/fallback"))
+
+        state.setClickPending(false)
+
+        assertTrue(state.hasRetainedNavigation())
+        assertFalse(state.advance(total = 2))
+        state.unbindNavigation(failedOwner)
+        state.bindNavigation(replacementOwner) { calls.add(it) }
+
+        assertEquals(listOf("https://creative.example/fallback"), calls)
+        assertFalse(state.hasRetainedNavigation())
+        assertTrue(state.advance(total = 2))
     }
 
     @Test
@@ -482,6 +552,21 @@ class FullscreenClickHandoffPolicyTest {
         assertSame(first, state.clickAdmission(0))
         assertFalse(state.clickAdmission(0).isEnabled())
         assertTrue(state.clickAdmission(1).isEnabled())
+    }
+
+    @Test
+    fun `fallback navigation ownership resets for the next screen`() {
+        val state = FallbackPresentationState()
+        state.showing(0)
+        assertTrue(state.clickAdmission(0).disable())
+        state.bindNavigation(Any()) { true }
+        assertTrue(state.retainNavigation("https://creative.example/first"))
+        assertEquals(false, state.navigationOverride(documentAdmissionEnabled = false))
+
+        state.showing(1)
+        assertTrue(state.clickAdmission(1).disable())
+
+        assertEquals(true, state.navigationOverride(documentAdmissionEnabled = false))
     }
 
     @Test

@@ -78,6 +78,45 @@ class AdBeaconQueueTest {
     }
 
     @Test
+    fun `fallback beacon telemetry keeps screen ad id and separate parent serve id`() {
+        assertEquals(
+            BeaconTelemetryContext(adId = "fallback-ad", serveId = "parent-serve"),
+            beaconTelemetryContext("fallback-ad", "parent-serve"),
+        )
+        assertEquals(
+            BeaconTelemetryContext(adId = "fallback-ad", serveId = null),
+            beaconTelemetryContext("fallback-ad", ""),
+        )
+        assertEquals(
+            BeaconTelemetryContext(adId = "fallback-ad", serveId = null),
+            beaconTelemetryContext("fallback-ad", null),
+        )
+        assertEquals(
+            BeaconTelemetryContext(adId = "primary-ad", serveId = "primary-ad"),
+            beaconTelemetryContext("primary-ad", null, adFormat = "rewarded"),
+        )
+    }
+
+    @Test
+    fun `fallback HTTP click beacon remains keyed by fallback ad id`() = runTest {
+        val store = FakeStore()
+        val sender = FakeSender()
+        val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
+
+        engine.queue(
+            impressionId = "fallback-ad",
+            action = "click",
+            interactionId = "interaction",
+            clickSource = ClickSources.FALLBACK_CTA,
+        )
+        advanceUntilIdle()
+
+        assertEquals("fallback-ad", sender.sentBeacons.single().impressionId)
+        assertEquals("interaction", sender.sentBeacons.single().interactionId)
+        assertEquals(ClickSources.FALLBACK_CTA, sender.sentBeacons.single().clickSource)
+    }
+
+    @Test
     fun `a 2xx delivers the beacon and removes it`() = runTest {
         val store = FakeStore()
         val sender = FakeSender().apply { codes["imp:seen"] = 200 }

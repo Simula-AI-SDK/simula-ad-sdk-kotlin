@@ -67,6 +67,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
+import java.lang.ref.WeakReference
 import kotlin.math.ceil
 import kotlinx.coroutines.delay
 
@@ -91,8 +92,10 @@ internal fun enqueueOwnedFallbackClickBeacon(
 internal fun fallbackNavigationOverride(
     clickHandoffPending: Boolean,
     documentAdmissionEnabled: Boolean,
+    fallbackNavigationStarted: Boolean,
 ): Boolean? = when {
     clickHandoffPending -> true
+    !documentAdmissionEnabled && !fallbackNavigationStarted -> true
     !documentAdmissionEnabled -> false
     else -> null
 }
@@ -110,13 +113,29 @@ internal class FallbackPresentationState(
         private set
     private val clickAdmissions = LinkedHashMap<Int, PrimaryCtaDocumentAdmission>()
     private var navigationOwner: Any? = null
-    private var navigateInWebView: ((String) -> Unit)? = null
+    private var navigateInWebView: ((String) -> Boolean)? = null
+    private var pendingNavigationUrl: String? = null
+    private var fallbackNavigationStarted = false
+    private var deliveryInProgress = false
+    private var cleared = false
     private var fetchWaitGeneration = 0L
     private var fetchWaitDeadlineMs = 0L
 
-    fun showing(index: Int) { stage = FallbackStage.SHOWING; this.index = index.coerceAtLeast(0) }
+    fun showing(index: Int) {
+        val nextIndex = index.coerceAtLeast(0)
+        if (stage == FallbackStage.SHOWING && this.index != nextIndex) {
+            pendingNavigationUrl = null
+            fallbackNavigationStarted = false
+            deliveryInProgress = false
+        }
+        stage = FallbackStage.SHOWING
+        this.index = nextIndex
+    }
     fun done() { stage = FallbackStage.DONE }
-    fun setClickPending(pending: Boolean) { clickHandoffPending = pending }
+    fun setClickPending(pending: Boolean) {
+        clickHandoffPending = pending
+        if (!pending) dispatchReadyNavigation()
+    }
     fun retainFetchedAds(ads: List<SimulaApiClient.FallbackAd>) { fetchedAds = ads }
     fun fetchFailed() = Unit
     fun terminalizeInitialFetchFailure(): List<SimulaApiClient.FallbackAd> {
@@ -159,10 +178,13 @@ internal class FallbackPresentationState(
         return true
     }
 
-    @Synchronized
-    fun bindNavigation(owner: Any, navigate: (String) -> Unit) {
-        navigationOwner = owner
-        navigateInWebView = navigate
+    fun bindNavigation(owner: Any, navigate: (String) -> Boolean) {
+        synchronized(this) {
+            if (cleared) return
+            navigationOwner = owner
+            navigateInWebView = navigate
+        }
+        dispatchReadyNavigation()
     }
 
     @Synchronized
@@ -173,13 +195,60 @@ internal class FallbackPresentationState(
         }
     }
 
-    fun navigate(url: String) {
-        val navigate = synchronized(this) { navigateInWebView }
-        runCatching { navigate?.invoke(url) }
+    fun retainNavigation(url: String): Boolean {
+        synchronized(this) {
+            if (cleared || url.isBlank()) return false
+            if (pendingNavigationUrl == null) pendingNavigationUrl = url
+        }
+        dispatchReadyNavigation()
+        return true
     }
 
+    @Synchronized
+    fun hasRetainedNavigation(): Boolean = pendingNavigationUrl != null
+
+    @Synchronized
+    fun clear() {
+        cleared = true
+        clickHandoffPending = false
+        pendingNavigationUrl = null
+        fallbackNavigationStarted = false
+        deliveryInProgress = false
+        navigationOwner = null
+        navigateInWebView = null
+        clickAdmissions.clear()
+    }
+
+    private fun dispatchReadyNavigation() {
+        val delivery = synchronized(this) {
+            if (cleared || clickHandoffPending || deliveryInProgress) return
+            val navigate = navigateInWebView ?: return
+            val url = pendingNavigationUrl ?: return
+            deliveryInProgress = true
+            navigate to url
+        }
+        val delivered = runCatching { delivery.first(delivery.second) }.getOrDefault(false)
+        synchronized(this) {
+            deliveryInProgress = false
+            if (delivered && pendingNavigationUrl == delivery.second) {
+                pendingNavigationUrl = null
+                fallbackNavigationStarted = true
+            }
+        }
+    }
+
+    @Synchronized
+    fun navigationOverride(documentAdmissionEnabled: Boolean): Boolean? = fallbackNavigationOverride(
+        clickHandoffPending = clickHandoffPending,
+        documentAdmissionEnabled = documentAdmissionEnabled,
+        fallbackNavigationStarted = fallbackNavigationStarted,
+    )
+
+    @Synchronized
     fun advance(total: Int): Boolean {
-        if (clickHandoffPending || stage != FallbackStage.SHOWING) return false
+        if (clickHandoffPending || pendingNavigationUrl != null || deliveryInProgress ||
+            stage != FallbackStage.SHOWING
+        ) return false
         if (index + 1 < total) showing(index + 1) else done()
         return true
     }
@@ -430,13 +499,13 @@ private fun FallbackAdOverlay(
     val clickAdmission = remember(presentationState, fallbackIndex) {
         presentationState.clickAdmission(fallbackIndex)
     }
-    val navigationOwner = remember(presentationState) { Any() }
-    DisposableEffect(presentationState, navigationOwner) {
-        presentationState.bindNavigation(navigationOwner) fallback@{ url ->
-            val webView = fallbackWebView ?: return@fallback
-            webView.post {
-                if (fallbackWebView === webView) runCatching { webView.loadUrl(url) }
-            }
+    val navigationOwner = remember(presentationState, fallbackIndex) { Any() }
+    DisposableEffect(presentationState, navigationOwner, fallbackWebView) {
+        val webView = fallbackWebView ?: return@DisposableEffect onDispose {}
+        val webViewRef = WeakReference(webView)
+        presentationState.bindNavigation(navigationOwner) { url ->
+            val target = webViewRef.get() ?: return@bindNavigation false
+            runCatching { target.loadUrl(url) }.isSuccess
         }
         onDispose { presentationState.unbindNavigation(navigationOwner) }
     }
@@ -542,10 +611,7 @@ private fun FallbackAdOverlay(
                         }
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val target = request?.url?.toString() ?: return false
-                            fallbackNavigationOverride(
-                                clickHandoffPending = presentationState.clickHandoffPending,
-                                documentAdmissionEnabled = clickAdmission.isEnabled(),
-                            )?.let { return it }
+                            presentationState.navigationOverride(clickAdmission.isEnabled())?.let { return it }
                             val targetUri = runCatching { Uri.parse(target) }.getOrNull() ?: return true
                             if (targetUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
                             // Subframes stay inside the creative and automatic cross-origin redirects
@@ -594,6 +660,7 @@ private fun FallbackAdOverlay(
                                             beaconId,
                                             "click",
                                             adFormat = adFormat,
+                                            telemetryServeId = impressionId,
                                             interactionId = interaction.id,
                                             clickSource = interaction.source,
                                             onPersistenceComplete = completion,
@@ -602,10 +669,9 @@ private fun FallbackAdOverlay(
                                 },
                                 recordTelemetry = { completion -> persistClick(interaction, completion) },
                                 onHandoff = { committedInteraction, completion ->
-                                    val clickTarget = CreativeCtaRouter.preferredClickUrl(
-                                        ctaTrackingUrl,
-                                        target,
-                                    )
+                                    val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(target)
+                                    val clickTarget = CreativeCtaRouter.admittedHttpUrl(ctaTrackingUrl)
+                                        ?: tappedDestination
                                     val route = { appContext: Context ->
                                         val opened = CreativeCtaRouter.open(
                                             appContext,
@@ -616,8 +682,8 @@ private fun FallbackAdOverlay(
                                         )
                                         if (opened) runCatching { onStoreOpen(committedInteraction) }
                                         if (!opened) {
-                                            CreativeCtaRouter.admittedHttpUrl(target)?.let { fallbackUrl ->
-                                                presentationState.navigate(fallbackUrl)
+                                            tappedDestination?.let { fallbackUrl ->
+                                                presentationState.retainNavigation(fallbackUrl)
                                             }
                                         }
                                         opened
@@ -660,6 +726,7 @@ private fun FallbackAdOverlay(
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
             onRelease = { webView ->
                 if (fallbackWebView === webView) fallbackWebView = null
+                presentationState.unbindNavigation(navigationOwner)
                 WebViewPool.release(webView)
             },
         )

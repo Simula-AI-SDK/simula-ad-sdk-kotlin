@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -419,6 +420,127 @@ class ClickTrackingTest {
     }
 
     @Test
+    fun `retained primary CTA admission is shared across Activity recreation`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val firstActivity = Any()
+        val replacementActivity = Any()
+        val admission = state.admission
+        state.attachActivity(firstActivity)
+
+        assertTrue(admission.disable())
+        state.detachActivity(firstActivity)
+        state.attachActivity(replacementActivity)
+
+        assertSame(admission, state.admission)
+        assertFalse(state.admission.isEnabled())
+    }
+
+    @Test
+    fun `primary navigation unblocks after terminal route when no fallback was retained`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val handoff = testHandoff("pending")
+
+        assertNull(state.navigationOverride())
+        assertTrue(state.admission.disable())
+        state.onHandoffCreated(handoff)
+        assertEquals(true, state.navigationOverride())
+
+        state.onHandoffFinished(handoff)
+        assertEquals(false, state.navigationOverride())
+    }
+
+    @Test
+    fun `failed primary route waits for replacement owner and drains exactly once`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val oldActivity = Any()
+        val replacementActivity = Any()
+        val handoff = testHandoff("route")
+        val calls = mutableListOf<String>()
+        state.attachActivity(oldActivity)
+        assertTrue(state.admission.disable())
+        state.onHandoffCreated(handoff)
+
+        assertTrue(state.retainFallback("https://creative.example/fallback", oldActivity))
+        state.detachActivity(oldActivity)
+        state.attachActivity(replacementActivity)
+        state.onHandoffFinished(handoff)
+        assertTrue(calls.isEmpty())
+        assertTrue(state.hasRetainedFallback())
+
+        assertTrue(state.bindNavigation(Any(), replacementActivity, calls::add))
+        assertEquals(listOf("https://creative.example/fallback"), calls)
+        assertFalse(state.hasRetainedFallback())
+        assertEquals(false, state.navigationOverride())
+        assertTrue(state.bindNavigation(Any(), replacementActivity, calls::add))
+        assertEquals("fallback delivery is one-shot", 1, calls.size)
+    }
+
+    @Test
+    fun `stale primary owner cannot clear replacement binding`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val activity = Any()
+        val staleOwner = Any()
+        val replacementOwner = Any()
+        val calls = mutableListOf<String>()
+        val handoff = testHandoff("stale")
+        state.attachActivity(activity)
+        assertTrue(state.bindNavigation(staleOwner, activity) { calls.add("stale:$it") })
+        assertTrue(state.bindNavigation(replacementOwner, activity) { calls.add("new:$it") })
+
+        state.unbindNavigation(staleOwner)
+        state.onHandoffCreated(handoff)
+        assertTrue(state.retainFallback("https://creative.example/fallback", activity))
+        state.onHandoffFinished(handoff)
+
+        assertEquals(listOf("new:https://creative.example/fallback"), calls)
+    }
+
+    @Test
+    fun `failed primary fallback delivery remains retained for replacement owner`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val activity = Any()
+        val failedOwner = Any()
+        val replacementOwner = Any()
+        val handoff = testHandoff("retry")
+        val calls = mutableListOf<String>()
+        state.attachActivity(activity)
+        assertTrue(state.admission.disable())
+        assertTrue(state.bindNavigation(failedOwner, activity) { false })
+        state.onHandoffCreated(handoff)
+        assertTrue(state.retainFallback("https://creative.example/fallback", activity))
+
+        state.onHandoffFinished(handoff)
+
+        assertTrue(state.hasRetainedFallback())
+        assertEquals(true, state.navigationOverride())
+        state.unbindNavigation(failedOwner)
+        assertTrue(state.bindNavigation(replacementOwner, activity) { calls.add(it) })
+        assertEquals(listOf("https://creative.example/fallback"), calls)
+        assertFalse(state.hasRetainedFallback())
+        assertEquals(false, state.navigationOverride())
+    }
+
+    @Test
+    fun `primary fallback rejects stale Activity and teardown clears retained work`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val current = Any()
+        val stale = Any()
+        val handoff = testHandoff("clear")
+        val calls = mutableListOf<String>()
+        state.attachActivity(current)
+        state.onHandoffCreated(handoff)
+
+        assertFalse(state.retainFallback("https://creative.example/stale", stale))
+        assertTrue(state.retainFallback("https://creative.example/current", current))
+        state.clear()
+        assertFalse(state.hasRetainedFallback())
+        assertFalse(state.bindNavigation(Any(), current, calls::add))
+        state.onHandoffFinished(handoff)
+        assertTrue(calls.isEmpty())
+        assertEquals(true, state.navigationOverride())
+    }
+
+    @Test
     fun `primary CTA route preserves tapped fallback separately from external target`() {
         val route = PrimaryCtaRoute(
             tappedUrl = "https://creative.example/original",
@@ -498,4 +620,8 @@ class ClickTrackingTest {
         assertEquals(PresentationRouteResult.REJECTED, routes.request({ executions++; true }) {})
         assertEquals(0, executions)
     }
+
+    private fun testHandoff(id: String): ClickPersistenceHandoff = ClickPersistenceHandoff(
+        requireNotNull(ClickInteractionGate(idFactory = { id }).claim(ClickSources.PRIMARY_CTA)),
+    ) {}
 }

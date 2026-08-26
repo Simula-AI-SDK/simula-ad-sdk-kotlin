@@ -174,6 +174,13 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun disabledReplacementDocumentDoesNotReceiveTrustedCtaRelayNonce() {
+        assertEquals("nonce", activeCtaNonce("nonce", disabled = false))
+        assertNull(activeCtaNonce("nonce", disabled = true))
+        assertNull(activeCtaNonce(null, disabled = false))
+    }
+
+    @Test
     fun trustedCtaMessageRejectsMalformedOrNonStringFields() {
         assertNull(trustedCtaUrl("malformed", "nonce"))
         assertNull(trustedCtaUrl("""{"type":"SIMULA_CTA_OPEN","url":7,"activation_nonce":"nonce"}""", "nonce"))

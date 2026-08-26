@@ -24,7 +24,6 @@ import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.PresentationRouteResult
-import ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission
 import ad.simula.ad.sdk.network.PrimaryCtaRoute
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
@@ -100,6 +99,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
+import java.lang.ref.WeakReference
 import kotlin.math.ceil
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -484,7 +484,12 @@ private fun CreativeInterstitial(
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
             // Durable beacon (was a fire-and-forget trackShown).
-            AdBeaconManager.enqueue(ad.impressionId, "shown", adFormat = "interstitial")
+            AdBeaconManager.enqueue(
+                ad.impressionId,
+                "shown",
+                adFormat = "interstitial",
+                telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
+            )
         }
     }
 
@@ -507,6 +512,7 @@ private fun CreativeInterstitial(
                 ad.impressionId,
                 "seen",
                 adFormat = "interstitial",
+                telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
                 metadata = presentation.metadata,
             )
         }
@@ -554,14 +560,19 @@ private fun CreativeInterstitial(
                 bridge = bridge,
                 presentation = presentation,
                 onPrimaryCta = primaryCta@{ tappedUrl ->
-                    val claim = notifyPublisherClickForClaim(
-                        presentation.claimClick(ClickSources.PRIMARY_CTA),
-                        { presentation.callbacks.notifyClicked() },
-                    ) ?: return@primaryCta false
+                    val claim = presentation.claimClick(ClickSources.PRIMARY_CTA)
+                        ?: return@primaryCta false
+                    if (!presentation.primaryCtaNavigation.admission.disable()) {
+                        claim.release()
+                        return@primaryCta false
+                    }
+                    notifyPublisherClick { presentation.callbacks.notifyClicked() }
                     val interaction = claim.interaction
+                    val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(tappedUrl)
                     val route = PrimaryCtaRoute(
-                        tappedUrl = CreativeCtaRouter.admittedHttpUrl(tappedUrl),
-                        externalTarget = CreativeCtaRouter.preferredClickUrl(ad.trackingUrl, tappedUrl),
+                        tappedUrl = tappedDestination,
+                        externalTarget = CreativeCtaRouter.admittedHttpUrl(ad.trackingUrl)
+                            ?: tappedDestination,
                     )
                     coordinateDeferredClickPersistence(
                         mainHandler = clickHandoffHandler,
@@ -571,6 +582,7 @@ private fun CreativeInterstitial(
                                 ad.impressionId,
                                 "click",
                                 adFormat = "interstitial",
+                                telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
                                 interactionId = interaction.id,
                                 clickSource = interaction.source,
                                 onPersistenceComplete = completion,
@@ -676,6 +688,7 @@ private fun CreativeInterstitial(
                                 ad.impressionId,
                                 "click",
                                 adFormat = "interstitial",
+                                telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
                                 interactionId = interaction.id,
                                 clickSource = interaction.source,
                                 onPersistenceComplete = completion,
@@ -741,6 +754,7 @@ private fun CreativeInterstitial(
                                 ad.impressionId,
                                 "click",
                                 adFormat = "interstitial",
+                                telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
                                 interactionId = interaction.id,
                                 clickSource = interaction.source,
                                 onPersistenceComplete = completion,
@@ -815,21 +829,18 @@ private fun CreativeHtml(
     modifier: Modifier = Modifier,
 ) {
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
-    val primaryCtaAdmission = remember(presentation) { PrimaryCtaDocumentAdmission() }
+    val primaryCtaNavigation = presentation.primaryCtaNavigation
+    val primaryCtaAdmission = primaryCtaNavigation.admission
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaInterstitialActivity
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(presentation, fallbackOwner, fallbackActivity) {
-        if (fallbackActivity == null) return@DisposableEffect onDispose {}
-        presentation.setPrimaryFallback(fallbackOwner, fallbackActivity) fallback@{ url ->
-            val webView = creativeWebView ?: return@fallback
-            primaryCtaAdmission.disable()
-            BridgeWebViewInstaller.disableTrustedCta(webView)
-            webView.post {
-                if (creativeWebView === webView) {
-                    runCatching { webView.loadUrl(url) }
-                }
-            }
+    DisposableEffect(presentation, fallbackOwner, fallbackActivity, creativeWebView) {
+        val activity = fallbackActivity ?: return@DisposableEffect onDispose {}
+        val webView = creativeWebView ?: return@DisposableEffect onDispose {}
+        val webViewRef = WeakReference(webView)
+        presentation.setPrimaryFallback(fallbackOwner, activity) { url ->
+            val target = webViewRef.get() ?: return@setPrimaryFallback false
+            runCatching { target.loadUrl(url) }.isSuccess
         }
         onDispose { presentation.clearPrimaryFallback(fallbackOwner) }
     }
@@ -880,14 +891,12 @@ private fun CreativeHtml(
                         request: WebResourceRequest?,
                     ): Boolean {
                         val url = request?.url?.toString() ?: return false
-                        if (!primaryCtaAdmission.isEnabled()) return false
+                        primaryCtaNavigation.navigationOverride()?.let { return it }
                         // Document-start interception handles trusted window.open/target=_blank.
                         // This remains the platform fallback for direct gesture navigations.
                         if (!request.hasGesture()) return false
                         val accepted = onPrimaryCta(url)
-                        if (accepted && primaryCtaAdmission.disable()) {
-                            view?.let(BridgeWebViewInstaller::disableTrustedCta)
-                        }
+                        if (accepted) view?.let(BridgeWebViewInstaller::disableTrustedCta)
                         return true
                     }
                 },
@@ -895,12 +904,11 @@ private fun CreativeHtml(
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
                 BridgeWebViewInstaller.install(this, bridge) { url ->
-                    if (primaryCtaAdmission.isEnabled() && onPrimaryCta(url) &&
-                        primaryCtaAdmission.disable()
-                    ) {
+                    if (primaryCtaAdmission.isEnabled() && onPrimaryCta(url)) {
                         creativeWebView?.let(BridgeWebViewInstaller::disableTrustedCta)
                     }
                 }
+                if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
                 // Self-contained creative: asset URLs are absolute (baseURL = null).
                 loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
                 creativeWebView = this
@@ -908,6 +916,8 @@ private fun CreativeHtml(
         },
         modifier = modifier,
         onRelease = { webView ->
+            if (creativeWebView === webView) creativeWebView = null
+            presentation.clearPrimaryFallback(fallbackOwner)
             BridgeWebViewInstaller.release(webView)
         },
     )

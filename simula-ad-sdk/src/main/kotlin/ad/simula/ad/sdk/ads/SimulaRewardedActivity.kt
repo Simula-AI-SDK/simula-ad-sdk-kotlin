@@ -17,7 +17,6 @@ import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.PresentationRouteResult
-import ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission
 import ad.simula.ad.sdk.network.PrimaryCtaRoute
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
@@ -74,6 +73,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
+import java.lang.ref.WeakReference
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -351,18 +351,17 @@ private fun RewardedMinigame(
     // a WebView on its own, so a rewarded ad left open behind the home screen would keep running.
     // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
-    val primaryCtaAdmission = remember(presentation) { PrimaryCtaDocumentAdmission() }
+    val primaryCtaNavigation = presentation.primaryCtaNavigation
+    val primaryCtaAdmission = primaryCtaNavigation.admission
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaRewardedActivity
-    DisposableEffect(presentation, fallbackOwner, fallbackActivity) {
-        if (fallbackActivity == null) return@DisposableEffect onDispose {}
-        presentation.setPrimaryFallback(fallbackOwner, fallbackActivity) fallback@{ url ->
-            val webView = creativeWebView ?: return@fallback
-            primaryCtaAdmission.disable()
-            BridgeWebViewInstaller.disableTrustedCta(webView)
-            webView.post {
-                if (creativeWebView === webView) runCatching { webView.loadUrl(url) }
-            }
+    DisposableEffect(presentation, fallbackOwner, fallbackActivity, creativeWebView) {
+        val activity = fallbackActivity ?: return@DisposableEffect onDispose {}
+        val webView = creativeWebView ?: return@DisposableEffect onDispose {}
+        val webViewRef = WeakReference(webView)
+        presentation.setPrimaryFallback(fallbackOwner, activity) { url ->
+            val target = webViewRef.get() ?: return@setPrimaryFallback false
+            runCatching { target.loadUrl(url) }.isSuccess
         }
         onDispose { presentation.clearPrimaryFallback(fallbackOwner) }
     }
@@ -439,7 +438,12 @@ private fun RewardedMinigame(
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
             // Durable beacon (was a fire-and-forget trackShown).
-            AdBeaconManager.enqueue(presentation.impressionId, "shown", adFormat = "rewarded")
+            AdBeaconManager.enqueue(
+                presentation.impressionId,
+                "shown",
+                adFormat = "rewarded",
+                telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
+            )
         }
     }
 
@@ -462,6 +466,7 @@ private fun RewardedMinigame(
                 presentation.impressionId,
                 "seen",
                 adFormat = "rewarded",
+                telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
                 metadata = presentation.metadata,
             )
         }
@@ -547,16 +552,19 @@ private fun RewardedMinigame(
 
     fun beginPrimaryCta(tappedUrl: String): Boolean {
         if (!primaryCtaAdmission.isEnabled()) return true
-        val claim = notifyPublisherClickForClaim(
-            presentation.claimClick(ClickSources.PRIMARY_CTA),
-            { presentation.callbacks.notifyClicked() },
-        ) ?: return true
-        primaryCtaAdmission.disable()
+        val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
+        if (!primaryCtaAdmission.disable()) {
+            claim.release()
+            return true
+        }
+        notifyPublisherClick { presentation.callbacks.notifyClicked() }
         creativeWebView?.let(BridgeWebViewInstaller::disableTrustedCta)
         val interaction = claim.interaction
+        val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(tappedUrl)
         val route = PrimaryCtaRoute(
-            tappedUrl = CreativeCtaRouter.admittedHttpUrl(tappedUrl),
-            externalTarget = CreativeCtaRouter.preferredClickUrl(presentation.trackingUrl, tappedUrl),
+            tappedUrl = tappedDestination,
+            externalTarget = CreativeCtaRouter.admittedHttpUrl(presentation.trackingUrl)
+                ?: tappedDestination,
         )
         coordinateDeferredClickPersistence(
             mainHandler = clickHandoffHandler,
@@ -566,6 +574,7 @@ private fun RewardedMinigame(
                     presentation.impressionId,
                     "click",
                     adFormat = "rewarded",
+                    telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
                     interactionId = interaction.id,
                     clickSource = interaction.source,
                     onPersistenceComplete = completion,
@@ -633,7 +642,7 @@ private fun RewardedMinigame(
                             request: WebResourceRequest?,
                         ): Boolean {
                             val requestUrl = request?.url?.toString() ?: return false
-                            if (!primaryCtaAdmission.isEnabled()) return false
+                            primaryCtaNavigation.navigationOverride()?.let { return it }
                             if (requestUrl == url) return false
                             // Allow same-origin navigation; open external links externally.
                             if (Uri.parse(url).host == Uri.parse(requestUrl).host) return false
@@ -681,6 +690,7 @@ private fun RewardedMinigame(
                     BridgeWebViewInstaller.install(this, bridge) { url ->
                         if (primaryCtaAdmission.isEnabled()) beginPrimaryCta(url)
                     }
+                    if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
                     // Prefer the server-rendered HTML when present (parity with the interstitial,
                     // which fills the surface); fall back to the iframe URL.
                     if (html.isNotBlank()) {
@@ -700,6 +710,8 @@ private fun RewardedMinigame(
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
             onRelease = { webView ->
+                if (creativeWebView === webView) creativeWebView = null
+                presentation.clearPrimaryFallback(fallbackOwner)
                 BridgeWebViewInstaller.release(webView)
             },
         )
@@ -747,6 +759,7 @@ private fun RewardedMinigame(
                                 presentation.impressionId,
                                 "click",
                                 adFormat = "rewarded",
+                                telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
                                 interactionId = interaction.id,
                                 clickSource = interaction.source,
                                 onPersistenceComplete = completion,

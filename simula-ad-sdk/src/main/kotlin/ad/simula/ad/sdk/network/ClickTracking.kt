@@ -488,6 +488,130 @@ internal class PrimaryCtaDocumentAdmission {
     }
 }
 
+/**
+ * Presentation-owned primary CTA state. The presentation outlives Activity recreation, while the
+ * bound Activity and WebView navigation callback must not. A failed external route is retained until
+ * the handoff is terminal and a WebView owned by the current Activity has bound.
+ */
+internal class RetainedPrimaryCtaNavigationState<T : Any> {
+    val admission = PrimaryCtaDocumentAdmission()
+
+    private var currentActivity: WeakReference<T>? = null
+    private var navigationOwner: Any? = null
+    private var navigationActivity: WeakReference<T>? = null
+    private var navigateInWebView: ((String) -> Boolean)? = null
+    private var pendingHandoff: ClickPersistenceHandoff? = null
+    private var pendingFallbackUrl: String? = null
+    private var fallbackNavigationStarted = false
+    private var deliveryInProgress = false
+    private var cleared = false
+
+    fun attachActivity(activity: T) {
+        synchronized(this) {
+            if (cleared) return
+            currentActivity = WeakReference(activity)
+            if (navigationActivity?.get() !== activity) clearBindingLocked()
+        }
+        dispatchReadyFallback()
+    }
+
+    @Synchronized
+    fun detachActivity(activity: T) {
+        if (currentActivity?.get() === activity) currentActivity = null
+        if (navigationActivity?.get() === activity) clearBindingLocked()
+    }
+
+    fun bindNavigation(owner: Any, activity: T, navigate: (String) -> Boolean): Boolean {
+        synchronized(this) {
+            if (cleared || currentActivity?.get() !== activity) return false
+            navigationOwner = owner
+            navigationActivity = WeakReference(activity)
+            navigateInWebView = navigate
+        }
+        dispatchReadyFallback()
+        return true
+    }
+
+    @Synchronized
+    fun unbindNavigation(owner: Any) {
+        if (navigationOwner === owner) clearBindingLocked()
+    }
+
+    @Synchronized
+    fun navigationOverride(): Boolean? = when {
+        pendingHandoff != null -> true
+        !admission.isEnabled() && !fallbackNavigationStarted -> true
+        !admission.isEnabled() -> false
+        else -> null
+    }
+
+    @Synchronized
+    fun onHandoffCreated(handoff: ClickPersistenceHandoff) {
+        if (!cleared && pendingHandoff == null) pendingHandoff = handoff
+    }
+
+    fun onHandoffFinished(handoff: ClickPersistenceHandoff) {
+        synchronized(this) {
+            if (pendingHandoff === handoff) {
+                pendingHandoff = null
+                if (pendingFallbackUrl == null) fallbackNavigationStarted = true
+            }
+        }
+        dispatchReadyFallback()
+    }
+
+    fun retainFallback(url: String, activity: T): Boolean {
+        synchronized(this) {
+            if (cleared || url.isBlank() || currentActivity?.get() !== activity) return false
+            if (pendingFallbackUrl == null) pendingFallbackUrl = url
+        }
+        dispatchReadyFallback()
+        return true
+    }
+
+    @Synchronized
+    fun hasRetainedFallback(): Boolean = pendingFallbackUrl != null
+
+    @Synchronized
+    fun clear() {
+        if (cleared) return
+        cleared = true
+        admission.disable()
+        currentActivity = null
+        pendingHandoff = null
+        pendingFallbackUrl = null
+        fallbackNavigationStarted = false
+        deliveryInProgress = false
+        clearBindingLocked()
+    }
+
+    private fun dispatchReadyFallback() {
+        val delivery = synchronized(this) {
+            if (cleared || pendingHandoff != null || deliveryInProgress) return
+            val current = currentActivity?.get() ?: return
+            if (navigationActivity?.get() !== current) return
+            val navigate = navigateInWebView ?: return
+            val url = pendingFallbackUrl ?: return
+            deliveryInProgress = true
+            navigate to url
+        }
+        val delivered = runCatching { delivery.first(delivery.second) }.getOrDefault(false)
+        synchronized(this) {
+            deliveryInProgress = false
+            if (delivered && pendingFallbackUrl == delivery.second) {
+                pendingFallbackUrl = null
+                fallbackNavigationStarted = true
+            }
+        }
+    }
+
+    private fun clearBindingLocked() {
+        navigationOwner = null
+        navigationActivity = null
+        navigateInWebView = null
+    }
+}
+
 /** A provisional click admission that only starts the duplicate window after [commit]. */
 internal class ClickInteractionClaim internal constructor(
     val interaction: ClickInteraction,

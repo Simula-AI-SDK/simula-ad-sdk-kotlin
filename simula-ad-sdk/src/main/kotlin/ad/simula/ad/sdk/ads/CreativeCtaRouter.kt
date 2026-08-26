@@ -5,7 +5,9 @@ import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import java.net.URI
 import java.net.URL
+import java.net.URLDecoder
 
 /**
  * Routes a creative's call-to-action tap to its advertiser destination.
@@ -54,7 +56,7 @@ internal object CreativeCtaRouter {
 
     internal fun admittedHttpUrl(value: String?): String? {
         val candidate = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        if (candidate.any { it.code in 0..31 || it.code == 127 }) return null
+        if (candidate.hasUrlControlCharacters()) return null
         val url = runCatching { URL(candidate) }.getOrNull() ?: return null
         return candidate.takeIf {
             (url.protocol.equals("http", true) || url.protocol.equals("https", true)) &&
@@ -62,6 +64,67 @@ internal object CreativeCtaRouter {
                 url.host.none(Char::isWhitespace)
         }
     }
+
+    /**
+     * Safely normalizes a user-tapped fallback destination without broadening ordinary MMP tracker
+     * admission. HTTP(S) remains byte-preserving. A strict Play `market://details` link is converted
+     * to its HTTPS equivalent, while an Android intent URI contributes only its encoded HTTP(S)
+     * browser fallback and is never launched directly.
+     */
+    internal fun normalizeTappedDestination(value: String?): String? {
+        admittedHttpUrl(value)?.let { return it }
+        val candidate = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (candidate.hasUrlControlCharacters()) return null
+        return when {
+            candidate.startsWith("market://", ignoreCase = true) -> normalizeMarketDestination(candidate)
+            candidate.startsWith("intent://", ignoreCase = true) -> normalizeIntentFallback(candidate)
+            else -> null
+        }
+    }
+
+    private fun normalizeMarketDestination(candidate: String): String? {
+        val uri = runCatching { URI(candidate) }.getOrNull() ?: return null
+        if (!uri.scheme.equals("market", ignoreCase = true)) return null
+        if (!uri.rawAuthority.equals("details", ignoreCase = true)) return null
+        if (!uri.rawPath.isNullOrEmpty() || uri.rawFragment != null) return null
+        val rawQuery = uri.rawQuery?.takeIf { it.isNotEmpty() } ?: return null
+        val hasPackageId = rawQuery.split('&').any { part ->
+            val separator = part.indexOf('=')
+            if (separator <= 0) return@any false
+            val key = decodeIntentValue(part.substring(0, separator)) ?: return@any false
+            val value = decodeIntentValue(part.substring(separator + 1)) ?: return@any false
+            key.equals("id", ignoreCase = true) && value.isNotBlank()
+        }
+        if (!hasPackageId) return null
+        return "https://play.google.com/store/apps/details?$rawQuery"
+    }
+
+    private fun normalizeIntentFallback(candidate: String): String? {
+        val marker = candidate.indexOf("#Intent;")
+        if (marker < "intent://".length || !candidate.endsWith(";end")) return null
+        val tokens = candidate.substring(marker + "#Intent;".length, candidate.length - ";end".length)
+            .split(';')
+        if (tokens.any { token ->
+                token.equals("SEL", ignoreCase = true) ||
+                    token.substringBefore('=').equals("component", ignoreCase = true) ||
+                    token.substringBefore('=').equals("selector", ignoreCase = true)
+            }
+        ) {
+            return null
+        }
+        val fallbacks = tokens.mapNotNull { token ->
+            token.takeIf { it.startsWith("S.browser_fallback_url=") }
+                ?.substringAfter('=')
+        }
+        if (fallbacks.size != 1) return null
+        val decoded = decodeIntentValue(fallbacks.single()) ?: return null
+        return admittedHttpUrl(decoded)
+    }
+
+    private fun decodeIntentValue(value: String): String? =
+        runCatching {
+            URLDecoder.decode(value.replace("+", "%2B"), Charsets.UTF_8.name())
+        }.getOrNull()
 
     /**
      * The URL a creative CTA should open: the tracking link itself, trimmed and **verbatim**
@@ -145,3 +208,5 @@ internal object CreativeCtaRouter {
         context.applicationContext.startActivity(intent)
     }.isSuccess
 }
+
+private fun String.hasUrlControlCharacters(): Boolean = any { it.code in 0..31 || it.code == 127 }

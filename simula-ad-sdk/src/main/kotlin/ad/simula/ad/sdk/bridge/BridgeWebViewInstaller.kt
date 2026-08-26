@@ -25,6 +25,9 @@ private const val TRUSTED_CTA_OPEN = "SIMULA_CTA_OPEN"
 private const val MAX_CTA_URL_CHARS = 8 * 1024
 private val installerJson = Json { ignoreUnknownKeys = true }
 
+internal fun activeCtaNonce(nonce: String?, disabled: Boolean): String? =
+    nonce?.takeUnless { disabled }
+
 internal fun trustedCtaRelaySource(activationNonce: String): String = """
     var originalOpen = window.open;
     var ctaDisabled = false;
@@ -287,7 +290,10 @@ $ctaRelay
         if (documentStartSupported()) {
             scripts[webView] = WebViewCompat.addDocumentStartJavaScript(
                 webView,
-                relayScript(installation.id, installation.activationNonce),
+                relayScript(
+                    installation.id,
+                    activeCtaNonce(installation.activationNonce, installation.ctaDisabled),
+                ),
                 setOf("*"),
             )
         }
@@ -303,7 +309,13 @@ $ctaRelay
                 return@post
             }
             runCatching {
-                view.evaluateJavascript(relayScript(installation.id, installation.activationNonce), null)
+                view.evaluateJavascript(
+                    relayScript(
+                        installation.id,
+                        activeCtaNonce(installation.activationNonce, installation.ctaDisabled),
+                    ),
+                    null,
+                )
             }
         }
     }
