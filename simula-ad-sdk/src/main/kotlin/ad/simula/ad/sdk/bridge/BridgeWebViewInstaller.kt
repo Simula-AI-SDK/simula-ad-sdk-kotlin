@@ -28,9 +28,13 @@ private val installerJson = Json { ignoreUnknownKeys = true }
 internal fun activeCtaNonce(nonce: String?, disabled: Boolean): String? =
     nonce?.takeUnless { disabled }
 
-internal fun trustedCtaRelaySource(activationNonce: String): String = """
+internal fun trustedCtaRelaySource(
+    activationNonce: String,
+    trustedCtaBaseUrl: String? = null,
+): String = """
     var originalOpen = window.open;
     var ctaDisabled = false;
+    var trustedCtaBaseUrl = ${trustedCtaBaseUrl?.let(::JsonPrimitive) ?: "null"};
     var capturedUserActivation = navigator.userActivation;
     var nativeSetTimeout = window.setTimeout.bind(window);
     var trustedDispatch = false;
@@ -139,13 +143,22 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
         try { return new URL(String(value), document.baseURI).href; }
         catch (_) { return null; }
     }
+    function isSameOriginCta(url) {
+        if (!trustedCtaBaseUrl) { return false; }
+        try {
+            var base = new URL(trustedCtaBaseUrl);
+            var target = new URL(url, base);
+            if (base.protocol !== 'http:' && base.protocol !== 'https:') { return false; }
+            return target.origin === base.origin;
+        } catch (_) { return false; }
+    }
     function forwardTrustedCta(value) {
         if (ctaDisabled) { return false; }
+        var url = resolvedUrl(value);
+        if (!url || isSameOriginCta(url)) { return false; }
         if (gestureSequence === 0) { return false; }
         if (claimedGesture === gestureSequence) { return true; }
         if (!hasActiveUserGesture()) { return false; }
-        var url = resolvedUrl(value);
-        if (!url) { return false; }
         claimedGesture = gestureSequence;
         try {
             nativePost(nativeStringify({
@@ -198,8 +211,12 @@ internal object BridgeWebViewInstaller {
      * dropping the SDK's own query replies (marked `__simulaSdkResponse`). Mirrors the iOS
      * `WebViewPool.postMessageScript`.
      */
-    private fun relayScript(installationId: String, activationNonce: String?): String {
-        val ctaRelay = activationNonce?.let(::trustedCtaRelaySource).orEmpty()
+    private fun relayScript(
+        installationId: String,
+        activationNonce: String?,
+        trustedCtaBaseUrl: String?,
+    ): String {
+        val ctaRelay = activationNonce?.let { trustedCtaRelaySource(it, trustedCtaBaseUrl) }.orEmpty()
         return """
         (function () {
             var nativeReceiver = window.$NATIVE_OBJECT;
@@ -246,6 +263,7 @@ $ctaRelay
     fun install(
         webView: WebView,
         bridge: CreativeBridge,
+        trustedCtaBaseUrl: String? = null,
         onTrustedCtaOpen: ((String) -> Unit)? = null,
     ) {
         uninstall(webView) // clear stale wiring from this pooled view's prior use
@@ -253,6 +271,7 @@ $ctaRelay
             id = (++nextInstallationId).toString(),
             audioObserver = CreativeAudioStateObserver(webView),
             activationNonce = onTrustedCtaOpen?.let { UUID.randomUUID().toString() },
+            trustedCtaBaseUrl = trustedCtaBaseUrl,
             onTrustedCtaOpen = onTrustedCtaOpen,
         )
         installations[webView] = installation
@@ -293,6 +312,7 @@ $ctaRelay
                 relayScript(
                     installation.id,
                     activeCtaNonce(installation.activationNonce, installation.ctaDisabled),
+                    installation.trustedCtaBaseUrl,
                 ),
                 setOf("*"),
             )
@@ -313,6 +333,7 @@ $ctaRelay
                     relayScript(
                         installation.id,
                         activeCtaNonce(installation.activationNonce, installation.ctaDisabled),
+                        installation.trustedCtaBaseUrl,
                     ),
                     null,
                 )
@@ -366,6 +387,7 @@ private data class BridgeInstallation(
     val id: String,
     val audioObserver: CreativeAudioStateObserver,
     val activationNonce: String?,
+    val trustedCtaBaseUrl: String?,
     val onTrustedCtaOpen: ((String) -> Unit)?,
 ) {
     var fallbackGeneration: Long = 0L

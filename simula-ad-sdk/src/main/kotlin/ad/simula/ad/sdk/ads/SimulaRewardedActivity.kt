@@ -22,7 +22,6 @@ import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
 import android.app.Activity
 import android.graphics.Bitmap
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -625,6 +624,7 @@ private fun RewardedMinigame(
             factory = { ctx ->
                 val url = presentation.iframeUrl
                 val html = presentation.renderedHtml
+                val creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(url)
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : CreativeTelemetryWebViewClient("rewarded") {
@@ -645,7 +645,7 @@ private fun RewardedMinigame(
                             primaryCtaNavigation.navigationOverride()?.let { return it }
                             if (requestUrl == url) return false
                             // Allow same-origin navigation; open external links externally.
-                            if (Uri.parse(url).host == Uri.parse(requestUrl).host) return false
+                            if (CreativeCtaRouter.hasSameHttpOrigin(url, requestUrl)) return false
                             // External link from the playable is the CTA store-open — routed
                             // through the shared CTA router so the tapped tracker opens verbatim
                             // (referrer-preserving) with the raw store link as the deterministic
@@ -687,14 +687,14 @@ private fun RewardedMinigame(
                     surface = "rewarded",
                 ).apply {
                     webChromeClient = CreativeTelemetryWebChromeClient("rewarded", SimulaAds.devMode)
-                    BridgeWebViewInstaller.install(this, bridge) { url ->
+                    BridgeWebViewInstaller.install(this, bridge, trustedCtaBaseUrl = creativeBaseUrl) { url ->
                         if (primaryCtaAdmission.isEnabled()) beginPrimaryCta(url)
                     }
                     if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
                     // Prefer the server-rendered HTML when present (parity with the interstitial,
                     // which fills the surface); fall back to the iframe URL.
                     if (html.isNotBlank()) {
-                        loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+                        loadDataWithBaseURL(creativeBaseUrl, html, "text/html", "UTF-8", null)
                     } else {
                         loadUrl(url)
                     }

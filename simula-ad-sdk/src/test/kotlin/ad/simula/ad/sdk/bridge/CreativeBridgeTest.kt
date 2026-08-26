@@ -235,6 +235,23 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun trustedCtaRelayLeavesSameOriginPopupsToTheWebViewBeforeClaimingTheGesture() {
+        val source = trustedCtaRelaySource(
+            activationNonce = "nonce",
+            trustedCtaBaseUrl = "https://creative.example:443/game",
+        )
+
+        assertTrue(source.contains("var trustedCtaBaseUrl = \"https://creative.example:443/game\""))
+        assertTrue(source.contains("return target.origin === base.origin"))
+        assertTrue(source.contains("new URL(String(value), document.baseURI)"))
+        val sameOriginCheck = source.indexOf("if (!url || isSameOriginCta(url)) { return false; }")
+        val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
+        assertTrue(sameOriginCheck >= 0)
+        assertTrue(gestureClaim >= 0)
+        assertTrue(sameOriginCheck < gestureClaim)
+    }
+
+    @Test
     fun getAudioStateReplyShape() {
         val reply = capture("""{"type":"GET_AUDIO_STATE","requestId":"42"}""")
         assertEquals("GET_AUDIO_STATE", reply["type"]!!.jsonPrimitive.content)

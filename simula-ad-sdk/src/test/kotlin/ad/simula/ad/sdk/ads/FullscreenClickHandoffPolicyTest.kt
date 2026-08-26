@@ -415,6 +415,40 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `successful fallback route records terminal navigation before dismissal unblocks`() {
+        val state = FallbackPresentationState()
+        val scheduler = TestScheduler()
+        val gate = ClickInteractionGate(idFactory = { "fallback" })
+        var routeCompletion: ((Boolean) -> Unit)? = null
+        state.showing(0)
+        assertTrue(state.clickAdmission(0).disable())
+
+        coordinateDeferredClickPersistence(
+            scheduler = scheduler,
+            claim = requireNotNull(gate.claim(ClickSources.FALLBACK_CTA)),
+            enqueueBeacon = { it(BeaconPersistenceOutcome.Persisted) },
+            recordTelemetry = { it() },
+            onHandoff = { _, completion ->
+                routeCompletion = completion
+                ClickRouteStart.STARTED
+            },
+            onCreated = { state.setClickPending(true) },
+            onFinished = { state.setClickPending(false) },
+        )
+        scheduler.runReady()
+
+        assertEquals(true, state.navigationOverride(documentAdmissionEnabled = false))
+        assertFalse(state.advance(total = 2))
+
+        routeCompletion?.invoke(true)
+        assertTrue("terminal UI update is still queued", state.clickHandoffPending)
+        scheduler.runReady()
+
+        assertEquals(false, state.navigationOverride(documentAdmissionEnabled = false))
+        assertTrue(state.advance(total = 2))
+    }
+
+    @Test
     fun `fallback presentation retains phase index and pending ownership for recreation`() {
         val state = FallbackPresentationState()
         state.showing(2)

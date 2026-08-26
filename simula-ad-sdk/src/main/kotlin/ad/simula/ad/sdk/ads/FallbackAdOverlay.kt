@@ -133,7 +133,11 @@ internal class FallbackPresentationState(
     }
     fun done() { stage = FallbackStage.DONE }
     fun setClickPending(pending: Boolean) {
-        clickHandoffPending = pending
+        synchronized(this) {
+            if (cleared) return
+            clickHandoffPending = pending
+            if (!pending && pendingNavigationUrl == null) fallbackNavigationStarted = true
+        }
         if (!pending) dispatchReadyNavigation()
     }
     fun retainFetchedAds(ads: List<SimulaApiClient.FallbackAd>) { fetchedAds = ads }

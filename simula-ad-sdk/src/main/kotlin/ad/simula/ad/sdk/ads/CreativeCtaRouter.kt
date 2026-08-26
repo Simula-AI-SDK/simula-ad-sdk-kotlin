@@ -65,6 +65,14 @@ internal object CreativeCtaRouter {
         }
     }
 
+    internal fun hasSameHttpOrigin(first: String?, second: String?): Boolean {
+        val firstUrl = admittedHttpUrl(first)?.let { runCatching { URL(it) }.getOrNull() } ?: return false
+        val secondUrl = admittedHttpUrl(second)?.let { runCatching { URL(it) }.getOrNull() } ?: return false
+        return firstUrl.protocol.equals(secondUrl.protocol, ignoreCase = true) &&
+            firstUrl.host.equals(secondUrl.host, ignoreCase = true) &&
+            firstUrl.effectivePort() == secondUrl.effectivePort()
+    }
+
     /**
      * Safely normalizes a user-tapped fallback destination without broadening ordinary MMP tracker
      * admission. HTTP(S) remains byte-preserving. A strict Play `market://details` link is converted
@@ -129,7 +137,7 @@ internal object CreativeCtaRouter {
     /**
      * The URL a creative CTA should open: the tracking link itself, trimmed and **verbatim**
      * (never rewritten into a store URL), or — when the tracker is blank/missing AND the
-     * [destination] is the app store — the campaign's raw [storeUrl], so the CTA deterministically
+     * [destination] is the app store — the campaign's safely normalized [storeUrl], so the CTA deterministically
      * lands on the store instead of silently no-oping. A web-destination CTA never falls back to
      * the store link. `null` when nothing is applicable (the caller then no-ops). Pure and
      * framework-free so the "never rewrite the tracker" contract can be unit-tested.
@@ -140,7 +148,7 @@ internal object CreativeCtaRouter {
         destination: String = "appstore",
     ): String? =
         admittedHttpUrl(trackingUrl)
-            ?: admittedHttpUrl(storeUrl).takeIf { destination == "appstore" }
+            ?: normalizeTappedDestination(storeUrl).takeIf { destination == "appstore" }
 
     /**
      * Opens the advertiser destination for a creative CTA by handing [targetUrl] to the browser.
@@ -176,8 +184,8 @@ internal object CreativeCtaRouter {
         record: (String) -> Unit = {},
     ): Boolean {
         val admittedTracking = admittedHttpUrl(trackingUrl)
-        val admittedStore = admittedHttpUrl(storeUrl).takeIf { destination == "appstore" }
-        val url = targetUrl(trackingUrl, storeUrl, destination) ?: run {
+        val admittedStore = normalizeTappedDestination(storeUrl).takeIf { destination == "appstore" }
+        val url = admittedTracking ?: admittedStore ?: run {
             runCatching { record("mmp_route_failed") }
             return false
         }
@@ -192,7 +200,7 @@ internal object CreativeCtaRouter {
             runCatching { record("mmp_route_failed") }
             return false
         }
-        val fallback = admittedHttpUrl(storeUrl)?.takeIf { it != url } ?: run {
+        val fallback = admittedStore?.takeIf { it != url } ?: run {
             runCatching { record("mmp_route_failed") }
             return false
         }
@@ -208,5 +216,7 @@ internal object CreativeCtaRouter {
         context.applicationContext.startActivity(intent)
     }.isSuccess
 }
+
+private fun URL.effectivePort(): Int = if (port >= 0) port else defaultPort
 
 private fun String.hasUrlControlCharacters(): Boolean = any { it.code in 0..31 || it.code == 127 }

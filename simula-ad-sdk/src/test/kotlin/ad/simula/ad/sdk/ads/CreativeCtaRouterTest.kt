@@ -91,6 +91,42 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `normalized market store fallback is used directly when tracker is missing`() {
+        val market = "market://details?id=com.example.app&referrer=click%2Bvalue"
+        val https = "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%2Bvalue"
+        val launched = mutableListOf<String>()
+
+        assertEquals(https, CreativeCtaRouter.targetUrl(null, market, destination = "appstore"))
+        assertTrue(
+            CreativeCtaRouter.routeCta(
+                trackingUrl = null,
+                destination = "appstore",
+                storeUrl = market,
+                launch = { launched += it; true },
+            ),
+        )
+        assertEquals(listOf(https), launched)
+    }
+
+    @Test
+    fun `normalized market store fallback is reused after tracker launch fails`() {
+        val tracker = "https://tracker.example/click"
+        val market = "market://details?id=com.example.app"
+        val https = "https://play.google.com/store/apps/details?id=com.example.app"
+        val launched = mutableListOf<String>()
+
+        assertTrue(
+            CreativeCtaRouter.routeCta(
+                trackingUrl = tracker,
+                destination = "appstore",
+                storeUrl = market,
+                launch = { url -> launched += url; url == https },
+            ),
+        )
+        assertEquals(listOf(tracker, https), launched)
+    }
+
+    @Test
     fun `market normalization rejects anything except strict details links with package id`() {
         listOf(
             "market://details",
@@ -114,6 +150,35 @@ class CreativeCtaRouterTest {
             "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%2Bvalue",
             CreativeCtaRouter.normalizeTappedDestination(intent),
         )
+    }
+
+    @Test
+    fun `intent browser fallback is used by direct and retry store routes`() {
+        val intent = "intent://details#Intent;scheme=market;" +
+            "S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.example.app;end"
+        val fallback = "https://play.google.com/store/apps/details?id=com.example.app"
+        val directLaunches = mutableListOf<String>()
+        val retryLaunches = mutableListOf<String>()
+
+        assertEquals(fallback, CreativeCtaRouter.targetUrl(null, intent, destination = "appstore"))
+        assertTrue(
+            CreativeCtaRouter.routeCta(
+                trackingUrl = null,
+                destination = "appstore",
+                storeUrl = intent,
+                launch = { directLaunches += it; true },
+            ),
+        )
+        assertTrue(
+            CreativeCtaRouter.routeCta(
+                trackingUrl = "https://tracker.example/click",
+                destination = "appstore",
+                storeUrl = intent,
+                launch = { url -> retryLaunches += url; url == fallback },
+            ),
+        )
+        assertEquals(listOf(fallback), directLaunches)
+        assertEquals(listOf("https://tracker.example/click", fallback), retryLaunches)
     }
 
     @Test
@@ -160,6 +225,30 @@ class CreativeCtaRouterTest {
         assertNull(CreativeCtaRouter.normalizeTappedDestination("custom://open/app"))
         assertNull(CreativeCtaRouter.admittedHttpUrl("market://details?id=app"))
         assertNull(CreativeCtaRouter.admittedHttpUrl("intent://details#Intent;end"))
+    }
+
+    @Test
+    fun `same HTTP origin requires matching scheme host and effective port`() {
+        assertTrue(
+            CreativeCtaRouter.hasSameHttpOrigin(
+                "https://creative.example/game",
+                "https://CREATIVE.example:443/next",
+            ),
+        )
+        assertEquals(
+            false,
+            CreativeCtaRouter.hasSameHttpOrigin(
+                "https://creative.example/game",
+                "http://creative.example/next",
+            ),
+        )
+        assertEquals(
+            false,
+            CreativeCtaRouter.hasSameHttpOrigin(
+                "https://creative.example/game",
+                "https://creative.example:8443/next",
+            ),
+        )
     }
 
     @Test
