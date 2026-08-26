@@ -58,6 +58,7 @@ internal class InterstitialPresentation(
     private var pendingClickHandoff: ClickPersistenceHandoff? = null
     private val clickRoute = ResumedPresentationRoute<SimulaInterstitialActivity>()
     val primaryCtaNavigation = RetainedPrimaryCtaNavigationState<SimulaInterstitialActivity>()
+    val installBannerState = InstallBannerPresentationState(ad.adBehavior?.skoverlay)
     val fallbackState = FallbackPresentationState()
     val storeExit by lazy(LazyThreadSafetyMode.NONE) {
         StoreExitTracker(

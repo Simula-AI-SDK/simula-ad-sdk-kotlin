@@ -14,7 +14,6 @@ import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.OverlayPosition
-import ad.simula.ad.sdk.model.OverlayTiming
 import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
@@ -463,16 +462,14 @@ private fun CreativeInterstitial(
 
     // Play Install Prompt (`skoverlay`) — an SDK-presented bottom install banner. Gated to API 21+.
     val skoverlay = behavior?.skoverlay
-    var installBannerVisible by remember { mutableStateOf(false) }
     if (skoverlay != null && skoverlay.enabled && Build.VERSION.SDK_INT >= 21) {
-        when (skoverlay.timing) {
-            // during_play / delayed present automatically (after the optional delay).
-            OverlayTiming.DURING_PLAY, OverlayTiming.DELAYED -> LaunchedEffect(Unit) {
-                if (skoverlay.delaySeconds > 0) delay(skoverlay.delaySeconds.seconds)
-                installBannerVisible = true
+        LaunchedEffect(presentation.installBannerState) {
+            presentation.installBannerState.start()
+            while (true) {
+                val remainingMs = presentation.installBannerState.delayedRemainingMs() ?: break
+                if (remainingMs > 0L) delay(remainingMs.milliseconds)
+                if (presentation.installBannerState.onDelayedDeadlineReached()) break
             }
-            // on_click is triggered from the CTA handler.
-            OverlayTiming.ON_CLICK -> Unit
         }
     }
 
@@ -566,6 +563,9 @@ private fun CreativeInterstitial(
                         claim.release()
                         return@primaryCta false
                     }
+                    if (Build.VERSION.SDK_INT >= 21) {
+                        presentation.installBannerState.onPrimaryCtaAdmitted()
+                    }
                     notifyPublisherClick { presentation.callbacks.notifyClicked() }
                     val interaction = claim.interaction
                     val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(tappedUrl)
@@ -607,11 +607,6 @@ private fun CreativeInterstitial(
                                 if (opened) {
                                     presentation.autoRedirectCoordinator.recordUserRouteOpened()
                                     routeActivity.recordClickStoreOpen(committedInteraction.source)
-                                    if (skoverlay != null && skoverlay.enabled &&
-                                        skoverlay.timing == OverlayTiming.ON_CLICK && Build.VERSION.SDK_INT >= 21
-                                    ) {
-                                        installBannerVisible = true
-                                    }
                                 } else {
                                     route.tappedUrl?.let {
                                         presentation.openPrimaryFallback(it, routeActivity)
@@ -736,7 +731,7 @@ private fun CreativeInterstitial(
         }
 
         // Play Install Prompt banner — independent install affordance, pinned to the bottom.
-        if (skoverlay != null && skoverlay.enabled && installBannerVisible) {
+        if (skoverlay != null && skoverlay.enabled && presentation.installBannerState.snapshot.visible) {
             PlayInstallBanner(
                 config = skoverlay,
                 onTap = {
@@ -797,7 +792,7 @@ private fun CreativeInterstitial(
                         },
                     )
                 },
-                onDismiss = { installBannerVisible = false },
+                onDismiss = { presentation.installBannerState.dismiss() },
             )
         }
 
