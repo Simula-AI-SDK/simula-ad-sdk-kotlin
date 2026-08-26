@@ -208,7 +208,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     adFormat = AD_FORMAT,
                     adUnitId = adUnitId,
                     adId = ad.impressionId,
-                    serveId = null,
+                    serveId = ad.impressionId,
                     durationMs = elapsedSinceLoad(),
                     errorCode = null,
                 )
@@ -343,8 +343,12 @@ class SimulaRewardedAd(val adUnitId: String) {
                     }
 
                     // Preview is local-only: surface the click callback, no telemetry.
-                    override fun onClicked() {
+                    override fun onClicked(
+                        interaction: ad.simula.ad.sdk.network.ClickInteraction,
+                        onTelemetryPersisted: () -> Unit,
+                    ) {
                         listener?.onAdClicked(this@SimulaRewardedAd)
+                        onTelemetryPersisted()
                     }
 
                     override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
@@ -429,22 +433,35 @@ class SimulaRewardedAd(val adUnitId: String) {
 
     private fun bridge(adId: String): RewardedCallbacks = object : RewardedCallbacks {
         override fun onDisplayed() {
-            Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, null, elapsedSinceShow(), null)
+            Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, adId, elapsedSinceShow(), null)
             listener?.onAdDisplayed(this@SimulaRewardedAd)
         }
 
         override fun onImpression() {
-            Telemetry.recordLifecycle("impression", AD_FORMAT, adUnitId, adId, null, elapsedSinceShow(), null)
+            Telemetry.recordLifecycle("impression", AD_FORMAT, adUnitId, adId, adId, elapsedSinceShow(), null)
             listener?.onAdImpression(this@SimulaRewardedAd)
         }
 
         override fun onPaid(adValue: AdValue) {
-            Telemetry.recordLifecycle("paid", AD_FORMAT, adUnitId, adId, null, null, null)
+            Telemetry.recordLifecycle("paid", AD_FORMAT, adUnitId, adId, adId, null, null)
             listener?.onAdPaid(this@SimulaRewardedAd, adValue)
         }
 
-        override fun onClicked() {
-            Telemetry.recordLifecycle("click", AD_FORMAT, adUnitId, adId, null, null, null)
+        override fun onClicked(
+            interaction: ad.simula.ad.sdk.network.ClickInteraction,
+            onTelemetryPersisted: () -> Unit,
+        ) {
+            Telemetry.recordLifecycle(
+                stage = "click",
+                adFormat = AD_FORMAT,
+                adUnitId = adUnitId,
+                adId = adId,
+                serveId = adId,
+                interactionId = interaction.id,
+                clickSource = interaction.source,
+                critical = true,
+                onPersisted = onTelemetryPersisted,
+            )
             listener?.onAdClicked(this@SimulaRewardedAd)
         }
 
@@ -453,7 +470,7 @@ class SimulaRewardedAd(val adUnitId: String) {
             // CLOSE = the playable was dismissed. The reward is NOT verified here — that's deferred to
             // onRewardCompleted (after every post-game fallback ad screen), so verifying is contingent
             // on completing the whole unit. Closed bookkeeping + auto-preload still happen now.
-            Telemetry.recordLifecycle("closed", AD_FORMAT, adUnitId, adId, null, null, null)
+            Telemetry.recordLifecycle("closed", AD_FORMAT, adUnitId, adId, adId, null, null)
             listener?.onAdClosed(this@SimulaRewardedAd)
             // Auto-preload the next ad (iOS parity), reusing the last character context.
             load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
@@ -463,7 +480,7 @@ class SimulaRewardedAd(val adUnitId: String) {
             // Fired once the user has completed the whole unit (playable + every fallback ad screen).
             // A non-earned completion grants nothing.
             if (!earned) return
-            Telemetry.recordLifecycle("reward_earned", AD_FORMAT, adUnitId, adId, null, null, null)
+            Telemetry.recordLifecycle("reward_earned", AD_FORMAT, adUnitId, adId, adId, null, null)
             listener?.onAdEarnedReward(this@SimulaRewardedAd)
             val sid = impressionId
             val sess = sessionId
@@ -496,7 +513,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                             AD_FORMAT,
                             verificationAdUnitId,
                             verificationAdId,
-                            null,
+                            verificationAdId,
                             verifyMs,
                             null,
                         )
@@ -506,7 +523,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                             AD_FORMAT,
                             verificationAdUnitId,
                             verificationAdId,
-                            null,
+                            verificationAdId,
                             verifyMs,
                             "verify_failed",
                         )

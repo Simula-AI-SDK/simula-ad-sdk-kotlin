@@ -855,13 +855,15 @@ internal object SimulaApiClient {
     suspend fun trackClick(
         impressionId: String,
         apiKey: String,
+        interactionId: String = java.util.UUID.randomUUID().toString(),
+        clickSource: String = ClickSources.PRIMARY_CTA,
     ): Unit = withContext(Dispatchers.IO) {
         if (impressionId.isBlank()) return@withContext
         try {
             SimulaHttp.request(
                 url = "$API_BASE_URL/impressions/$impressionId/click",
                 method = "POST",
-                headers = authHeaders(apiKey),
+                headers = impressionBeaconHeaders(apiKey, "click", interactionId, clickSource),
             )
         } catch (_: Exception) {
             // Silently fail
@@ -880,14 +882,30 @@ internal object SimulaApiClient {
         action: String,
         apiKey: String,
         metadata: Map<String, String>? = null,
+        interactionId: String? = null,
+        clickSource: String? = null,
     ): Int = withContext(Dispatchers.IO) {
         val body = impressionMetadataRequestBody(action, metadata)?.let { json.encodeToString(it) }
         SimulaHttp.request(
             url = "$API_BASE_URL/impressions/$impressionId/$action",
             method = "POST",
-            headers = authHeaders(apiKey),
+            headers = impressionBeaconHeaders(apiKey, action, interactionId, clickSource),
             body = body,
         ).code
+    }
+
+    internal fun impressionBeaconHeaders(
+        apiKey: String,
+        action: String,
+        interactionId: String?,
+        clickSource: String?,
+    ): Map<String, String> {
+        val headers = authHeaders(apiKey)
+        if (action != "click" || interactionId.isNullOrBlank() || clickSource.isNullOrBlank()) return headers
+        return headers + mapOf(
+            "X-Simula-Click-Event-Id" to interactionId,
+            "X-Simula-Click-Source" to ClickSources.normalize(clickSource),
+        )
     }
 
     /**

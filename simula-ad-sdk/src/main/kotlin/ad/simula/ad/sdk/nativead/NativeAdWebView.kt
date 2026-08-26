@@ -12,6 +12,10 @@ import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.minigame.resolveWebViewRetentionCapacity
 import ad.simula.ad.sdk.minigame.webViewTrimAction
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionGate
+import ad.simula.ad.sdk.network.ClickSources
+import ad.simula.ad.sdk.network.routeClaimedClick
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.MutableContextWrapper
@@ -88,7 +92,7 @@ internal fun NativeAdWebView(
     impressionId: String,
     heightDp: Float,
     onHeightPx: (Float) -> Unit,
-    onAdClick: () -> Unit,
+    onAdClick: (ClickInteraction) -> Unit,
     onLoadError: () -> Unit,
     trackingUrl: String? = null,
     destination: String = "appstore",
@@ -702,7 +706,7 @@ internal class NativeAdWiring(
     private val impressionId: String,
 ) {
     @Volatile var onHeightPx: (Float) -> Unit = {}
-    @Volatile var onAdClick: () -> Unit = {}
+    @Volatile var onAdClick: (ClickInteraction) -> Unit = {}
     @Volatile var onLoadError: () -> Unit = {}
     // Render-process-death recovery. The client flags [renderGone] when this creative's WebView loses
     // its render process (it then draws blank and is unusable); the store destroys it — never recycles
@@ -734,6 +738,7 @@ internal class NativeAdWiring(
     @Volatile var trackingUrl: String? = null
     @Volatile var destination: String = "appstore"
     @Volatile var storeUrl: String? = null
+    private val clickInteractionGate = ClickInteractionGate()
 
     fun adoptCallbacksFrom(other: NativeAdWiring) {
         onHeightPx = other.onHeightPx
@@ -812,9 +817,14 @@ internal class NativeAdWiring(
      * rides along so the router can deterministically land an appstore CTA on the store when the
      * tracker can't be launched (parity with the interstitial/rewarded CTAs). */
     fun openExternal(tappedUrl: String) {
-        val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, tappedUrl)
-        CreativeCtaRouter.open(appContext, target, destination, storeUrl = storeUrl)
-        onAdClick()
+        routeClaimedClick(
+            claim = clickInteractionGate.claim(ClickSources.PRIMARY_CTA),
+            open = {
+                val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, tappedUrl)
+                CreativeCtaRouter.open(appContext, target, destination, storeUrl = storeUrl)
+            },
+            onOpened = onAdClick,
+        )
     }
 }
 

@@ -101,8 +101,7 @@ fun GameWebView(
 
     val density = LocalDensity.current.density
     val screenHeightDp = config.screenHeightDp.toFloat()
-    val isFullScreenPercent = playableHeight is String && playableHeight.removeSuffix("%").toFloatOrNull() == 100f
-    val isBottomSheet = playableHeight != null && !isFullScreenPercent
+    val isBottomSheet = isBottomSheetPlayableHeight(playableHeight, screenHeightDp.toInt())
 
     var iframeUrl by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
@@ -167,7 +166,7 @@ fun GameWebView(
     val handleClose: () -> Unit = {
         onDimensionsOnClose?.invoke(
             animatedHeightDp.value,
-            isBottomSheet && animatedHeightDp.value < screenHeightDp * 0.95f,
+            isBottomSheet && isBottomSheetPlayableHeight(animatedHeightDp.value, screenHeightDp.toInt()),
         )
         onClose()
     }
@@ -374,6 +373,9 @@ fun GameWebView(
     }
 }
 
+internal fun isBottomSheetPlayableHeight(playableHeight: Any?, screenHeightDp: Int): Boolean =
+    calculatePlayableHeight(playableHeight, screenHeightDp) < screenHeightDp * 0.95f
+
 /**
  * WebView content composable. Manages WebView lifecycle properly.
  */
@@ -409,10 +411,12 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
 
     AndroidView(
         factory = { ctx ->
+            var realLoadStarted = false
             WebViewPool.acquire(
                 context = ctx,
                 client = object : WebViewClient() {
                     override fun onPageCommitVisible(view: WebView?, committedUrl: String?) {
+                        if (!realLoadStarted) return
                         if (committedUrl == "about:blank") return
                         onPageFinished()
                     }
@@ -439,6 +443,7 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
                         recordRenderProcessGone("minigame", detail)
                 },
             ).apply {
+                realLoadStarted = true
                 loadUrl(url)
                 gameWebView = this
             }

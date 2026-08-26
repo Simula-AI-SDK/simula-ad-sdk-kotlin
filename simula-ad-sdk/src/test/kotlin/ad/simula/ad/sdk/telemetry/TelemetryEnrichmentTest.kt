@@ -236,11 +236,18 @@ class TelemetryEnrichmentTest {
     }
 
     @Test
-    fun `recordLifecycle carries trigger and cacheSource`() = runTest {
+    fun `recordLifecycle carries click identity source trigger and cacheSource`() = runTest {
         val sender = FakeSender()
         val m = build(this, FakeStore(), sender, clock = { 1_000L })
+        m.applyServerConfig(enabled = true, sampleRate = 0.25)
 
-        m.recordLifecycle("store_opened", "interstitial", null, "ad1", null, 1500L, null, trigger = "cta", cacheSource = null)
+        m.recordLifecycle(
+            "store_opened", "interstitial", null, "ad1", "ad1", 1500L, null,
+            trigger = "cta",
+            cacheSource = null,
+            interactionId = "interaction-1",
+            clickSource = "primary_cta",
+        )
         m.recordLifecycle("load_success", "character_ad", "unit1", "ad2", null, null, null, cacheSource = "preload")
         advanceUntilIdle()
 
@@ -248,12 +255,64 @@ class TelemetryEnrichmentTest {
         val opened = events.single { it.name == "store_opened" }
         assertEquals(TYPE_LIFECYCLE, opened.type)
         assertEquals("cta", opened.trigger)
+        assertEquals("interaction-1", opened.interactionId)
+        assertEquals("primary_cta", opened.clickSource)
+        assertEquals("ad1", opened.serveId)
+        assertEquals(0.25, opened.sampleRate ?: -1.0, 0.0)
         assertEquals(1500L, opened.durationMs)
         assertNull(opened.cacheSource)
+        assertEquals(0.25, sender.batches.first().sampleRate ?: -1.0, 0.0)
 
         val load = events.single { it.name == "load_success" }
         assertEquals("preload", load.cacheSource)
         assertNull(load.trigger)
+    }
+
+    @Test
+    fun `events retain admission sample rate across server config epochs`() = runTest {
+        val sender = FakeSender()
+        val m = build(this, FakeStore(), sender, clock = { 1_000L })
+
+        m.recordOperation("before_config", 1L, success = true)
+        m.applyServerConfig(enabled = true, sampleRate = 0.25)
+        m.recordOperation("after_config", 1L, success = true)
+        m.flushNow()
+        advanceUntilIdle()
+
+        val batch = sender.batches.first { envelope ->
+            envelope.events.any { it.name == "before_config" }
+        }
+        assertEquals(1.0, batch.events.single { it.name == "before_config" }.sampleRate ?: -1.0, 0.0)
+        assertEquals(0.25, batch.events.single { it.name == "after_config" }.sampleRate ?: -1.0, 0.0)
+        assertNull("mixed admission epochs have no accurate envelope rate", batch.sampleRate)
+    }
+
+    @Test
+    fun `critical lifecycle persists before releasing handoff callback`() = runTest {
+        val store = FakeStore()
+        val sender = FakeSender()
+        val m = build(this, store, sender, clock = { 1_000L })
+        var persistedAtHandoff = false
+
+        m.recordLifecycle(
+            stage = "click",
+            adFormat = "interstitial",
+            adUnitId = null,
+            adId = "serve-1",
+            serveId = "serve-1",
+            durationMs = null,
+            errorCode = null,
+            interactionId = "interaction-1",
+            clickSource = "store_prompt",
+            critical = true,
+            onPersisted = {
+                persistedAtHandoff = store.data.any { it.interactionId == "interaction-1" }
+            },
+        )
+        advanceUntilIdle()
+
+        assertEquals(true, persistedAtHandoff)
+        assertEquals("interaction-1", sender.batches.flatMap { it.events }.single().interactionId)
     }
 
     @Test

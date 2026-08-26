@@ -197,7 +197,14 @@ internal object Telemetry {
         trigger: String? = null,
         cacheSource: String? = null,
         breadcrumb: String? = null,
-    ) = manager?.recordLifecycle(stage, adFormat, adUnitId, adId, serveId, durationMs, errorCode, trigger, cacheSource, breadcrumb) ?: Unit
+        interactionId: String? = null,
+        clickSource: String? = null,
+        critical: Boolean = false,
+        onPersisted: (() -> Unit)? = null,
+    ) = manager?.recordLifecycle(
+        stage, adFormat, adUnitId, adId, serveId, durationMs, errorCode, trigger, cacheSource,
+        breadcrumb, interactionId, clickSource, critical, onPersisted,
+    ) ?: runCatching { onPersisted?.invoke() }.let { Unit }
 
     fun recordError(
         signature: String,

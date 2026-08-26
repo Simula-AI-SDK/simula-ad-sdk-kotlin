@@ -5,11 +5,22 @@ import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
+import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionClaim
+import ad.simula.ad.sdk.network.ClickInteractionGate
+import ad.simula.ad.sdk.network.ClickPersistenceHandoff
+import ad.simula.ad.sdk.network.ClickRouteOutcome
+import ad.simula.ad.sdk.network.ClickSources
+import ad.simula.ad.sdk.network.routeClaimedClick
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.SystemClock
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -42,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -69,8 +81,11 @@ internal fun FallbackAdHost(
     impressionId: String,
     onFullyClosed: () -> Unit,
     autoStoreRedirect: AutoStoreRedirect? = null,
-    onAutoStoreRedirect: () -> Unit = {},
-    onAdClick: () -> Unit = {},
+    onAutoStoreRedirect: () -> Boolean = { false },
+    onAdClick: (ClickInteraction) -> Unit = {},
+    claimClick: ((String) -> ClickInteractionClaim?)? = null,
+    autoRedirectCoordinator: AutoRedirectCoordinator? = null,
+    pendingClickHandoff: () -> ClickPersistenceHandoff? = { null },
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
     // through the shared router (tracker verbatim, raw store link as the deterministic fallback).
     // Defaults preserve today's behavior when no context is available.
@@ -80,9 +95,20 @@ internal fun FallbackAdHost(
     content: @Composable (onClose: () -> Unit) -> Unit,
 ) {
     var phase by remember { mutableStateOf<FallbackPhase>(FallbackPhase.Content) }
+    val fallbackClickGate = remember(impressionId) { ClickInteractionGate() }
+    val clickClaim = claimClick ?: fallbackClickGate::claim
+    // Fullscreen presentations pass their shared coordinator; the local instance is only for the
+    // standalone/default host and must not replace presentation state across end-screen indices.
+    val localAutoRedirectCoordinator = remember(impressionId) { AutoRedirectCoordinator() }
+    val redirects = autoRedirectCoordinator ?: localAutoRedirectCoordinator
+    DisposableEffect(localAutoRedirectCoordinator, autoRedirectCoordinator) {
+        onDispose {
+            if (autoRedirectCoordinator == null) localAutoRedirectCoordinator.dispose()
+        }
+    }
     // auto_store_redirect END_SCREEN_N: open the primary ad's store once, when the fallback screen
     // whose index matches the configured trigger is presented (index 0 = END SCREEN 1, index 1 = 2).
-    var autoRedirectFired by remember { mutableStateOf(false) }
+    // Scope replacement drops deferred callbacks from an end screen that has already closed.
 
     // Prefetch the fallback screens in the background while the primary creative is on screen, so
     // they present instantly on close instead of fetching then (which flashed the host behind).
@@ -106,49 +132,64 @@ internal fun FallbackAdHost(
         }
     }
 
-    when (val p = phase) {
-        FallbackPhase.Content -> content { onPrimaryClosed() }
-        // Prefetch wasn't ready at close — hold on a black backdrop and advance the instant it lands.
-        FallbackPhase.Fetching -> {
-            Box(Modifier.fillMaxSize().background(Color.Black))
-            // Swallow back during this brief settle window so a fast back-press can't finish the
-            // Activity before the end screens are revealed (parity with the gated close).
-            BackHandler(enabled = true) {}
-            LaunchedEffect(prefetched) {
-                val ads = prefetched ?: return@LaunchedEffect
-                phase = if (ads.isNotEmpty()) FallbackPhase.Showing(ads, index = 0) else FallbackPhase.Done
-            }
-        }
-        is FallbackPhase.Showing -> {
-            val ad = p.ads[p.index]
-            // Fire the auto store redirect when the END_SCREEN_N fallback screen is presented.
-            LaunchedEffect(p.index) {
-                if (!autoRedirectFired && autoStoreRedirect?.enabled == true &&
-                    autoStoreRedirect.trigger == endScreenTriggerForIndex(p.index)
-                ) {
-                    autoRedirectFired = true
-                    onAutoStoreRedirect()
+    // This root survives every phase, including Done's final callback frame, so no transition can
+    // expose the Activity window or host beneath it.
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        when (val p = phase) {
+            FallbackPhase.Content -> content { onPrimaryClosed() }
+            // Prefetch wasn't ready at close — hold on the black backdrop and advance when it lands.
+            FallbackPhase.Fetching -> {
+                // Swallow back during this brief settle window so a fast back-press can't finish the
+                // Activity before the end screens are revealed (parity with the gated close).
+                BackHandler(enabled = true) {}
+                LaunchedEffect(prefetched) {
+                    val ads = prefetched ?: return@LaunchedEffect
+                    phase = if (ads.isNotEmpty()) FallbackPhase.Showing(ads, index = 0) else FallbackPhase.Done
                 }
             }
-            // key() so each screen gets fresh overlay state (countdown, WebView) — without it the
-            // next screen would inherit the previous one's elapsed countdown and loaded page.
-            key(p.index) {
-                FallbackAdOverlay(
-                    iframeUrl = ad.iframeUrl,
-                    html = ad.html,
-                    adId = ad.adId,
-                    onAdClick = onAdClick,
-                    ctaTrackingUrl = ctaTrackingUrl,
-                    ctaDestination = ctaDestination,
-                    ctaStoreUrl = ctaStoreUrl,
-                    onClose = {
-                        // Reveal the next screen on each close tap; done after the last one.
-                        phase = if (p.index + 1 < p.ads.size) p.copy(index = p.index + 1) else FallbackPhase.Done
-                    },
-                )
+            is FallbackPhase.Showing -> {
+                val ad = p.ads[p.index]
+                val autoRedirectScope = remember(impressionId, p.index) { Any() }
+                DisposableEffect(redirects, autoRedirectScope) {
+                    redirects.activate(autoRedirectScope)
+                    onDispose { redirects.deactivate(autoRedirectScope) }
+                }
+                // Fire the auto store redirect when the END_SCREEN_N fallback screen is presented.
+                LaunchedEffect(p.index) {
+                    if (autoStoreRedirect?.enabled == true &&
+                        autoStoreRedirect.trigger == endScreenTriggerForIndex(p.index)
+                    ) {
+                        redirects.request(
+                            scope = autoRedirectScope,
+                            pendingHandoff = pendingClickHandoff(),
+                            route = onAutoStoreRedirect,
+                        )
+                    }
+                }
+                // key() so each screen gets fresh overlay state (countdown, WebView) — without it the
+                // next screen would inherit the previous one's elapsed countdown and loaded page.
+                key(p.index) {
+                    FallbackAdOverlay(
+                        iframeUrl = ad.iframeUrl,
+                        html = ad.html,
+                        adId = ad.adId,
+                        onAdClick = { interaction ->
+                            redirects.recordUserRouteOpened()
+                            onAdClick(interaction)
+                        },
+                        claimClick = clickClaim,
+                        ctaTrackingUrl = ctaTrackingUrl,
+                        ctaDestination = ctaDestination,
+                        ctaStoreUrl = ctaStoreUrl,
+                        onClose = {
+                            // Reveal the next screen on each close tap; done after the last one.
+                            phase = if (p.index + 1 < p.ads.size) p.copy(index = p.index + 1) else FallbackPhase.Done
+                        },
+                    )
+                }
             }
+            FallbackPhase.Done -> LaunchedEffect(Unit) { onFullyClosed() }
         }
-        FallbackPhase.Done -> LaunchedEffect(Unit) { onFullyClosed() }
     }
 }
 
@@ -168,13 +209,15 @@ private fun FallbackAdOverlay(
     iframeUrl: String?,
     html: String? = null,
     adId: String,
-    onAdClick: () -> Unit = {},
+    onAdClick: (ClickInteraction) -> Unit = {},
+    claimClick: (String) -> ClickInteractionClaim?,
     ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
     onClose: () -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val inlineHtml = html?.takeIf { it.isNotBlank() }
     // The pooled fallback WebView, captured from the AndroidView factory below so we can pause/resume
     // it with the host and force a repaint on foreground return — AndroidView won't pause a WebView, and
     // a hardware-accelerated WebView returns black/blank after the window loses visibility (background).
@@ -200,6 +243,10 @@ private fun FallbackAdOverlay(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     var countdown by remember { mutableStateOf(5) }
+    // A pooled WebView is transparent and may still contain about:blank. Keep an opaque layer above
+    // this one WebView until its current creative has actually committed a visible frame.
+    var pageCommitted by remember { mutableStateOf(false) }
+    var pageLoadFailed by remember { mutableStateOf(false) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ring = remember { Animatable(0f) }
     // Foreground-only 5s gate: time accrues only while the Activity is RESUMED, so leaving the app
@@ -231,45 +278,102 @@ private fun FallbackAdOverlay(
     ) {
         AndroidView(
             factory = { ctx ->
+                var realLoadStarted = false
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : WebViewClient() {
-                        // Monotonic time of the last fired CTA click — de-dupes a single tap that surfaces
-                        // more than one navigation (e.g. window.open from the inline srcdoc creative).
-                        var lastClickMs = 0L
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                            if (!realLoadStarted) return
+                            pageCommitted = false
+                            if (!url.isNullOrBlank() && (url != "about:blank" || inlineHtml != null)) {
+                                pageLoadFailed = false
+                            }
+                        }
+                        override fun onPageCommitVisible(view: WebView?, url: String?) {
+                            if (!realLoadStarted) return
+                            if (!url.isNullOrBlank() &&
+                                (url != "about:blank" || inlineHtml != null) &&
+                                !pageLoadFailed
+                            ) {
+                                pageCommitted = true
+                            }
+                        }
+                        override fun onReceivedError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            error: WebResourceError?,
+                        ) {
+                            if (!realLoadStarted) return
+                            if (request?.isForMainFrame == true) {
+                                pageLoadFailed = true
+                                pageCommitted = false
+                            }
+                        }
+                        override fun onReceivedHttpError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            errorResponse: WebResourceResponse?,
+                        ) {
+                            if (!realLoadStarted) return
+                            if (request?.isForMainFrame == true) {
+                                pageLoadFailed = true
+                                pageCommitted = false
+                            }
+                        }
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val target = request?.url?.toString() ?: return false
-                            // Inline-html (srcdoc) internal navigations aren't click-throughs.
-                            if (target.startsWith("about:")) return false
-                            // Same-origin stays in the webview; cross-origin opens externally. (When the
-                            // creative is inline html, iframeUrl is still the page's base origin.)
-                            val originHost = iframeUrl?.let { Uri.parse(it).host }
-                            if (originHost != null && originHost == Uri.parse(target).host) return false
+                            val targetUri = runCatching { Uri.parse(target) }.getOrNull() ?: return true
+                            if (targetUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
+                            // Subframes stay inside the creative and automatic cross-origin redirects
+                            // are blocked rather than opening external UI.
+                            if (request.isForMainFrame != true) return false
+                            val originUri = iframeUrl?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                            val originPort = originUri?.port?.takeIf { it >= 0 } ?: when (originUri?.scheme?.lowercase()) {
+                                "http" -> 80
+                                "https" -> 443
+                                else -> -1
+                            }
+                            val targetPort = targetUri.port.takeIf { it >= 0 } ?: when (targetUri.scheme?.lowercase()) {
+                                "http" -> 80
+                                "https" -> 443
+                                else -> -1
+                            }
+                            val sameOrigin = originUri?.host != null &&
+                                originUri.scheme.equals(targetUri.scheme, ignoreCase = true) &&
+                                originUri.host.equals(targetUri.host, ignoreCase = true) &&
+                                originPort == targetPort
+                            if (sameOrigin) return false
+                            if (!request.hasGesture()) return true
                             // Route through the shared CTA router: the tapped tracker opens
                             // verbatim (referrer-preserving); the serve's raw store link is the
                             // deterministic fallback when it can't be launched. A failed launch
                             // returns false so the WebView navigates in place (the pre-router
                             // failure behavior).
-                            val clickTarget = CreativeCtaRouter.preferredClickUrl(
-                                ctaTrackingUrl,
-                                target,
-                            )
-                            val opened = CreativeCtaRouter.open(
-                                ctx.applicationContext,
-                                clickTarget,
-                                ctaDestination,
-                                null,
-                                ctaStoreUrl,
-                            )
-                            if (!opened) return false
                             // A genuine user tap on the end-screen CTA is a click (parity with the creative
                             // CTAs; programmatic redirects don't fire onClicked). The iframe self-reports its
-                            // own click beacon, so fire the publisher callback only — no SDK beacon here.
-                            if (request?.hasGesture() == true) {
-                                val now = SystemClock.elapsedRealtime()
-                                if (now - lastClickMs >= 500) { lastClickMs = now; onAdClick() }
+                            // own click beacon, so fire the publisher callback/lifecycle only — no SDK
+                            // beacon here. Its self-report cannot yet share the native interaction UUID;
+                            // preserve this ownership until a staged creative/native contract migration.
+                            return when (routeClaimedClick(
+                                claim = claimClick(ClickSources.FALLBACK_CTA),
+                                open = {
+                                    val clickTarget = CreativeCtaRouter.preferredClickUrl(
+                                        ctaTrackingUrl,
+                                        target,
+                                    )
+                                    CreativeCtaRouter.open(
+                                        ctx.applicationContext,
+                                        clickTarget,
+                                        ctaDestination,
+                                        null,
+                                        ctaStoreUrl,
+                                    )
+                                },
+                                onOpened = onAdClick,
+                            )) {
+                                ClickRouteOutcome.OPEN_FAILED -> false
+                                ClickRouteOutcome.BLOCKED, ClickRouteOutcome.OPENED -> true
                             }
-                            return true
                         }
                         // Absorb a renderer-process death so a crashing end-screen creative can't take
                         // the host app process down with it (parity with the minigame/interstitial
@@ -278,12 +382,13 @@ private fun FallbackAdOverlay(
                             recordRenderProcessGone("fallback_ad", detail)
                     },
                 ).apply {
-                    val creative = html
-                    if (!creative.isNullOrBlank()) {
+                    if (inlineHtml != null) {
                         // Inline html (preferred). baseUrl = the iframe origin so the end screen's own
                         // click beacon (fetch to the API) stays same-origin, exactly as loadUrl did.
-                        loadDataWithBaseURL(iframeUrl, creative, "text/html", "UTF-8", null)
+                        realLoadStarted = true
+                        loadDataWithBaseURL(iframeUrl, inlineHtml, "text/html", "UTF-8", null)
                     } else if (!iframeUrl.isNullOrBlank()) {
+                        realLoadStarted = true
                         loadUrl(iframeUrl)
                     }
                     fallbackWebView = this
@@ -298,6 +403,19 @@ private fun FallbackAdOverlay(
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
             onRelease = { webView -> WebViewPool.release(webView) },
         )
+
+        if (!pageCommitted) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                        }
+                    },
+            )
+        }
 
         Box(
             modifier = Modifier

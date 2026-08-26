@@ -2,6 +2,11 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdValue
+import ad.simula.ad.sdk.network.AutoRedirectCoordinator
+import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionClaim
+import ad.simula.ad.sdk.network.ClickInteractionGate
+import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.SimulaApiClient
 import java.util.concurrent.ConcurrentHashMap
 
@@ -16,7 +21,7 @@ internal interface InterstitialCallbacks {
     /** The paid event — fired together with [onImpression], carrying the on-device estimate. */
     fun onPaid(adValue: AdValue)
 
-    fun onClicked()
+    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
     fun onClosed()
 }
 
@@ -27,6 +32,35 @@ internal class InterstitialPresentation(
     val callbacks: InterstitialCallbacks,
     val metadata: Map<String, String>? = null,
 ) {
+    private val clickInteractionGate = ClickInteractionGate()
+    private var pendingClickHandoff: ClickPersistenceHandoff? = null
+    val autoRedirectCoordinator = AutoRedirectCoordinator()
+
+    fun claimClick(source: String): ClickInteractionClaim? = clickInteractionGate.claim(source)
+
+    fun hasPendingClick(): Boolean = clickInteractionGate.hasPendingClaim()
+
+    @Synchronized
+    fun pendingClickHandoff(): ClickPersistenceHandoff? = pendingClickHandoff
+
+    @Synchronized
+    fun trackClickHandoff(handoff: ClickPersistenceHandoff) {
+        pendingClickHandoff = handoff
+        autoRedirectCoordinator.observeUserHandoff(handoff)
+    }
+
+    @Synchronized
+    fun clearClickHandoff(handoff: ClickPersistenceHandoff) {
+        if (pendingClickHandoff === handoff) pendingClickHandoff = null
+    }
+
+    @Synchronized
+    fun cancelPendingClickHandoff() {
+        autoRedirectCoordinator.dispose()
+        pendingClickHandoff?.cancel()
+        pendingClickHandoff = null
+    }
+
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */
     var displayedReported = false
 
@@ -69,7 +103,7 @@ internal object InterstitialHandoff {
     }
 
     fun remove(token: String) {
-        pending.remove(token)
+        pending.remove(token)?.cancelPendingClickHandoff()
         FullscreenPresentationRegistry.release("interstitial:$token")
     }
 }

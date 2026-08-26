@@ -50,15 +50,13 @@ class AdBeaconQueueTest {
         val errors = mutableMapOf<String, Throwable>()
         val callCounts = mutableMapOf<String, Int>()
         val sentMetadata = mutableMapOf<String, Map<String, String>?>()
+        val sentBeacons = mutableListOf<PendingBeacon>()
         private fun key(id: String, action: String) = "$id:$action"
-        override suspend fun send(
-            impressionId: String,
-            action: String,
-            metadata: Map<String, String>?,
-        ): Int {
-            val k = key(impressionId, action)
+        override suspend fun send(beacon: PendingBeacon): Int {
+            val k = key(beacon.impressionId, beacon.action)
             callCounts[k] = (callCounts[k] ?: 0) + 1
-            sentMetadata[k] = metadata
+            sentMetadata[k] = beacon.metadata
+            sentBeacons += beacon.copy()
             errors[k]?.let { throw it }
             return codes[k] ?: 200
         }
@@ -69,12 +67,8 @@ class AdBeaconQueueTest {
         val releaseFirstCall = CompletableDeferred<Unit>()
         val metadataSnapshots = mutableListOf<Map<String, String>?>()
 
-        override suspend fun send(
-            impressionId: String,
-            action: String,
-            metadata: Map<String, String>?,
-        ): Int {
-            metadataSnapshots += metadata
+        override suspend fun send(beacon: PendingBeacon): Int {
+            metadataSnapshots += beacon.metadata
             if (metadataSnapshots.size == 1) {
                 firstCallStarted.complete(Unit)
                 releaseFirstCall.await()
@@ -105,6 +99,7 @@ class AdBeaconQueueTest {
         val sender = FakeSender()
         val sleepEntered = CompletableDeferred<Unit>()
         val releaseSleep = CompletableDeferred<Unit>()
+        var persistenceOutcome: BeaconPersistenceOutcome? = null
         val engine = AdBeaconQueue(
             store,
             sender,
@@ -116,9 +111,10 @@ class AdBeaconQueueTest {
             },
         )
 
-        engine.queue("imp", "seen")
+        engine.queue("imp", "seen", onPersistenceComplete = { persistenceOutcome = it })
         sleepEntered.await()
 
+        assertEquals(BeaconPersistenceOutcome.RetryableFailure, persistenceOutcome)
         assertTrue(store.data.isEmpty())
         assertTrue(sender.callCounts.isEmpty())
 
@@ -126,6 +122,27 @@ class AdBeaconQueueTest {
         advanceUntilIdle()
         assertEquals(1, sender.callCounts["imp:seen"])
         assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `successful enqueue reports durable persistence before network completion`() = runTest {
+        val store = FakeStore()
+        val sender = BlockingSender()
+        val engine = AdBeaconQueue(store, sender, clock = { 0L }, scope = this)
+        var persistenceOutcome: BeaconPersistenceOutcome? = null
+
+        engine.queue(
+            impressionId = "serve-1",
+            action = "click",
+            interactionId = "interaction-1",
+            clickSource = ClickSources.STORE_PROMPT,
+            onPersistenceComplete = { persistenceOutcome = it },
+        )
+        sender.firstCallStarted.await()
+
+        assertEquals(BeaconPersistenceOutcome.Persisted, persistenceOutcome)
+        sender.releaseFirstCall.complete(Unit)
+        advanceUntilIdle()
     }
 
     @Test
@@ -165,6 +182,7 @@ class AdBeaconQueueTest {
         val sleepEntered = CompletableDeferred<Unit>()
         val releaseSleep = CompletableDeferred<Unit>()
         var sleepCount = 0
+        var overflowOutcome: BeaconPersistenceOutcome? = null
         val engine = AdBeaconQueue(
             store,
             sender,
@@ -180,12 +198,13 @@ class AdBeaconQueueTest {
 
         engine.queue("imp", "seen", mapOf("a" to "one"))
         engine.queue("imp", "seen", mapOf("b" to "two"))
-        engine.queue("overflow", "click")
+        engine.queue("overflow", "click", onPersistenceComplete = { overflowOutcome = it })
         sleepEntered.await()
         runCurrent()
 
         assertEquals("one recovery sleeper for every pending event", 1, sleepCount)
         assertTrue(sender.callCounts.isEmpty())
+        assertEquals(BeaconPersistenceOutcome.Rejected, overflowOutcome)
 
         store.failLoads = false
         releaseSleep.complete(Unit)
@@ -545,6 +564,75 @@ class AdBeaconQueueTest {
         assertNull(decoded[0].metadata)
         assertEquals(1, decoded[0].retryCount)
         assertEquals(42L, decoded[0].lastAttemptTimestamp)
+    }
+
+    @Test
+    fun `persisted click retry retains event id and source`() = runTest {
+        var now = 0L
+        val store = FakeStore()
+        val sender = FakeSender().apply { codes["serve-1:click"] = 500 }
+        val retryScheduled = CompletableDeferred<Unit>()
+        val releaseRetry = CompletableDeferred<Unit>()
+        val engine = AdBeaconQueue(
+            store,
+            sender,
+            clock = { now },
+            scope = this,
+            sleep = {
+                retryScheduled.complete(Unit)
+                releaseRetry.await()
+            },
+        )
+
+        engine.queue(
+            impressionId = "serve-1",
+            action = "click",
+            interactionId = "0f62cb3e-e63d-4e6a-87dd-2bfb84bd156d",
+            clickSource = ClickSources.INSTALL_BANNER,
+        )
+        retryScheduled.await()
+        val persistedRetry = store.data.single()
+
+        sender.codes["serve-1:click"] = 200
+        now = 5_000L
+        releaseRetry.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(2, sender.sentBeacons.size)
+        assertEquals(
+            listOf(persistedRetry.interactionId, persistedRetry.interactionId),
+            sender.sentBeacons.map { it.interactionId },
+        )
+        assertEquals(
+            listOf(ClickSources.INSTALL_BANNER, ClickSources.INSTALL_BANNER),
+            sender.sentBeacons.map { it.clickSource },
+        )
+        assertEquals(listOf(persistedRetry.rowId, persistedRetry.rowId), sender.sentBeacons.map { it.rowId })
+    }
+
+    @Test
+    fun `click headers use exact contract names while shown headers stay unchanged`() {
+        val clickHeaders = SimulaApiClient.impressionBeaconHeaders(
+            apiKey = "key",
+            action = "click",
+            interactionId = "event-123",
+            clickSource = "cta",
+        )
+        val shownHeaders = SimulaApiClient.impressionBeaconHeaders(
+            apiKey = "key",
+            action = "shown",
+            interactionId = "event-123",
+            clickSource = ClickSources.PRIMARY_CTA,
+        )
+
+        assertEquals("event-123", clickHeaders["X-Simula-Click-Event-Id"])
+        assertEquals(ClickSources.PRIMARY_CTA, clickHeaders["X-Simula-Click-Source"])
+        assertEquals(
+            shownHeaders,
+            clickHeaders - setOf("X-Simula-Click-Event-Id", "X-Simula-Click-Source"),
+        )
+        assertTrue("X-Simula-Click-Event-Id" !in shownHeaders)
+        assertTrue("X-Simula-Click-Source" !in shownHeaders)
     }
 
     @Test

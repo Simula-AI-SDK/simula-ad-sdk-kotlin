@@ -27,6 +27,7 @@
             android:name="ad.simula.ad.sdk.ads.SimulaInterstitialActivity"
             android:exported="false"
             android:hardwareAccelerated="true"
+            android:screenOrientation="behind"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
             android:theme="@style/Theme.Simula.Interstitial" />
 
@@ -35,6 +36,7 @@
             android:name="ad.simula.ad.sdk.ads.SimulaRewardedActivity"
             android:exported="false"
             android:hardwareAccelerated="true"
+            android:screenOrientation="behind"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
             android:theme="@style/Theme.Simula.Interstitial" />
     </application>

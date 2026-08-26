@@ -50,9 +50,9 @@ internal data class CarrierInfo(val carrier: String?, val radio: String?)
  *   with the next timed/manual flush. Perf events persist on each flush. Recovered on start.
  * - **Batched**: flushes at [FLUSH_THRESHOLD] events, every [FLUSH_INTERVAL_MS], or eagerly
  *   for a new error signature. Failed batches retry with exponential backoff.
- * - **Bounded**: the buffer caps at [MAX_BUFFER] (oldest dropped) and distinct error
- *   signatures at [MAX_ERROR_SIGNATURES]; both surface a `dropped` meta event rather than
- *   silently truncating.
+ * - **Bounded**: the buffer caps at [MAX_BUFFER] (oldest non-critical dropped; new events rejected
+ *   when every slot is a critical click) and distinct error signatures at [MAX_ERROR_SIGNATURES];
+ *   both surface a `dropped` meta event rather than silently truncating.
  * - **Sampled / killable**: perf is sampled per session at [sampleRate]; the whole pipeline
  *   honors [enabled] (host opt-out always wins; the server can additionally disable it).
  *
@@ -83,7 +83,8 @@ internal class TelemetryManager(
     private val json = Json { encodeDefaults = false; ignoreUnknownKeys = true }
 
     private val mutex = Mutex()
-    // Perf/network/lifecycle/operation events, FIFO.
+    // Perf/network/lifecycle/operation events. FIFO among ordinary events; durably confirmed
+    // critical clicks are protected from later capacity eviction.
     private val buffer = ArrayDeque<TelemetryEvent>()
     // Handled errors aggregated by an internal key within the flush window. The event's wire
     // `name` stays unchanged; crash/ANR sites add persisted fingerprint/stack context to this key
@@ -98,7 +99,8 @@ internal class TelemetryManager(
     private var retryCount = 0
 
     @Volatile private var isEnabled: Boolean = enabled
-    @Volatile private var perfSampledIn: Boolean = enabled && random() < sampleRate
+    @Volatile private var effectiveSampleRate: Double = if (enabled) sampleRate.coerceIn(0.0, 1.0) else 0.0
+    @Volatile private var perfSampledIn: Boolean = enabled && random() < effectiveSampleRate
 
     // Aux session state for the funnel / time-to-first-ad / experiment, guarded by a plain lock
     // (recordLifecycle is non-suspend, so it can't take the coroutine `mutex`).
@@ -132,7 +134,7 @@ internal class TelemetryManager(
                             .toInt()
                     }
                 } else {
-                    buffer.addLast(e)
+                    admitBufferedEvent(e)
                 }
             }
         }
@@ -146,7 +148,8 @@ internal class TelemetryManager(
      */
     fun applyServerConfig(enabled: Boolean, sampleRate: Double) {
         isEnabled = enabled
-        perfSampledIn = enabled && random() < sampleRate.coerceIn(0.0, 1.0)
+        effectiveSampleRate = if (enabled) sampleRate.coerceIn(0.0, 1.0) else 0.0
+        perfSampledIn = enabled && random() < effectiveSampleRate
     }
 
     // ── Record entry points (cheap; offload to the scope) ──────────────────────
@@ -254,6 +257,10 @@ internal class TelemetryManager(
         trigger: String? = null,
         cacheSource: String? = null,
         breadcrumb: String? = null,
+        interactionId: String? = null,
+        clickSource: String? = null,
+        critical: Boolean = false,
+        onPersisted: (() -> Unit)? = null,
     ) {
         accumulate(stage, adFormat, cacheSource, errorCode)
         enqueuePerf(
@@ -267,7 +274,13 @@ internal class TelemetryManager(
                 trigger = trigger,
                 cacheSource = cacheSource,
                 breadcrumb = breadcrumb,
+                interactionId = interactionId,
+                clickSource = clickSource,
+                // Critical lifecycle events are admitted independently of session perf sampling.
+                sampleRate = if (critical) 1.0 else effectiveSampleRate,
             ),
+            persistAndFlush = critical,
+            onPersisted = onPersisted,
         )
     }
 
@@ -396,8 +409,13 @@ internal class TelemetryManager(
 
     // ── Internals ──────────────────────────────────────────────────────────────
 
-    private fun newEvent(type: String, name: String) =
-        TelemetryEvent(type = type, name = name, eventId = UUID.randomUUID().toString(), timestamp = clock())
+    private fun newEvent(type: String, name: String) = TelemetryEvent(
+        type = type,
+        name = name,
+        eventId = UUID.randomUUID().toString(),
+        timestamp = clock(),
+        sampleRate = effectiveSampleRate,
+    )
 
     /** Compact one-line view for the dev console. Carries only non-sensitive event fields —
      * never the envelope's apiKey/ppid/advertising-id — and the message is already redacted. */
@@ -414,6 +432,8 @@ internal class TelemetryManager(
         e.adUnitId?.let { append(" unit=").append(it) }
         e.adId?.let { append(" ad=").append(it) }
         e.serveId?.let { append(" serve=").append(it) }
+        e.interactionId?.let { append(" interaction=").append(it) }
+        e.clickSource?.let { append(" source=").append(it) }
         e.errorCode?.let { append(" code=").append(it) }
         e.count?.let { append(" count=").append(it) }
         e.message?.let { append(" msg=").append(it) }
@@ -430,20 +450,50 @@ internal class TelemetryManager(
         return r.take(MAX_MESSAGE_LEN)
     }
 
-    private fun enqueuePerf(event: TelemetryEvent) {
-        if (!isEnabled || !perfSampledIn) return
+    private fun enqueuePerf(
+        event: TelemetryEvent,
+        persistAndFlush: Boolean = false,
+        onPersisted: (() -> Unit)? = null,
+    ) {
+        if (!isEnabled) {
+            runCatching { onPersisted?.invoke() }
+            return
+        }
+        if (!persistAndFlush && !perfSampledIn) return
         debugLog?.invoke(formatForLog(event))
         scope.launch {
-            val shouldFlush = mutex.withLock {
-                buffer.addLast(event)
-                while (buffer.size > MAX_BUFFER) {
-                    buffer.removeFirst()
-                    droppedCount++
+            var persisted = !persistAndFlush
+            val shouldFlush = runCatching {
+                mutex.withLock {
+                    if (!admitBufferedEvent(event)) return@withLock false
+                    if (persistAndFlush) persisted = store.save(snapshot())
+                    persistAndFlush || buffer.size >= FLUSH_THRESHOLD
                 }
-                buffer.size >= FLUSH_THRESHOLD
-            }
+            }.getOrDefault(false)
+            if (persisted) runCatching { onPersisted?.invoke() }
             if (shouldFlush) flush() else scheduleTimedFlush()
         }
+    }
+
+    /**
+     * Keep the shared FIFO bounded without invalidating a critical click's durability callback.
+     * Critical identity is derived from stable wire fields so recovered rows receive the same
+     * protection without adding a persistence-only field to the payload.
+     */
+    private fun admitBufferedEvent(event: TelemetryEvent): Boolean {
+        if (buffer.size < MAX_BUFFER) {
+            buffer.addLast(event)
+            return true
+        }
+        val evictable = buffer.firstOrNull { !it.isCriticalClickLifecycle() }
+        if (evictable == null) {
+            droppedCount++
+            return false
+        }
+        buffer.remove(evictable)
+        droppedCount++
+        buffer.addLast(event)
+        return true
     }
 
     /** Buffer + aggregated errors as one list for persistence / recovery. */
@@ -582,6 +632,9 @@ internal class TelemetryManager(
             deviceModel = ctx.deviceModel,
             hostAppId = ctx.hostAppId,
             devMode = ctx.devMode,
+            // A mixed-epoch batch has no single accurate envelope rate; every new event carries its
+            // own admission rate, while this compatibility field remains useful for homogeneous batches.
+            sampleRate = events.map { it.sampleRate }.distinct().singleOrNull(),
             sessionId = identity.sessionId,
             // PII providers are already consent-gated by the facade (re-checked at send time).
             primaryUserId = identity.primaryUserId,
@@ -615,6 +668,10 @@ internal class TelemetryManager(
         val SECRET_RE = Regex("(?i)(api[_-]?key|token|secret|password)([=:])\\S+")
     }
 }
+
+/** Critical click rows remain recognizable after JSON/SQLite recovery. */
+internal fun TelemetryEvent.isCriticalClickLifecycle(): Boolean =
+    type == TYPE_LIFECYCLE && (name == "click" || name == "click_fired")
 
 /**
  * Internal-only aggregation key for handled errors. The stable wire [name] is always the prefix and

@@ -39,6 +39,9 @@ internal data class TelemetryEvent(
     @SerialName("ad_unit_id") val adUnitId: String? = null,
     @SerialName("ad_id") val adId: String? = null,
     @SerialName("serve_id") val serveId: String? = null,
+    @SerialName("interaction_id") val interactionId: String? = null,
+    @SerialName("click_source") val clickSource: String? = null,
+    @SerialName("sample_rate") val sampleRate: Double? = null,
     @SerialName("error_code") val errorCode: String? = null,
     val message: String? = null,
     val breadcrumb: String? = null,
@@ -46,7 +49,8 @@ internal data class TelemetryEvent(
     val stack: List<String>? = null,
     @SerialName("cache_hit") val cacheHit: Boolean? = null,
     @SerialName("retry_count") val retryCount: Int? = null,
-    // Store-exit click type for store_opened/returned/abandoned: cta | store_prompt | auto_redirect.
+    // Store-exit type for store_opened/returned/abandoned: primary_cta | store_prompt |
+    // install_banner | fallback_cta | auto_redirect.
     val trigger: String? = null,
     // Native load source for load_success: preload | cache | network.
     @SerialName("cache_source") val cacheSource: String? = null,
@@ -69,6 +73,7 @@ internal data class TelemetryEnvelope(
     @SerialName("device_model") val deviceModel: String,
     @SerialName("host_app_id") val hostAppId: String,
     @SerialName("dev_mode") val devMode: Boolean,
+    @SerialName("sample_rate") val sampleRate: Double? = null,
     @SerialName("session_id") val sessionId: String? = null,
     // Consent-gated: only populated when the resolved ConsentSnapshot allows.
     @SerialName("primary_user_id") val primaryUserId: String? = null,

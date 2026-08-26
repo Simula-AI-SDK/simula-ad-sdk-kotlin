@@ -1,7 +1,65 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.network.BeaconPersistenceOutcome
+import ad.simula.ad.sdk.network.CLICK_PERSISTENCE_WAIT_MS
+import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionClaim
+import ad.simula.ad.sdk.network.ClickPersistenceHandoff
+import ad.simula.ad.sdk.network.ClickPersistencePart
+import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.telemetry.Telemetry
+import android.os.Handler
 import android.os.SystemClock
+
+/**
+ * Wait for both click durability attempts without doing I/O on the caller thread. Every queue
+ * success releases its barrier part; failures remain queued for recovery and fall through the short
+ * timeout so a broken/wedged store cannot swallow navigation indefinitely.
+ */
+internal fun coordinateClickPersistence(
+    mainHandler: Handler,
+    claim: ClickInteractionClaim,
+    enqueueBeacon: ((BeaconPersistenceOutcome) -> Unit) -> Unit,
+    recordTelemetry: (() -> Unit) -> Unit,
+    onHandoff: (ClickInteraction) -> Boolean,
+    onCreated: (ClickPersistenceHandoff) -> Unit = {},
+    onFinished: (ClickPersistenceHandoff) -> Unit = {},
+): ClickPersistenceHandoff {
+    lateinit var handoff: ClickPersistenceHandoff
+    lateinit var timeout: Runnable
+    val route = Runnable {
+        handoff.handoff(onHandoff)
+        runCatching { onFinished(handoff) }
+    }
+    timeout = Runnable {
+        if (!handoff.timeout()) return@Runnable
+        Telemetry.recordError(
+            signature = "click:persistence_timeout",
+            breadcrumb = "handoff=external",
+        )
+    }
+    handoff = ClickPersistenceHandoff(claim) {
+        mainHandler.removeCallbacks(timeout)
+        mainHandler.post(route)
+    }
+    runCatching { onCreated(handoff) }.onFailure { handoff.cancel() }
+    if (handoff.isTerminal()) return handoff
+    mainHandler.postDelayed(timeout, CLICK_PERSISTENCE_WAIT_MS)
+    runCatching {
+        enqueueBeacon { outcome ->
+            if (outcome == BeaconPersistenceOutcome.Persisted) {
+                handoff.complete(ClickPersistencePart.BEACON)
+            }
+        }
+    }
+    runCatching {
+        recordTelemetry { handoff.complete(ClickPersistencePart.TELEMETRY) }
+    }
+    return handoff
+}
+
+internal fun canDismissFullscreen(dismissUnlocked: Boolean, hasPendingClick: Boolean): Boolean =
+    dismissUnlocked && !hasPendingClick
 
 /**
  * Tracks the store-exit funnel for a single full-screen ad presentation: which click type sent the
@@ -40,7 +98,7 @@ internal class StoreExitTracker(
             adFormat = adFormat,
             adUnitId = adUnitId,
             adId = adId,
-            serveId = null,
+            serveId = adId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
             durationMs = (now - openedAt).coerceAtLeast(0L), // time away
             errorCode = null,
             trigger = trigger,
@@ -56,23 +114,24 @@ internal class StoreExitTracker(
     }
 
     /**
-     * A CTA / store-prompt / auto-redirect opened the store. [trigger] is one of
-     * `cta` / `store_prompt` / `auto_redirect`. `durationMs` carries the foreground dwell at open.
+     * A CTA / store-prompt / auto-redirect opened the store. The legacy store-exit dimension keeps
+     * `cta` while the separate click-source contract uses `primary_cta`.
      */
     fun recordStoreOpen(trigger: String) {
         val now = SystemClock.elapsedRealtime()
         val dwellMs = foregroundMs + if (inForeground) (now - resumedAt).coerceAtLeast(0L) else 0L
+        val storeExitTrigger = ClickSources.storeExitTrigger(trigger)
         openedAt = now
-        pendingTrigger = trigger
+        pendingTrigger = storeExitTrigger
         Telemetry.recordLifecycle(
             stage = "store_opened",
             adFormat = adFormat,
             adUnitId = adUnitId,
             adId = adId,
-            serveId = null,
+            serveId = adId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
             durationMs = dwellMs, // foreground time before leaving
             errorCode = null,
-            trigger = trigger,
+            trigger = storeExitTrigger,
         )
     }
 
@@ -85,7 +144,7 @@ internal class StoreExitTracker(
             adFormat = adFormat,
             adUnitId = adUnitId,
             adId = adId,
-            serveId = null,
+            serveId = adId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
             durationMs = null,
             errorCode = null,
             trigger = trigger,

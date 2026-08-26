@@ -2,13 +2,16 @@ package ad.simula.ad.sdk.minigame
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.graphics.Bitmap
 import android.os.Build
 import android.content.Intent
 import android.net.Uri
 import android.view.WindowManager
 import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -62,6 +65,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -125,6 +129,7 @@ fun MiniGameMenu(
     if (simulaContext.apiKey.isBlank()) return
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
     val preloadedCatalog = LocalPreloadedCatalog.current
 
     // ── State ────────────────────────────────────────────────────────────────
@@ -271,7 +276,6 @@ fun MiniGameMenu(
 
     // ── Dialog 1: Menu Card ──────────────────────────────────────────────
         if (isOpen && selectedGameId == null && currentFallbackAd == null) {
-            val configuration = LocalConfiguration.current
             val screenWidthDp = configuration.screenWidthDp
             val isMobile = screenWidthDp < 768
 
@@ -616,6 +620,7 @@ fun MiniGameMenu(
 
         // ── Dialog 2: Ad Overlay ─────────────────────────────────────────────
         if (currentFallbackAd != null) {
+            val fallbackPlayableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null
             Dialog(
                 onDismissRequest = { handleAdIframeClose() },
                 properties = DialogProperties(
@@ -623,13 +628,14 @@ fun MiniGameMenu(
                     decorFitsSystemWindows = false,
                 ),
             ) {
-                FullscreenDialogWindowConfig()
+                FullscreenDialogWindowConfig(opaqueBackground = fallbackPlayableHeightDp == null)
                 // key() so each revealed screen gets fresh overlay state (countdown, WebView).
                 key(fallbackAdIndex) {
                     AdIframeOverlay(
                         url = currentFallbackAd.iframeUrl ?: "",
+                        html = currentFallbackAd.html,
                         onClose = { handleAdIframeClose() },
-                        playableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null,
+                        playableHeightDp = fallbackPlayableHeightDp,
                         playableBorderColor = theme.playableBorderColor ?: "#262626",
                         adId = currentFallbackAd.adId,
                     )
@@ -648,7 +654,12 @@ fun MiniGameMenu(
                     decorFitsSystemWindows = false,
                 ),
             ) {
-                FullscreenDialogWindowConfig()
+                FullscreenDialogWindowConfig(
+                    opaqueBackground = !isBottomSheetPlayableHeight(
+                        theme.playableHeight,
+                        configuration.screenHeightDp,
+                    ),
+                )
                 GameWebView(
                     gameId = currentGameId,
                     charID = charID,
@@ -674,13 +685,15 @@ fun MiniGameMenu(
 // ── Fullscreen Dialog Window Config ──────────────────────────────────────────
 
 @Composable
-private fun FullscreenDialogWindowConfig() {
+private fun FullscreenDialogWindowConfig(opaqueBackground: Boolean = false) {
     val view = LocalView.current
     val dialogWindow = (view.parent as? DialogWindowProvider)?.window
     SideEffect {
         dialogWindow?.let { window ->
             window.setDimAmount(0f)
-            window.setBackgroundDrawableResource(android.R.color.transparent)
+            window.setBackgroundDrawableResource(
+                if (opaqueBackground) android.R.color.black else android.R.color.transparent,
+            )
             WindowCompat.setDecorFitsSystemWindows(window, false)
             window.statusBarColor = android.graphics.Color.TRANSPARENT
             window.navigationBarColor = android.graphics.Color.TRANSPARENT
@@ -708,6 +721,7 @@ private fun FullscreenDialogWindowConfig() {
 @Composable
 private fun AdIframeOverlay(
     url: String,
+    html: String? = null,
     onClose: () -> Unit,
     playableHeightDp: Float? = null,
     playableBorderColor: String = "#262626",
@@ -715,11 +729,13 @@ private fun AdIframeOverlay(
 ) {
     val context = LocalContext.current
     val view = LocalView.current
+    val inlineHtml = html?.takeIf { it.isNotBlank() }
 
     var adCountdown by remember { mutableStateOf(5) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ringProgress = remember { Animatable(0f) }
     var adPageLoaded by remember { mutableStateOf(false) }
+    var adPageFailed by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         launch { ringProgress.animateTo(1f, tween(5000, easing = LinearEasing)) }
@@ -802,22 +818,75 @@ private fun AdIframeOverlay(
             Box(modifier = Modifier.fillMaxSize().weight(1f)) {
                 AndroidView(
                     factory = { ctx ->
+                        var realLoadStarted = false
                         WebViewPool.acquire(
                             context = ctx,
                             client = object : WebViewClient() {
-                                override fun onPageFinished(view: WebView?, finishedUrl: String?) {
-                                    if (finishedUrl == "about:blank") return
-                                    adPageLoaded = true
+                                override fun onPageStarted(view: WebView?, startedUrl: String?, favicon: Bitmap?) {
+                                    if (!realLoadStarted) return
+                                    adPageLoaded = false
+                                    if (!startedUrl.isNullOrBlank() &&
+                                        (startedUrl != "about:blank" || inlineHtml != null)
+                                    ) {
+                                        adPageFailed = false
+                                    }
+                                }
+                                override fun onPageCommitVisible(view: WebView?, committedUrl: String?) {
+                                    if (!realLoadStarted) return
+                                    if (!committedUrl.isNullOrBlank() &&
+                                        (committedUrl != "about:blank" || inlineHtml != null) &&
+                                        !adPageFailed
+                                    ) {
+                                        adPageLoaded = true
+                                    }
+                                }
+                                override fun onReceivedError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    error: WebResourceError?,
+                                ) {
+                                    if (!realLoadStarted) return
+                                    if (request?.isForMainFrame == true) {
+                                        adPageFailed = true
+                                        adPageLoaded = false
+                                    }
+                                }
+                                override fun onReceivedHttpError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    errorResponse: WebResourceResponse?,
+                                ) {
+                                    if (!realLoadStarted) return
+                                    if (request?.isForMainFrame == true) {
+                                        adPageFailed = true
+                                        adPageLoaded = false
+                                    }
                                 }
                                 override fun shouldOverrideUrlLoading(
                                     view: WebView?,
                                     request: WebResourceRequest?,
                                 ): Boolean {
                                     val requestUrl = request?.url?.toString() ?: return false
-                                    if (requestUrl == url) return false
-                                    val originalHost = Uri.parse(url).host
-                                    val requestHost = Uri.parse(requestUrl).host
-                                    if (originalHost == requestHost) return false
+                                    val requestUri = runCatching { Uri.parse(requestUrl) }.getOrNull() ?: return true
+                                    if (requestUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
+                                    if (request?.isForMainFrame != true) return false
+                                    val originalUri = runCatching { Uri.parse(url) }.getOrNull()
+                                    val originalPort = originalUri?.port?.takeIf { it >= 0 } ?: when (originalUri?.scheme?.lowercase()) {
+                                        "http" -> 80
+                                        "https" -> 443
+                                        else -> -1
+                                    }
+                                    val requestPort = requestUri.port.takeIf { it >= 0 } ?: when (requestUri.scheme?.lowercase()) {
+                                        "http" -> 80
+                                        "https" -> 443
+                                        else -> -1
+                                    }
+                                    val sameOrigin = originalUri?.host != null &&
+                                        originalUri.scheme.equals(requestUri.scheme, ignoreCase = true) &&
+                                        originalUri.host.equals(requestUri.host, ignoreCase = true) &&
+                                        originalPort == requestPort
+                                    if (sameOrigin) return false
+                                    if (!request.hasGesture()) return true
                                     // Consume the navigation either way; runCatching so a custom-scheme
                                     // link with no installed handler can't throw ActivityNotFoundException
                                     // into the host (matches the other CTA sites).
@@ -837,18 +906,40 @@ private fun AdIframeOverlay(
                                 override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
                                     recordRenderProcessGone("minigame_ad", detail)
                             },
-                        ).apply { loadUrl(url) }
+                        ).apply {
+                            if (inlineHtml != null) {
+                                realLoadStarted = true
+                                loadDataWithBaseURL(
+                                    url.takeIf { it.isNotBlank() },
+                                    inlineHtml,
+                                    "text/html",
+                                    "UTF-8",
+                                    null,
+                                )
+                            } else if (url.isNotBlank()) {
+                                realLoadStarted = true
+                                loadUrl(url)
+                            }
+                        }
                     },
                     modifier = Modifier.fillMaxSize(),
                     onRelease = { webView -> WebViewPool.release(webView) },
                 )
 
                 if (!adPageLoaded) {
+                    // Fail blank: keep WebView error pages hidden without spinning forever.
                     Box(
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.White)
+                            .pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                                }
+                            },
                         contentAlignment = Alignment.Center,
                     ) {
-                        CircularProgressIndicator(color = Color(0xFF6B7280))
+                        if (!adPageFailed) CircularProgressIndicator(color = Color(0xFF6B7280))
                     }
                 }
 

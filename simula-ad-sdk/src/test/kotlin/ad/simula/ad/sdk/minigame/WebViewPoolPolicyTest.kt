@@ -10,6 +10,39 @@ import org.junit.Test
 class WebViewPoolPolicyTest {
 
     @Test
+    fun `resetting view is unavailable until reset finishes`() {
+        val state = WebViewResetPoolState<String>()
+
+        assertTrue(state.beginReset("view", capacity = 1))
+        assertEquals(1, state.retainedCount)
+        assertEquals(null, state.acquire())
+        assertTrue(state.completeReset("view", retain = true))
+        assertEquals("view", state.acquire())
+    }
+
+    @Test
+    fun `late reset completion cannot resurrect an evicted view`() {
+        val state = WebViewResetPoolState<String>()
+
+        assertTrue(state.beginReset("view", capacity = 1))
+        assertEquals(listOf("view"), state.evictAll())
+        assertFalse(state.completeReset("view", retain = true))
+        assertEquals(0, state.retainedCount)
+    }
+
+    @Test
+    fun `reset ownership remains bounded and failed reset frees capacity`() {
+        val state = WebViewResetPoolState<String>()
+
+        assertTrue(state.beginReset("first", capacity = 1))
+        assertFalse(state.beginReset("second", capacity = 1))
+        assertTrue(state.failReset("first"))
+        assertTrue(state.beginReset("second", capacity = 1))
+        assertFalse(state.completeReset("second", retain = false))
+        assertEquals(0, state.retainedCount)
+    }
+
+    @Test
     fun `retains only when capacity is available and cooldown has elapsed`() {
         assertTrue(canRetainPooledWebView(maxIdle = 1, idleCount = 0, nowMs = 10_000L, blockedUntilMs = 10_000L))
         assertFalse(canRetainPooledWebView(maxIdle = 1, idleCount = 1, nowMs = 10_000L, blockedUntilMs = 0L))
