@@ -34,10 +34,10 @@ class FullscreenClickHandoffPolicyTest {
 
     @Test
     fun `dismissal requires unlocked close and no pending click`() {
-        assertFalse(canDismissFullscreen(dismissUnlocked = false, hasPendingClick = false))
-        assertFalse(canDismissFullscreen(dismissUnlocked = false, hasPendingClick = true))
-        assertFalse(canDismissFullscreen(dismissUnlocked = true, hasPendingClick = true))
-        assertTrue(canDismissFullscreen(dismissUnlocked = true, hasPendingClick = false))
+        assertFalse(canDismissFullscreen(dismissUnlocked = false, clickHandoffPending = false))
+        assertFalse(canDismissFullscreen(dismissUnlocked = false, clickHandoffPending = true))
+        assertFalse(canDismissFullscreen(dismissUnlocked = true, clickHandoffPending = true))
+        assertTrue(canDismissFullscreen(dismissUnlocked = true, clickHandoffPending = false))
     }
 
     @Test
@@ -47,13 +47,41 @@ class FullscreenClickHandoffPolicyTest {
             requireNotNull(gate.claim(ClickSources.INSTALL_BANNER)),
         ) {}
 
-        assertFalse(canDismissFullscreen(dismissUnlocked = true, hasPendingClick = gate.hasPendingClaim()))
+        assertFalse(canDismissFullscreen(dismissUnlocked = true, clickHandoffPending = gate.hasPendingClaim()))
         handoff.complete(ClickPersistencePart.TELEMETRY)
         handoff.complete(ClickPersistencePart.BEACON)
-        assertFalse(canDismissFullscreen(dismissUnlocked = true, hasPendingClick = gate.hasPendingClaim()))
+        assertFalse(canDismissFullscreen(dismissUnlocked = true, clickHandoffPending = gate.hasPendingClaim()))
 
         assertTrue(handoff.handoff { true })
-        assertTrue(canDismissFullscreen(dismissUnlocked = true, hasPendingClick = gate.hasPendingClaim()))
+        assertTrue(canDismissFullscreen(dismissUnlocked = true, clickHandoffPending = gate.hasPendingClaim()))
+    }
+
+    @Test
+    fun `retained routing handoff blocks dismissal and recreation after claim commits`() {
+        val gate = ClickInteractionGate(idFactory = { "interaction" })
+        val handoff = ClickPersistenceHandoff(
+            requireNotNull(gate.claim(ClickSources.PRIMARY_CTA)),
+        ) {}
+        var retained: ClickPersistenceHandoff? = handoff
+        var routeCompletion: ((Boolean) -> Unit)? = null
+        handoff.addResultListener { retained = null }
+
+        handoff.complete(ClickPersistencePart.TELEMETRY)
+        handoff.complete(ClickPersistencePart.BEACON)
+        assertTrue(handoff.handoffAsync { _, completion ->
+            routeCompletion = completion
+            ClickRouteStart.STARTED
+        })
+
+        assertFalse("claim is committed before routing finishes", gate.hasPendingClaim())
+        assertFalse(canDismissFullscreen(dismissUnlocked = true, clickHandoffPending = retained != null))
+        val recreatedPending = retained != null
+        assertFalse("recreation restores the retained handoff", canDismissFullscreen(true, recreatedPending))
+
+        routeCompletion?.invoke(true)
+
+        assertNull(retained)
+        assertTrue(canDismissFullscreen(dismissUnlocked = true, clickHandoffPending = retained != null))
     }
 
     @Test
@@ -268,6 +296,11 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `fullscreen fallback click beacon belongs to fallback screen`() {
+        assertEquals("fallback-ad", fallbackClickBeaconImpressionId("fallback-ad"))
+    }
+
+    @Test
     fun `rejected beacon persistence reports diagnostic without trapping route`() {
         val gate = ClickInteractionGate(idFactory = { "interaction" })
         val scheduler = TestScheduler()
@@ -382,5 +415,59 @@ class FullscreenClickHandoffPolicyTest {
         assertSame(first, state.clickAdmission(0))
         assertFalse(state.clickAdmission(0).isEnabled())
         assertTrue(state.clickAdmission(1).isEnabled())
+    }
+
+    @Test
+    fun `post-close fallback deadline survives recreation and rejects late success`() {
+        var now = 1_000L
+        val state = FallbackPresentationState(clockMs = { now })
+        val generation = state.startPostCloseFetchWait()
+
+        assertEquals(FALLBACK_POST_CLOSE_WAIT_MS, state.postCloseFetchWaitRemainingMs(generation))
+        now += 1_250L
+        assertEquals(generation, state.retainedPostCloseFetchWait())
+        assertEquals(750L, state.postCloseFetchWaitRemainingMs(generation))
+
+        now += 750L
+        assertTrue(state.timeoutPostCloseFetchWait(generation))
+        assertEquals(FallbackStage.DONE, state.stage)
+        assertFalse(
+            state.resolvePostCloseFetchWait(
+                generation,
+                listOf(SimulaApiClient.FallbackAd("late", html = "<html/>")),
+            ),
+        )
+        assertEquals(FallbackStage.DONE, state.stage)
+    }
+
+    @Test
+    fun `post-close fallback result wins before deadline`() {
+        var now = 5_000L
+        val state = FallbackPresentationState(clockMs = { now })
+        val generation = state.startPostCloseFetchWait()
+        val ads = listOf(SimulaApiClient.FallbackAd("fallback", html = "<html/>"))
+
+        now += FALLBACK_POST_CLOSE_WAIT_MS - 1L
+        assertTrue(state.resolvePostCloseFetchWait(generation, ads))
+        assertEquals(FallbackStage.SHOWING, state.stage)
+        assertEquals(0, state.index)
+        assertFalse(state.timeoutPostCloseFetchWait(generation))
+    }
+
+    @Test
+    fun `accepted primary CTA admission remains disabled after successful route`() {
+        val admission = ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission()
+        val gate = ClickInteractionGate(idFactory = { "primary" })
+        val handoff = ClickPersistenceHandoff(
+            requireNotNull(gate.claim(ClickSources.PRIMARY_CTA)),
+        ) {}
+
+        assertTrue(admission.disable())
+        handoff.complete(ClickPersistencePart.TELEMETRY)
+        handoff.complete(ClickPersistencePart.BEACON)
+        assertTrue(handoff.handoff { true })
+
+        assertFalse(admission.isEnabled())
+        assertFalse(admission.disable())
     }
 }

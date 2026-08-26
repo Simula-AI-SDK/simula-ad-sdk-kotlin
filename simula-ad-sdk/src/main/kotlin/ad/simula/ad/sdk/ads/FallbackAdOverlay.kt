@@ -72,8 +72,13 @@ import kotlinx.coroutines.delay
 internal enum class FallbackStage { CONTENT, FETCHING, SHOWING, DONE }
 private const val FALLBACK_FETCH_ATTEMPTS = 2
 private const val FALLBACK_FETCH_RETRY_MS = 250L
+internal const val FALLBACK_POST_CLOSE_WAIT_MS = 2_000L
 
-internal class FallbackPresentationState {
+internal fun fallbackClickBeaconImpressionId(adId: String): String = adId
+
+internal class FallbackPresentationState(
+    private val clockMs: () -> Long = SystemClock::elapsedRealtime,
+) {
     var stage: FallbackStage = FallbackStage.CONTENT
         private set
     var index: Int = 0
@@ -85,8 +90,9 @@ internal class FallbackPresentationState {
     private val clickAdmissions = LinkedHashMap<Int, PrimaryCtaDocumentAdmission>()
     private var navigationOwner: Any? = null
     private var navigateInWebView: ((String) -> Unit)? = null
+    private var fetchWaitGeneration = 0L
+    private var fetchWaitDeadlineMs = 0L
 
-    fun fetching() { stage = FallbackStage.FETCHING }
     fun showing(index: Int) { stage = FallbackStage.SHOWING; this.index = index.coerceAtLeast(0) }
     fun done() { stage = FallbackStage.DONE }
     fun setClickPending(pending: Boolean) { clickHandoffPending = pending }
@@ -99,6 +105,38 @@ internal class FallbackPresentationState {
     }
     fun clickAdmission(index: Int): PrimaryCtaDocumentAdmission =
         clickAdmissions.getOrPut(index.coerceAtLeast(0)) { PrimaryCtaDocumentAdmission() }
+
+    fun startPostCloseFetchWait(): Long {
+        if (stage != FallbackStage.FETCHING) {
+            fetchWaitGeneration++
+            fetchWaitDeadlineMs = clockMs() + FALLBACK_POST_CLOSE_WAIT_MS
+            stage = FallbackStage.FETCHING
+        }
+        return fetchWaitGeneration
+    }
+
+    fun retainedPostCloseFetchWait(): Long =
+        if (stage == FallbackStage.FETCHING) fetchWaitGeneration else startPostCloseFetchWait()
+
+    fun postCloseFetchWaitRemainingMs(generation: Long): Long? {
+        if (stage != FallbackStage.FETCHING || generation != fetchWaitGeneration) return null
+        return (fetchWaitDeadlineMs - clockMs()).coerceAtLeast(0L)
+    }
+
+    fun resolvePostCloseFetchWait(
+        generation: Long,
+        ads: List<SimulaApiClient.FallbackAd>,
+    ): Boolean {
+        if (stage != FallbackStage.FETCHING || generation != fetchWaitGeneration) return false
+        if (ads.isNotEmpty()) showing(0) else done()
+        return true
+    }
+
+    fun timeoutPostCloseFetchWait(generation: Long): Boolean {
+        if (stage != FallbackStage.FETCHING || generation != fetchWaitGeneration) return false
+        done()
+        return true
+    }
 
     @Synchronized
     fun bindNavigation(owner: Any, navigate: (String) -> Unit) {
@@ -165,7 +203,16 @@ internal fun FallbackAdHost(
         mutableStateOf<FallbackPhase>(
             when (presentationState.stage) {
                 FallbackStage.CONTENT -> FallbackPhase.Content
-                FallbackStage.FETCHING, FallbackStage.SHOWING -> FallbackPhase.Fetching
+                FallbackStage.FETCHING -> FallbackPhase.Fetching(
+                    presentationState.retainedPostCloseFetchWait(),
+                )
+                FallbackStage.SHOWING -> presentationState.fetchedAds
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { ads ->
+                        val index = presentationState.index.coerceIn(0, ads.lastIndex)
+                        FallbackPhase.Showing(ads, index)
+                    }
+                    ?: FallbackPhase.Done.also { presentationState.done() }
                 FallbackStage.DONE -> FallbackPhase.Done
             },
         )
@@ -204,14 +251,10 @@ internal fun FallbackAdHost(
                 presentationState.fetchFailed()
                 if (attempt + 1 < FALLBACK_FETCH_ATTEMPTS) delay(FALLBACK_FETCH_RETRY_MS)
             }
+            if (presentationState.stage == FallbackStage.DONE) return@LaunchedEffect
             val resolved = fetched ?: presentationState.terminalizeInitialFetchFailure()
             presentationState.retainFetchedAds(resolved)
             prefetched = resolved
-        }
-        val ads = prefetched.orEmpty()
-        if (presentationState.stage == FallbackStage.SHOWING && ads.isNotEmpty()) {
-            val index = presentationState.index.coerceIn(0, ads.lastIndex)
-            phase = FallbackPhase.Showing(ads, index)
         }
     }
 
@@ -220,7 +263,7 @@ internal fun FallbackAdHost(
     fun onPrimaryClosed() {
         val ads = prefetched
         phase = when {
-            ads == null -> FallbackPhase.Fetching.also { presentationState.fetching() }
+            ads == null -> FallbackPhase.Fetching(presentationState.startPostCloseFetchWait())
             ads.isNotEmpty() -> FallbackPhase.Showing(ads, index = 0).also { presentationState.showing(0) }
             else -> FallbackPhase.Done.also { presentationState.done() }
         }
@@ -232,18 +275,26 @@ internal fun FallbackAdHost(
         when (val p = phase) {
             FallbackPhase.Content -> content { onPrimaryClosed() }
             // Prefetch wasn't ready at close — hold on the black backdrop and advance when it lands.
-            FallbackPhase.Fetching -> {
+            is FallbackPhase.Fetching -> {
                 // Swallow back during this brief settle window so a fast back-press can't finish the
                 // Activity before the end screens are revealed (parity with the gated close).
                 BackHandler(enabled = true) {}
-                LaunchedEffect(prefetched) {
+                LaunchedEffect(p.generation) {
+                    val remainingMs = presentationState.postCloseFetchWaitRemainingMs(p.generation)
+                        ?: return@LaunchedEffect
+                    if (remainingMs > 0L) delay(remainingMs)
+                    if (presentationState.timeoutPostCloseFetchWait(p.generation)) {
+                        phase = FallbackPhase.Done
+                    }
+                }
+                LaunchedEffect(prefetched, p.generation) {
                     val ads = prefetched ?: return@LaunchedEffect
-                    phase = if (ads.isNotEmpty()) {
-                        val index = presentationState.index.coerceIn(0, ads.lastIndex)
-                        presentationState.showing(index)
-                        FallbackPhase.Showing(ads, index)
+                    if (!presentationState.resolvePostCloseFetchWait(p.generation, ads)) {
+                        return@LaunchedEffect
+                    }
+                    phase = if (presentationState.stage == FallbackStage.SHOWING) {
+                        FallbackPhase.Showing(ads, presentationState.index)
                     } else {
-                        presentationState.done()
                         FallbackPhase.Done
                     }
                 }
@@ -315,7 +366,7 @@ internal fun FallbackAdHost(
 
 private sealed interface FallbackPhase {
     data object Content : FallbackPhase
-    data object Fetching : FallbackPhase
+    data class Fetching(val generation: Long) : FallbackPhase
     data class Showing(val ads: List<SimulaApiClient.FallbackAd>, val index: Int) : FallbackPhase
     data object Done : FallbackPhase
 }
@@ -497,13 +548,14 @@ private fun FallbackAdOverlay(
                             // A genuine user tap uses one native fallback_cta interaction id for durable
                             // beacon + lifecycle attribution. Programmatic redirects remain non-clicks.
                             val claim = claimClick(ClickSources.FALLBACK_CTA) ?: return true
+                            clickAdmission.disable()
                             val interaction = claim.interaction
                             coordinateDeferredClickPersistence(
                                 mainHandler = clickHandler,
                                 claim = claim,
                                 enqueueBeacon = { completion ->
                                     AdBeaconManager.enqueue(
-                                        impressionId,
+                                        fallbackClickBeaconImpressionId(adId),
                                         "click",
                                         adFormat = adFormat,
                                         interactionId = interaction.id,
@@ -526,7 +578,7 @@ private fun FallbackAdOverlay(
                                             ctaStoreUrl,
                                         )
                                         if (opened) onAdClick(committedInteraction)
-                                        if (!opened && clickAdmission.disable()) {
+                                        if (!opened) {
                                             CreativeCtaRouter.admittedHttpUrl(target)?.let { fallbackUrl ->
                                                 presentationState.navigate(fallbackUrl)
                                             }

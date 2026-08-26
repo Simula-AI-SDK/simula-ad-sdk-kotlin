@@ -337,7 +337,7 @@ private fun RewardedMinigame(
     val lifecycleOwner = LocalLifecycleOwner.current
     val clickHandoffHandler = remember { Handler(Looper.getMainLooper()) }
     var clickHandoffPending by remember(presentation) {
-        mutableStateOf(presentation.hasPendingClick())
+        mutableStateOf(presentation.pendingClickHandoff() != null)
     }
     DisposableEffect(presentation) {
         val subscription = presentation.pendingClickHandoff()?.addResultListener {
@@ -362,7 +362,7 @@ private fun RewardedMinigame(
         if (fallbackActivity == null) return@DisposableEffect onDispose {}
         presentation.setPrimaryFallback(fallbackOwner, fallbackActivity) fallback@{ url ->
             val webView = creativeWebView ?: return@fallback
-            if (!primaryCtaAdmission.disable()) return@fallback
+            primaryCtaAdmission.disable()
             BridgeWebViewInstaller.disableTrustedCta(webView)
             webView.post {
                 if (creativeWebView === webView) runCatching { webView.loadUrl(url) }
@@ -546,11 +546,14 @@ private fun RewardedMinigame(
 
     // No early exit: Back does nothing until the reward is earned, then it closes (earned).
     BackHandler(enabled = true) {
-        if (canDismissFullscreen(rewardEarned, presentation.hasPendingClick())) onFinish(true)
+        if (canDismissFullscreen(rewardEarned, clickHandoffPending)) onFinish(true)
     }
 
     fun beginPrimaryCta(tappedUrl: String): Boolean {
+        if (!primaryCtaAdmission.isEnabled()) return true
         val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
+        primaryCtaAdmission.disable()
+        creativeWebView?.let(BridgeWebViewInstaller::disableTrustedCta)
         val interaction = claim.interaction
         val route = PrimaryCtaRoute(
             tappedUrl = CreativeCtaRouter.admittedHttpUrl(tappedUrl),
@@ -600,7 +603,7 @@ private fun RewardedMinigame(
             },
             onFinished = { handoff ->
                 presentation.clearClickHandoff(handoff)
-                clickHandoffPending = presentation.hasPendingClick()
+                clickHandoffPending = presentation.pendingClickHandoff() != null
             },
         )
         return true
@@ -718,7 +721,7 @@ private fun RewardedMinigame(
             remaining = secondsLeft,
             progress = closeProgress.value,
             onClose = {
-                if (canDismissFullscreen(rewardEarned, presentation.hasPendingClick())) onFinish(true)
+                if (canDismissFullscreen(rewardEarned, clickHandoffPending)) onFinish(true)
             },
         )
 
@@ -782,7 +785,7 @@ private fun RewardedMinigame(
                         },
                         onFinished = { handoff ->
                             presentation.clearClickHandoff(handoff)
-                            clickHandoffPending = presentation.hasPendingClick()
+                            clickHandoffPending = presentation.pendingClickHandoff() != null
                         },
                     )
                 },

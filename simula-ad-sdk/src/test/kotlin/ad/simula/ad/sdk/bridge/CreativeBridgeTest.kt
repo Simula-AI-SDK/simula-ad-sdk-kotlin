@@ -208,6 +208,18 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun trustedCtaRelayRejectsNonActivationKeysAndCancelledContacts() {
+        val source = trustedCtaRelaySource("nonce")
+
+        assertTrue(source.contains("key === 'escape' || key === 'esc' || key === 'dead' || key === 'process'"))
+        assertTrue(source.contains("return !isModifierOnlyKey(key)"))
+        assertTrue(source.contains("type === 'pointercancel' || type === 'touchcancel'"))
+        assertTrue(source.contains("cancelledContact = true"))
+        assertTrue(source.contains("if (contactPending || cancelledContact) { return false; }"))
+        assertTrue(source.contains("if (!awaitingClick) { beginGesture(); }"))
+    }
+
+    @Test
     fun getAudioStateReplyShape() {
         val reply = capture("""{"type":"GET_AUDIO_STATE","requestId":"42"}""")
         assertEquals("GET_AUDIO_STATE", reply["type"]!!.jsonPrimitive.content)

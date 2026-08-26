@@ -968,6 +968,7 @@ private fun AdIframeOverlay(
                                     if (!request.hasGesture()) return true
                                     val admittedUrl = CreativeCtaRouter.admittedHttpUrl(requestUrl) ?: return true
                                     val claim = clickGate.claim(ClickSources.FALLBACK_CTA) ?: return true
+                                    clickAdmission.disable()
                                     val interaction = claim.interaction
                                     coordinateDeferredClickPersistence(
                                         mainHandler = clickHandler,
@@ -1001,7 +1002,7 @@ private fun AdIframeOverlay(
                                                         admittedUrl,
                                                         destination = "web",
                                                     )
-                                                    if (!opened && clickAdmission.disable()) {
+                                                    if (!opened) {
                                                         adWebView?.post {
                                                             if (adWebView != null) runCatching { adWebView?.loadUrl(admittedUrl) }
                                                         }

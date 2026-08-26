@@ -364,7 +364,7 @@ private fun CreativeInterstitial(
     val lifecycleOwner = LocalLifecycleOwner.current
     val clickHandoffHandler = remember { Handler(Looper.getMainLooper()) }
     var clickHandoffPending by remember(presentation) {
-        mutableStateOf(presentation.hasPendingClick())
+        mutableStateOf(presentation.pendingClickHandoff() != null)
     }
     DisposableEffect(presentation) {
         val subscription = presentation.pendingClickHandoff()?.addResultListener {
@@ -543,7 +543,7 @@ private fun CreativeInterstitial(
     // FallbackAdOverlay; this one is only composed during the primary creative.) Mirrors
     // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
     BackHandler(enabled = true) {
-        if (canDismissFullscreen(closeEnabled, presentation.hasPendingClick())) onFinish()
+        if (canDismissFullscreen(closeEnabled, clickHandoffPending)) onFinish()
     }
 
     Box(
@@ -558,7 +558,7 @@ private fun CreativeInterstitial(
                 bridge = bridge,
                 presentation = presentation,
                 onPrimaryCta = primaryCta@{ tappedUrl ->
-                    val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return@primaryCta true
+                    val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return@primaryCta false
                     val interaction = claim.interaction
                     val route = PrimaryCtaRoute(
                         tappedUrl = CreativeCtaRouter.admittedHttpUrl(tappedUrl),
@@ -621,7 +621,7 @@ private fun CreativeInterstitial(
                         },
                         onFinished = { handoff ->
                             presentation.clearClickHandoff(handoff)
-                            clickHandoffPending = presentation.hasPendingClick()
+                            clickHandoffPending = presentation.pendingClickHandoff() != null
                         },
                     )
                     true
@@ -648,7 +648,7 @@ private fun CreativeInterstitial(
             remaining = closeRemaining,
             progress = closeProgress.value,
             onClose = {
-                if (canDismissFullscreen(closeEnabled, presentation.hasPendingClick())) onFinish()
+                if (canDismissFullscreen(closeEnabled, clickHandoffPending)) onFinish()
             },
         )
 
@@ -714,7 +714,7 @@ private fun CreativeInterstitial(
                         },
                         onFinished = { handoff ->
                             presentation.clearClickHandoff(handoff)
-                            clickHandoffPending = presentation.hasPendingClick()
+                            clickHandoffPending = presentation.pendingClickHandoff() != null
                         },
                     )
                 },
@@ -778,7 +778,7 @@ private fun CreativeInterstitial(
                         },
                         onFinished = { handoff ->
                             presentation.clearClickHandoff(handoff)
-                            clickHandoffPending = presentation.hasPendingClick()
+                            clickHandoffPending = presentation.pendingClickHandoff() != null
                         },
                     )
                 },
@@ -822,7 +822,7 @@ private fun CreativeHtml(
         if (fallbackActivity == null) return@DisposableEffect onDispose {}
         presentation.setPrimaryFallback(fallbackOwner, fallbackActivity) fallback@{ url ->
             val webView = creativeWebView ?: return@fallback
-            if (!primaryCtaAdmission.disable()) return@fallback
+            primaryCtaAdmission.disable()
             BridgeWebViewInstaller.disableTrustedCta(webView)
             webView.post {
                 if (creativeWebView === webView) {
@@ -883,14 +883,22 @@ private fun CreativeHtml(
                         // Document-start interception handles trusted window.open/target=_blank.
                         // This remains the platform fallback for direct gesture navigations.
                         if (!request.hasGesture()) return false
-                        return onPrimaryCta(url)
+                        val accepted = onPrimaryCta(url)
+                        if (accepted && primaryCtaAdmission.disable()) {
+                            view?.let(BridgeWebViewInstaller::disableTrustedCta)
+                        }
+                        return true
                     }
                 },
                 surface = "interstitial",
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
                 BridgeWebViewInstaller.install(this, bridge) { url ->
-                    if (primaryCtaAdmission.isEnabled()) onPrimaryCta(url)
+                    if (primaryCtaAdmission.isEnabled() && onPrimaryCta(url) &&
+                        primaryCtaAdmission.disable()
+                    ) {
+                        creativeWebView?.let(BridgeWebViewInstaller::disableTrustedCta)
+                    }
                 }
                 // Self-contained creative: asset URLs are absolute (baseURL = null).
                 loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)

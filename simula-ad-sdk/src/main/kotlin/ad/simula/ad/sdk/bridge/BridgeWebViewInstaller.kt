@@ -25,6 +25,150 @@ private const val TRUSTED_CTA_OPEN = "SIMULA_CTA_OPEN"
 private const val MAX_CTA_URL_CHARS = 8 * 1024
 private val installerJson = Json { ignoreUnknownKeys = true }
 
+internal fun trustedCtaRelaySource(activationNonce: String): String = """
+    var originalOpen = window.open;
+    var ctaDisabled = false;
+    var capturedUserActivation = navigator.userActivation;
+    var nativeSetTimeout = window.setTimeout.bind(window);
+    var trustedDispatch = false;
+    var trustedEventEpoch = 0;
+    var gestureSequence = 0;
+    var claimedGesture = -1;
+    var awaitingClick = false;
+    var contactPending = false;
+    var cancelledContact = false;
+
+    function clearTrustedDispatchLater(epoch) {
+        nativeSetTimeout(function () {
+            if (trustedEventEpoch === epoch) { trustedDispatch = false; }
+        }, 0);
+    }
+    function markTrustedDispatch() {
+        trustedEventEpoch += 1;
+        trustedDispatch = true;
+        clearTrustedDispatchLater(trustedEventEpoch);
+    }
+    function beginGesture() {
+        cancelledContact = false;
+        if (!awaitingClick) { gestureSequence += 1; }
+        awaitingClick = true;
+        markTrustedDispatch();
+    }
+    function beginKeyboardGesture() {
+        cancelledContact = false;
+        gestureSequence += 1;
+        awaitingClick = true;
+        markTrustedDispatch();
+    }
+    function disarmPendingContact() {
+        contactPending = true;
+        awaitingClick = false;
+        trustedDispatch = false;
+        trustedEventEpoch += 1;
+        cancelledContact = false;
+    }
+    function cancelContact() {
+        contactPending = false;
+        awaitingClick = false;
+        trustedDispatch = false;
+        trustedEventEpoch += 1;
+        cancelledContact = true;
+        var epoch = trustedEventEpoch;
+        nativeSetTimeout(function () {
+            if (trustedEventEpoch === epoch) { cancelledContact = false; }
+        }, 0);
+    }
+    function isModifierOnlyKey(key) {
+        return ['alt','altgraph','capslock','control','ctrl','fn','fnlock','hyper','meta',
+            'numlock','scrolllock','shift','super','symbol','symbollock'].indexOf(key) !== -1;
+    }
+    function isActivationKey(event) {
+        if (event.repeat === true) { return false; }
+        var key = String(event.key || '').toLowerCase();
+        if (key === 'escape' || key === 'esc' || key === 'dead' || key === 'process') { return false; }
+        return !isModifierOnlyKey(key);
+    }
+    function observeTrustedEvent(event) {
+        if (!event || event.isTrusted !== true) { return; }
+        var type = event.type;
+        var pointerType = String(event.pointerType || '').toLowerCase();
+        if (type === 'pointerdown') {
+            if (pointerType === 'touch' || pointerType === 'pen') { disarmPendingContact(); }
+            else { beginGesture(); }
+        } else if (type === 'pointerup') {
+            if (pointerType === 'touch' || pointerType === 'pen') {
+                if (!contactPending) { return; }
+                contactPending = false;
+            }
+            beginGesture();
+        } else if (type === 'pointercancel' || type === 'touchcancel') {
+            cancelContact();
+        } else if (type === 'mousedown') {
+            if (!contactPending) { beginGesture(); }
+        } else if (type === 'touchstart') {
+            disarmPendingContact();
+        } else if (type === 'touchend') {
+            if (!contactPending) { return; }
+            contactPending = false;
+            beginGesture();
+        } else if (type === 'keydown') {
+            if (isActivationKey(event)) { beginKeyboardGesture(); }
+        } else if (type === 'click') {
+            if (cancelledContact || contactPending) { return; }
+            if (!awaitingClick) { beginGesture(); }
+            else { markTrustedDispatch(); }
+            awaitingClick = false;
+        }
+    }
+    ['click', 'pointerdown', 'pointerup', 'pointercancel', 'mousedown',
+        'touchstart', 'touchend', 'touchcancel', 'keydown'].forEach(function (name) {
+        window.addEventListener(name, observeTrustedEvent, true);
+    });
+    function hasActiveUserGesture() {
+        if (contactPending || cancelledContact) { return false; }
+        return trustedDispatch ||
+            !!(capturedUserActivation && capturedUserActivation.isActive === true);
+    }
+    function resolvedUrl(value) {
+        if (value === undefined || value === null) { return null; }
+        try { return new URL(String(value), document.baseURI).href; }
+        catch (_) { return null; }
+    }
+    function forwardTrustedCta(value) {
+        if (ctaDisabled) { return false; }
+        if (gestureSequence === 0 || !hasActiveUserGesture()) { return false; }
+        var url = resolvedUrl(value);
+        if (!url) { return false; }
+        if (claimedGesture === gestureSequence) { return true; }
+        claimedGesture = gestureSequence;
+        try {
+            nativePost(nativeStringify({
+                type: '$TRUSTED_CTA_OPEN',
+                url: url,
+                activation_nonce: '$activationNonce'
+            }));
+            return true;
+        } catch (_) {
+            if (claimedGesture === gestureSequence) { claimedGesture = -1; }
+            return false;
+        }
+    }
+    window.open = function () {
+        if (arguments.length > 0 && forwardTrustedCta(arguments[0])) { return null; }
+        return originalOpen.apply(window, arguments);
+    };
+    window.__simulaSdkDisableCta = function () {
+        ctaDisabled = true;
+        window.open = originalOpen;
+    };
+    window.addEventListener('click', function (event) {
+        if (!event || event.isTrusted !== true || !hasActiveUserGesture()) { return; }
+        var anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+        if (!anchor || String(anchor.target).toLowerCase() !== '_blank') { return; }
+        if (forwardTrustedCta(anchor.href)) { event.preventDefault(); }
+    }, true);
+""".trimIndent()
+
 /**
  * Wires the WebView ↔ SDK bridge (PRD §3) onto a creative [WebView]: a `@JavascriptInterface`
  * receiver plus an injected document-start relay that forwards `window.postMessage` envelopes to
@@ -49,85 +193,7 @@ internal object BridgeWebViewInstaller {
      * `WebViewPool.postMessageScript`.
      */
     private fun relayScript(installationId: String, activationNonce: String?): String {
-        val ctaRelay = if (activationNonce == null) "" else """
-            var originalOpen = window.open;
-            var ctaDisabled = false;
-            var trustedDispatch = false;
-            var gestureSequence = 0;
-            var claimedGesture = -1;
-            var awaitingClick = false;
-            var capturedUserActivation = navigator.userActivation;
-            var resolvedPromise = Promise.resolve();
-            var nativePromiseThen = Promise.prototype.then;
-
-            function clearTrustedDispatchLater() {
-                nativePromiseThen.call(resolvedPromise, function () { trustedDispatch = false; });
-            }
-            function beginGesture() {
-                gestureSequence += 1;
-                awaitingClick = true;
-            }
-            function observeTrustedEvent(event) {
-                if (!event || event.isTrusted !== true) { return; }
-                trustedDispatch = true;
-                clearTrustedDispatchLater();
-                if (event.type === 'pointerdown' ||
-                    (event.type === 'keydown' && event.repeat !== true)) {
-                    beginGesture();
-                } else if (event.type === 'click') {
-                    if (!awaitingClick) { beginGesture(); }
-                    awaitingClick = false;
-                } else if (event.type === 'pointercancel') {
-                    awaitingClick = false;
-                }
-            }
-            ['click', 'pointerdown', 'pointerup', 'pointercancel', 'mousedown', 'touchend', 'keydown']
-                .forEach(function (name) {
-                    window.addEventListener(name, observeTrustedEvent, true);
-                });
-            function hasActiveUserGesture() {
-                return trustedDispatch ||
-                    !!(capturedUserActivation && capturedUserActivation.isActive === true);
-            }
-            function resolvedUrl(value) {
-                if (value === undefined || value === null) { return null; }
-                try { return new URL(String(value), document.baseURI).href; }
-                catch (_) { return null; }
-            }
-            function forwardTrustedCta(value) {
-                if (ctaDisabled) { return false; }
-                if (gestureSequence === 0 || !hasActiveUserGesture()) { return false; }
-                var url = resolvedUrl(value);
-                if (!url) { return false; }
-                if (claimedGesture === gestureSequence) { return true; }
-                claimedGesture = gestureSequence;
-                try {
-                    nativePost(nativeStringify({
-                        type: '$TRUSTED_CTA_OPEN',
-                        url: url,
-                        activation_nonce: '$activationNonce'
-                    }));
-                    return true;
-                } catch (_) {
-                    if (claimedGesture === gestureSequence) { claimedGesture = -1; }
-                    return false;
-                }
-            }
-            window.open = function () {
-                if (arguments.length > 0 && forwardTrustedCta(arguments[0])) { return null; }
-                return originalOpen.apply(window, arguments);
-            };
-            window.__simulaSdkDisableCta = function () {
-                ctaDisabled = true;
-                window.open = originalOpen;
-            };
-            window.addEventListener('click', function (event) {
-                if (!event || event.isTrusted !== true || !hasActiveUserGesture()) { return; }
-                var anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-                if (!anchor || String(anchor.target).toLowerCase() !== '_blank') { return; }
-                if (forwardTrustedCta(anchor.href)) { event.preventDefault(); }
-            }, true);
-        """.trimIndent()
+        val ctaRelay = activationNonce?.let(::trustedCtaRelaySource).orEmpty()
         return """
         (function () {
             var nativeReceiver = window.$NATIVE_OBJECT;
