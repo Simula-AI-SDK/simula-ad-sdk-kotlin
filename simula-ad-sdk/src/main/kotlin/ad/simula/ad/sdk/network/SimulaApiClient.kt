@@ -757,7 +757,24 @@ internal object SimulaApiClient {
         val adId: String,
         val iframeUrl: String? = null,
         val html: String? = null,
+        val nativeClickBeaconV1Enabled: Boolean = false,
     )
+
+    internal fun fallbackAdFromBody(
+        ad: FallbackAdBody,
+        responseNativeClickBeaconV1Enabled: Boolean,
+    ): FallbackAd? {
+        val html = ad.html?.takeIf { it.isNotBlank() }
+        val url = ad.iframeUrl?.takeIf { it.isNotBlank() }
+        if (html == null && url == null) return null
+        return FallbackAd(
+            adId = ad.adId,
+            iframeUrl = url,
+            html = html,
+            nativeClickBeaconV1Enabled =
+                ad.nativeClickBeaconV1Enabled ?: responseNativeClickBeaconV1Enabled,
+        )
+    }
 
     /**
      * Fetch the fallback ad screens for a serve via `GET /load/fallbacks/{impression_id}`,
@@ -780,12 +797,8 @@ internal object SimulaApiClient {
 
                 val data = json.decodeFromString<FallbackAdsApiResponse>(response.body)
                 data.ads.mapNotNull { ad ->
-                    // Prefer the inline html (rendered in FallbackAdOverlay); keep the iframe url as
-                    // the same-origin base + url fallback. Drop only when neither is present.
-                    val html = ad.html?.takeIf { it.isNotBlank() }
-                    val url = ad.iframeUrl?.takeIf { it.isNotBlank() }
-                    if (html == null && url == null) null
-                    else FallbackAd(adId = ad.adId, iframeUrl = url, html = html)
+                    // Prefer inline HTML; keep iframe URL as its same-origin base/url fallback.
+                    fallbackAdFromBody(ad, data.nativeClickBeaconV1Enabled)
                 }
             }
         }

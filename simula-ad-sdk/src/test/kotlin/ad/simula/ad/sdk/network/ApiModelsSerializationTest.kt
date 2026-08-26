@@ -132,19 +132,22 @@ class ApiModelsSerializationTest {
     @Test
     fun `fallbacks response decodes screens in order`() {
         val payload = """
-            {"impression_id":"imp_1","ads":[
+            {"impression_id":"imp_1","native_click_beacon_v1_enabled":true,"ads":[
               {"ad_id":"a1","html":"<html>1</html>","iframe_url":"https://i/1"},
-              {"ad_id":"a2","html":"<html>2</html>","iframe_url":"https://i/2"}
+              {"ad_id":"a2","native_click_beacon_v1_enabled":false,"html":"<html>2</html>","iframe_url":"https://i/2"}
             ]}
         """.trimIndent()
         val r = json.decodeFromString<FallbackAdsApiResponse>(payload)
         assertEquals("imp_1", r.impressionId)
+        assertTrue(r.nativeClickBeaconV1Enabled)
         assertEquals(2, r.ads.size)
         assertEquals("a1", r.ads[0].adId)
+        assertNull(r.ads[0].nativeClickBeaconV1Enabled)
         assertEquals("https://i/1", r.ads[0].iframeUrl)
         // html is the preferred creative source rendered by FallbackAdOverlay.
         assertEquals("<html>1</html>", r.ads[0].html)
         assertEquals("a2", r.ads[1].adId)
+        assertEquals(false, r.ads[1].nativeClickBeaconV1Enabled)
     }
 
     @Test
@@ -154,12 +157,38 @@ class ApiModelsSerializationTest {
 
         val bare = json.decodeFromString<FallbackAdsApiResponse>("{}")
         assertEquals("", bare.impressionId)
+        assertEquals(false, bare.nativeClickBeaconV1Enabled)
         assertTrue(bare.ads.isEmpty())
 
         val partial = json.decodeFromString<FallbackAdsApiResponse>("""{"ads":[{"ad_id":"a1"}]}""")
         assertEquals("a1", partial.ads[0].adId)
         assertNull(partial.ads[0].iframeUrl)
         assertNull(partial.ads[0].html)
+        assertNull(partial.ads[0].nativeClickBeaconV1Enabled)
+    }
+
+    @Test
+    fun `fallback beacon ownership defaults false and per-ad value overrides response`() {
+        val inherited = SimulaApiClient.fallbackAdFromBody(
+            FallbackAdBody(adId = "a1", html = "<html/>"),
+            responseNativeClickBeaconV1Enabled = true,
+        )
+        val overridden = SimulaApiClient.fallbackAdFromBody(
+            FallbackAdBody(
+                adId = "a2",
+                html = "<html/>",
+                nativeClickBeaconV1Enabled = false,
+            ),
+            responseNativeClickBeaconV1Enabled = true,
+        )
+        val defaulted = SimulaApiClient.fallbackAdFromBody(
+            FallbackAdBody(adId = "a3", iframeUrl = "https://i/3"),
+            responseNativeClickBeaconV1Enabled = false,
+        )
+
+        assertEquals(true, inherited?.nativeClickBeaconV1Enabled)
+        assertEquals(false, overridden?.nativeClickBeaconV1Enabled)
+        assertEquals(false, defaulted?.nativeClickBeaconV1Enabled)
     }
 
     // ── Menu game click ──────────────────────────────────────────────────────

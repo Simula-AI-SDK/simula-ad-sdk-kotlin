@@ -5,7 +5,7 @@ import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import java.net.URI
+import java.net.URL
 
 /**
  * Routes a creative's call-to-action tap to its advertiser destination.
@@ -53,12 +53,13 @@ internal object CreativeCtaRouter {
         admittedHttpUrl(trackingUrl) ?: admittedHttpUrl(embeddedUrl)
 
     internal fun admittedHttpUrl(value: String?): String? {
-        if (value.isNullOrBlank()) return null
-        val uri = runCatching { URI(value) }.getOrNull() ?: return null
-        return value.takeIf {
-            uri.isAbsolute &&
-                uri.host?.isNotBlank() == true &&
-                (uri.scheme.equals("http", true) || uri.scheme.equals("https", true))
+        val candidate = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (candidate.any { it.code in 0..31 || it.code == 127 }) return null
+        val url = runCatching { URL(candidate) }.getOrNull() ?: return null
+        return candidate.takeIf {
+            (url.protocol.equals("http", true) || url.protocol.equals("https", true)) &&
+                url.host.isNotBlank() &&
+                url.host.none(Char::isWhitespace)
         }
     }
 

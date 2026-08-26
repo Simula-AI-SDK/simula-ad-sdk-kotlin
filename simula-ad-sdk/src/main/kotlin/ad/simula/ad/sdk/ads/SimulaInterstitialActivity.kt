@@ -162,12 +162,8 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     presentationState = p.fallbackState,
                     onFullyClosed = ::finishAd,
                     autoStoreRedirect = p.ad.adBehavior?.autoStoreRedirect,
-                    // Capable sessions use the native fallback_cta beacon; the backend suppresses the
-                    // legacy HTML self-beacon using native_click_beacon_v1.
-                    onAdClick = { interaction ->
-                        p.callbacks.notifyClicked()
-                        p.storeExit.recordStoreOpen(interaction.source)
-                    },
+                    onAdClick = { p.callbacks.notifyClicked() },
+                    onStoreOpen = { interaction -> p.storeExit.recordStoreOpen(interaction.source) },
                     persistClick = p.callbacks::persistClick,
                     claimClick = p::claimClick,
                     routeClick = { route, completion ->
@@ -558,7 +554,10 @@ private fun CreativeInterstitial(
                 bridge = bridge,
                 presentation = presentation,
                 onPrimaryCta = primaryCta@{ tappedUrl ->
-                    val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return@primaryCta false
+                    val claim = notifyPublisherClickForClaim(
+                        presentation.claimClick(ClickSources.PRIMARY_CTA),
+                        { presentation.callbacks.notifyClicked() },
+                    ) ?: return@primaryCta false
                     val interaction = claim.interaction
                     val route = PrimaryCtaRoute(
                         tappedUrl = CreativeCtaRouter.admittedHttpUrl(tappedUrl),
@@ -595,7 +594,6 @@ private fun CreativeInterstitial(
                                 )
                                 if (opened) {
                                     presentation.autoRedirectCoordinator.recordUserRouteOpened()
-                                    presentation.callbacks.notifyClicked()
                                     routeActivity.recordClickStoreOpen(committedInteraction.source)
                                     if (skoverlay != null && skoverlay.enabled &&
                                         skoverlay.timing == OverlayTiming.ON_CLICK && Build.VERSION.SDK_INT >= 21
@@ -661,11 +659,14 @@ private fun CreativeInterstitial(
                 prompt = storePrompt,
                 closePosition = close.position,
                 onTap = {
-                    // Persist telemetry + beacon before routing; notify the publisher only after
-                    // the external destination opens — only on a real user tap.
+                    // A genuine admitted tap notifies the publisher once; persistence and routing
+                    // continue independently, while store-open tracking remains success-gated.
                     // openDestination is reused by auto_store_redirect (no tap), so the click
                     // signal lives here on the badge, not in openDestination.
-                    val claim = presentation.claimClick(ClickSources.STORE_PROMPT) ?: return@StorePromptBadge
+                    val claim = notifyPublisherClickForClaim(
+                        presentation.claimClick(ClickSources.STORE_PROMPT),
+                        { presentation.callbacks.notifyClicked() },
+                    ) ?: return@StorePromptBadge
                     val interaction = claim.interaction
                     coordinateDeferredClickPersistence(
                         mainHandler = clickHandoffHandler,
@@ -697,7 +698,6 @@ private fun CreativeInterstitial(
                                     ad.androidStoreUrl,
                                 )
                                 if (opened) {
-                                    presentation.callbacks.notifyClicked()
                                     routeActivity.recordClickStoreOpen(committedInteraction.source)
                                 }
                                 opened
@@ -727,9 +727,11 @@ private fun CreativeInterstitial(
             PlayInstallBanner(
                 config = skoverlay,
                 onTap = {
-                    // A user tap on the install banner persists the click before opening the store;
-                    // publisher notification follows only after a successful external launch.
-                    val claim = presentation.claimClick(ClickSources.INSTALL_BANNER) ?: return@PlayInstallBanner
+                    // A user tap notifies once at admission; persistence still precedes routing.
+                    val claim = notifyPublisherClickForClaim(
+                        presentation.claimClick(ClickSources.INSTALL_BANNER),
+                        { presentation.callbacks.notifyClicked() },
+                    ) ?: return@PlayInstallBanner
                     val interaction = claim.interaction
                     coordinateDeferredClickPersistence(
                         mainHandler = clickHandoffHandler,
@@ -761,7 +763,6 @@ private fun CreativeInterstitial(
                                     ad.androidStoreUrl,
                                 )
                                 if (opened) {
-                                    presentation.callbacks.notifyClicked()
                                     routeActivity.recordClickStoreOpen(committedInteraction.source)
                                 }
                                 opened

@@ -32,6 +32,7 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
     var nativeSetTimeout = window.setTimeout.bind(window);
     var trustedDispatch = false;
     var trustedEventEpoch = 0;
+    var trustedEventTimestamp = -1;
     var gestureSequence = 0;
     var claimedGesture = -1;
     var awaitingClick = false;
@@ -43,22 +44,23 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
             if (trustedEventEpoch === epoch) { trustedDispatch = false; }
         }, 0);
     }
-    function markTrustedDispatch() {
+    function markTrustedDispatch(event) {
         trustedEventEpoch += 1;
+        trustedEventTimestamp = Number(event.timeStamp || 0);
         trustedDispatch = true;
         clearTrustedDispatchLater(trustedEventEpoch);
     }
-    function beginGesture() {
+    function beginGesture(event) {
         cancelledContact = false;
         if (!awaitingClick) { gestureSequence += 1; }
         awaitingClick = true;
-        markTrustedDispatch();
+        markTrustedDispatch(event);
     }
-    function beginKeyboardGesture() {
+    function beginKeyboardGesture(event) {
         cancelledContact = false;
         gestureSequence += 1;
         awaitingClick = true;
-        markTrustedDispatch();
+        markTrustedDispatch(event);
     }
     function disarmPendingContact() {
         contactPending = true;
@@ -94,29 +96,29 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
         var pointerType = String(event.pointerType || '').toLowerCase();
         if (type === 'pointerdown') {
             if (pointerType === 'touch' || pointerType === 'pen') { disarmPendingContact(); }
-            else { beginGesture(); }
+            else { beginGesture(event); }
         } else if (type === 'pointerup') {
             if (pointerType === 'touch' || pointerType === 'pen') {
                 if (!contactPending) { return; }
                 contactPending = false;
             }
-            beginGesture();
+            beginGesture(event);
         } else if (type === 'pointercancel' || type === 'touchcancel') {
             cancelContact();
         } else if (type === 'mousedown') {
-            if (!contactPending) { beginGesture(); }
+            if (!contactPending) { beginGesture(event); }
         } else if (type === 'touchstart') {
             disarmPendingContact();
         } else if (type === 'touchend') {
             if (!contactPending) { return; }
             contactPending = false;
-            beginGesture();
+            beginGesture(event);
         } else if (type === 'keydown') {
-            if (isActivationKey(event)) { beginKeyboardGesture(); }
+            if (isActivationKey(event)) { beginKeyboardGesture(event); }
         } else if (type === 'click') {
             if (cancelledContact || contactPending) { return; }
-            if (!awaitingClick) { beginGesture(); }
-            else { markTrustedDispatch(); }
+            if (!awaitingClick) { beginGesture(event); }
+            else { markTrustedDispatch(event); }
             awaitingClick = false;
         }
     }
@@ -126,8 +128,8 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
     });
     function hasActiveUserGesture() {
         if (contactPending || cancelledContact) { return false; }
-        return trustedDispatch ||
-            !!(capturedUserActivation && capturedUserActivation.isActive === true);
+        if (capturedUserActivation && capturedUserActivation.isActive === true) { return true; }
+        return trustedDispatch && trustedEventTimestamp >= 0;
     }
     function resolvedUrl(value) {
         if (value === undefined || value === null) { return null; }
@@ -136,10 +138,11 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
     }
     function forwardTrustedCta(value) {
         if (ctaDisabled) { return false; }
-        if (gestureSequence === 0 || !hasActiveUserGesture()) { return false; }
+        if (gestureSequence === 0) { return false; }
+        if (claimedGesture === gestureSequence) { return true; }
+        if (!hasActiveUserGesture()) { return false; }
         var url = resolvedUrl(value);
         if (!url) { return false; }
-        if (claimedGesture === gestureSequence) { return true; }
         claimedGesture = gestureSequence;
         try {
             nativePost(nativeStringify({

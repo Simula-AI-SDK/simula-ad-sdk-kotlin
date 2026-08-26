@@ -129,12 +129,8 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     presentationState = p.fallbackState,
                     onFullyClosed = ::completeReward,
                     autoStoreRedirect = p.adBehavior?.autoStoreRedirect,
-                    // Capable sessions use the native fallback_cta beacon; the backend suppresses the
-                    // legacy HTML self-beacon using native_click_beacon_v1.
-                    onAdClick = { interaction ->
-                        p.callbacks.notifyClicked()
-                        p.storeExit.recordStoreOpen(interaction.source)
-                    },
+                    onAdClick = { p.callbacks.notifyClicked() },
+                    onStoreOpen = { interaction -> p.storeExit.recordStoreOpen(interaction.source) },
                     persistClick = p.callbacks::persistClick,
                     claimClick = p::claimClick,
                     routeClick = { route, completion ->
@@ -551,7 +547,10 @@ private fun RewardedMinigame(
 
     fun beginPrimaryCta(tappedUrl: String): Boolean {
         if (!primaryCtaAdmission.isEnabled()) return true
-        val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
+        val claim = notifyPublisherClickForClaim(
+            presentation.claimClick(ClickSources.PRIMARY_CTA),
+            { presentation.callbacks.notifyClicked() },
+        ) ?: return true
         primaryCtaAdmission.disable()
         creativeWebView?.let(BridgeWebViewInstaller::disableTrustedCta)
         val interaction = claim.interaction
@@ -588,7 +587,6 @@ private fun RewardedMinigame(
                     )
                     if (opened) {
                         presentation.autoRedirectCoordinator.recordUserRouteOpened()
-                        presentation.callbacks.notifyClicked()
                         routeActivity.recordClickStoreOpen(committedInteraction.source)
                     } else {
                         route.tappedUrl?.let { presentation.openPrimaryFallback(it, routeActivity) }
@@ -642,12 +640,10 @@ private fun RewardedMinigame(
                             // External link from the playable is the CTA store-open — routed
                             // through the shared CTA router so the tapped tracker opens verbatim
                             // (referrer-preserving) with the raw store link as the deterministic
-                            // fallback. CLICKED and the store-exit funnel are gated on the launch
-                            // actually succeeding, so a failed launch is never recorded as a store
-                            // visit (a false `opened` lets the WebView navigate in place, the
-                            // pre-router failure behavior). Only a user-gesture navigation counts
-                            // as a click (parity with the interstitial); auto-redirects open the
-                            // store but don't fire CLICKED.
+                            // fallback. CLICKED records the admitted user gesture before this route;
+                            // only the store-exit funnel is gated on a successful launch. A false
+                            // `opened` lets the WebView navigate in place, matching the pre-router
+                            // failure behavior. Auto redirects open the store without firing CLICKED.
                             val open = {
                                 val target = CreativeCtaRouter.preferredClickUrl(
                                     presentation.trackingUrl,
@@ -737,9 +733,11 @@ private fun RewardedMinigame(
                 edgePadding = 8.dp,
                 rowHeight = MIN_TOUCH_TARGET_DP.dp,
                 onTap = {
-                    // Persist telemetry + beacon before routing; notify the publisher only after
-                    // the external destination opens (never for auto_store_redirect).
-                    val claim = presentation.claimClick(ClickSources.STORE_PROMPT) ?: return@StorePromptBadge
+                    // A genuine admitted tap notifies once; auto redirects never enter this path.
+                    val claim = notifyPublisherClickForClaim(
+                        presentation.claimClick(ClickSources.STORE_PROMPT),
+                        { presentation.callbacks.notifyClicked() },
+                    ) ?: return@StorePromptBadge
                     val interaction = claim.interaction
                     coordinateDeferredClickPersistence(
                         mainHandler = clickHandoffHandler,
@@ -772,7 +770,6 @@ private fun RewardedMinigame(
                                     presentation.androidStoreUrl,
                                 )
                                 if (opened) {
-                                    presentation.callbacks.notifyClicked()
                                     routeActivity.recordClickStoreOpen(committedInteraction.source)
                                 }
                                 opened

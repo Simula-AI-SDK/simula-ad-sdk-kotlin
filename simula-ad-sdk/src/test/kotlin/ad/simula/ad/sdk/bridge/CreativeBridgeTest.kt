@@ -216,7 +216,15 @@ class CreativeBridgeTest {
         assertTrue(source.contains("type === 'pointercancel' || type === 'touchcancel'"))
         assertTrue(source.contains("cancelledContact = true"))
         assertTrue(source.contains("if (contactPending || cancelledContact) { return false; }"))
-        assertTrue(source.contains("if (!awaitingClick) { beginGesture(); }"))
+        assertTrue(source.contains("var trustedEventTimestamp = -1"))
+        assertTrue(source.contains("trustedEventTimestamp = Number(event.timeStamp || 0)"))
+        assertTrue(source.contains("return trustedDispatch && trustedEventTimestamp >= 0"))
+        assertTrue(source.contains("if (!awaitingClick) { beginGesture(event); }"))
+        val duplicateCheck = requireNotNull(source.indexOf("if (claimedGesture === gestureSequence) { return true; }")
+            .takeIf { it >= 0 })
+        val activeCheck = requireNotNull(source.indexOf("if (!hasActiveUserGesture()) { return false; }")
+            .takeIf { it >= 0 })
+        assertTrue(duplicateCheck < activeCheck)
     }
 
     @Test

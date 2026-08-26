@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.AdBeaconManager
+import ad.simula.ad.sdk.network.BeaconPersistenceOutcome
 import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.ClickInteraction
@@ -74,7 +75,27 @@ private const val FALLBACK_FETCH_ATTEMPTS = 2
 private const val FALLBACK_FETCH_RETRY_MS = 250L
 internal const val FALLBACK_POST_CLOSE_WAIT_MS = 2_000L
 
-internal fun fallbackClickBeaconImpressionId(adId: String): String = adId
+internal fun fallbackClickBeaconImpressionId(adId: String, serverEnabled: Boolean): String? =
+    adId.takeIf { serverEnabled && it.isNotBlank() }
+
+internal fun enqueueOwnedFallbackClickBeacon(
+    adId: String,
+    serverEnabled: Boolean,
+    completion: (BeaconPersistenceOutcome) -> Unit,
+    enqueue: (String) -> Unit,
+) {
+    val beaconId = fallbackClickBeaconImpressionId(adId, serverEnabled)
+    if (beaconId == null) completion(BeaconPersistenceOutcome.Persisted) else enqueue(beaconId)
+}
+
+internal fun fallbackNavigationOverride(
+    clickHandoffPending: Boolean,
+    documentAdmissionEnabled: Boolean,
+): Boolean? = when {
+    clickHandoffPending -> true
+    !documentAdmissionEnabled -> false
+    else -> null
+}
 
 internal class FallbackPresentationState(
     private val clockMs: () -> Long = SystemClock::elapsedRealtime,
@@ -184,6 +205,7 @@ internal fun FallbackAdHost(
     autoStoreRedirect: AutoStoreRedirect? = null,
     onAutoStoreRedirect: () -> Boolean = { false },
     onAdClick: (ClickInteraction) -> Unit = {},
+    onStoreOpen: (ClickInteraction) -> Unit = {},
     persistClick: (ClickInteraction, () -> Unit) -> Unit = { _, complete -> complete() },
     claimClick: ((String) -> ClickInteractionClaim?)? = null,
     routeClick: (((Context) -> Boolean, (Boolean) -> Unit) -> ClickRouteStart)? = null,
@@ -325,9 +347,11 @@ internal fun FallbackAdHost(
                         iframeUrl = ad.iframeUrl,
                         html = ad.html,
                         adId = ad.adId,
-                        onAdClick = { interaction ->
+                        nativeClickBeaconV1Enabled = ad.nativeClickBeaconV1Enabled,
+                        onAdClick = onAdClick,
+                        onStoreOpen = { interaction ->
                             redirects.recordUserRouteOpened()
-                            onAdClick(interaction)
+                            onStoreOpen(interaction)
                         },
                         persistClick = persistClick,
                         claimClick = clickClaim,
@@ -336,7 +360,6 @@ internal fun FallbackAdHost(
                         routeClick = routeClick,
                         presentationState = presentationState,
                         fallbackIndex = p.index,
-                        clickHandoffPending = presentationState.clickHandoffPending,
                         onClickHandoffCreated = { handoff ->
                             presentationState.setClickPending(true)
                             onClickHandoffCreated(handoff)
@@ -380,7 +403,9 @@ private fun FallbackAdOverlay(
     iframeUrl: String?,
     html: String? = null,
     adId: String,
+    nativeClickBeaconV1Enabled: Boolean,
     onAdClick: (ClickInteraction) -> Unit = {},
+    onStoreOpen: (ClickInteraction) -> Unit = {},
     persistClick: (ClickInteraction, () -> Unit) -> Unit,
     claimClick: (String) -> ClickInteractionClaim?,
     impressionId: String,
@@ -388,7 +413,6 @@ private fun FallbackAdOverlay(
     routeClick: (((Context) -> Boolean, (Boolean) -> Unit) -> ClickRouteStart)?,
     presentationState: FallbackPresentationState,
     fallbackIndex: Int,
-    clickHandoffPending: Boolean,
     onClickHandoffCreated: (ClickPersistenceHandoff) -> Unit,
     onClickHandoffFinished: (ClickPersistenceHandoff) -> Unit,
     ctaTrackingUrl: String? = null,
@@ -463,7 +487,9 @@ private fun FallbackAdOverlay(
         }
     }
     // Back can only close once the countdown elapses (parity with the creative's gated close).
-    BackHandler(enabled = true) { if (countdown <= 0 && !clickHandoffPending) onClose() }
+    BackHandler(enabled = true) {
+        if (countdown <= 0 && !presentationState.clickHandoffPending) onClose()
+    }
 
     Box(
         modifier = Modifier
@@ -516,8 +542,10 @@ private fun FallbackAdOverlay(
                         }
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val target = request?.url?.toString() ?: return false
-                            if (clickHandoffPending) return true
-                            if (!clickAdmission.isEnabled()) return false
+                            fallbackNavigationOverride(
+                                clickHandoffPending = presentationState.clickHandoffPending,
+                                documentAdmissionEnabled = clickAdmission.isEnabled(),
+                            )?.let { return it }
                             val targetUri = runCatching { Uri.parse(target) }.getOrNull() ?: return true
                             if (targetUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
                             // Subframes stay inside the creative and automatic cross-origin redirects
@@ -547,21 +575,30 @@ private fun FallbackAdOverlay(
                             // failure behavior).
                             // A genuine user tap uses one native fallback_cta interaction id for durable
                             // beacon + lifecycle attribution. Programmatic redirects remain non-clicks.
-                            val claim = claimClick(ClickSources.FALLBACK_CTA) ?: return true
+                            val claim = notifyPublisherClickForClaim(
+                                claimClick(ClickSources.FALLBACK_CTA),
+                                onAdClick,
+                            ) ?: return true
                             clickAdmission.disable()
                             val interaction = claim.interaction
                             coordinateDeferredClickPersistence(
                                 mainHandler = clickHandler,
                                 claim = claim,
                                 enqueueBeacon = { completion ->
-                                    AdBeaconManager.enqueue(
-                                        fallbackClickBeaconImpressionId(adId),
-                                        "click",
-                                        adFormat = adFormat,
-                                        interactionId = interaction.id,
-                                        clickSource = interaction.source,
-                                        onPersistenceComplete = completion,
-                                    )
+                                    enqueueOwnedFallbackClickBeacon(
+                                        adId = adId,
+                                        serverEnabled = nativeClickBeaconV1Enabled,
+                                        completion = completion,
+                                    ) { beaconId ->
+                                        AdBeaconManager.enqueue(
+                                            beaconId,
+                                            "click",
+                                            adFormat = adFormat,
+                                            interactionId = interaction.id,
+                                            clickSource = interaction.source,
+                                            onPersistenceComplete = completion,
+                                        )
+                                    }
                                 },
                                 recordTelemetry = { completion -> persistClick(interaction, completion) },
                                 onHandoff = { committedInteraction, completion ->
@@ -577,7 +614,7 @@ private fun FallbackAdOverlay(
                                             null,
                                             ctaStoreUrl,
                                         )
-                                        if (opened) onAdClick(committedInteraction)
+                                        if (opened) runCatching { onStoreOpen(committedInteraction) }
                                         if (!opened) {
                                             CreativeCtaRouter.admittedHttpUrl(target)?.let { fallbackUrl ->
                                                 presentationState.navigate(fallbackUrl)
@@ -640,7 +677,7 @@ private fun FallbackAdOverlay(
             )
         }
 
-        if (clickHandoffPending) {
+        if (presentationState.clickHandoffPending) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -660,7 +697,7 @@ private fun FallbackAdOverlay(
                 .size(48.dp),
             contentAlignment = Alignment.Center,
         ) {
-            if (countdown <= 0 && !clickHandoffPending) {
+            if (countdown <= 0 && !presentationState.clickHandoffPending) {
                 // Compact close button (16dp circle) with a full 48dp tap target so it's easy to hit.
                 Box(
                     modifier = Modifier

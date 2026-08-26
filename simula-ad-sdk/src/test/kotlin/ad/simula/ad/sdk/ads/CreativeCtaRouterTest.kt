@@ -51,6 +51,54 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `admitted URL preserves lenient MMP query bytes and trims only outer whitespace`() {
+        val urls = listOf(
+            "https://tracker.example/click?pid=partner|affiliate&c=summer",
+            "https://tracker.example/click?campaign=Summer Sale&clickid=abc",
+            "https://tracker.example/click?clickid={click_id}&sub={sub_id}",
+            "https://tracker.example/click?pipe=%7C&space=Summer%20Sale&macro=%7Bclick_id%7D",
+        )
+
+        urls.forEach { assertEquals(it, CreativeCtaRouter.admittedHttpUrl(it)) }
+        assertEquals(urls[2], CreativeCtaRouter.admittedHttpUrl("  ${urls[2]}  "))
+        assertEquals("HTTP://tracker.example/click", CreativeCtaRouter.admittedHttpUrl("HTTP://tracker.example/click"))
+    }
+
+    @Test
+    fun `URL admission rejects controls unsafe schemes and malformed authorities`() {
+        listOf(
+            "javascript:alert(1)",
+            "data:text/html,hello",
+            "intent://tracker.example/click",
+            "market://details?id=app",
+            "/relative",
+            "//tracker.example/click",
+            "https:///missing-host",
+            "https://bad host.example/click",
+            "https://tracker.example/click\nX-Injected: value",
+            "https://tracker.example/click\u007f",
+        ).forEach { assertNull(it, CreativeCtaRouter.admittedHttpUrl(it)) }
+    }
+
+    @Test
+    fun `lenient top-level tracker wins and is launched byte-for-byte`() {
+        val tracker = "https://tracker.example/click?pid=partner|affiliate&campaign=Summer Sale&id={click_id}"
+        val store = "https://play.google.com/store/apps/details?id=app"
+        val launched = mutableListOf<String>()
+
+        assertEquals(tracker, CreativeCtaRouter.preferredClickUrl("  $tracker  ", store))
+        assertTrue(
+            CreativeCtaRouter.routeCta(
+                trackingUrl = "  $tracker  ",
+                destination = "appstore",
+                storeUrl = store,
+                launch = { launched += it; true },
+            ),
+        )
+        assertEquals(listOf(tracker), launched)
+    }
+
+    @Test
     fun `opens the tracking link verbatim regardless of destination`() {
         val tracking = "https://app.appsflyer.com/id123?pid=net&c=camp&af_siteid=pub&clickid=abc"
         // The opened URL is exactly the tracker — same host, query untouched, never a market:// link.

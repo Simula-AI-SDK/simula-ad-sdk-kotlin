@@ -4,6 +4,8 @@ import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickPersistencePart
 import ad.simula.ad.sdk.network.ClickSources
+import ad.simula.ad.sdk.network.AutoRedirectCoordinator
+import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.BeaconPersistenceOutcome
 import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.ClickHandoffResult
@@ -88,10 +90,12 @@ class FullscreenClickHandoffPolicyTest {
     fun `primary CTA persists one stable beacon and telemetry before route handoff`() {
         var now = 1_000L
         val gate = ClickInteractionGate(clockMs = { now }, idFactory = { "interaction-1" })
-        val claim = requireNotNull(gate.claim(ClickSources.PRIMARY_CTA))
         val scheduler = TestScheduler()
         val order = mutableListOf<String>()
         val beacons = mutableListOf<Pair<String, String>>()
+        val claim = requireNotNull(
+            notifyPublisherClickForClaim(gate.claim(ClickSources.PRIMARY_CTA)) { order += "publisher_click" },
+        )
 
         coordinateClickPersistence(
             scheduler = scheduler,
@@ -112,7 +116,7 @@ class FullscreenClickHandoffPolicyTest {
         )
 
         assertEquals(
-            listOf("beacon_persisted", "telemetry_persisted"),
+            listOf("publisher_click", "beacon_persisted", "telemetry_persisted"),
             order,
         )
         assertEquals(listOf("interaction-1" to ClickSources.PRIMARY_CTA), beacons)
@@ -120,19 +124,22 @@ class FullscreenClickHandoffPolicyTest {
 
         scheduler.runReady()
 
-        assertEquals(listOf("beacon_persisted", "telemetry_persisted", "route"), order)
+        assertEquals(listOf("publisher_click", "beacon_persisted", "telemetry_persisted", "route"), order)
         assertEquals(1, beacons.size)
         now = 1_100L
         assertNull("successful route starts the duplicate window", gate.claim(ClickSources.PRIMARY_CTA))
     }
 
     @Test
-    fun `failed primary CTA route remains accounted and does not notify publisher`() {
+    fun `failed primary CTA route notifies admitted tap once without store open`() {
         var nextId = 0
         val gate = ClickInteractionGate(idFactory = { "interaction-${++nextId}" })
-        val claim = requireNotNull(gate.claim(ClickSources.PRIMARY_CTA))
         val scheduler = TestScheduler()
         var publisherClicks = 0
+        var storeOpens = 0
+        val claim = requireNotNull(
+            notifyPublisherClickForClaim(gate.claim(ClickSources.PRIMARY_CTA)) { publisherClicks++ },
+        )
 
         coordinateClickPersistence(
             scheduler = scheduler,
@@ -141,14 +148,19 @@ class FullscreenClickHandoffPolicyTest {
             recordTelemetry = { it() },
             onHandoff = {
                 val opened = false
-                if (opened) publisherClicks++
+                if (opened) storeOpens++
                 opened
             },
         )
         scheduler.runReady()
 
-        assertEquals(0, publisherClicks)
-        assertNull("persisted interaction cannot be reissued after route failure", gate.claim(ClickSources.PRIMARY_CTA))
+        assertEquals(1, publisherClicks)
+        assertEquals(0, storeOpens)
+        assertNull(
+            "persisted interaction cannot be reissued after route failure",
+            notifyPublisherClickForClaim(gate.claim(ClickSources.PRIMARY_CTA)) { publisherClicks++ },
+        )
+        assertEquals("duplicate callbacks do not notify again", 1, publisherClicks)
     }
 
     @Test
@@ -161,11 +173,34 @@ class FullscreenClickHandoffPolicyTest {
     @Test
     fun `throwing publisher click callback is isolated`() {
         var continued = false
+        val gate = ClickInteractionGate(idFactory = { "interaction" })
 
-        notifyPublisherClick { throw IllegalStateException("host callback") }
+        val claim = notifyPublisherClickForClaim(gate.claim(ClickSources.PRIMARY_CTA)) {
+            throw IllegalStateException("host callback")
+        }
         continued = true
 
+        assertTrue(claim != null)
         assertTrue(continued)
+    }
+
+    @Test
+    fun `auto redirect opens without publisher click callback`() {
+        val redirects = AutoRedirectCoordinator()
+        val scope = Any()
+        var publisherClicks = 0
+        var routeAttempts = 0
+        redirects.activate(scope)
+        assertNull(notifyPublisherClickForClaim(null) { publisherClicks++ })
+
+        val result = redirects.request(scope, pendingHandoff = null) {
+            routeAttempts++
+            true
+        }
+
+        assertEquals(AutoRedirectResult.OPENED, result)
+        assertEquals(1, routeAttempts)
+        assertEquals(0, publisherClicks)
     }
 
     @Test
@@ -297,7 +332,39 @@ class FullscreenClickHandoffPolicyTest {
 
     @Test
     fun `fullscreen fallback click beacon belongs to fallback screen`() {
-        assertEquals("fallback-ad", fallbackClickBeaconImpressionId("fallback-ad"))
+        assertEquals("fallback-ad", fallbackClickBeaconImpressionId("fallback-ad", serverEnabled = true))
+        assertNull(fallbackClickBeaconImpressionId("fallback-ad", serverEnabled = false))
+        assertNull(fallbackClickBeaconImpressionId("", serverEnabled = true))
+    }
+
+    @Test
+    fun `unowned fallback beacon completes persistence without enqueue`() {
+        val outcomes = mutableListOf<BeaconPersistenceOutcome>()
+        val enqueued = mutableListOf<String>()
+
+        enqueueOwnedFallbackClickBeacon(
+            adId = "fallback-ad",
+            serverEnabled = false,
+            completion = outcomes::add,
+            enqueue = enqueued::add,
+        )
+        assertEquals(listOf(BeaconPersistenceOutcome.Persisted), outcomes)
+        assertTrue(enqueued.isEmpty())
+
+        enqueueOwnedFallbackClickBeacon(
+            adId = "fallback-ad",
+            serverEnabled = true,
+            completion = outcomes::add,
+            enqueue = enqueued::add,
+        )
+        assertEquals(listOf("fallback-ad"), enqueued)
+    }
+
+    @Test
+    fun `pending fallback navigation stays blocked after document admission disables`() {
+        assertEquals(true, fallbackNavigationOverride(true, documentAdmissionEnabled = false))
+        assertEquals(false, fallbackNavigationOverride(false, documentAdmissionEnabled = false))
+        assertNull(fallbackNavigationOverride(false, documentAdmissionEnabled = true))
     }
 
     @Test

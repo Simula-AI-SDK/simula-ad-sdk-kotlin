@@ -38,6 +38,15 @@ internal fun notifyPublisherClick(callback: () -> Unit) {
     runCatching(callback)
 }
 
+internal fun notifyPublisherClickForClaim(
+    claim: ClickInteractionClaim?,
+    callback: (ClickInteraction) -> Unit,
+): ClickInteractionClaim? {
+    claim ?: return null
+    notifyPublisherClick { callback(claim.interaction) }
+    return claim
+}
+
 /** Everything [SimulaInterstitialActivity] needs to render one presentation. */
 internal class InterstitialPresentation(
     val ad: SimulaApiClient.AdLoadResult,

@@ -90,6 +90,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.ads.AdInfoReportOverlay
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.ads.coordinateDeferredClickPersistence
+import ad.simula.ad.sdk.ads.enqueueOwnedFallbackClickBeacon
 import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.image.BundledResourceImage
 import ad.simula.ad.sdk.image.CachedAsyncImage
@@ -100,7 +101,6 @@ import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.AdBeaconManager
-import ad.simula.ad.sdk.network.BeaconPersistenceOutcome
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickRouteStart
@@ -679,6 +679,7 @@ fun MiniGameMenu(
                         playableHeightDp = fallbackPlayableHeightDp,
                         playableBorderColor = theme.playableBorderColor ?: "#262626",
                         adId = currentFallbackAd.adId,
+                        nativeClickBeaconV1Enabled = currentFallbackAd.nativeClickBeaconV1Enabled,
                     )
                 }
             }
@@ -767,6 +768,7 @@ private fun AdIframeOverlay(
     playableHeightDp: Float? = null,
     playableBorderColor: String = "#262626",
     adId: String = "",
+    nativeClickBeaconV1Enabled: Boolean = false,
 ) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -974,14 +976,20 @@ private fun AdIframeOverlay(
                                         mainHandler = clickHandler,
                                         claim = claim,
                                         enqueueBeacon = { completion ->
-                                            AdBeaconManager.enqueue(
-                                                adId,
-                                                "click",
-                                                adFormat = "interstitial",
-                                                interactionId = interaction.id,
-                                                clickSource = interaction.source,
-                                                onPersistenceComplete = completion,
-                                            )
+                                            enqueueOwnedFallbackClickBeacon(
+                                                adId = adId,
+                                                serverEnabled = nativeClickBeaconV1Enabled,
+                                                completion = completion,
+                                            ) { beaconId ->
+                                                AdBeaconManager.enqueue(
+                                                    beaconId,
+                                                    "click",
+                                                    adFormat = "interstitial",
+                                                    interactionId = interaction.id,
+                                                    clickSource = interaction.source,
+                                                    onPersistenceComplete = completion,
+                                                )
+                                            }
                                         },
                                         recordTelemetry = { completion ->
                                             Telemetry.recordLifecycle(

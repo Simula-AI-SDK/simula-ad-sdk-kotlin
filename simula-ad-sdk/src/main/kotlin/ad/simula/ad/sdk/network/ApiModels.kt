@@ -104,6 +104,8 @@ internal data class AdResponseBody(
 @Serializable
 internal data class FallbackAdsApiResponse(
     @SerialName("impression_id") val impressionId: String = "",
+    @SerialName("native_click_beacon_v1_enabled")
+    val nativeClickBeaconV1Enabled: Boolean = false,
     val ads: List<FallbackAdBody> = emptyList(),
 )
 
@@ -111,6 +113,8 @@ internal data class FallbackAdsApiResponse(
 internal data class FallbackAdBody(
     // Each screen carries its own ad id (the per-screen impression for report/tracking).
     @SerialName("ad_id") val adId: String = "",
+    @SerialName("native_click_beacon_v1_enabled")
+    val nativeClickBeaconV1Enabled: Boolean? = null,
     val html: String? = null,
     @SerialName("iframe_url") val iframeUrl: String? = null,
 )
@@ -177,6 +181,7 @@ internal data class ApiDeviceCapabilities(
     @SerialName("api_level") val apiLevel: Int = 0,
     @SerialName("play_services_available") val playServicesAvailable: Boolean = false,
     @SerialName("install_referrer_available") val installReferrerAvailable: Boolean = false,
+    // Declares SDK support only. The fallback response separately grants native beacon ownership.
     @SerialName("native_click_beacon_v1") val nativeClickBeaconV1: Boolean = true,
 )
 
