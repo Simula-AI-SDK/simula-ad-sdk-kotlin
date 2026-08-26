@@ -25,6 +25,12 @@ internal interface InterstitialCallbacks {
     fun onPaid(adValue: AdValue)
 
     fun persistClick(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
+    fun persistFallbackClick(
+        adId: String,
+        serveId: String?,
+        interaction: ClickInteraction,
+        onTelemetryPersisted: () -> Unit = {},
+    ) = persistClick(interaction, onTelemetryPersisted)
     fun notifyClicked()
 
     fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {}) {

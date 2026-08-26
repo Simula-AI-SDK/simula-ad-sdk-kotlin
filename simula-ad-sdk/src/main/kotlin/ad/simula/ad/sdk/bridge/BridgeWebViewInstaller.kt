@@ -152,10 +152,17 @@ internal fun trustedCtaRelaySource(
             return target.origin === base.origin;
         } catch (_) { return false; }
     }
+    function isInternalCta(url) {
+        try {
+            var protocol = new URL(url, trustedCtaBaseUrl || document.baseURI).protocol;
+            return protocol === 'about:' || protocol === 'data:' || protocol === 'blob:' ||
+                protocol === 'javascript:';
+        } catch (_) { return true; }
+    }
     function forwardTrustedCta(value) {
         if (ctaDisabled) { return false; }
         var url = resolvedUrl(value);
-        if (!url || isSameOriginCta(url)) { return false; }
+        if (!url || !trustedCtaBaseUrl || isInternalCta(url) || isSameOriginCta(url)) { return false; }
         if (gestureSequence === 0) { return false; }
         if (claimedGesture === gestureSequence) { return true; }
         if (!hasActiveUserGesture()) { return false; }

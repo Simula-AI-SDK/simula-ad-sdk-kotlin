@@ -19,13 +19,38 @@ import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
 import ad.simula.ad.sdk.telemetry.Telemetry
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+
+internal object LenientNullableBooleanSerializer : KSerializer<Boolean?> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("LenientNullableBoolean", PrimitiveKind.BOOLEAN)
+
+    override fun deserialize(decoder: Decoder): Boolean? {
+        val jsonDecoder = decoder as? JsonDecoder ?: return runCatching { decoder.decodeBoolean() }.getOrNull()
+        val primitive = jsonDecoder.decodeJsonElement() as? JsonPrimitive ?: return null
+        return primitive.takeUnless(JsonPrimitive::isString)?.booleanOrNull
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    override fun serialize(encoder: Encoder, value: Boolean?) {
+        if (value == null) encoder.encodeNull() else encoder.encodeBoolean(value)
+    }
+}
 
 @Serializable
 internal data class SessionResponse(
@@ -105,7 +130,8 @@ internal data class AdResponseBody(
 internal data class FallbackAdsApiResponse(
     @SerialName("impression_id") val impressionId: String = "",
     @SerialName("native_click_beacon_v1_enabled")
-    val nativeClickBeaconV1Enabled: Boolean = false,
+    @Serializable(with = LenientNullableBooleanSerializer::class)
+    val nativeClickBeaconV1Enabled: Boolean? = null,
     val ads: List<FallbackAdBody> = emptyList(),
 )
 
@@ -114,6 +140,7 @@ internal data class FallbackAdBody(
     // Each screen carries its own ad id (the per-screen impression for report/tracking).
     @SerialName("ad_id") val adId: String = "",
     @SerialName("native_click_beacon_v1_enabled")
+    @Serializable(with = LenientNullableBooleanSerializer::class)
     val nativeClickBeaconV1Enabled: Boolean? = null,
     val html: String? = null,
     @SerialName("iframe_url") val iframeUrl: String? = null,

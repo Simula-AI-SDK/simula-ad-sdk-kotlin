@@ -484,6 +484,25 @@ class SimulaInterstitialAd(val adUnitId: String) {
             )
         }
 
+        override fun persistFallbackClick(
+            adId: String,
+            serveId: String?,
+            interaction: ad.simula.ad.sdk.network.ClickInteraction,
+            onTelemetryPersisted: () -> Unit,
+        ) {
+            Telemetry.recordLifecycle(
+                stage = "click",
+                adFormat = AD_FORMAT,
+                adUnitId = adUnitId,
+                adId = adId,
+                serveId = serveId,
+                interactionId = interaction.id,
+                clickSource = interaction.source,
+                critical = true,
+                onPersisted = onTelemetryPersisted,
+            )
+        }
+
         override fun notifyClicked() {
             notifyPublisherClick { listener?.onAdClicked(this@SimulaInterstitialAd) }
         }

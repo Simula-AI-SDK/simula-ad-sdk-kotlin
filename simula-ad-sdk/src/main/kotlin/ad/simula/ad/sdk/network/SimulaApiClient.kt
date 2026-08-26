@@ -798,7 +798,7 @@ internal object SimulaApiClient {
                 val data = json.decodeFromString<FallbackAdsApiResponse>(response.body)
                 data.ads.mapNotNull { ad ->
                     // Prefer inline HTML; keep iframe URL as its same-origin base/url fallback.
-                    fallbackAdFromBody(ad, data.nativeClickBeaconV1Enabled)
+                    fallbackAdFromBody(ad, data.nativeClickBeaconV1Enabled == true)
                 }
             }
         }

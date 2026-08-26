@@ -130,7 +130,14 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     autoStoreRedirect = p.adBehavior?.autoStoreRedirect,
                     onAdClick = { p.callbacks.notifyClicked() },
                     onStoreOpen = { interaction -> p.storeExit.recordStoreOpen(interaction.source) },
-                    persistClick = p.callbacks::persistClick,
+                    persistClick = { fallbackAdId, interaction, completion ->
+                        p.callbacks.persistFallbackClick(
+                            fallbackAdId,
+                            p.impressionId.takeIf { it.isNotBlank() },
+                            interaction,
+                            completion,
+                        )
+                    },
                     claimClick = p::claimClick,
                     routeClick = { route, completion ->
                         val result = p.routeClick(
@@ -551,6 +558,8 @@ private fun RewardedMinigame(
 
     fun beginPrimaryCta(tappedUrl: String): Boolean {
         if (!primaryCtaAdmission.isEnabled()) return true
+        val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(tappedUrl) ?: return false
+        if (CreativeCtaRouter.hasSameHttpOrigin(presentation.iframeUrl, tappedDestination)) return false
         val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
         if (!primaryCtaAdmission.disable()) {
             claim.release()
@@ -559,7 +568,6 @@ private fun RewardedMinigame(
         notifyPublisherClick { presentation.callbacks.notifyClicked() }
         creativeWebView?.let(BridgeWebViewInstaller::disableTrustedCta)
         val interaction = claim.interaction
-        val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(tappedUrl)
         val route = PrimaryCtaRoute(
             tappedUrl = tappedDestination,
             externalTarget = CreativeCtaRouter.admittedHttpUrl(presentation.trackingUrl)

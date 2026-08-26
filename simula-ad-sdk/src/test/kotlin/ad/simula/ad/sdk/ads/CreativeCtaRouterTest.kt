@@ -42,6 +42,35 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `embedded market and intent destinations are safely normalized for auto redirects`() {
+        val market = "market://details?id=com.example.app&referrer=click%2Bvalue"
+        val intent = "intent://details#Intent;scheme=market;" +
+            "S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.example.app;end"
+
+        assertEquals(
+            "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%2Bvalue",
+            CreativeCtaRouter.preferredClickUrl(null, market),
+        )
+        assertEquals(
+            "https://play.google.com/store/apps/details?id=com.example.app",
+            CreativeCtaRouter.preferredClickUrl(null, intent),
+        )
+        assertEquals(
+            "https://tracker.example/click",
+            CreativeCtaRouter.preferredClickUrl("https://tracker.example/click", market),
+        )
+    }
+
+    @Test
+    fun `embedded unsafe custom destinations remain rejected`() {
+        listOf(
+            "javascript:alert(1)",
+            "custom://open/app",
+            "intent://details#Intent;scheme=market;end",
+        ).forEach { assertNull(CreativeCtaRouter.preferredClickUrl(null, it)) }
+    }
+
+    @Test
     fun `admitted URL preserves encoded query bytes exactly`() {
         val url = "https://tracker.example/click?a=x%2Fy&sig=a%2Bb%3D%3D"
 

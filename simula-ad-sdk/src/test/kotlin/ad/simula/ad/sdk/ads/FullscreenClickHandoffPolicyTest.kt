@@ -589,6 +589,18 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `fallback close gate progress survives recreation per screen`() {
+        val state = FallbackPresentationState()
+
+        assertEquals(0L, state.closeGateElapsedMs(0))
+        assertEquals(4_500L, state.addCloseGateElapsedMs(0, 4_500L))
+        assertEquals(4_500L, state.closeGateElapsedMs(0))
+        assertEquals(FALLBACK_CLOSE_GATE_MS, state.addCloseGateElapsedMs(0, 1_000L))
+        assertEquals(FALLBACK_CLOSE_GATE_MS, state.closeGateElapsedMs(0))
+        assertEquals(0L, state.closeGateElapsedMs(1))
+    }
+
+    @Test
     fun `fallback navigation ownership resets for the next screen`() {
         val state = FallbackPresentationState()
         state.showing(0)

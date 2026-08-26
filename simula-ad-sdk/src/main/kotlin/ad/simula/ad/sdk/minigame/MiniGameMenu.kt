@@ -1000,6 +1000,7 @@ private fun AdIframeOverlay(
                                                 stage = "click",
                                                 adFormat = "interstitial",
                                                 adId = adId.takeIf { it.isNotBlank() },
+                                                serveId = parentServeId?.takeIf { it.isNotBlank() },
                                                 interactionId = interaction.id,
                                                 clickSource = interaction.source,
                                                 critical = true,

@@ -244,11 +244,28 @@ class CreativeBridgeTest {
         assertTrue(source.contains("var trustedCtaBaseUrl = \"https://creative.example:443/game\""))
         assertTrue(source.contains("return target.origin === base.origin"))
         assertTrue(source.contains("new URL(String(value), document.baseURI)"))
-        val sameOriginCheck = source.indexOf("if (!url || isSameOriginCta(url)) { return false; }")
+        val sameOriginCheck = source.indexOf(
+            "if (!url || !trustedCtaBaseUrl || isInternalCta(url) || isSameOriginCta(url)) { return false; }",
+        )
         val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
         assertTrue(sameOriginCheck >= 0)
         assertTrue(gestureClaim >= 0)
         assertTrue(sameOriginCheck < gestureClaim)
+    }
+
+    @Test
+    fun trustedCtaRelayFailsClosedWithoutOriginAndRejectsInternalDocuments() {
+        val source = trustedCtaRelaySource("nonce")
+
+        assertTrue(source.contains("!trustedCtaBaseUrl"))
+        assertTrue(source.contains("protocol === 'about:'"))
+        assertTrue(source.contains("protocol === 'data:'"))
+        assertTrue(source.contains("protocol === 'blob:'"))
+        assertTrue(source.contains("protocol === 'javascript:'"))
+        val policyCheck = source.indexOf("if (!url || !trustedCtaBaseUrl || isInternalCta(url)")
+        val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
+        assertTrue(policyCheck >= 0)
+        assertTrue(policyCheck < gestureClaim)
     }
 
     @Test

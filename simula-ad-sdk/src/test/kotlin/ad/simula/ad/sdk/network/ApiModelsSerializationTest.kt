@@ -139,7 +139,7 @@ class ApiModelsSerializationTest {
         """.trimIndent()
         val r = json.decodeFromString<FallbackAdsApiResponse>(payload)
         assertEquals("imp_1", r.impressionId)
-        assertTrue(r.nativeClickBeaconV1Enabled)
+        assertEquals(true, r.nativeClickBeaconV1Enabled)
         assertEquals(2, r.ads.size)
         assertEquals("a1", r.ads[0].adId)
         assertNull(r.ads[0].nativeClickBeaconV1Enabled)
@@ -157,7 +157,7 @@ class ApiModelsSerializationTest {
 
         val bare = json.decodeFromString<FallbackAdsApiResponse>("{}")
         assertEquals("", bare.impressionId)
-        assertEquals(false, bare.nativeClickBeaconV1Enabled)
+        assertNull(bare.nativeClickBeaconV1Enabled)
         assertTrue(bare.ads.isEmpty())
 
         val partial = json.decodeFromString<FallbackAdsApiResponse>("""{"ads":[{"ad_id":"a1"}]}""")
@@ -165,6 +165,30 @@ class ApiModelsSerializationTest {
         assertNull(partial.ads[0].iframeUrl)
         assertNull(partial.ads[0].html)
         assertNull(partial.ads[0].nativeClickBeaconV1Enabled)
+    }
+
+    @Test
+    fun `malformed fallback beacon ownership fails closed without dropping screens`() {
+        val payload = """
+            {"native_click_beacon_v1_enabled":"true","ads":[
+              {"ad_id":"a1","html":"<html>1</html>"},
+              {"ad_id":"a2","native_click_beacon_v1_enabled":1,"html":"<html>2</html>"}
+            ]}
+        """.trimIndent()
+
+        val response = json.decodeFromString<FallbackAdsApiResponse>(payload)
+
+        assertNull(response.nativeClickBeaconV1Enabled)
+        assertEquals(2, response.ads.size)
+        assertNull(response.ads[1].nativeClickBeaconV1Enabled)
+        assertFalse(
+            requireNotNull(SimulaApiClient.fallbackAdFromBody(response.ads[0], false))
+                .nativeClickBeaconV1Enabled,
+        )
+        assertFalse(
+            requireNotNull(SimulaApiClient.fallbackAdFromBody(response.ads[1], false))
+                .nativeClickBeaconV1Enabled,
+        )
     }
 
     @Test

@@ -163,7 +163,14 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     autoStoreRedirect = p.ad.adBehavior?.autoStoreRedirect,
                     onAdClick = { p.callbacks.notifyClicked() },
                     onStoreOpen = { interaction -> p.storeExit.recordStoreOpen(interaction.source) },
-                    persistClick = p.callbacks::persistClick,
+                    persistClick = { fallbackAdId, interaction, completion ->
+                        p.callbacks.persistFallbackClick(
+                            fallbackAdId,
+                            p.ad.impressionId.takeIf { it.isNotBlank() },
+                            interaction,
+                            completion,
+                        )
+                    },
                     claimClick = p::claimClick,
                     routeClick = { route, completion ->
                         val result = p.routeClick(
@@ -557,6 +564,13 @@ private fun CreativeInterstitial(
                 bridge = bridge,
                 presentation = presentation,
                 onPrimaryCta = primaryCta@{ tappedUrl ->
+                    val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(tappedUrl)
+                        ?: return@primaryCta false
+                    if (CreativeCtaRouter.hasSameHttpOrigin(
+                            ad.creative?.bundleUrl,
+                            tappedDestination,
+                        )
+                    ) return@primaryCta false
                     val claim = presentation.claimClick(ClickSources.PRIMARY_CTA)
                         ?: return@primaryCta false
                     if (!presentation.primaryCtaNavigation.admission.disable()) {
@@ -568,7 +582,6 @@ private fun CreativeInterstitial(
                     }
                     notifyPublisherClick { presentation.callbacks.notifyClicked() }
                     val interaction = claim.interaction
-                    val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(tappedUrl)
                     val route = PrimaryCtaRoute(
                         tappedUrl = tappedDestination,
                         externalTarget = CreativeCtaRouter.admittedHttpUrl(ad.trackingUrl)
@@ -826,6 +839,7 @@ private fun CreativeHtml(
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
     val primaryCtaNavigation = presentation.primaryCtaNavigation
     val primaryCtaAdmission = primaryCtaNavigation.admission
+    val trustedCtaBaseUrl = CreativeCtaRouter.admittedHttpUrl(presentation.ad.creative?.bundleUrl)
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaInterstitialActivity
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -890,6 +904,7 @@ private fun CreativeHtml(
                         // Document-start interception handles trusted window.open/target=_blank.
                         // This remains the platform fallback for direct gesture navigations.
                         if (!request.hasGesture()) return false
+                        if (CreativeCtaRouter.hasSameHttpOrigin(trustedCtaBaseUrl, url)) return false
                         val accepted = onPrimaryCta(url)
                         if (accepted) view?.let(BridgeWebViewInstaller::disableTrustedCta)
                         return true
@@ -898,7 +913,7 @@ private fun CreativeHtml(
                 surface = "interstitial",
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
-                BridgeWebViewInstaller.install(this, bridge) { url ->
+                BridgeWebViewInstaller.install(this, bridge, trustedCtaBaseUrl = trustedCtaBaseUrl) { url ->
                     if (primaryCtaAdmission.isEnabled() && onPrimaryCta(url)) {
                         creativeWebView?.let(BridgeWebViewInstaller::disableTrustedCta)
                     }

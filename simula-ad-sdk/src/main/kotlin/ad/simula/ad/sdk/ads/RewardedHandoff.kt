@@ -25,6 +25,12 @@ internal interface RewardedCallbacks {
     fun onPaid(adValue: AdValue)
 
     fun persistClick(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
+    fun persistFallbackClick(
+        adId: String,
+        serveId: String?,
+        interaction: ClickInteraction,
+        onTelemetryPersisted: () -> Unit = {},
+    ) = persistClick(interaction, onTelemetryPersisted)
     fun notifyClicked()
 
     /** A successfully routed CTA. Fallback HTML still owns its backend beacon. */

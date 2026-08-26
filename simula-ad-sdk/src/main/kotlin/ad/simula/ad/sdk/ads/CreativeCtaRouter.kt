@@ -52,7 +52,7 @@ internal object CreativeCtaRouter {
     /** Prefer the attribution URL carried outside rendered HTML, whose script text may HTML-escape
      * query separators. Older payloads without that field keep using the creative's tapped URL. */
     internal fun preferredClickUrl(trackingUrl: String?, embeddedUrl: String): String? =
-        admittedHttpUrl(trackingUrl) ?: admittedHttpUrl(embeddedUrl)
+        admittedHttpUrl(trackingUrl) ?: normalizeTappedDestination(embeddedUrl)
 
     internal fun admittedHttpUrl(value: String?): String? {
         val candidate = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null

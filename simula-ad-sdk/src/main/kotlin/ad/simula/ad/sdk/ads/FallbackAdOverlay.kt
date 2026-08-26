@@ -75,6 +75,7 @@ internal enum class FallbackStage { CONTENT, FETCHING, SHOWING, DONE }
 private const val FALLBACK_FETCH_ATTEMPTS = 2
 private const val FALLBACK_FETCH_RETRY_MS = 250L
 internal const val FALLBACK_POST_CLOSE_WAIT_MS = 2_000L
+internal const val FALLBACK_CLOSE_GATE_MS = 5_000L
 
 internal fun fallbackClickBeaconImpressionId(adId: String, serverEnabled: Boolean): String? =
     adId.takeIf { serverEnabled && it.isNotBlank() }
@@ -120,6 +121,7 @@ internal class FallbackPresentationState(
     private var cleared = false
     private var fetchWaitGeneration = 0L
     private var fetchWaitDeadlineMs = 0L
+    private val closeGateElapsedByIndex = LinkedHashMap<Int, Long>()
 
     fun showing(index: Int) {
         val nextIndex = index.coerceAtLeast(0)
@@ -149,6 +151,19 @@ internal class FallbackPresentationState(
     }
     fun clickAdmission(index: Int): PrimaryCtaDocumentAdmission =
         clickAdmissions.getOrPut(index.coerceAtLeast(0)) { PrimaryCtaDocumentAdmission() }
+
+    @Synchronized
+    fun closeGateElapsedMs(index: Int): Long = closeGateElapsedByIndex[index.coerceAtLeast(0)] ?: 0L
+
+    @Synchronized
+    fun addCloseGateElapsedMs(index: Int, elapsedMs: Long): Long {
+        val key = index.coerceAtLeast(0)
+        val current = closeGateElapsedByIndex[key] ?: 0L
+        val remaining = FALLBACK_CLOSE_GATE_MS - current
+        val updated = current + elapsedMs.coerceIn(0L, remaining)
+        closeGateElapsedByIndex[key] = updated
+        return updated
+    }
 
     fun startPostCloseFetchWait(): Long {
         if (stage != FallbackStage.FETCHING) {
@@ -221,6 +236,7 @@ internal class FallbackPresentationState(
         navigationOwner = null
         navigateInWebView = null
         clickAdmissions.clear()
+        closeGateElapsedByIndex.clear()
     }
 
     private fun dispatchReadyNavigation() {
@@ -279,7 +295,7 @@ internal fun FallbackAdHost(
     onAutoStoreRedirect: () -> Boolean = { false },
     onAdClick: (ClickInteraction) -> Unit = {},
     onStoreOpen: (ClickInteraction) -> Unit = {},
-    persistClick: (ClickInteraction, () -> Unit) -> Unit = { _, complete -> complete() },
+    persistClick: (String, ClickInteraction, () -> Unit) -> Unit = { _, _, complete -> complete() },
     claimClick: ((String) -> ClickInteractionClaim?)? = null,
     routeClick: (((Context) -> Boolean, (Boolean) -> Unit) -> ClickRouteStart)? = null,
     onClickHandoffCreated: (ClickPersistenceHandoff) -> Unit = {},
@@ -479,7 +495,7 @@ private fun FallbackAdOverlay(
     nativeClickBeaconV1Enabled: Boolean,
     onAdClick: (ClickInteraction) -> Unit = {},
     onStoreOpen: (ClickInteraction) -> Unit = {},
-    persistClick: (ClickInteraction, () -> Unit) -> Unit,
+    persistClick: (String, ClickInteraction, () -> Unit) -> Unit,
     claimClick: (String) -> ClickInteractionClaim?,
     impressionId: String,
     adFormat: String,
@@ -533,29 +549,37 @@ private fun FallbackAdOverlay(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    var countdown by remember { mutableStateOf(5) }
+    val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex)
+    var countdown by remember(presentationState, fallbackIndex) {
+        mutableStateOf(
+            ceil((FALLBACK_CLOSE_GATE_MS - retainedGateMs).coerceAtLeast(0L) / 1000.0).toInt(),
+        )
+    }
     // A pooled WebView is transparent and may still contain about:blank. Keep an opaque layer above
     // this one WebView until its current creative has actually committed a visible frame.
     var pageCommitted by remember { mutableStateOf(false) }
     var pageLoadFailed by remember { mutableStateOf(false) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
-    val ring = remember { Animatable(0f) }
+    val ring = remember(presentationState, fallbackIndex) {
+        Animatable((retainedGateMs.toFloat() / FALLBACK_CLOSE_GATE_MS).coerceIn(0f, 1f))
+    }
     // Foreground-only 5s gate: time accrues only while the Activity is RESUMED, so leaving the app
     // pauses the countdown (parity with the interstitial / rewarded close gates). repeatOnLifecycle
     // cancels the loop when backgrounded and resumes it from the accrued time on return.
     LaunchedEffect(Unit) {
-        val totalMs = 5_000L
-        var accumulatedMs = 0L
+        var accumulatedMs = presentationState.closeGateElapsedMs(fallbackIndex)
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             // Re-anchor on each resume so the backgrounded interval is never counted.
             var lastTickMs = SystemClock.elapsedRealtime()
-            while (accumulatedMs < totalMs) {
+            while (accumulatedMs < FALLBACK_CLOSE_GATE_MS) {
                 delay(50L)
                 val now = SystemClock.elapsedRealtime()
-                accumulatedMs += now - lastTickMs
+                accumulatedMs = presentationState.addCloseGateElapsedMs(fallbackIndex, now - lastTickMs)
                 lastTickMs = now
-                ring.snapTo((accumulatedMs.toFloat() / totalMs).coerceIn(0f, 1f))
-                countdown = ceil((totalMs - accumulatedMs).coerceAtLeast(0L) / 1000.0).toInt()
+                ring.snapTo((accumulatedMs.toFloat() / FALLBACK_CLOSE_GATE_MS).coerceIn(0f, 1f))
+                countdown = ceil(
+                    (FALLBACK_CLOSE_GATE_MS - accumulatedMs).coerceAtLeast(0L) / 1000.0,
+                ).toInt()
             }
         }
     }
@@ -671,7 +695,7 @@ private fun FallbackAdOverlay(
                                         )
                                     }
                                 },
-                                recordTelemetry = { completion -> persistClick(interaction, completion) },
+                                recordTelemetry = { completion -> persistClick(adId, interaction, completion) },
                                 onHandoff = { committedInteraction, completion ->
                                     val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(target)
                                     val clickTarget = CreativeCtaRouter.admittedHttpUrl(ctaTrackingUrl)
