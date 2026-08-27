@@ -27,10 +27,11 @@ import android.content.MutableContextWrapper
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
-import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
@@ -151,18 +152,20 @@ internal fun NativeAdWebView(
     // deterministically wake the creative via the `onAppForeground` bridge (see character_ad.html).
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, owner, visibilityRelay) {
-        owner.session.wiring.automaticNavigationActive =
-            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        owner.session.wiring.updateAutomaticNavigationActive(
+            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+        )
         var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE -> owner.session.wiring.automaticNavigationActive = false
+                Lifecycle.Event.ON_PAUSE -> owner.session.wiring.updateAutomaticNavigationActive(false)
                 Lifecycle.Event.ON_STOP -> {
-                    owner.session.wiring.automaticNavigationActive = false
+                    owner.session.wiring.updateAutomaticNavigationActive(false)
                     wasStopped = true
                 }
                 Lifecycle.Event.ON_RESUME -> {
-                    owner.session.wiring.automaticNavigationActive = true
+                    owner.session.wiring.updateAutomaticNavigationActive(true)
+                    visibilityRelay?.resetDedupe()
                     if (wasStopped) {
                         wasStopped = false
                         val session = owner.session
@@ -172,7 +175,6 @@ internal fun NativeAdWebView(
                             webView?.onResume()
                             webView?.resumeTimers() // defensive; pauseTimers() is process-global
                             session.wiring.pushForeground()
-                            visibilityRelay?.resetDedupe()
                         }
                     }
                 }
@@ -181,7 +183,7 @@ internal fun NativeAdWebView(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
-            owner.session.wiring.automaticNavigationActive = false
+            owner.session.wiring.updateAutomaticNavigationActive(false)
             lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
@@ -358,6 +360,7 @@ internal object NativeAdWebViewStore {
         requested.loadedKey = creativeKey(iframeUrl, renderedHtml)
         requested.attachment = attachment
         requested.wiring.webView = fresh
+        requested.wiring.onAutomaticNavigationAttached()
         attachment.session = requested
         attachment.owner.session = requested
 
@@ -399,6 +402,7 @@ internal object NativeAdWebViewStore {
             session.attachment = attachment
             attachment.session = session
             session.wiring.webView = retained // visibility pushes target the live view
+            session.wiring.onAutomaticNavigationAttached()
             retained.repaintOnNextFrame() // repaint the stale hardware layer (avoid a black/blank frame)
             evictIfNeeded()
             return retained
@@ -426,6 +430,7 @@ internal object NativeAdWebViewStore {
         session.attachment = attachment
         attachment.session = session
         session.wiring.webView = fresh
+        session.wiring.onAutomaticNavigationAttached()
         evictIfNeeded()
         return fresh
     }
@@ -449,6 +454,7 @@ internal object NativeAdWebViewStore {
         // A newer keyed AndroidView already took over this session. Its stale predecessor's view was
         // moved, recycled, or destroyed during takeover, so an out-of-order release is a no-op.
         if (disposition == NativeReleaseDisposition.IGNORE) return
+        session.wiring.onAutomaticNavigationDetached()
         // A render-dead current view must be destroyed, never recycled to the pool — a dead view in the
         // pool would hand the next consumer a permanently-blank WebView. (This fires when the slot
         // remounts after onRenderProcessGone: the dead view is disposed here, attach() rebuilds.)
@@ -770,8 +776,15 @@ internal class NativeAdWiring(
     @Volatile var destination: String = "appstore"
     @Volatile var storeUrl: String? = null
     @Volatile var automaticNavigationActive: Boolean = false
+    @Volatile private var automaticNavigationAttached: Boolean = false
+    @Volatile private var automaticVisibilityFraction: Float = -1f
     private val clickInteractionGate = ClickInteractionGate()
     private val automaticNavigationGate = AutomaticNavigationGate()
+    private val automaticNavigationVisibleRect = Rect()
+    private var focusObservedView: WebView? = null
+    private val windowFocusListener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
+        if (hasFocus) dispatchPendingAutomaticNavigation()
+    }
 
     fun adoptCallbacksFrom(other: NativeAdWiring) {
         onHeightPx = other.onHeightPx
@@ -799,8 +812,13 @@ internal class NativeAdWiring(
      */
     @MainThread
     fun pushVisibility(ratio: Float) {
-        val r = String.format(java.util.Locale.US, "%.2f", ratio.coerceIn(0f, 1f))
+        val clamped = ratio.coerceIn(0f, 1f)
+        val crossedIntoEligibility = automaticVisibilityFraction < NATIVE_AUTOMATIC_NAVIGATION_MIN_VISIBLE &&
+            clamped >= NATIVE_AUTOMATIC_NAVIGATION_MIN_VISIBLE
+        automaticVisibilityFraction = clamped
+        val r = String.format(java.util.Locale.US, "%.2f", clamped)
         webView?.evaluateJavascript("window.onVisibility&&window.onVisibility($r)", null)
+        if (crossedIntoEligibility) dispatchPendingAutomaticNavigation()
     }
 
     /**
@@ -872,12 +890,15 @@ internal class NativeAdWiring(
                     storeUrl = storeUrl,
                 )
             },
-            onOpened = onAdClick,
+            onOpened = { interaction ->
+                automaticNavigationGate.suppressPending()
+                onAdClick(interaction)
+            },
         )
         return true
     }
 
-    fun handleAutomaticNavigation(targetUrl: String, currentPageUrl: String?): Boolean {
+    fun handleAutomaticNavigation(source: WebView, targetUrl: String, currentPageUrl: String?): Boolean {
         return when (val plan = CreativeCtaRouter.automaticNavigationPlan(
             value = targetUrl,
             destination = destination,
@@ -886,23 +907,80 @@ internal class NativeAdWiring(
             CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> false
             CreativeCtaRouter.AutomaticNavigationPlan.Consume -> true
             is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
-                val currentView = webView
-                if (!automaticNavigationActive || currentView?.isAttachedToWindow != true ||
-                    currentView.windowVisibility != View.VISIBLE
-                ) return true
-                automaticNavigationGate.attempt {
-                    CreativeCtaRouter.openAutomaticNavigation(
-                        appContext,
-                        plan.targetUrl,
-                        destination,
-                        trackingUrl,
-                        automaticNavigationGate.wasTrackerRequestedInWebView() ||
-                            CreativeCtaRouter.matchesKnownTrackingUrl(currentPageUrl, trackingUrl),
-                    )
-                }
+                if (source !== webView) return true
+                automaticNavigationGate.retain(
+                    plan.targetUrl,
+                    automaticNavigationGate.wasTrackerRequestedInWebView() ||
+                        CreativeCtaRouter.matchesKnownTrackingUrl(currentPageUrl, trackingUrl),
+                )
+                dispatchPendingAutomaticNavigation()
                 true
             }
         }
+    }
+
+    private fun dispatchPendingAutomaticNavigation() {
+        val currentView = webView ?: return
+        automaticNavigationVisibleRect.setEmpty()
+        val globallyVisibleFraction = runCatching {
+            currentView.getGlobalVisibleRect(automaticNavigationVisibleRect) &&
+                !automaticNavigationVisibleRect.isEmpty && currentView.width > 0 && currentView.height > 0
+        }.getOrDefault(false).let { visible ->
+            if (!visible) 0f else {
+                val visibleArea = automaticNavigationVisibleRect.width().toLong() *
+                    automaticNavigationVisibleRect.height().toLong()
+                val totalArea = currentView.width.toLong() * currentView.height.toLong()
+                (visibleArea.toDouble() / totalArea.toDouble()).toFloat().coerceIn(0f, 1f)
+            }
+        }
+        if (!nativeAutomaticNavigationEligible(
+            lifecycleActive = automaticNavigationActive,
+            currentOwner = currentView === webView,
+            logicallyAttached = automaticNavigationAttached,
+            attachedToWindow = currentView.isAttachedToWindow,
+            shown = currentView.isShown,
+            windowFocused = currentView.hasWindowFocus(),
+            globallyVisibleFraction = globallyVisibleFraction,
+            visibleFraction = automaticVisibilityFraction,
+        )) return
+        automaticNavigationGate.attemptPending { route ->
+            CreativeCtaRouter.openAutomaticNavigation(
+                appContext,
+                route.targetUrl,
+                destination,
+                trackingUrl,
+                route.trackerAlreadyRequested,
+            )
+        }
+    }
+
+    fun updateAutomaticNavigationActive(active: Boolean) {
+        automaticNavigationActive = active
+        automaticVisibilityFraction = -1f
+    }
+
+    fun onAutomaticNavigationAttached() {
+        automaticNavigationAttached = true
+        automaticVisibilityFraction = -1f
+        val currentView = webView
+        if (focusObservedView !== currentView) {
+            focusObservedView?.let { observed ->
+                runCatching { observed.viewTreeObserver.removeOnWindowFocusChangeListener(windowFocusListener) }
+            }
+            focusObservedView = currentView
+            currentView?.let { observed ->
+                runCatching { observed.viewTreeObserver.addOnWindowFocusChangeListener(windowFocusListener) }
+            }
+        }
+    }
+
+    fun onAutomaticNavigationDetached() {
+        automaticNavigationAttached = false
+        automaticVisibilityFraction = -1f
+        focusObservedView?.let { observed ->
+            runCatching { observed.viewTreeObserver.removeOnWindowFocusChangeListener(windowFocusListener) }
+        }
+        focusObservedView = null
     }
 
     fun observeNavigationStarted(url: String?) {
@@ -1079,9 +1157,24 @@ private class NativeAdWebViewClient(
         if (request.hasGesture()) {
             return wiring.handleNavigation(url, view.url)
         }
-        return wiring.handleAutomaticNavigation(url, view.url)
+        return wiring.handleAutomaticNavigation(view, url, view.url)
     }
 }
+
+internal fun nativeAutomaticNavigationEligible(
+    lifecycleActive: Boolean,
+    currentOwner: Boolean,
+    logicallyAttached: Boolean,
+    attachedToWindow: Boolean,
+    shown: Boolean,
+    windowFocused: Boolean,
+    globallyVisibleFraction: Float,
+    visibleFraction: Float,
+): Boolean = lifecycleActive && currentOwner && logicallyAttached && attachedToWindow && shown &&
+    windowFocused && globallyVisibleFraction >= NATIVE_AUTOMATIC_NAVIGATION_MIN_VISIBLE &&
+    visibleFraction >= NATIVE_AUTOMATIC_NAVIGATION_MIN_VISIBLE
+
+private const val NATIVE_AUTOMATIC_NAVIGATION_MIN_VISIBLE = 0.5f
 
 private const val NATIVE_BRIDGE_OBJECT = "SimulaNativeBridge"
 

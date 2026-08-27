@@ -10,32 +10,76 @@ import java.net.URI
 import java.net.URL
 import java.net.URLDecoder
 
+internal data class PendingAutomaticNavigation(
+    val targetUrl: String,
+    val trackerAlreadyRequested: Boolean,
+)
+
+internal enum class AutomaticNavigationOutcome { STORE_OPENED, OTHER_OPENED, HANDLED, FAILED }
+
 internal class AutomaticNavigationGate {
     private var inFlight = false
     private var opened = false
     private var trackerRequestedInWebView = false
+    private var pending: PendingAutomaticNavigation? = null
+
+    @Synchronized
+    fun retain(targetUrl: String, trackerAlreadyRequested: Boolean): Boolean {
+        if (opened || targetUrl.isBlank() || targetUrl.length > MAX_AUTOMATIC_NAVIGATION_URL_CHARS) return false
+        val retained = pending
+        if (retained != null && retained.targetUrl != targetUrl) return false
+        pending = PendingAutomaticNavigation(
+            targetUrl = targetUrl,
+            trackerAlreadyRequested = retained?.trackerAlreadyRequested == true ||
+                trackerAlreadyRequested || trackerRequestedInWebView,
+        )
+        return true
+    }
 
     @Synchronized
     fun markTrackerRequestedInWebView() {
         trackerRequestedInWebView = true
+        pending = pending?.copy(trackerAlreadyRequested = true)
     }
 
     @Synchronized
     fun wasTrackerRequestedInWebView(): Boolean = trackerRequestedInWebView
 
-    fun attempt(open: () -> Boolean): Boolean {
-        synchronized(this) {
-            if (inFlight || opened) return false
+    fun attemptPending(open: (PendingAutomaticNavigation) -> AutomaticNavigationOutcome): AutomaticNavigationOutcome {
+        val route = synchronized(this) {
+            if (inFlight || opened) return AutomaticNavigationOutcome.FAILED
+            val retained = pending ?: return AutomaticNavigationOutcome.FAILED
             inFlight = true
+            retained
         }
-        val didOpen = runCatching(open).getOrDefault(false)
+        val outcome = runCatching { open(route) }.getOrDefault(AutomaticNavigationOutcome.FAILED)
         synchronized(this) {
             inFlight = false
-            if (didOpen) opened = true
+            if (outcome != AutomaticNavigationOutcome.FAILED) {
+                opened = true
+                pending = null
+            }
         }
-        return didOpen
+        return outcome
     }
+
+    @Synchronized
+    fun suppressPending() {
+        opened = true
+        pending = null
+    }
+
+    @Synchronized
+    fun clear() {
+        opened = true
+        pending = null
+    }
+
+    @Synchronized
+    fun hasPending(): Boolean = pending != null
 }
+
+private const val MAX_AUTOMATIC_NAVIGATION_URL_CHARS = 8 * 1024
 
 /**
  * Routes a creative's call-to-action tap to its advertiser destination.
@@ -393,7 +437,7 @@ internal object CreativeCtaRouter {
         destination: String,
         trackingUrl: String? = null,
         trackerAlreadyRequested: Boolean = false,
-    ): Boolean = routeAutomaticNavigation(
+    ): AutomaticNavigationOutcome = routeAutomaticNavigationOutcome(
         targetUrl = targetUrl,
         destination = destination,
         trackingUrl = trackingUrl,
@@ -409,27 +453,68 @@ internal object CreativeCtaRouter {
         trackerAlreadyRequested: Boolean = false,
         launch: (String) -> Boolean,
         record: (String) -> Unit = {},
-    ): Boolean {
+    ): Boolean = routeAutomaticNavigationOutcome(
+        targetUrl,
+        destination,
+        trackingUrl,
+        trackerAlreadyRequested,
+        launch,
+        record,
+    ).let { it == AutomaticNavigationOutcome.STORE_OPENED || it == AutomaticNavigationOutcome.OTHER_OPENED }
+
+    internal fun routeAutomaticNavigationOutcome(
+        targetUrl: String,
+        destination: String,
+        trackingUrl: String?,
+        trackerAlreadyRequested: Boolean = false,
+        launch: (String) -> Boolean,
+        record: (String) -> Unit = {},
+    ): AutomaticNavigationOutcome {
         val admittedHttp = admittedHttpUrl(targetUrl)
         val target = if (admittedHttp != null) {
-            if (isPlayStoreHost(admittedHttp) && admittedDirectPlayStoreUrl(admittedHttp) == null) return false
+            if (isPlayStoreHost(admittedHttp) && admittedDirectPlayStoreUrl(admittedHttp) == null) {
+                return AutomaticNavigationOutcome.FAILED
+            }
             admittedHttp
         } else {
             normalizeTappedDestination(targetUrl)
                 ?: admittedWebCustomDestination(targetUrl, destination)
-                ?: return false
+                ?: return AutomaticNavigationOutcome.FAILED
+        }
+        val targetIsTracker = matchesKnownTrackingUrl(target, trackingUrl)
+        val storeBound = destination == "appstore" || admittedDirectPlayStoreUrl(target) != null
+        if (trackerAlreadyRequested) {
+            if (targetIsTracker) return AutomaticNavigationOutcome.HANDLED
+            return runCatching { launch(target) }.getOrDefault(false).toAutomaticNavigationOutcome(storeBound)
+        }
+        if (targetIsTracker) {
+            return runCatching { launch(target) }.getOrDefault(false)
+                .toAutomaticNavigationOutcome(destination == "appstore")
         }
         if (admittedDirectPlayStoreUrl(target) != null) {
-            if (trackerAlreadyRequested) return runCatching { launch(target) }.getOrDefault(false)
             return routeCta(
                 trackingUrl = trackingUrl,
                 destination = "appstore",
                 storeUrl = target,
                 launch = launch,
                 record = record,
-            )
+            ).toAutomaticNavigationOutcome(storeBound = true)
         }
-        return runCatching { launch(target) }.getOrDefault(false)
+        val tracker = admittedHttpUrl(trackingUrl)
+        if (tracker != null) {
+            runCatching { record("mmp_route_attempted") }
+            if (runCatching { launch(tracker) }.getOrDefault(false)) {
+                return if (storeBound) {
+                    AutomaticNavigationOutcome.STORE_OPENED
+                } else {
+                    AutomaticNavigationOutcome.OTHER_OPENED
+                }
+            }
+            val opened = runCatching { launch(target) }.getOrDefault(false)
+            if (!opened) runCatching { record("mmp_route_failed") }
+            return opened.toAutomaticNavigationOutcome(storeBound)
+        }
+        return runCatching { launch(target) }.getOrDefault(false).toAutomaticNavigationOutcome(storeBound)
     }
 
     internal fun routeCta(
@@ -471,6 +556,12 @@ internal object CreativeCtaRouter {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.applicationContext.startActivity(intent)
     }.isSuccess
+}
+
+private fun Boolean.toAutomaticNavigationOutcome(storeBound: Boolean): AutomaticNavigationOutcome = when {
+    !this -> AutomaticNavigationOutcome.FAILED
+    storeBound -> AutomaticNavigationOutcome.STORE_OPENED
+    else -> AutomaticNavigationOutcome.OTHER_OPENED
 }
 
 private fun URL.effectivePort(): Int = if (port >= 0) port else defaultPort

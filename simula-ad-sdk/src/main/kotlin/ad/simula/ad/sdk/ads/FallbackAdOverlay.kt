@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
+import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.BeaconPersistenceOutcome
 import ad.simula.ad.sdk.network.ClickRouteStart
@@ -114,11 +115,15 @@ internal class FallbackPresentationState(
         val nextIndex = index.coerceAtLeast(0)
         if (stage == FallbackStage.SHOWING && this.index != nextIndex) {
             cancelNavigationLocked()
+            automaticNavigationGates.clear()
         }
         stage = FallbackStage.SHOWING
         this.index = nextIndex
     }
-    fun done() { stage = FallbackStage.DONE }
+    fun done() {
+        stage = FallbackStage.DONE
+        automaticNavigationGates.clear()
+    }
     fun setClickPending(pending: Boolean) {
         synchronized(this) {
             if (cleared) return
@@ -133,15 +138,36 @@ internal class FallbackPresentationState(
         if (retained != null) return retained
         return emptyList<SimulaApiClient.FallbackAd>().also(::retainFetchedAds)
     }
-    fun attemptAutomaticNavigation(index: Int, open: () -> Boolean): Boolean =
-        automaticNavigationGate(index).attempt(open)
+    fun retainAutomaticNavigation(
+        index: Int,
+        owner: Any,
+        targetUrl: String,
+        trackerAlreadyRequested: Boolean,
+    ): Boolean {
+        if (stage != FallbackStage.SHOWING || this.index != index || navigationOwner !== owner) return false
+        return automaticNavigationGate(index).retain(targetUrl, trackerAlreadyRequested)
+    }
+
+    fun attemptAutomaticNavigation(
+        index: Int,
+        open: (PendingAutomaticNavigation) -> AutomaticNavigationOutcome,
+    ): AutomaticNavigationOutcome {
+        if (stage != FallbackStage.SHOWING || this.index != index) return AutomaticNavigationOutcome.FAILED
+        return automaticNavigationGate(index).attemptPending(open)
+    }
+
+    fun suppressAutomaticNavigation(index: Int) {
+        automaticNavigationGates[index.coerceAtLeast(0)]?.suppressPending()
+    }
 
     fun markAutomaticTrackerRequested(index: Int) {
+        if (stage != FallbackStage.SHOWING || this.index != index) return
         automaticNavigationGate(index).markTrackerRequestedInWebView()
     }
 
     fun wasAutomaticTrackerRequested(index: Int): Boolean =
-        automaticNavigationGate(index).wasTrackerRequestedInWebView()
+        stage == FallbackStage.SHOWING && this.index == index &&
+            automaticNavigationGate(index).wasTrackerRequestedInWebView()
 
     private fun automaticNavigationGate(index: Int): AutomaticNavigationGate =
         automaticNavigationGates.getOrPut(index.coerceAtLeast(0)) { AutomaticNavigationGate() }
@@ -330,7 +356,9 @@ internal fun FallbackAdHost(
     onFullyClosed: () -> Unit,
     autoStoreRedirect: AutoStoreRedirect? = null,
     onAutoStoreRedirect: () -> Boolean = { false },
-    openAutomaticNavigation: (String, Boolean) -> Boolean = { _, _ -> false },
+    openAutomaticNavigation: (String, Boolean) -> AutomaticNavigationOutcome = { _, _ ->
+        AutomaticNavigationOutcome.FAILED
+    },
     onAdClick: (ClickInteraction) -> Unit = {},
     onStoreOpen: (ClickInteraction) -> Unit = {},
     persistClick: (String, ClickInteraction, () -> Unit) -> Unit = { _, _, complete -> complete() },
@@ -451,10 +479,25 @@ internal fun FallbackAdHost(
             is FallbackPhase.Showing -> {
                 val ad = p.ads[p.index]
                 val autoRedirectScope = remember(impressionId, p.index) { Any() }
+                fun dispatchAutomaticNavigation() {
+                    val result = redirects.request(
+                        scope = autoRedirectScope,
+                        pendingHandoff = pendingClickHandoff(),
+                    ) {
+                        val outcome = presentationState.attemptAutomaticNavigation(p.index) { route ->
+                            openAutomaticNavigation(route.targetUrl, route.trackerAlreadyRequested)
+                        }
+                        outcome != AutomaticNavigationOutcome.FAILED
+                    }
+                    if (result == AutoRedirectResult.SUPPRESSED) {
+                        presentationState.suppressAutomaticNavigation(p.index)
+                    }
+                }
                 DisposableEffect(redirects, autoRedirectScope) {
                     redirects.activate(autoRedirectScope)
                     onDispose { redirects.deactivate(autoRedirectScope) }
                 }
+                LaunchedEffect(autoRedirectScope) { dispatchAutomaticNavigation() }
                 // Fire the auto store redirect when the END_SCREEN_N fallback screen is presented.
                 LaunchedEffect(p.index) {
                     if (autoStoreRedirect?.enabled == true &&
@@ -498,16 +541,7 @@ internal fun FallbackAdHost(
                         ctaTrackingUrl = ctaTrackingUrl,
                         ctaDestination = ctaDestination,
                         ctaStoreUrl = ctaStoreUrl,
-                        onAutomaticNavigation = { targetUrl, trackerAlreadyRequested ->
-                            redirects.request(
-                                scope = autoRedirectScope,
-                                pendingHandoff = pendingClickHandoff(),
-                            ) {
-                                presentationState.attemptAutomaticNavigation(p.index) {
-                                    openAutomaticNavigation(targetUrl, trackerAlreadyRequested)
-                                }
-                            }
-                        },
+                        onAutomaticNavigation = ::dispatchAutomaticNavigation,
                         onClose = {
                             if (!presentationState.advance(p.ads.size)) return@FallbackAdOverlay
                             phase = if (presentationState.stage == FallbackStage.SHOWING) {
@@ -555,7 +589,7 @@ private fun FallbackAdOverlay(
     ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
-    onAutomaticNavigation: (String, Boolean) -> Unit,
+    onAutomaticNavigation: () -> Unit,
     onClose: () -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -584,6 +618,7 @@ private fun FallbackAdOverlay(
                 Lifecycle.Event.ON_STOP -> wasStopped = true
                 Lifecycle.Event.ON_RESUME -> {
                     wv?.onResume()
+                    onAutomaticNavigation()
                     if (wasStopped) {
                         wasStopped = false
                         wv?.repaintOnNextFrame()
@@ -704,11 +739,14 @@ private fun FallbackAdOverlay(
                                     CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> Unit
                                     CreativeCtaRouter.AutomaticNavigationPlan.Consume -> return true
                                     is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
-                                        onAutomaticNavigation(
+                                        presentationState.retainAutomaticNavigation(
+                                            fallbackIndex,
+                                            navigationOwner,
                                             plan.targetUrl,
                                             presentationState.wasAutomaticTrackerRequested(fallbackIndex) ||
                                                 CreativeCtaRouter.matchesKnownTrackingUrl(view?.url, ctaTrackingUrl),
                                         )
+                                        onAutomaticNavigation()
                                         return true
                                     }
                                 }

@@ -731,17 +731,38 @@ class FullscreenClickHandoffPolicyTest {
     fun `fallback automatic navigation retries failure and commits success per screen`() {
         val state = FallbackPresentationState()
         var firstScreenAttempts = 0
+        val firstOwner = Any()
+        state.showing(0)
+        state.bindNavigation(firstOwner) { true }
+        assertTrue(state.retainAutomaticNavigation(0, firstOwner, "https://tracker.example/first", false))
 
-        assertFalse(state.attemptAutomaticNavigation(0) { firstScreenAttempts++; false })
-        assertTrue(state.attemptAutomaticNavigation(0) { firstScreenAttempts++; true })
-        assertFalse(state.attemptAutomaticNavigation(0) { firstScreenAttempts++; true })
+        assertEquals(AutomaticNavigationOutcome.FAILED, state.attemptAutomaticNavigation(0) {
+            firstScreenAttempts++
+            AutomaticNavigationOutcome.FAILED
+        })
+        assertEquals(AutomaticNavigationOutcome.STORE_OPENED, state.attemptAutomaticNavigation(0) {
+            firstScreenAttempts++
+            AutomaticNavigationOutcome.STORE_OPENED
+        })
+        assertEquals(AutomaticNavigationOutcome.FAILED, state.attemptAutomaticNavigation(0) {
+            firstScreenAttempts++
+            AutomaticNavigationOutcome.STORE_OPENED
+        })
         assertEquals(2, firstScreenAttempts)
-        assertTrue(state.attemptAutomaticNavigation(1) { true })
+        val secondOwner = Any()
+        state.showing(1)
+        state.bindNavigation(secondOwner) { true }
+        assertTrue(state.retainAutomaticNavigation(1, secondOwner, "https://tracker.example/second", false))
+        assertEquals(
+            AutomaticNavigationOutcome.STORE_OPENED,
+            state.attemptAutomaticNavigation(1) { AutomaticNavigationOutcome.STORE_OPENED },
+        )
     }
 
     @Test
     fun `fallback tracker provenance is retained per screen`() {
         val state = FallbackPresentationState()
+        state.showing(0)
 
         state.markAutomaticTrackerRequested(0)
 
@@ -755,25 +776,38 @@ class FullscreenClickHandoffPolicyTest {
         val scope = Any()
         val gate = AutomaticNavigationGate()
         var opens = 0
+        assertTrue(gate.retain("https://tracker.example/click", false))
 
         assertEquals(
             AutoRedirectResult.STALE,
-            coordinator.request(scope, null) { gate.attempt { opens++; true } },
+            coordinator.request(scope, null) {
+                gate.attemptPending { opens++; AutomaticNavigationOutcome.STORE_OPENED } !=
+                    AutomaticNavigationOutcome.FAILED
+            },
         )
         assertEquals(0, opens)
 
         coordinator.activate(scope)
         assertEquals(
             AutoRedirectResult.FAILED,
-            coordinator.request(scope, null) { gate.attempt { opens++; false } },
+            coordinator.request(scope, null) {
+                gate.attemptPending { opens++; AutomaticNavigationOutcome.FAILED } !=
+                    AutomaticNavigationOutcome.FAILED
+            },
         )
         assertEquals(
             AutoRedirectResult.OPENED,
-            coordinator.request(scope, null) { gate.attempt { opens++; true } },
+            coordinator.request(scope, null) {
+                gate.attemptPending { opens++; AutomaticNavigationOutcome.STORE_OPENED } !=
+                    AutomaticNavigationOutcome.FAILED
+            },
         )
         assertEquals(
             AutoRedirectResult.SUPPRESSED,
-            coordinator.request(scope, null) { gate.attempt { opens++; true } },
+            coordinator.request(scope, null) {
+                gate.attemptPending { opens++; AutomaticNavigationOutcome.STORE_OPENED } !=
+                    AutomaticNavigationOutcome.FAILED
+            },
         )
         assertEquals(2, opens)
     }

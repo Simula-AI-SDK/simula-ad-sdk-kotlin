@@ -275,16 +275,62 @@ class CreativeCtaRouterTest {
         val gate = AutomaticNavigationGate()
         var attempts = 0
         var reentrantOpened = true
+        assertTrue(gate.retain("https://tracker.example/click", false))
 
-        assertFalse(gate.attempt {
+        assertEquals(AutomaticNavigationOutcome.FAILED, gate.attemptPending {
             attempts++
-            reentrantOpened = gate.attempt { true }
-            false
+            reentrantOpened = gate.attemptPending { AutomaticNavigationOutcome.STORE_OPENED } ==
+                AutomaticNavigationOutcome.STORE_OPENED
+            AutomaticNavigationOutcome.FAILED
         })
         assertFalse(reentrantOpened)
-        assertTrue(gate.attempt { attempts++; true })
-        assertFalse(gate.attempt { attempts++; true })
+        assertTrue(gate.hasPending())
+        assertEquals(AutomaticNavigationOutcome.STORE_OPENED, gate.attemptPending {
+            attempts++
+            AutomaticNavigationOutcome.STORE_OPENED
+        })
+        assertEquals(
+            AutomaticNavigationOutcome.FAILED,
+            gate.attemptPending { attempts++; AutomaticNavigationOutcome.STORE_OPENED },
+        )
+        assertFalse(gate.hasPending())
         assertEquals(2, attempts)
+    }
+
+    @Test
+    fun `automatic navigation gate retains one bounded route and upgrades provenance`() {
+        val gate = AutomaticNavigationGate()
+        val target = "https://play.google.com/store/apps/details?id=com.example.app"
+        var delivered: PendingAutomaticNavigation? = null
+
+        assertTrue(gate.retain(target, false))
+        assertTrue(gate.retain(target, true))
+        assertFalse(gate.retain("https://tracker.example/other", false))
+        assertEquals(AutomaticNavigationOutcome.STORE_OPENED, gate.attemptPending { route ->
+            delivered = route
+            AutomaticNavigationOutcome.STORE_OPENED
+        })
+        assertEquals(PendingAutomaticNavigation(target, true), delivered)
+
+        val oversized = AutomaticNavigationGate()
+        assertFalse(oversized.retain("https://tracker.example/" + "x".repeat(8 * 1024), false))
+        assertFalse(oversized.hasPending())
+    }
+
+    @Test
+    fun `clearing automatic navigation drops retained route`() {
+        val gate = AutomaticNavigationGate()
+        var opens = 0
+        assertTrue(gate.retain("https://tracker.example/click", false))
+
+        gate.clear()
+
+        assertFalse(gate.hasPending())
+        assertEquals(
+            AutomaticNavigationOutcome.FAILED,
+            gate.attemptPending { opens++; AutomaticNavigationOutcome.STORE_OPENED },
+        )
+        assertEquals(0, opens)
     }
 
     @Test
@@ -608,6 +654,15 @@ class CreativeCtaRouterTest {
         val play = "https://play.google.com/store/apps/details?id=com.example.app&referrer=abc%2B123"
         val trackerLaunches = mutableListOf<String>()
 
+        assertEquals(
+            AutomaticNavigationOutcome.STORE_OPENED,
+            CreativeCtaRouter.routeAutomaticNavigationOutcome(
+                targetUrl = play,
+                destination = "appstore",
+                trackingUrl = tracker,
+                launch = { true },
+            ),
+        )
         assertTrue(
             CreativeCtaRouter.routeAutomaticNavigation(
                 targetUrl = play,
@@ -681,6 +736,29 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `already requested tracker is terminal without another launch`() {
+        val tracker = "https://tracker.example/click?campaign=handled"
+        val gate = AutomaticNavigationGate()
+        var launches = 0
+        assertTrue(gate.retain(tracker, trackerAlreadyRequested = true))
+
+        assertEquals(
+            AutomaticNavigationOutcome.HANDLED,
+            gate.attemptPending { route ->
+                CreativeCtaRouter.routeAutomaticNavigationOutcome(
+                    targetUrl = route.targetUrl,
+                    destination = "appstore",
+                    trackingUrl = tracker,
+                    trackerAlreadyRequested = route.trackerAlreadyRequested,
+                    launch = { launches++; true },
+                )
+            },
+        )
+        assertFalse(gate.hasPending())
+        assertEquals(0, launches)
+    }
+
+    @Test
     fun `automatic router independently rejects malformed Play destinations`() {
         var launches = 0
 
@@ -709,6 +787,74 @@ class CreativeCtaRouterTest {
             ),
         )
         assertEquals(listOf(tracker), launched)
+    }
+
+    @Test
+    fun `custom automatic exit fires tracker first and preserves exact fallback`() {
+        val tracker = "https://tracker.example/click?campaign=custom"
+        val custom = "partner-app://offer"
+        val trackerLaunches = mutableListOf<String>()
+
+        assertEquals(
+            AutomaticNavigationOutcome.OTHER_OPENED,
+            CreativeCtaRouter.routeAutomaticNavigationOutcome(
+                targetUrl = custom,
+                destination = "web",
+                trackingUrl = tracker,
+                launch = { true },
+            ),
+        )
+        assertTrue(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = custom,
+                destination = "web",
+                trackingUrl = tracker,
+                launch = { trackerLaunches += it; true },
+            ),
+        )
+        assertEquals(listOf(tracker), trackerLaunches)
+
+        val fallbackLaunches = mutableListOf<String>()
+        assertTrue(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = custom,
+                destination = "web",
+                trackingUrl = tracker,
+                launch = { url -> fallbackLaunches += url; url == custom },
+            ),
+        )
+        assertEquals(listOf(tracker, custom), fallbackLaunches)
+
+        val continuationLaunches = mutableListOf<String>()
+        assertTrue(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = custom,
+                destination = "web",
+                trackingUrl = tracker,
+                trackerAlreadyRequested = true,
+                launch = { continuationLaunches += it; true },
+            ),
+        )
+        assertEquals(listOf(custom), continuationLaunches)
+    }
+
+    @Test
+    fun `non-Play intent automatic exit fires tracker before decoded fallback`() {
+        val tracker = "https://tracker.example/click?campaign=intent"
+        val fallback = "https://advertiser.example/offer?source=simula%2Bauto"
+        val intent = "intent://offer#Intent;scheme=https;" +
+            "S.browser_fallback_url=https%3A%2F%2Fadvertiser.example%2Foffer%3Fsource%3Dsimula%252Bauto;end"
+        val launched = mutableListOf<String>()
+
+        assertTrue(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = intent,
+                destination = "web",
+                trackingUrl = tracker,
+                launch = { url -> launched += url; url == fallback },
+            ),
+        )
+        assertEquals(listOf(tracker, fallback), launched)
     }
 
     @Test

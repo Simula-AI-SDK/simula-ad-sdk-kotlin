@@ -145,6 +145,7 @@ internal class InterstitialPresentation(
         pendingClickHandoff = null
         clickRoute.cancel()
         primaryCtaNavigation.clear()
+        automaticNavigationGate.clear()
         fallbackState.clear()
     }
 

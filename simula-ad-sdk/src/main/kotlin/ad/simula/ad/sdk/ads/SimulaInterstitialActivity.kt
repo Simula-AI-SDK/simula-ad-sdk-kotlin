@@ -19,6 +19,7 @@ import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.network.AdBeaconManager
+import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickRouteStart
@@ -206,7 +207,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                         opened
                     },
                     openAutomaticNavigation = { targetUrl, trackerAlreadyRequested ->
-                        val opened = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                        val outcome = if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                             CreativeCtaRouter.openAutomaticNavigation(
                                 applicationContext,
                                 targetUrl,
@@ -214,8 +215,11 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                                 p.ad.trackingUrl,
                                 trackerAlreadyRequested,
                             )
-                        if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
-                        opened
+                        } else AutomaticNavigationOutcome.FAILED
+                        if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                            storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
+                        }
+                        outcome
                     },
                     // End-screen CTA routing context (deterministic store fallback).
                     ctaTrackingUrl = p.ad.trackingUrl,
@@ -436,25 +440,32 @@ private fun CreativeInterstitial(
             opened
         }
     }
-    fun routeAutomaticCta(targetUrl: String, trackerAlreadyRequested: Boolean) {
-        presentation.autoRedirectCoordinator.request(
+    fun routeAutomaticCta() {
+        val result = presentation.autoRedirectCoordinator.request(
             scope = autoRedirectScope,
             pendingHandoff = presentation.pendingClickHandoff(),
         ) {
-            val opened = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
-                presentation.automaticNavigationGate.attempt {
+            val outcome = if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                presentation.automaticNavigationGate.attemptPending { route ->
                     CreativeCtaRouter.openAutomaticNavigation(
                         context.applicationContext,
-                        targetUrl,
+                        route.targetUrl,
                         ad.destination,
                         ad.trackingUrl,
-                        trackerAlreadyRequested,
+                        route.trackerAlreadyRequested,
                     )
                 }
-            if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
-            opened
+            } else AutomaticNavigationOutcome.FAILED
+            if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                recordStoreOpen(ClickSources.AUTO_REDIRECT)
+            }
+            outcome != AutomaticNavigationOutcome.FAILED
+        }
+        if (result == AutoRedirectResult.SUPPRESSED) {
+            presentation.automaticNavigationGate.suppressPending()
         }
     }
+    LaunchedEffect(autoRedirectScope) { routeAutomaticCta() }
     val bridge = remember {
         androidCreativeBridge(
             appContext = context.applicationContext,
@@ -597,7 +608,10 @@ private fun CreativeInterstitial(
     // FallbackAdOverlay; this one is only composed during the primary creative.) Mirrors
     // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
     BackHandler(enabled = true) {
-        if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) onFinish()
+        if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) {
+            presentation.automaticNavigationGate.clear()
+            onFinish()
+        }
     }
 
     Box(
@@ -628,7 +642,11 @@ private fun CreativeInterstitial(
                     )
                     bridgeReady = true
                 },
-                onAutomaticCta = ::routeAutomaticCta,
+                onAutomaticCta = {
+                    presentation.automaticNavigationGate.retain(it.targetUrl, it.trackerAlreadyRequested)
+                    routeAutomaticCta()
+                },
+                onAutomaticNavigationReady = ::routeAutomaticCta,
                 onPrimaryCta = primaryCta@{ route ->
                     val claim = presentation.claimClick(ClickSources.PRIMARY_CTA)
                         ?: return@primaryCta false
@@ -719,7 +737,10 @@ private fun CreativeInterstitial(
             remaining = closeRemaining,
             progress = closeProgress.value,
             onClose = {
-                if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) onFinish()
+                if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) {
+                    presentation.automaticNavigationGate.clear()
+                    onFinish()
+                }
             },
         )
 
@@ -889,7 +910,8 @@ private fun CreativeHtml(
     presentation: InterstitialPresentation,
     onBridgeUnavailable: () -> Unit,
     onBridgeReady: () -> Unit,
-    onAutomaticCta: (String, Boolean) -> Unit,
+    onAutomaticCta: (PendingAutomaticNavigation) -> Unit,
+    onAutomaticNavigationReady: () -> Unit,
     onPrimaryCta: (PrimaryCtaRoute) -> Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -938,6 +960,7 @@ private fun CreativeHtml(
                 Lifecycle.Event.ON_STOP -> wasStopped = true
                 Lifecycle.Event.ON_RESUME -> {
                     wv?.onResume()
+                    onAutomaticNavigationReady()
                     if (wasStopped) {
                         wasStopped = false
                         // A hardware-accelerated WebView drops its draw functor on background; force the
@@ -988,13 +1011,17 @@ private fun CreativeHtml(
                                 CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> false
                                 CreativeCtaRouter.AutomaticNavigationPlan.Consume -> true
                                 is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
+                                    if (view !== creativeWebView) return true
                                     onAutomaticCta(
-                                        plan.targetUrl,
-                                        presentation.automaticNavigationGate.wasTrackerRequestedInWebView() ||
-                                            CreativeCtaRouter.matchesKnownTrackingUrl(
-                                                view?.url,
-                                                presentation.ad.trackingUrl,
-                                            ),
+                                        PendingAutomaticNavigation(
+                                            targetUrl = plan.targetUrl,
+                                            trackerAlreadyRequested =
+                                                presentation.automaticNavigationGate.wasTrackerRequestedInWebView() ||
+                                                    CreativeCtaRouter.matchesKnownTrackingUrl(
+                                                        view?.url,
+                                                        presentation.ad.trackingUrl,
+                                                    ),
+                                        ),
                                     )
                                     true
                                 }

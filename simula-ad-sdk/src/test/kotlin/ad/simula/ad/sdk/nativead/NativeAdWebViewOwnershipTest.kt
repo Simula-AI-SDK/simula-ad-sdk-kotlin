@@ -137,4 +137,60 @@ class NativeAdWebViewOwnershipTest {
             nativeReleaseDisposition(true, false, false, loadFailed = false, renderGone = true, retentionEligible = true),
         )
     }
+
+
+    @Test
+    fun `native automatic route requires current focused and viewable owner`() {
+        assertTrue(
+            nativeAutomaticNavigationEligible(
+                lifecycleActive = true,
+                currentOwner = true,
+                logicallyAttached = true,
+                attachedToWindow = true,
+                shown = true,
+                windowFocused = true,
+                globallyVisibleFraction = 0.5f,
+                visibleFraction = 0.5f,
+            ),
+        )
+        repeat(6) { index ->
+            val flags = MutableList(6) { true }.also { it[index] = false }
+            assertFalse(
+                nativeAutomaticNavigationEligible(
+                    lifecycleActive = flags[0],
+                    currentOwner = flags[1],
+                    logicallyAttached = flags[2],
+                    attachedToWindow = flags[3],
+                    shown = flags[4],
+                    windowFocused = flags[5],
+                    globallyVisibleFraction = 1f,
+                    visibleFraction = 1f,
+                ),
+            )
+        }
+        assertFalse(
+            nativeAutomaticNavigationEligible(
+                lifecycleActive = true,
+                currentOwner = true,
+                logicallyAttached = true,
+                attachedToWindow = true,
+                shown = true,
+                windowFocused = true,
+                globallyVisibleFraction = 1f,
+                visibleFraction = 0.49f,
+            ),
+        )
+        assertFalse(
+            nativeAutomaticNavigationEligible(
+                lifecycleActive = true,
+                currentOwner = true,
+                logicallyAttached = true,
+                attachedToWindow = true,
+                shown = true,
+                windowFocused = true,
+                globallyVisibleFraction = 0.49f,
+                visibleFraction = 1f,
+            ),
+        )
+    }
 }

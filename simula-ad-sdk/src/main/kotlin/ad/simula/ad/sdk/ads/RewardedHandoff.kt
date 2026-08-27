@@ -161,6 +161,7 @@ internal class RewardedPresentation(
         pendingClickHandoff = null
         clickRoute.cancel()
         primaryCtaNavigation.clear()
+        automaticNavigationGate.clear()
         fallbackState.clear()
     }
 
