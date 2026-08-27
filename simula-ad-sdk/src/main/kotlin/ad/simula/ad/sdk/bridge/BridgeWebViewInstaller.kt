@@ -28,6 +28,22 @@ private val installerJson = Json { ignoreUnknownKeys = true }
 internal fun activeCtaNonce(nonce: String?, disabled: Boolean): String? =
     nonce?.takeUnless { disabled }
 
+internal enum class BridgeInjectionMode { DOCUMENT_START, PAGE_START_FALLBACK, UNAVAILABLE }
+
+internal fun bridgeInjectionMode(
+    cleanupConfirmed: Boolean,
+    interfaceInstalled: Boolean,
+    documentStartSupported: Boolean,
+    coreDocumentStartInstalled: Boolean,
+    ctaRequired: Boolean,
+    ctaDocumentStartInstalled: Boolean,
+): BridgeInjectionMode = when {
+    !cleanupConfirmed || !interfaceInstalled -> BridgeInjectionMode.UNAVAILABLE
+    documentStartSupported && coreDocumentStartInstalled &&
+        (!ctaRequired || ctaDocumentStartInstalled) -> BridgeInjectionMode.DOCUMENT_START
+    else -> BridgeInjectionMode.PAGE_START_FALLBACK
+}
+
 internal fun trustedCtaRelaySource(activationNonce: String): String = """
     var activationNonce = ${JsonPrimitive(activationNonce)};
     var originalOpen = window.open;
@@ -276,23 +292,40 @@ ${trustedCtaRelaySource(activationNonce)}
         })();
     """.trimIndent()
 
+    internal fun fallbackRelayScript(
+        installationId: String,
+        bridgeCapability: String,
+        activationNonce: String?,
+        ctaDisabled: Boolean,
+        coreDocumentStartInstalled: Boolean,
+        ctaDocumentStartInstalled: Boolean,
+    ): String = buildString {
+        if (!coreDocumentStartInstalled) append(coreRelayScript(installationId, bridgeCapability))
+        if (!ctaDocumentStartInstalled) {
+            activeCtaNonce(activationNonce, ctaDisabled)?.let { nonce ->
+                if (isNotEmpty()) append('\n')
+                append(trustedCtaDocumentStartScript(nonce))
+            }
+        }
+    }
+
     /** Whether document-start injection (the reliable, all-frames path) is available on this device. */
     fun documentStartSupported(): Boolean = runCatching {
         WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
     }.getOrDefault(false)
 
     /**
-     * Attach [bridge] to [webView]. If document-start registration is unavailable or fails, bridge
-     * injection fails closed; late injection cannot protect closure-held capabilities from page code.
+     * Attach [bridge] to [webView]. Legacy providers and failed document-start registrations use a
+     * capability-bound page-start fallback; unsafe cleanup or interface setup remains unavailable.
      */
     fun install(
         webView: WebView,
         bridge: CreativeBridge,
         onTrustedCtaOpen: ((String) -> Unit)? = null,
-    ): Boolean {
+    ): BridgeInjectionMode {
         if (!uninstall(webView)) {
             Telemetry.recordError(signature = "bridge:stale_wiring_cleanup_failed")
-            return false
+            return BridgeInjectionMode.UNAVAILABLE
         }
         val installation = BridgeInstallation(
             id = (++nextInstallationId).toString(),
@@ -359,10 +392,13 @@ ${trustedCtaRelaySource(activationNonce)}
                 it.active = false
                 runCatching { it.audioObserver.close() }
             }
-            return false
+            return BridgeInjectionMode.UNAVAILABLE
         }
 
-        if (documentStartSupported()) {
+        val documentStartSupported = documentStartSupported()
+        var coreDocumentStartInstalled = false
+        var ctaDocumentStartInstalled = installation.activationNonce == null
+        if (documentStartSupported) {
             val core = runCatching {
                 WebViewCompat.addDocumentStartJavaScript(
                     webView,
@@ -377,6 +413,7 @@ ${trustedCtaRelaySource(activationNonce)}
                 )
             }.getOrNull()
             if (core != null) {
+                coreDocumentStartInstalled = true
                 val cta = activeCtaNonce(installation.activationNonce, installation.ctaDisabled)?.let { nonce ->
                     runCatching {
                         WebViewCompat.addDocumentStartJavaScript(
@@ -392,16 +429,47 @@ ${trustedCtaRelaySource(activationNonce)}
                         )
                     }.getOrNull()
                 }
+                ctaDocumentStartInstalled = installation.activationNonce == null || cta != null
                 scripts[webView] = DocumentStartScripts(core = core, cta = cta)
             }
+        } else {
+            Telemetry.recordError(signature = "bridge:document_start_unavailable")
         }
-        return true
+        val mode = bridgeInjectionMode(
+            cleanupConfirmed = true,
+            interfaceInstalled = true,
+            documentStartSupported = documentStartSupported,
+            coreDocumentStartInstalled = coreDocumentStartInstalled,
+            ctaRequired = installation.activationNonce != null,
+            ctaDocumentStartInstalled = ctaDocumentStartInstalled,
+        )
+        installation.injectionMode = mode
+        installation.coreDocumentStartInstalled = coreDocumentStartInstalled
+        installation.ctaDocumentStartInstalled = ctaDocumentStartInstalled
+        return mode
     }
 
     /** Disarm delivery as soon as a replacement main document starts navigating. */
     fun onPageStarted(webView: WebView?) {
         val view = webView ?: return
-        installations[view]?.audioObserver?.onPageStarted()
+        val installation = installations[view] ?: return
+        installation.audioObserver.onPageStarted()
+        if (!installation.active || installation.injectionMode != BridgeInjectionMode.PAGE_START_FALLBACK) return
+        val source = fallbackRelayScript(
+            installationId = installation.id,
+            bridgeCapability = installation.bridgeCapability,
+            activationNonce = installation.activationNonce,
+            ctaDisabled = installation.ctaDisabled,
+            coreDocumentStartInstalled = installation.coreDocumentStartInstalled,
+            ctaDocumentStartInstalled = installation.ctaDocumentStartInstalled,
+        )
+        if (source.isEmpty()) return
+        runCatching { view.evaluateJavascript(source, null) }.onFailure {
+            Telemetry.recordError(
+                signature = "bridge:page_start_fallback_failed",
+                errorCode = it::class.java.simpleName,
+            )
+        }
     }
 
     /** Permanently disables CTA ownership for this installation and all later documents. */
@@ -473,6 +541,9 @@ private data class BridgeInstallation(
     val activationNonce: String?,
     val onTrustedCtaOpen: ((String) -> Unit)?,
 ) {
+    var injectionMode: BridgeInjectionMode = BridgeInjectionMode.UNAVAILABLE
+    var coreDocumentStartInstalled: Boolean = false
+    var ctaDocumentStartInstalled: Boolean = false
     @Volatile
     var active: Boolean = true
     @Volatile

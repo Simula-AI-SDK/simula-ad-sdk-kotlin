@@ -502,8 +502,8 @@ internal class RetainedPrimaryCtaNavigationState<T : Any> {
     private var navigateInWebView: ((String) -> Boolean)? = null
     private var pendingHandoff: ClickPersistenceHandoff? = null
     private var pendingFallbackUrl: String? = null
-    private var fallbackNavigationStarted = false
-    private var deliveryInProgress = false
+    private var activeDelivery: NavigationDelivery? = null
+    private var deliveryRevision = 0L
     private var cleared = false
 
     fun attachActivity(activity: T) {
@@ -524,6 +524,7 @@ internal class RetainedPrimaryCtaNavigationState<T : Any> {
     fun bindNavigation(owner: Any, activity: T, navigate: (String) -> Boolean): Boolean {
         synchronized(this) {
             if (cleared || currentActivity?.get() !== activity) return false
+            if (navigationOwner !== owner) clearBindingLocked()
             navigationOwner = owner
             navigationActivity = WeakReference(activity)
             navigateInWebView = navigate
@@ -538,11 +539,33 @@ internal class RetainedPrimaryCtaNavigationState<T : Any> {
     }
 
     @Synchronized
-    fun navigationOverride(): Boolean? = when {
-        pendingHandoff != null -> true
-        !admission.isEnabled() && !fallbackNavigationStarted -> true
-        !admission.isEnabled() -> false
-        else -> null
+    fun navigationOverride(
+        targetUrl: String? = null,
+        isMainFrame: Boolean = true,
+        hasGesture: Boolean = false,
+        owner: Any? = navigationOwner,
+    ): Boolean? {
+        if (cleared) return true
+        if (pendingHandoff != null) return true
+        activeDelivery?.let { delivery ->
+            if (delivery.owner === owner && isMainFrame && !hasGesture &&
+                targetUrl == delivery.url && !delivery.permitConsumed
+            ) {
+                delivery.permitConsumed = true
+                if (pendingFallbackUrl == null) activeDelivery = null
+                return false
+            }
+            return true
+        }
+        return if (pendingFallbackUrl != null) true else null
+    }
+
+    @Synchronized
+    fun onNavigationStarted(url: String?, owner: Any? = navigationOwner) {
+        val delivery = activeDelivery ?: return
+        if (delivery.owner !== owner || url != delivery.url) return
+        delivery.permitConsumed = true
+        if (pendingFallbackUrl == null) activeDelivery = null
     }
 
     @Synchronized
@@ -554,7 +577,6 @@ internal class RetainedPrimaryCtaNavigationState<T : Any> {
         synchronized(this) {
             if (pendingHandoff === handoff) {
                 pendingHandoff = null
-                if (pendingFallbackUrl == null) fallbackNavigationStarted = true
             }
         }
         dispatchReadyFallback()
@@ -580,36 +602,48 @@ internal class RetainedPrimaryCtaNavigationState<T : Any> {
         currentActivity = null
         pendingHandoff = null
         pendingFallbackUrl = null
-        fallbackNavigationStarted = false
-        deliveryInProgress = false
+        activeDelivery = null
+        deliveryRevision++
         clearBindingLocked()
     }
 
     private fun dispatchReadyFallback() {
         val delivery = synchronized(this) {
-            if (cleared || pendingHandoff != null || deliveryInProgress) return
+            if (cleared || pendingHandoff != null || activeDelivery != null) return
             val current = currentActivity?.get() ?: return
             if (navigationActivity?.get() !== current) return
             val navigate = navigateInWebView ?: return
             val url = pendingFallbackUrl ?: return
-            deliveryInProgress = true
-            navigate to url
+            val owner = navigationOwner ?: return
+            NavigationDelivery(++deliveryRevision, owner, url).also { activeDelivery = it } to navigate
         }
-        val delivered = runCatching { delivery.first(delivery.second) }.getOrDefault(false)
+        val delivered = runCatching { delivery.second(delivery.first.url) }.getOrDefault(false)
         synchronized(this) {
-            deliveryInProgress = false
-            if (delivered && pendingFallbackUrl == delivery.second) {
+            if (activeDelivery !== delivery.first) return@synchronized
+            if (delivered && pendingFallbackUrl == delivery.first.url) {
                 pendingFallbackUrl = null
-                fallbackNavigationStarted = true
             }
+            if (!delivered || delivery.first.permitConsumed) activeDelivery = null
         }
     }
 
     private fun clearBindingLocked() {
+        activeDelivery?.takeIf { it.owner === navigationOwner }?.let { delivery ->
+            if (pendingFallbackUrl == null) pendingFallbackUrl = delivery.url
+            activeDelivery = null
+            deliveryRevision++
+        }
         navigationOwner = null
         navigationActivity = null
         navigateInWebView = null
     }
+
+    private data class NavigationDelivery(
+        val revision: Long,
+        val owner: Any,
+        val url: String,
+        var permitConsumed: Boolean = false,
+    )
 }
 
 /** A provisional click admission that only starts the duplicate window after [commit]. */

@@ -5,6 +5,13 @@ import org.junit.Test
 
 class RewardedNavigationPolicyTest {
     @Test
+    fun `zero gate reward waits for usable creative bridge`() {
+        assertEquals(false, initialRewardEarned(false, accumulatedPlayTimeMs = 0L, gateSeconds = 0))
+        assertEquals(true, initialRewardEarned(true, accumulatedPlayTimeMs = 0L, gateSeconds = 0))
+        assertEquals(true, initialRewardEarned(false, accumulatedPlayTimeMs = 5_000L, gateSeconds = 5))
+    }
+
+    @Test
     fun `ordinary automatic redirects stay in WebView`() {
         listOf(
             "https://creative.example/game",
@@ -40,6 +47,28 @@ class RewardedNavigationPolicyTest {
         assertEquals(
             RewardedNavigationAction.CONSUME,
             rewardedNavigationAction(true, false, "intent://details#Intent;scheme=market;end", null, null),
+        )
+        assertEquals(
+            RewardedNavigationAction.ROUTE_AUTO_STORE,
+            rewardedNavigationAction(
+                true,
+                false,
+                "partner-app://offer",
+                null,
+                null,
+                destination = "web",
+            ),
+        )
+        assertEquals(
+            RewardedNavigationAction.CONSUME,
+            rewardedNavigationAction(
+                true,
+                false,
+                "partner-app://offer",
+                null,
+                null,
+                destination = "appstore",
+            ),
         )
     }
 

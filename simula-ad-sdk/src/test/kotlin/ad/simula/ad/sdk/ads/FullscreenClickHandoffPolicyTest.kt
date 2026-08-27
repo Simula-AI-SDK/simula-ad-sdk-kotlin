@@ -395,11 +395,59 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
-    fun `pending fallback navigation stays blocked after document admission disables`() {
-        assertEquals(true, fallbackNavigationOverride(true, false, fallbackNavigationStarted = false))
-        assertEquals(true, fallbackNavigationOverride(false, false, fallbackNavigationStarted = false))
-        assertEquals(false, fallbackNavigationOverride(false, false, fallbackNavigationStarted = true))
-        assertNull(fallbackNavigationOverride(false, true, fallbackNavigationStarted = false))
+    fun `retained fallback permits only the exact SDK owned navigation`() {
+        val state = FallbackPresentationState()
+        val fallbackUrl = "https://creative.example/fallback"
+        state.showing(0)
+        state.setClickPending(true)
+        assertEquals(true, state.navigationOverride())
+        assertTrue(state.retainNavigation(fallbackUrl))
+        state.setClickPending(false)
+        state.bindNavigation(Any()) { url ->
+            assertEquals(false, state.navigationOverride(url, true, false))
+            assertEquals(true, state.navigationOverride("https://advertiser.example", true, false))
+            assertEquals(true, state.navigationOverride(url, false, false))
+            assertEquals(true, state.navigationOverride(url, true, true))
+            true
+        }
+        assertNull(state.navigationOverride())
+    }
+
+    @Test
+    fun `fallback navigation permit survives asynchronous WebView callback and is one shot`() {
+        val state = FallbackPresentationState()
+        val fallbackUrl = "https://creative.example/fallback"
+        state.showing(0)
+        state.setClickPending(true)
+        assertTrue(state.retainNavigation(fallbackUrl))
+        state.bindNavigation(Any()) { true }
+
+        state.setClickPending(false)
+
+        assertFalse(state.hasRetainedNavigation())
+        assertEquals(false, state.navigationOverride(fallbackUrl, true, false))
+        assertNull(state.navigationOverride(fallbackUrl, true, false))
+    }
+
+    @Test
+    fun `fallback navigation permit requeues for replacement owner and rejects stale callback`() {
+        val state = FallbackPresentationState()
+        val oldOwner = Any()
+        val replacementOwner = Any()
+        val fallbackUrl = "https://creative.example/fallback"
+        state.showing(0)
+        state.setClickPending(true)
+        assertTrue(state.retainNavigation(fallbackUrl))
+        state.bindNavigation(oldOwner) { true }
+        state.setClickPending(false)
+
+        state.unbindNavigation(oldOwner)
+        assertTrue(state.hasRetainedNavigation())
+        state.bindNavigation(replacementOwner) { true }
+        state.onNavigationStarted(fallbackUrl, oldOwner)
+        assertEquals(true, state.navigationOverride(fallbackUrl, true, false, oldOwner))
+        assertEquals(false, state.navigationOverride(fallbackUrl, true, false, replacementOwner))
+        assertNull(state.navigationOverride(fallbackUrl, true, false, replacementOwner))
     }
 
     @Test
@@ -471,14 +519,14 @@ class FullscreenClickHandoffPolicyTest {
         )
         scheduler.runReady()
 
-        assertEquals(true, state.navigationOverride(documentAdmissionEnabled = false))
+        assertEquals(true, state.navigationOverride())
         assertFalse(state.advance(total = 2))
 
         routeCompletion?.invoke(true)
         assertTrue("terminal UI update is still queued", state.clickHandoffPending)
         scheduler.runReady()
 
-        assertEquals(false, state.navigationOverride(documentAdmissionEnabled = false))
+        assertNull(state.navigationOverride())
         assertTrue(state.advance(total = 2))
     }
 
@@ -560,6 +608,7 @@ class FullscreenClickHandoffPolicyTest {
         state.bindNavigation(replacementOwner) { calls.add("new:$it") }
         assertEquals(listOf("new:https://creative.example/fallback"), calls)
         assertFalse(state.hasRetainedNavigation())
+        state.onNavigationStarted("https://creative.example/fallback", replacementOwner)
         state.bindNavigation(Any()) { calls.add("duplicate:$it") }
         assertEquals("fallback delivery is one-shot", 1, calls.size)
     }
@@ -588,11 +637,9 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
-    fun `failed fallback delivery blocks advance until a replacement accepts it`() {
+    fun `close cancels undeliverable fallback navigation and advances`() {
         val state = FallbackPresentationState()
         val failedOwner = Any()
-        val replacementOwner = Any()
-        val calls = mutableListOf<String>()
         state.showing(0)
         assertTrue(state.clickAdmission(0).disable())
         state.bindNavigation(failedOwner) { false }
@@ -602,13 +649,9 @@ class FullscreenClickHandoffPolicyTest {
         state.setClickPending(false)
 
         assertTrue(state.hasRetainedNavigation())
-        assertFalse(state.advance(total = 2))
-        state.unbindNavigation(failedOwner)
-        state.bindNavigation(replacementOwner) { calls.add(it) }
-
-        assertEquals(listOf("https://creative.example/fallback"), calls)
-        assertFalse(state.hasRetainedNavigation())
         assertTrue(state.advance(total = 2))
+        assertFalse(state.hasRetainedNavigation())
+        assertEquals(1, state.index)
     }
 
     @Test
@@ -640,13 +683,15 @@ class FullscreenClickHandoffPolicyTest {
         state.showing(0)
         assertTrue(state.clickAdmission(0).disable())
         state.bindNavigation(Any()) { true }
-        assertTrue(state.retainNavigation("https://creative.example/first"))
-        assertEquals(false, state.navigationOverride(documentAdmissionEnabled = false))
+        val firstUrl = "https://creative.example/first"
+        assertTrue(state.retainNavigation(firstUrl))
+        state.onNavigationStarted(firstUrl)
+        assertNull(state.navigationOverride())
 
         state.showing(1)
         assertTrue(state.clickAdmission(1).disable())
 
-        assertEquals(true, state.navigationOverride(documentAdmissionEnabled = false))
+        assertNull(state.navigationOverride())
     }
 
     @Test

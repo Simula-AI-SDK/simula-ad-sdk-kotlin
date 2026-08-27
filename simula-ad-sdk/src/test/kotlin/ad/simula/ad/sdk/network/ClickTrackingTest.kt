@@ -436,7 +436,7 @@ class ClickTrackingTest {
     }
 
     @Test
-    fun `primary navigation unblocks after terminal route when no fallback was retained`() {
+    fun `terminal primary route delegates to normal policy without granting navigation`() {
         val state = RetainedPrimaryCtaNavigationState<Any>()
         val handoff = testHandoff("pending")
 
@@ -446,7 +446,7 @@ class ClickTrackingTest {
         assertEquals(true, state.navigationOverride())
 
         state.onHandoffFinished(handoff)
-        assertEquals(false, state.navigationOverride())
+        assertNull(state.navigationOverride())
     }
 
     @Test
@@ -467,10 +467,15 @@ class ClickTrackingTest {
         assertTrue(calls.isEmpty())
         assertTrue(state.hasRetainedFallback())
 
-        assertTrue(state.bindNavigation(Any(), replacementActivity, calls::add))
+        assertTrue(state.bindNavigation(Any(), replacementActivity) { url ->
+            assertEquals(false, state.navigationOverride(url, isMainFrame = true, hasGesture = false))
+            assertEquals(true, state.navigationOverride("https://advertiser.example", true, false))
+            assertEquals(true, state.navigationOverride(url, true, true))
+            calls.add(url)
+        })
         assertEquals(listOf("https://creative.example/fallback"), calls)
         assertFalse(state.hasRetainedFallback())
-        assertEquals(false, state.navigationOverride())
+        assertNull(state.navigationOverride())
         assertTrue(state.bindNavigation(Any(), replacementActivity, calls::add))
         assertEquals("fallback delivery is one-shot", 1, calls.size)
     }
@@ -514,10 +519,57 @@ class ClickTrackingTest {
         assertTrue(state.hasRetainedFallback())
         assertEquals(true, state.navigationOverride())
         state.unbindNavigation(failedOwner)
-        assertTrue(state.bindNavigation(replacementOwner, activity) { calls.add(it) })
+        assertTrue(state.bindNavigation(replacementOwner, activity) { url ->
+            assertEquals(false, state.navigationOverride(url, true, false))
+            assertEquals(true, state.navigationOverride("https://advertiser.example", true, false))
+            calls.add(url)
+        })
         assertEquals(listOf("https://creative.example/fallback"), calls)
         assertFalse(state.hasRetainedFallback())
-        assertEquals(false, state.navigationOverride())
+        assertNull(state.navigationOverride())
+    }
+
+    @Test
+    fun `primary navigation permit survives asynchronous WebView callback and is one shot`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val activity = Any()
+        val handoff = testHandoff("async")
+        val fallbackUrl = "https://creative.example/fallback"
+        state.attachActivity(activity)
+        assertTrue(state.admission.disable())
+        state.onHandoffCreated(handoff)
+        assertTrue(state.retainFallback(fallbackUrl, activity))
+        assertTrue(state.bindNavigation(Any(), activity) { true })
+
+        state.onHandoffFinished(handoff)
+
+        assertFalse(state.hasRetainedFallback())
+        assertEquals(false, state.navigationOverride(fallbackUrl, true, false))
+        assertNull(state.navigationOverride(fallbackUrl, true, false))
+    }
+
+    @Test
+    fun `primary navigation permit requeues for replacement owner and rejects stale callback`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val activity = Any()
+        val oldOwner = Any()
+        val replacementOwner = Any()
+        val handoff = testHandoff("replacement")
+        val fallbackUrl = "https://creative.example/fallback"
+        state.attachActivity(activity)
+        assertTrue(state.admission.disable())
+        state.onHandoffCreated(handoff)
+        assertTrue(state.retainFallback(fallbackUrl, activity))
+        assertTrue(state.bindNavigation(oldOwner, activity) { true })
+        state.onHandoffFinished(handoff)
+
+        state.unbindNavigation(oldOwner)
+        assertTrue(state.hasRetainedFallback())
+        assertTrue(state.bindNavigation(replacementOwner, activity) { true })
+        state.onNavigationStarted(fallbackUrl, oldOwner)
+        assertEquals(true, state.navigationOverride(fallbackUrl, true, false, oldOwner))
+        assertEquals(false, state.navigationOverride(fallbackUrl, true, false, replacementOwner))
+        assertNull(state.navigationOverride(fallbackUrl, true, false, replacementOwner))
     }
 
     @Test

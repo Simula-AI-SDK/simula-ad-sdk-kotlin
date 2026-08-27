@@ -225,12 +225,13 @@ class CreativeCtaRouterTest {
             "https://bad host.example/click",
             "https://bad\u00a0host.example/click",
             "https://bad\u200bhost.example/click",
-            "https://tracker.example:/click",
             "https://tracker.example:-1/click",
             "https://tracker.example:65536/click",
             "https://[2001:db8::1]:65536/click",
+            "https://user:password@tracker.example/click",
             "https://tracker.example/click\nX-Injected: value",
             "https://tracker.example/click\u007f",
+            "https://tracker.example/click\u0085",
         ).forEach { assertNull(it, CreativeCtaRouter.admittedHttpUrl(it)) }
     }
 
@@ -240,7 +241,32 @@ class CreativeCtaRouterTest {
             "https://tracker.example:0/click",
             "https://tracker.example:65535/click",
             "https://[2001:db8::1]:443/click",
+            "https://tracker.example:/click",
         ).forEach { assertEquals(it, CreativeCtaRouter.admittedHttpUrl(it)) }
+    }
+
+    @Test
+    fun `automatic navigation routes safe external schemes and consumes malformed ones`() {
+        assertEquals(
+            CreativeCtaRouter.AutomaticNavigationAction.ALLOW_IN_WEBVIEW,
+            CreativeCtaRouter.automaticNavigationAction("https://creative.example/next", "appstore"),
+        )
+        assertEquals(
+            CreativeCtaRouter.AutomaticNavigationAction.ROUTE_EXTERNALLY,
+            CreativeCtaRouter.automaticNavigationAction("market://details?id=com.example.app", "appstore"),
+        )
+        assertEquals(
+            CreativeCtaRouter.AutomaticNavigationAction.ROUTE_EXTERNALLY,
+            CreativeCtaRouter.automaticNavigationAction("partner-app://offer", "web"),
+        )
+        assertEquals(
+            CreativeCtaRouter.AutomaticNavigationAction.CONSUME,
+            CreativeCtaRouter.automaticNavigationAction("partner-app://offer", "appstore"),
+        )
+        assertEquals(
+            CreativeCtaRouter.AutomaticNavigationAction.CONSUME,
+            CreativeCtaRouter.automaticNavigationAction("intent://details#Intent;scheme=market;end", "appstore"),
+        )
     }
 
     @Test

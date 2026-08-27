@@ -50,6 +50,8 @@ import java.net.URLDecoder
  */
 internal object CreativeCtaRouter {
 
+    internal enum class AutomaticNavigationAction { ALLOW_IN_WEBVIEW, CONSUME, ROUTE_EXTERNALLY }
+
     internal sealed interface PrimaryCtaTapPlan {
         data object AllowInWebView : PrimaryCtaTapPlan
         data object ConsumeWithoutClick : PrimaryCtaTapPlan
@@ -68,6 +70,7 @@ internal object CreativeCtaRouter {
         return candidate.takeIf {
             (url.protocol.equals("http", true) || url.protocol.equals("https", true)) &&
                 url.host.isNotBlank() &&
+                url.userInfo == null &&
                 url.host.none { char ->
                     char.isWhitespace() || Character.getType(char) == Character.FORMAT.toInt()
                 } &&
@@ -145,6 +148,36 @@ internal object CreativeCtaRouter {
             return null
         }
         return candidate.takeIf { !uri.rawSchemeSpecificPart.isNullOrBlank() }
+    }
+
+    internal fun automaticNavigationAction(
+        value: String?,
+        destination: String,
+    ): AutomaticNavigationAction {
+        val candidate = value?.trim()?.takeIf { it.isNotEmpty() }
+            ?: return AutomaticNavigationAction.ALLOW_IN_WEBVIEW
+        if (candidate.hasUrlControlCharacters()) return AutomaticNavigationAction.CONSUME
+        val separator = candidate.indexOf(':')
+        if (separator <= 0) return AutomaticNavigationAction.ALLOW_IN_WEBVIEW
+        val scheme = candidate.substring(0, separator).lowercase()
+        if (!scheme.matches(URL_SCHEME_PATTERN)) return AutomaticNavigationAction.CONSUME
+        if (scheme in INTERNAL_WEBVIEW_SCHEMES) return AutomaticNavigationAction.ALLOW_IN_WEBVIEW
+        if (scheme == "http" || scheme == "https") {
+            return if (admittedHttpUrl(candidate) != null) {
+                AutomaticNavigationAction.ALLOW_IN_WEBVIEW
+            } else {
+                AutomaticNavigationAction.CONSUME
+            }
+        }
+        val routable = when (scheme) {
+            "market", "intent" -> normalizeTappedDestination(candidate) != null
+            else -> admittedWebCustomDestination(candidate, destination) != null
+        }
+        return if (routable) {
+            AutomaticNavigationAction.ROUTE_EXTERNALLY
+        } else {
+            AutomaticNavigationAction.CONSUME
+        }
     }
 
     /**
@@ -320,11 +353,12 @@ private fun URL.hasValidExplicitPort(): Boolean {
         if (separator < 0) return true
         hostAndPort.substring(separator + 1)
     }
-    if (explicitPort.isEmpty() || explicitPort.any { it !in '0'..'9' }) return false
+    if (explicitPort.isEmpty()) return true
+    if (explicitPort.any { it !in '0'..'9' }) return false
     return explicitPort.toIntOrNull()?.let { it in 0..65535 } == true
 }
 
-private fun String.hasUrlControlCharacters(): Boolean = any { it.code in 0..31 || it.code == 127 }
+private fun String.hasUrlControlCharacters(): Boolean = any { it.code in 0..31 || it.code in 127..159 }
 
 private val INTERNAL_WEBVIEW_SCHEMES = setOf("about", "blob", "data", "file", "javascript")
 private val URL_SCHEME_PATTERN = Regex("[a-z][a-z0-9+.-]*")

@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.bridge.BridgeInjectionMode
 import ad.simula.ad.sdk.bridge.CreativeBridge
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
@@ -362,6 +363,7 @@ private fun CreativeInterstitial(
     // bypassing the close-delay gate.
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    var bridgeReady by remember(presentation) { mutableStateOf(false) }
     val clickHandoffHandler = remember { Handler(Looper.getMainLooper()) }
     var clickHandoffPending by remember(presentation) {
         mutableStateOf(presentation.pendingClickHandoff() != null)
@@ -393,6 +395,22 @@ private fun CreativeInterstitial(
             opened
         }
     }
+    fun routeAutomaticCta(route: PrimaryCtaRoute) {
+        presentation.autoRedirectCoordinator.request(
+            scope = autoRedirectScope,
+            pendingHandoff = presentation.pendingClickHandoff(),
+        ) {
+            val opened = CreativeCtaRouter.openPrimaryCta(
+                context.applicationContext,
+                route,
+                ad.destination,
+                ad.adBehavior?.storeOpen,
+                ad.androidStoreUrl,
+            )
+            if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
+            opened
+        }
+    }
     val bridge = remember {
         androidCreativeBridge(
             appContext = context.applicationContext,
@@ -405,8 +423,8 @@ private fun CreativeInterstitial(
     // bridge). The keyed effect runs on first composition (covers a delay-0 immediate close) and on
     // every flip of `closeEnabled`; the presentation coordinator makes repeats a no-op after success.
     if (autoRedirect?.enabled == true && autoRedirect.trigger == AutoStoreRedirectTrigger.PLAYABLE_END) {
-        LaunchedEffect(closeEnabled) {
-            if (closeEnabled) fireAutoStoreRedirect()
+        LaunchedEffect(closeEnabled, bridgeReady) {
+            if (closeEnabled && bridgeReady) fireAutoStoreRedirect()
         }
     }
 
@@ -481,7 +499,8 @@ private fun CreativeInterstitial(
     // SHOWN — fired once the creative first composes
     // (begin-to-render), reporting the `/shown` beacon. Guarded so an Activity recreation
     // (config change) doesn't double-report.
-    LaunchedEffect(Unit) {
+    LaunchedEffect(bridgeReady) {
+        if (!bridgeReady) return@LaunchedEffect
         if (!presentation.displayedReported) {
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
@@ -501,7 +520,8 @@ private fun CreativeInterstitial(
     // so a backgrounded ad can't accrue the delay; the accrued time lives on the presentation so a
     // config-change recreation resumes rather than restarts. The `/seen` beacon is the billing source
     // of truth; onPaid is local analytics only and needs no network (the value is already on-device).
-    LaunchedEffect(Unit) {
+    LaunchedEffect(bridgeReady) {
+        if (!bridgeReady) return@LaunchedEffect
         if (presentation.impressionReported) return@LaunchedEffect
 
         fun fireImpressionAndPaid() {
@@ -561,6 +581,9 @@ private fun CreativeInterstitial(
                 html = html,
                 bridge = bridge,
                 presentation = presentation,
+                onBridgeUnavailable = onFinish,
+                onBridgeReady = { bridgeReady = true },
+                onAutomaticCta = ::routeAutomaticCta,
                 onPrimaryCta = primaryCta@{ route ->
                     val claim = presentation.claimClick(ClickSources.PRIMARY_CTA)
                         ?: return@primaryCta false
@@ -819,6 +842,9 @@ private fun CreativeHtml(
     html: String,
     bridge: CreativeBridge,
     presentation: InterstitialPresentation,
+    onBridgeUnavailable: () -> Unit,
+    onBridgeReady: () -> Unit,
+    onAutomaticCta: (PrimaryCtaRoute) -> Unit,
     onPrimaryCta: (PrimaryCtaRoute) -> Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -889,6 +915,7 @@ private fun CreativeHtml(
                 client = object : CreativeTelemetryWebViewClient("interstitial") {
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon) // starts the page-load timer
+                        primaryCtaNavigation.onNavigationStarted(url, fallbackOwner)
                         BridgeWebViewInstaller.onPageStarted(view)
                     }
 
@@ -897,22 +924,53 @@ private fun CreativeHtml(
                         request: WebResourceRequest?,
                     ): Boolean {
                         val url = request?.url?.toString() ?: return false
-                        primaryCtaNavigation.navigationOverride()?.let { return it }
+                        primaryCtaNavigation.navigationOverride(
+                            targetUrl = url,
+                            isMainFrame = request.isForMainFrame,
+                            hasGesture = request.hasGesture(),
+                            owner = fallbackOwner,
+                        )?.let { return it }
                         if (request.isForMainFrame != true) return false
                         // Document-start interception handles trusted window.open/target=_blank.
                         // This remains the platform fallback for direct gesture navigations.
-                        if (!request.hasGesture()) return false
+                        if (!request.hasGesture()) {
+                            return when (CreativeCtaRouter.automaticNavigationAction(
+                                value = url,
+                                destination = presentation.ad.destination,
+                            )) {
+                                CreativeCtaRouter.AutomaticNavigationAction.ALLOW_IN_WEBVIEW -> false
+                                CreativeCtaRouter.AutomaticNavigationAction.CONSUME -> true
+                                CreativeCtaRouter.AutomaticNavigationAction.ROUTE_EXTERNALLY -> {
+                                    val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+                                        tappedUrl = url,
+                                        creativeBaseUrl = null,
+                                        trackingUrl = presentation.ad.trackingUrl,
+                                        destination = presentation.ad.destination,
+                                    )) {
+                                        is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
+                                        else -> return true
+                                    }
+                                    onAutomaticCta(route)
+                                    true
+                                }
+                            }
+                        }
                         return handlePrimaryCta(url, view)
                     }
                 },
                 surface = "interstitial",
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
-                BridgeWebViewInstaller.install(this, bridge) { url ->
+                val injectionMode = BridgeWebViewInstaller.install(this, bridge) { url ->
                     if (primaryCtaAdmission.isEnabled()) handlePrimaryCta(url, this)
                 }
-                if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
-                loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+                if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
+                    post(onBridgeUnavailable)
+                } else {
+                    post(onBridgeReady)
+                    if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
+                    loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+                }
                 creativeWebView = this
             }
         },

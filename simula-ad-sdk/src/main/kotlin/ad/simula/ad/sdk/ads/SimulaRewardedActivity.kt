@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.bridge.BridgeInjectionMode
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -178,7 +179,8 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     RewardedMinigame(
                         presentation = p,
                         recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
-                        onFinish = { _ ->
+                        onFinish = { earned ->
+                            p.rewardEarned = earned
                             // CLOSE is deferred to completeReward (after the last fallback screen), so
                             // closing the playable alone doesn't fire the publisher close callback.
                             onClose()
@@ -296,24 +298,30 @@ internal enum class RewardedNavigationAction {
     ROUTE_AUTO_STORE,
 }
 
+internal fun initialRewardEarned(
+    persistedRewardEarned: Boolean,
+    accumulatedPlayTimeMs: Long,
+    gateSeconds: Int,
+): Boolean = persistedRewardEarned ||
+    (gateSeconds > 0 && RewardGate.isEarned(accumulatedPlayTimeMs, gateSeconds))
+
 internal fun rewardedNavigationAction(
     isMainFrame: Boolean,
     hasGesture: Boolean,
     targetUrl: String,
     currentPageUrl: String?,
     initialPageUrl: String?,
+    destination: String = "appstore",
 ): RewardedNavigationAction {
     if (!isMainFrame) return RewardedNavigationAction.ALLOW_IN_WEBVIEW
     if (!hasGesture) {
-        val scheme = targetUrl.substringBefore(':', missingDelimiterValue = "").lowercase()
-        if (scheme in setOf("market", "intent")) {
-            return if (CreativeCtaRouter.normalizeTappedDestination(targetUrl) != null) {
+        return when (CreativeCtaRouter.automaticNavigationAction(targetUrl, destination)) {
+            CreativeCtaRouter.AutomaticNavigationAction.ALLOW_IN_WEBVIEW ->
+                RewardedNavigationAction.ALLOW_IN_WEBVIEW
+            CreativeCtaRouter.AutomaticNavigationAction.CONSUME -> RewardedNavigationAction.CONSUME
+            CreativeCtaRouter.AutomaticNavigationAction.ROUTE_EXTERNALLY ->
                 RewardedNavigationAction.ROUTE_AUTO_STORE
-            } else {
-                RewardedNavigationAction.CONSUME
-            }
         }
-        return RewardedNavigationAction.ALLOW_IN_WEBVIEW
     }
     val currentOrigin = CreativeCtaRouter.admittedHttpUrl(currentPageUrl)
         ?: CreativeCtaRouter.admittedHttpUrl(initialPageUrl)
@@ -345,11 +353,7 @@ private fun RewardedMinigame(
     // A gate that already elapsed in a prior Activity instance (config-change recreation)
     // also starts earned — accumulated play time survives on the presentation.
     var rewardEarned by remember {
-        mutableStateOf(
-            gateSeconds <= 0 ||
-                presentation.rewardEarned ||
-                RewardGate.isEarned(presentation.accumulatedPlayTimeMs, gateSeconds),
-        )
+        mutableStateOf(initialRewardEarned(presentation.rewardEarned, presentation.accumulatedPlayTimeMs, gateSeconds))
     }
     var secondsLeft by remember {
         // Resume from already-accrued play time (config-change recovery), not the full gate.
@@ -398,6 +402,15 @@ private fun RewardedMinigame(
     // a WebView on its own, so a rewarded ad left open behind the home screen would keep running.
     // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
+    var bridgeReady by remember(presentation) { mutableStateOf(false) }
+    var bridgeUnavailable by remember { mutableStateOf(false) }
+    LaunchedEffect(bridgeUnavailable) {
+        if (bridgeUnavailable) {
+            rewardEarned = false
+            presentation.rewardEarned = false
+            onFinish(false)
+        }
+    }
     val primaryCtaNavigation = presentation.primaryCtaNavigation
     val primaryCtaAdmission = primaryCtaNavigation.admission
     val fallbackOwner = remember(presentation) { Any() }
@@ -472,15 +485,16 @@ private fun RewardedMinigame(
     // PLAYABLE_END — open the store the moment the close button appears (here, when the reward is
     // earned and the reward/close pill becomes a close button). SDK-native, no bridge.
     if (autoRedirect?.enabled == true && autoRedirect.trigger == AutoStoreRedirectTrigger.PLAYABLE_END) {
-        LaunchedEffect(rewardEarned) {
-            if (rewardEarned) fireAutoStoreRedirect()
+        LaunchedEffect(rewardEarned, bridgeReady) {
+            if (rewardEarned && bridgeReady) fireAutoStoreRedirect()
         }
     }
 
     // SHOWN — fired once the playable first composes
     // (begin-to-render), reporting the `/shown` beacon. Guarded so an Activity recreation doesn't
     // double-report.
-    LaunchedEffect(Unit) {
+    LaunchedEffect(bridgeReady) {
+        if (!bridgeReady) return@LaunchedEffect
         if (!presentation.displayedReported) {
             presentation.displayedReported = true
             presentation.callbacks.onDisplayed()
@@ -500,7 +514,8 @@ private fun RewardedMinigame(
     // Foreground-only so a backgrounded playable can't accrue the delay; the accrued time lives on the
     // presentation so a config-change recreation resumes rather than restarts. The `/seen` beacon is the
     // billing source of truth; onPaid is local analytics only (value already on-device, no network).
-    LaunchedEffect(Unit) {
+    LaunchedEffect(bridgeReady) {
+        if (!bridgeReady) return@LaunchedEffect
         if (presentation.impressionReported) return@LaunchedEffect
 
         fun fireImpressionAndPaid() {
@@ -543,7 +558,8 @@ private fun RewardedMinigame(
     // restarts it on return, so the gate can't be satisfied by simply backgrounding the
     // app for the required duration. The accumulated time lives on the presentation, so
     // a config change (rotation) resumes the remaining time instead of restarting it.
-    LaunchedEffect(Unit) {
+    LaunchedEffect(bridgeReady) {
+        if (!bridgeReady) return@LaunchedEffect
         if (gateSeconds <= 0) {
             presentation.rewardEarned = true
             rewardEarned = true
@@ -668,14 +684,22 @@ private fun RewardedMinigame(
     }
 
     fun routeAutomaticStoreNavigation(tappedUrl: String) {
-        val target = CreativeCtaRouter.preferredClickUrl(presentation.trackingUrl, tappedUrl) ?: return
+        val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+            tappedUrl = tappedUrl,
+            creativeBaseUrl = null,
+            trackingUrl = presentation.trackingUrl,
+            destination = presentation.destination,
+        )) {
+            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
+            else -> return
+        }
         presentation.autoRedirectCoordinator.request(
             scope = autoRedirectScope,
             pendingHandoff = presentation.pendingClickHandoff(),
         ) {
-            val opened = CreativeCtaRouter.open(
+            val opened = CreativeCtaRouter.openPrimaryCta(
                 context.applicationContext,
-                target,
+                route,
                 presentation.destination,
                 presentation.adBehavior?.storeOpen,
                 presentation.androidStoreUrl,
@@ -697,6 +721,7 @@ private fun RewardedMinigame(
                     client = object : CreativeTelemetryWebViewClient("rewarded") {
                         override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
                             super.onPageStarted(view, pageUrl, favicon) // starts the page-load timer
+                            primaryCtaNavigation.onNavigationStarted(pageUrl, fallbackOwner)
                             BridgeWebViewInstaller.onPageStarted(view)
                         }
 
@@ -705,13 +730,19 @@ private fun RewardedMinigame(
                             request: WebResourceRequest?,
                         ): Boolean {
                             val requestUrl = request?.url?.toString() ?: return false
-                            primaryCtaNavigation.navigationOverride()?.let { return it }
+                            primaryCtaNavigation.navigationOverride(
+                                targetUrl = requestUrl,
+                                isMainFrame = request.isForMainFrame,
+                                hasGesture = request.hasGesture(),
+                                owner = fallbackOwner,
+                            )?.let { return it }
                             return when (rewardedNavigationAction(
                                 isMainFrame = request.isForMainFrame,
                                 hasGesture = request.hasGesture(),
                                 targetUrl = requestUrl,
                                 currentPageUrl = view?.url,
                                 initialPageUrl = initialPageUrl,
+                                destination = presentation.destination,
                             )) {
                                 RewardedNavigationAction.ALLOW_IN_WEBVIEW -> false
                                 RewardedNavigationAction.CONSUME -> true
@@ -726,17 +757,22 @@ private fun RewardedMinigame(
                     surface = "rewarded",
                 ).apply {
                     webChromeClient = CreativeTelemetryWebChromeClient("rewarded", SimulaAds.devMode)
-                    BridgeWebViewInstaller.install(this, bridge) { url ->
+                    val injectionMode = BridgeWebViewInstaller.install(this, bridge) { url ->
                         if (primaryCtaAdmission.isEnabled()) beginPrimaryCta(url)
                     }
-                    if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
-                    when (val source = creativeSource) {
-                        is RewardedCreativeSource.Html -> {
-                            // Primary HTML stays opaque and never inherits iframe origin state.
-                            loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
+                    if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
+                        post { bridgeUnavailable = true }
+                    } else {
+                        post { bridgeReady = true }
+                        if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
+                        when (val source = creativeSource) {
+                            is RewardedCreativeSource.Html -> {
+                                // Primary HTML stays opaque and never inherits iframe origin state.
+                                loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
+                            }
+                            is RewardedCreativeSource.Iframe -> loadUrl(source.url)
+                            null -> Unit
                         }
-                        is RewardedCreativeSource.Iframe -> loadUrl(source.url)
-                        null -> Unit
                     }
                     creativeWebView = this
                 }

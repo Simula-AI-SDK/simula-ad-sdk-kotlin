@@ -90,17 +90,6 @@ internal fun enqueueOwnedFallbackClickBeacon(
     if (beaconId == null) completion(BeaconPersistenceOutcome.Persisted) else enqueue(beaconId)
 }
 
-internal fun fallbackNavigationOverride(
-    clickHandoffPending: Boolean,
-    documentAdmissionEnabled: Boolean,
-    fallbackNavigationStarted: Boolean,
-): Boolean? = when {
-    clickHandoffPending -> true
-    !documentAdmissionEnabled && !fallbackNavigationStarted -> true
-    !documentAdmissionEnabled -> false
-    else -> null
-}
-
 internal class FallbackPresentationState(
     private val clockMs: () -> Long = SystemClock::elapsedRealtime,
 ) {
@@ -116,8 +105,8 @@ internal class FallbackPresentationState(
     private var navigationOwner: Any? = null
     private var navigateInWebView: ((String) -> Boolean)? = null
     private var pendingNavigationUrl: String? = null
-    private var fallbackNavigationStarted = false
-    private var deliveryInProgress = false
+    private var activeDelivery: NavigationDelivery? = null
+    private var deliveryRevision = 0L
     private var cleared = false
     private var fetchWaitGeneration = 0L
     private var fetchWaitDeadlineMs = 0L
@@ -126,9 +115,7 @@ internal class FallbackPresentationState(
     fun showing(index: Int) {
         val nextIndex = index.coerceAtLeast(0)
         if (stage == FallbackStage.SHOWING && this.index != nextIndex) {
-            pendingNavigationUrl = null
-            fallbackNavigationStarted = false
-            deliveryInProgress = false
+            cancelNavigationLocked()
         }
         stage = FallbackStage.SHOWING
         this.index = nextIndex
@@ -138,7 +125,6 @@ internal class FallbackPresentationState(
         synchronized(this) {
             if (cleared) return
             clickHandoffPending = pending
-            if (!pending && pendingNavigationUrl == null) fallbackNavigationStarted = true
         }
         if (!pending) dispatchReadyNavigation()
     }
@@ -200,6 +186,7 @@ internal class FallbackPresentationState(
     fun bindNavigation(owner: Any, navigate: (String) -> Boolean) {
         synchronized(this) {
             if (cleared) return
+            if (navigationOwner !== owner) clearBindingLocked()
             navigationOwner = owner
             navigateInWebView = navigate
         }
@@ -209,8 +196,7 @@ internal class FallbackPresentationState(
     @Synchronized
     fun unbindNavigation(owner: Any) {
         if (navigationOwner === owner) {
-            navigationOwner = null
-            navigateInWebView = null
+            clearBindingLocked()
         }
     }
 
@@ -230,48 +216,91 @@ internal class FallbackPresentationState(
     fun clear() {
         cleared = true
         clickHandoffPending = false
-        pendingNavigationUrl = null
-        fallbackNavigationStarted = false
-        deliveryInProgress = false
-        navigationOwner = null
-        navigateInWebView = null
+        cancelNavigationLocked()
         clickAdmissions.clear()
         closeGateElapsedByIndex.clear()
     }
 
     private fun dispatchReadyNavigation() {
         val delivery = synchronized(this) {
-            if (cleared || clickHandoffPending || deliveryInProgress) return
+            if (cleared || clickHandoffPending || activeDelivery != null) return
             val navigate = navigateInWebView ?: return
             val url = pendingNavigationUrl ?: return
-            deliveryInProgress = true
-            navigate to url
+            val owner = navigationOwner ?: return
+            NavigationDelivery(++deliveryRevision, owner, url).also { activeDelivery = it } to navigate
         }
-        val delivered = runCatching { delivery.first(delivery.second) }.getOrDefault(false)
+        val delivered = runCatching { delivery.second(delivery.first.url) }.getOrDefault(false)
         synchronized(this) {
-            deliveryInProgress = false
-            if (delivered && pendingNavigationUrl == delivery.second) {
+            if (activeDelivery !== delivery.first) return@synchronized
+            if (delivered && pendingNavigationUrl == delivery.first.url) {
                 pendingNavigationUrl = null
-                fallbackNavigationStarted = true
             }
+            if (!delivered || delivery.first.permitConsumed) activeDelivery = null
         }
     }
 
     @Synchronized
-    fun navigationOverride(documentAdmissionEnabled: Boolean): Boolean? = fallbackNavigationOverride(
-        clickHandoffPending = clickHandoffPending,
-        documentAdmissionEnabled = documentAdmissionEnabled,
-        fallbackNavigationStarted = fallbackNavigationStarted,
-    )
+    fun navigationOverride(
+        targetUrl: String? = null,
+        isMainFrame: Boolean = true,
+        hasGesture: Boolean = false,
+        owner: Any? = navigationOwner,
+    ): Boolean? {
+        if (cleared) return true
+        if (clickHandoffPending) return true
+        activeDelivery?.let { delivery ->
+            if (delivery.owner === owner && isMainFrame && !hasGesture &&
+                targetUrl == delivery.url && !delivery.permitConsumed
+            ) {
+                delivery.permitConsumed = true
+                if (pendingNavigationUrl == null) activeDelivery = null
+                return false
+            }
+            return true
+        }
+        return if (pendingNavigationUrl != null) true else null
+    }
+
+    @Synchronized
+    fun onNavigationStarted(url: String?, owner: Any? = navigationOwner) {
+        val delivery = activeDelivery ?: return
+        if (delivery.owner !== owner || url != delivery.url) return
+        delivery.permitConsumed = true
+        if (pendingNavigationUrl == null) activeDelivery = null
+    }
 
     @Synchronized
     fun advance(total: Int): Boolean {
-        if (clickHandoffPending || pendingNavigationUrl != null || deliveryInProgress ||
-            stage != FallbackStage.SHOWING
-        ) return false
+        if (clickHandoffPending || stage != FallbackStage.SHOWING) return false
+        cancelNavigationLocked()
         if (index + 1 < total) showing(index + 1) else done()
         return true
     }
+
+    private fun cancelNavigationLocked() {
+        pendingNavigationUrl = null
+        activeDelivery = null
+        deliveryRevision++
+        navigationOwner = null
+        navigateInWebView = null
+    }
+
+    private fun clearBindingLocked() {
+        activeDelivery?.takeIf { it.owner === navigationOwner }?.let { delivery ->
+            if (pendingNavigationUrl == null) pendingNavigationUrl = delivery.url
+            activeDelivery = null
+            deliveryRevision++
+        }
+        navigationOwner = null
+        navigateInWebView = null
+    }
+
+    private data class NavigationDelivery(
+        val revision: Long,
+        val owner: Any,
+        val url: String,
+        var permitConsumed: Boolean = false,
+    )
 }
 
 /**
@@ -601,6 +630,7 @@ private fun FallbackAdOverlay(
                     client = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             if (!realLoadStarted) return
+                            presentationState.onNavigationStarted(url, navigationOwner)
                             pageCommitted = false
                             if (!url.isNullOrBlank() && (url != "about:blank" || inlineHtml != null)) {
                                 pageLoadFailed = false
@@ -639,7 +669,12 @@ private fun FallbackAdOverlay(
                         }
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val target = request?.url?.toString() ?: return false
-                            presentationState.navigationOverride(clickAdmission.isEnabled())?.let { return it }
+                            presentationState.navigationOverride(
+                                targetUrl = target,
+                                isMainFrame = request.isForMainFrame,
+                                hasGesture = request.hasGesture(),
+                                owner = navigationOwner,
+                            )?.let { return it }
                             val targetUri = runCatching { Uri.parse(target) }.getOrNull() ?: return true
                             if (targetUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
                             // Subframes stay inside the creative and automatic cross-origin redirects
@@ -679,11 +714,12 @@ private fun FallbackAdOverlay(
                             // failure behavior).
                             // A genuine user tap uses one native fallback_cta interaction id for durable
                             // beacon + lifecycle attribution. Programmatic redirects remain non-clicks.
-                            val claim = notifyPublisherClickForClaim(
-                                claimClick(ClickSources.FALLBACK_CTA),
-                                onAdClick,
-                            ) ?: return true
-                            clickAdmission.disable()
+                            val claim = claimClick(ClickSources.FALLBACK_CTA) ?: return true
+                            if (!clickAdmission.disable()) {
+                                claim.release()
+                                return true
+                            }
+                            notifyPublisherClick { onAdClick(claim.interaction) }
                             val interaction = claim.interaction
                             coordinateDeferredClickPersistence(
                                 mainHandler = clickHandler,

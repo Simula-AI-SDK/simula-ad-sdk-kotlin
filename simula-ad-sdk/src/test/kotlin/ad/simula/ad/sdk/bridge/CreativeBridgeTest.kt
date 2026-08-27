@@ -217,6 +217,79 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun fullscreenBridgeSelectsPageStartFallbackForLegacyAndPartialInstallations() {
+        assertEquals(
+            BridgeInjectionMode.PAGE_START_FALLBACK,
+            bridgeInjectionMode(true, true, false, false, true, false),
+        )
+        assertEquals(
+            BridgeInjectionMode.PAGE_START_FALLBACK,
+            bridgeInjectionMode(true, true, true, false, true, false),
+        )
+        assertEquals(
+            BridgeInjectionMode.PAGE_START_FALLBACK,
+            bridgeInjectionMode(true, true, true, true, true, false),
+        )
+        assertEquals(
+            BridgeInjectionMode.DOCUMENT_START,
+            bridgeInjectionMode(true, true, true, true, true, true),
+        )
+        assertEquals(
+            BridgeInjectionMode.DOCUMENT_START,
+            bridgeInjectionMode(true, true, true, true, false, false),
+        )
+        assertEquals(
+            BridgeInjectionMode.UNAVAILABLE,
+            bridgeInjectionMode(false, true, true, true, true, true),
+        )
+        assertEquals(
+            BridgeInjectionMode.UNAVAILABLE,
+            bridgeInjectionMode(true, false, true, true, true, true),
+        )
+    }
+
+    @Test
+    fun fullscreenPageStartFallbackCarriesCurrentCapabilityAndOnlyMissingRelays() {
+        val full = BridgeWebViewInstaller.fallbackRelayScript(
+            installationId = "17",
+            bridgeCapability = "bridge-capability",
+            activationNonce = "nonce",
+            ctaDisabled = false,
+            coreDocumentStartInstalled = false,
+            ctaDocumentStartInstalled = false,
+        )
+        assertTrue(full.contains("__simulaSdkPageReady:17:"))
+        assertTrue(full.contains("var bridgeCapability = \"bridge-capability\""))
+        assertTrue(full.contains("event.isTrusted !== true"))
+        assertTrue(full.contains("event.source !== window"))
+        assertTrue(full.contains("SIMULA_CTA_OPEN"))
+        assertTrue(full.contains("var activationNonce = \"nonce\""))
+
+        val ctaOnly = BridgeWebViewInstaller.fallbackRelayScript(
+            installationId = "17",
+            bridgeCapability = "bridge-capability",
+            activationNonce = "nonce",
+            ctaDisabled = false,
+            coreDocumentStartInstalled = true,
+            ctaDocumentStartInstalled = false,
+        )
+        assertFalse(ctaOnly.contains("__simulaSdkPageReady:"))
+        assertFalse(ctaOnly.contains("bridge-capability"))
+        assertTrue(ctaOnly.contains("SIMULA_CTA_OPEN"))
+
+        val coreOnly = BridgeWebViewInstaller.fallbackRelayScript(
+            installationId = "17",
+            bridgeCapability = "bridge-capability",
+            activationNonce = "nonce",
+            ctaDisabled = true,
+            coreDocumentStartInstalled = false,
+            ctaDocumentStartInstalled = false,
+        )
+        assertTrue(coreOnly.contains("__simulaSdkPageReady:17:"))
+        assertFalse(coreOnly.contains("SIMULA_CTA_OPEN"))
+    }
+
+    @Test
     fun trustedCtaDocumentScriptContainsOnlyOneShotCaptureLayer() {
         val source = BridgeWebViewInstaller.trustedCtaDocumentStartScript(activationNonce = "nonce")
 
