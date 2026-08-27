@@ -9,9 +9,9 @@ import org.junit.Test
  * Tier-0 regression guard for click-through attribution: the CTA must open the MMP tracking link
  * **verbatim** and never rewrite it into a `market://`/Play Store URL — rewriting strips the
  * `referrer` the Google Play Install Referrer API needs, breaking install attribution. The raw
- * store link ([CreativeCtaRouter.targetUrl]'s second argument) is only the deterministic fallback
- * when the tracker is blank/missing — it must never *replace* an available tracker. The framework
- * (Intent/Uri/Context) launch is verified manually; here we lock the pure URL-selection contract.
+ * store link is only the deterministic fallback when the tracker is blank/missing — it must never
+ * replace an available tracker. Framework launch is verified manually; here we lock the pure
+ * planner and router contracts.
  */
 class CreativeCtaRouterTest {
 
@@ -135,61 +135,6 @@ class CreativeCtaRouterTest {
     }
 
     @Test
-    fun `top-level tracker wins over the URL embedded in HTML`() {
-        val tracker = "https://tracker.example/click?a=1&b=2"
-        val embedded = "https://tracker.example/click?a=1&amp;b=2"
-
-        assertEquals(tracker, CreativeCtaRouter.preferredClickUrl(tracker, embedded))
-    }
-
-    @Test
-    fun `missing or blank top-level tracker falls back to embedded URL`() {
-        val embedded = "https://example.com/landing"
-
-        assertEquals(embedded, CreativeCtaRouter.preferredClickUrl(null, embedded))
-        assertEquals(embedded, CreativeCtaRouter.preferredClickUrl("", embedded))
-        assertEquals(embedded, CreativeCtaRouter.preferredClickUrl("   ", embedded))
-    }
-
-    @Test
-    fun `invalid top-level tracker falls back to admitted tapped URL`() {
-        val tapped = "https://creative.example/click?encoded=a%2Fb%3Fc&sig=x%2By"
-
-        assertEquals(tapped, CreativeCtaRouter.preferredClickUrl("javascript:alert(1)", tapped))
-        assertEquals(tapped, CreativeCtaRouter.preferredClickUrl("/relative", tapped))
-        assertEquals(tapped, CreativeCtaRouter.preferredClickUrl("https:///missing-host", tapped))
-    }
-
-    @Test
-    fun `embedded market and intent destinations are safely normalized for auto redirects`() {
-        val market = "market://details?id=com.example.app&referrer=click%2Bvalue"
-        val intent = "intent://details#Intent;scheme=market;" +
-            "S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.example.app;end"
-
-        assertEquals(
-            "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%2Bvalue",
-            CreativeCtaRouter.preferredClickUrl(null, market),
-        )
-        assertEquals(
-            "https://play.google.com/store/apps/details?id=com.example.app",
-            CreativeCtaRouter.preferredClickUrl(null, intent),
-        )
-        assertEquals(
-            "https://tracker.example/click",
-            CreativeCtaRouter.preferredClickUrl("https://tracker.example/click", market),
-        )
-    }
-
-    @Test
-    fun `embedded unsafe custom destinations remain rejected`() {
-        listOf(
-            "javascript:alert(1)",
-            "custom://open/app",
-            "intent://details#Intent;scheme=market;end",
-        ).forEach { assertNull(CreativeCtaRouter.preferredClickUrl(null, it)) }
-    }
-
-    @Test
     fun `admitted URL preserves encoded query bytes exactly`() {
         val url = "https://tracker.example/click?a=x%2Fy&sig=a%2Bb%3D%3D"
 
@@ -285,7 +230,6 @@ class CreativeCtaRouterTest {
         val https = "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%2Bvalue"
         val launched = mutableListOf<String>()
 
-        assertEquals(https, CreativeCtaRouter.targetUrl(null, market, destination = "appstore"))
         assertTrue(
             CreativeCtaRouter.routeCta(
                 trackingUrl = null,
@@ -349,7 +293,6 @@ class CreativeCtaRouterTest {
         val directLaunches = mutableListOf<String>()
         val retryLaunches = mutableListOf<String>()
 
-        assertEquals(fallback, CreativeCtaRouter.targetUrl(null, intent, destination = "appstore"))
         assertTrue(
             CreativeCtaRouter.routeCta(
                 trackingUrl = null,
@@ -441,12 +384,83 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `fallback navigation uses one admitted origin policy without changing gesture behavior`() {
+        val base = "https://creative.example/game"
+        val tracker = "https://tracker.example/click"
+
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView,
+            CreativeCtaRouter.fallbackCtaTapPlan(
+                false,
+                false,
+                "https://user@other.example/frame",
+                base,
+                tracker,
+                "appstore",
+            ),
+        )
+        listOf("about:blank", "data:text/plain,help", "blob:https://creative.example/id").forEach { target ->
+            assertEquals(
+                CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView,
+                CreativeCtaRouter.fallbackCtaTapPlan(true, false, target, base, tracker, "appstore"),
+            )
+        }
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView,
+            CreativeCtaRouter.fallbackCtaTapPlan(
+                true,
+                false,
+                "https://CREATIVE.example:443/next",
+                base,
+                tracker,
+                "appstore",
+            ),
+        )
+        listOf(
+            "https://other.example/next",
+            "https://user@creative.example/next",
+            "market://details?id=com.example.app",
+        ).forEach { target ->
+            assertEquals(
+                CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick,
+                CreativeCtaRouter.fallbackCtaTapPlan(true, false, target, base, tracker, "appstore"),
+            )
+        }
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView,
+            CreativeCtaRouter.fallbackCtaTapPlan(
+                true,
+                true,
+                "https://creative.example/next",
+                base,
+                tracker,
+                "appstore",
+            ),
+        )
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.Route(
+                ad.simula.ad.sdk.network.PrimaryCtaRoute(
+                    tappedUrl = "https://other.example/next",
+                    externalTarget = tracker,
+                ),
+            ),
+            CreativeCtaRouter.fallbackCtaTapPlan(
+                true,
+                true,
+                "https://other.example/next",
+                base,
+                tracker,
+                "appstore",
+            ),
+        )
+    }
+
+    @Test
     fun `lenient top-level tracker wins and is launched byte-for-byte`() {
         val tracker = "https://tracker.example/click?pid=partner|affiliate&campaign=Summer Sale&id={click_id}"
         val store = "https://play.google.com/store/apps/details?id=app"
         val launched = mutableListOf<String>()
 
-        assertEquals(tracker, CreativeCtaRouter.preferredClickUrl("  $tracker  ", store))
         assertTrue(
             CreativeCtaRouter.routeCta(
                 trackingUrl = "  $tracker  ",
@@ -459,46 +473,58 @@ class CreativeCtaRouterTest {
     }
 
     @Test
-    fun `opens the tracking link verbatim regardless of destination`() {
+    fun `live router opens the tracking link verbatim regardless of destination`() {
         val tracking = "https://app.appsflyer.com/id123?pid=net&c=camp&af_siteid=pub&clickid=abc"
-        // The opened URL is exactly the tracker — same host, query untouched, never a market:// link.
-        assertEquals(tracking, CreativeCtaRouter.targetUrl(tracking))
-    }
-
-    @Test
-    fun `a store link never replaces an available tracker`() {
-        val tracking = "https://scrmbly.sng.link/D8eij/u4bya?idfa=x&ad_id=abc"
         val store = "https://play.google.com/store/apps/details?id=com.scrambly"
-        // The tracker wins — opening the raw store link instead would drop the MMP click.
-        assertEquals(tracking, CreativeCtaRouter.targetUrl(tracking, store))
+        listOf("appstore", "web").forEach { destination ->
+            val launched = mutableListOf<String>()
+            assertTrue(
+                CreativeCtaRouter.routeCta(
+                    trackingUrl = tracking,
+                    destination = destination,
+                    storeUrl = store,
+                    launch = { launched += it; true },
+                ),
+            )
+            assertEquals(listOf(tracking), launched)
+        }
     }
 
     @Test
-    fun `blank or missing tracker falls back to the raw store link for appstore destinations`() {
+    fun `live router never uses store fallback for web destination`() {
         val store = "https://play.google.com/store/apps/details?id=com.scrambly"
-        // Previously a silent no-op; now the CTA deterministically lands on the store.
-        assertEquals(store, CreativeCtaRouter.targetUrl(null, store))
-        assertEquals(store, CreativeCtaRouter.targetUrl("", store))
-        assertEquals(store, CreativeCtaRouter.targetUrl("   ", store, "appstore"))
+        val launched = mutableListOf<String>()
+        val diagnostics = mutableListOf<String>()
+
+        assertEquals(
+            false,
+            CreativeCtaRouter.routeCta(
+                trackingUrl = null,
+                destination = "web",
+                storeUrl = store,
+                launch = { launched += it; true },
+                record = diagnostics::add,
+            ),
+        )
+        assertTrue(launched.isEmpty())
+        assertEquals(listOf("mmp_route_failed"), diagnostics)
     }
 
     @Test
-    fun `a web destination never falls back to the store link`() {
-        val store = "https://play.google.com/store/apps/details?id=com.scrambly"
-        // A web CTA with no tracker must no-op — opening the Play Store would be the wrong surface.
-        assertNull(CreativeCtaRouter.targetUrl(null, store, "web"))
-        assertNull(CreativeCtaRouter.targetUrl("  ", store, "web"))
-        // The tracker itself still opens verbatim for web destinations.
-        assertEquals("https://example.com/offer", CreativeCtaRouter.targetUrl("https://example.com/offer", store, "web"))
-    }
-
-    @Test
-    fun `blank or missing tracking link with no store link is a no-op`() {
-        assertNull(CreativeCtaRouter.targetUrl(null))
-        assertNull(CreativeCtaRouter.targetUrl(""))
-        assertNull(CreativeCtaRouter.targetUrl("   "))
-        assertNull(CreativeCtaRouter.targetUrl(null, null))
-        assertNull(CreativeCtaRouter.targetUrl("", "  "))
+    fun `live router with no admitted destination fails without launching`() {
+        listOf(null, "", "   ", "javascript:alert(1)").forEach { tracker ->
+            var launches = 0
+            assertEquals(
+                false,
+                CreativeCtaRouter.routeCta(
+                    trackingUrl = tracker,
+                    destination = "appstore",
+                    storeUrl = null,
+                    launch = { launches++; true },
+                ),
+            )
+            assertEquals(0, launches)
+        }
     }
 
     @Test

@@ -58,11 +58,6 @@ internal object CreativeCtaRouter {
         data class Route(val route: PrimaryCtaRoute) : PrimaryCtaTapPlan
     }
 
-    /** Prefer the attribution URL carried outside rendered HTML, whose script text may HTML-escape
-     * query separators. Older payloads without that field keep using the creative's tapped URL. */
-    internal fun preferredClickUrl(trackingUrl: String?, embeddedUrl: String): String? =
-        admittedHttpUrl(trackingUrl) ?: normalizeTappedDestination(embeddedUrl)
-
     internal fun admittedHttpUrl(value: String?): String? {
         val candidate = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         if (candidate.hasUrlControlCharacters()) return null
@@ -136,6 +131,27 @@ internal object CreativeCtaRouter {
                 externalTarget = externalTarget,
             ),
         )
+    }
+
+    internal fun fallbackCtaTapPlan(
+        isMainFrame: Boolean,
+        hasGesture: Boolean,
+        tappedUrl: String,
+        creativeBaseUrl: String?,
+        trackingUrl: String?,
+        destination: String,
+    ): PrimaryCtaTapPlan {
+        if (!isMainFrame) return PrimaryCtaTapPlan.AllowInWebView
+        val scheme = tappedUrl.substringBefore(':', missingDelimiterValue = "").lowercase()
+        if (scheme in setOf("about", "data", "blob")) return PrimaryCtaTapPlan.AllowInWebView
+        if (!hasGesture) {
+            return if (hasSameHttpOrigin(creativeBaseUrl, tappedUrl)) {
+                PrimaryCtaTapPlan.AllowInWebView
+            } else {
+                PrimaryCtaTapPlan.ConsumeWithoutClick
+            }
+        }
+        return primaryCtaTapPlan(tappedUrl, creativeBaseUrl, trackingUrl, destination)
     }
 
     internal fun admittedWebCustomDestination(value: String?, destination: String): String? {
@@ -242,23 +258,7 @@ internal object CreativeCtaRouter {
         }.getOrNull()
 
     /**
-     * The URL a creative CTA should open: the tracking link itself, trimmed and **verbatim**
-     * (never rewritten into a store URL), or — when the tracker is blank/missing AND the
-     * [destination] is the app store — the campaign's safely normalized [storeUrl], so the CTA deterministically
-     * lands on the store instead of silently no-oping. A web-destination CTA never falls back to
-     * the store link. `null` when nothing is applicable (the caller then no-ops). Pure and
-     * framework-free so the "never rewrite the tracker" contract can be unit-tested.
-     */
-    internal fun targetUrl(
-        trackingUrl: String?,
-        storeUrl: String? = null,
-        destination: String = "appstore",
-    ): String? =
-        admittedHttpUrl(trackingUrl)
-            ?: normalizeTappedDestination(storeUrl).takeIf { destination == "appstore" }
-
-    /**
-     * Opens the advertiser destination for a creative CTA by handing [targetUrl] to the browser.
+     * Opens the admitted tracker or deterministic app-store fallback in the browser.
      * Best-effort: a blank link or unavailable browser silently no-ops (the CLICKED event has
      * already fired upstream). When the tracker itself can't be launched and the destination is
      * the app store, the raw [storeUrl] (if distinct) is the deterministic fallback.

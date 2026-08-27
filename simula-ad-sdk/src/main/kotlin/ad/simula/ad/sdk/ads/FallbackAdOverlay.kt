@@ -18,7 +18,6 @@ import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission
 import android.content.Context
 import android.graphics.Bitmap
-import android.net.Uri
 import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
@@ -675,29 +674,9 @@ private fun FallbackAdOverlay(
                                 hasGesture = request.hasGesture(),
                                 owner = navigationOwner,
                             )?.let { return it }
-                            val targetUri = runCatching { Uri.parse(target) }.getOrNull() ?: return true
-                            if (targetUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
-                            // Subframes stay inside the creative and automatic cross-origin redirects
-                            // are blocked rather than opening external UI.
-                            if (request.isForMainFrame != true) return false
-                            val originUri = iframeUrl?.let { runCatching { Uri.parse(it) }.getOrNull() }
-                            val originPort = originUri?.port?.takeIf { it >= 0 } ?: when (originUri?.scheme?.lowercase()) {
-                                "http" -> 80
-                                "https" -> 443
-                                else -> -1
-                            }
-                            val targetPort = targetUri.port.takeIf { it >= 0 } ?: when (targetUri.scheme?.lowercase()) {
-                                "http" -> 80
-                                "https" -> 443
-                                else -> -1
-                            }
-                            val sameOrigin = originUri?.host != null &&
-                                originUri.scheme.equals(targetUri.scheme, ignoreCase = true) &&
-                                originUri.host.equals(targetUri.host, ignoreCase = true) &&
-                                originPort == targetPort
-                            if (sameOrigin) return false
-                            if (!request.hasGesture()) return true
-                            val routePlan = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+                            val routePlan = when (val plan = CreativeCtaRouter.fallbackCtaTapPlan(
+                                isMainFrame = request.isForMainFrame,
+                                hasGesture = request.hasGesture(),
                                 tappedUrl = target,
                                 creativeBaseUrl = iframeUrl,
                                 trackingUrl = ctaTrackingUrl,
