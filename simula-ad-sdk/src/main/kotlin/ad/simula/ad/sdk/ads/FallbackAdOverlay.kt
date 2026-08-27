@@ -662,6 +662,16 @@ private fun FallbackAdOverlay(
                                 originPort == targetPort
                             if (sameOrigin) return false
                             if (!request.hasGesture()) return true
+                            val routePlan = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+                                tappedUrl = target,
+                                creativeBaseUrl = iframeUrl,
+                                trackingUrl = ctaTrackingUrl,
+                                destination = ctaDestination,
+                            )) {
+                                CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> return false
+                                CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
+                                is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
+                            }
                             // Route through the shared CTA router: the tapped tracker opens
                             // verbatim (referrer-preserving); the serve's raw store link is the
                             // deterministic fallback when it can't be launched. A failed launch
@@ -697,20 +707,17 @@ private fun FallbackAdOverlay(
                                 },
                                 recordTelemetry = { completion -> persistClick(adId, interaction, completion) },
                                 onHandoff = { committedInteraction, completion ->
-                                    val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(target)
-                                    val clickTarget = CreativeCtaRouter.admittedHttpUrl(ctaTrackingUrl)
-                                        ?: tappedDestination
                                     val route = { appContext: Context ->
-                                        val opened = CreativeCtaRouter.open(
+                                        val opened = CreativeCtaRouter.openPrimaryCta(
                                             appContext,
-                                            clickTarget,
+                                            routePlan,
                                             ctaDestination,
                                             null,
                                             ctaStoreUrl,
                                         )
                                         if (opened) runCatching { onStoreOpen(committedInteraction) }
                                         if (!opened) {
-                                            tappedDestination?.let { fallbackUrl ->
+                                            routePlan.tappedUrl?.let { fallbackUrl ->
                                                 presentationState.retainNavigation(fallbackUrl)
                                             }
                                         }

@@ -199,10 +199,18 @@ class CreativeBridgeTest {
 
     @Test
     fun coreDocumentStartRelaySurvivesWithoutTrustedCtaHooks() {
-        val source = BridgeWebViewInstaller.coreRelayScript("17")
+        val source = BridgeWebViewInstaller.coreRelayScript("17", "bridge-capability")
 
+        assertTrue(source.contains("if (window !== window.top) { return; }"))
+        assertTrue(source.contains("'use strict';"))
+        assertTrue(source.contains("var bridgeCapability = \"bridge-capability\""))
+        assertEquals(1, source.split("bridge-capability").size - 1)
+        assertTrue(source.contains("event.isTrusted !== true"))
+        assertTrue(source.contains("event.source !== window"))
         assertTrue(source.contains("window.addEventListener('message'"))
         assertTrue(source.contains("__simulaSdkPageReady:17:"))
+        assertTrue(source.contains("nativeStringify(bridgeCapability)"))
+        assertFalse(source.contains("Object.keys(envelope)"))
         assertFalse(source.contains("SIMULA_CTA_OPEN"))
         assertFalse(source.contains("window.open ="))
         assertFalse(source.contains("activation_nonce"))
@@ -218,8 +226,27 @@ class CreativeBridgeTest {
         assertTrue(source.contains("SIMULA_CTA_OPEN"))
         assertTrue(source.contains("window.open ="))
         assertTrue(source.contains("activation_nonce"))
+        assertTrue(source.contains("'use strict';"))
+        assertTrue(source.contains("if (window !== window.top) { return; }"))
+        assertFalse(source.contains("nativeStringify({"))
         assertFalse(source.contains("__simulaSdkPageReady:"))
         assertFalse(source.contains("window.addEventListener('message'"))
+    }
+
+    @Test
+    fun genericBridgeMessagesRequireCurrentDocumentCapability() {
+        val authenticated =
+            """{"type":"AD_EARLY_COMPLETE","$BRIDGE_CAPABILITY_KEY":"current"}"""
+
+        assertEquals(authenticated, authenticatedBridgeMessage(authenticated, "current"))
+        assertNull(authenticatedBridgeMessage("""{"type":"AD_EARLY_COMPLETE"}""", "current"))
+        assertNull(
+            authenticatedBridgeMessage(
+                """{"type":"AD_EARLY_COMPLETE","$BRIDGE_CAPABILITY_KEY":"stale"}""",
+                "current",
+            ),
+        )
+        assertNull(authenticatedBridgeMessage("malformed", "current"))
     }
 
     @Test
@@ -269,7 +296,9 @@ class CreativeBridgeTest {
         assertTrue(source.contains("trustedEventTimestamp = Number(event.timeStamp || 0)"))
         assertTrue(source.contains("return trustedDispatch && trustedEventTimestamp >= 0"))
         assertTrue(source.contains("if (!awaitingClick) { beginGesture(event); }"))
-        assertTrue(source.contains("nativeReceiver.isCtaEnabled('nonce') === true"))
+        assertTrue(source.contains("var activationNonce = \"nonce\""))
+        assertTrue(source.contains("nativeReceiver.isCtaEnabled(activationNonce) === true"))
+        assertEquals(1, source.split("\"nonce\"").size - 1)
         val duplicateCheck = requireNotNull(source.indexOf("if (claimedGesture === gestureSequence) { return true; }")
             .takeIf { it >= 0 })
         val activeCheck = requireNotNull(source.indexOf("if (!hasActiveUserGesture()) { return false; }")

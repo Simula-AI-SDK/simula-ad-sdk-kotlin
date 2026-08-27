@@ -10,6 +10,7 @@ import kotlinx.serialization.json.put
 
 /** Maximum creative bridge message size, measured as Kotlin [String.length] UTF-16 code units. */
 internal const val CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS = 64 * 1024
+internal const val BRIDGE_CAPABILITY_KEY = "__simulaSdkCapability"
 
 internal val FULL_SCREEN_BRIDGE_MESSAGE_TYPES = setOf(
     "AD_EARLY_COMPLETE",
@@ -60,6 +61,17 @@ private val bridgeRejectionRecorder = BoundedBridgeRejectionRecorder { reason ->
 }
 
 private fun recordBridgeMessageRejected(reason: String) = bridgeRejectionRecorder.record(reason)
+
+/** Admits only a relay-authenticated envelope from the current top creative document. */
+internal fun authenticatedBridgeMessage(message: String, expectedCapability: String): String? {
+    if (message.length > CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS) return null
+    val root = runCatching { creativeBridgeJson.parseToJsonElement(message) as? JsonObject }.getOrNull()
+        ?: return null
+    val supplied = (root[BRIDGE_CAPABILITY_KEY] as? JsonPrimitive)
+        ?.takeIf { it.isString }
+        ?.content
+    return message.takeIf { supplied == expectedCapability }
+}
 
 /** Rejects oversized, malformed, non-object, missing-type, and unknown-type messages off-main. */
 internal fun parseKnownCreativeBridgeMessage(

@@ -331,6 +331,40 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `fallback CTA requires admitted external route before claiming`() {
+        val tracker = "https://tracker.example/click"
+
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView,
+            CreativeCtaRouter.primaryCtaTapPlan(
+                tappedUrl = "javascript:openDetails()",
+                creativeBaseUrl = "https://creative.example/end-screen",
+                trackingUrl = tracker,
+                destination = "appstore",
+            ),
+        )
+        listOf("market://details?missing=id", "custom-app://offer").forEach { tapped ->
+            assertEquals(
+                CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick,
+                CreativeCtaRouter.primaryCtaTapPlan(
+                    tappedUrl = tapped,
+                    creativeBaseUrl = "https://creative.example/end-screen",
+                    trackingUrl = tracker,
+                    destination = "appstore",
+                ),
+            )
+        }
+        assertTrue(
+            CreativeCtaRouter.primaryCtaTapPlan(
+                tappedUrl = "https://advertiser.example/offer",
+                creativeBaseUrl = "https://creative.example/end-screen",
+                trackingUrl = tracker,
+                destination = "appstore",
+            ) is CreativeCtaRouter.PrimaryCtaTapPlan.Route,
+        )
+    }
+
+    @Test
     fun `fullscreen fallback click beacon belongs to fallback screen`() {
         assertEquals("fallback-ad", fallbackClickBeaconImpressionId("fallback-ad", serverEnabled = true))
         assertNull(fallbackClickBeaconImpressionId("fallback-ad", serverEnabled = false))

@@ -1,9 +1,27 @@
 package ad.simula.ad.sdk.nativead
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NativeAdWebViewOwnershipTest {
+
+    @Test
+    fun `native bridge authenticates only top document messages and height`() {
+        val source = nativeBridgeScript("native-capability")
+
+        assertTrue(source.contains("window.top !== window.self"))
+        assertTrue(source.contains("'use strict';"))
+        assertTrue(source.contains("var bridgeCapability = \"native-capability\""))
+        assertEquals(1, source.split("native-capability").size - 1)
+        assertTrue(source.contains("e.isTrusted !== true"))
+        assertTrue(source.contains("e.source !== window"))
+        assertTrue(source.contains("JSON.stringify.bind(JSON)"))
+        assertTrue(source.contains("JSON.parse.bind(JSON)"))
+        assertTrue(source.contains("nativeStringify(bridgeCapability)"))
+        assertFalse(source.contains("Object.keys(envelope)"))
+    }
 
     @Test
     fun `claim reuses idle creative and never steals an attached matching session`() {

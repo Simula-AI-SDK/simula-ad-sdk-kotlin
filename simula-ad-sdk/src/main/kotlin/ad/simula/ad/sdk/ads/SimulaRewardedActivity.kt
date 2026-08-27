@@ -642,8 +642,6 @@ private fun RewardedMinigame(
                         override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
                             super.onPageStarted(view, pageUrl, favicon) // starts the page-load timer
                             BridgeWebViewInstaller.onPageStarted(view)
-                            // Inject only relay components whose document-start registration failed.
-                            BridgeWebViewInstaller.injectFallback(view)
                         }
 
                         override fun shouldOverrideUrlLoading(
@@ -652,6 +650,7 @@ private fun RewardedMinigame(
                         ): Boolean {
                             val requestUrl = request?.url?.toString() ?: return false
                             primaryCtaNavigation.navigationOverride()?.let { return it }
+                            if (request.isForMainFrame != true) return false
                             if (requestUrl == url) return false
                             // Allow same-origin navigation; open external links externally.
                             if (CreativeCtaRouter.hasSameHttpOrigin(url, requestUrl)) return false

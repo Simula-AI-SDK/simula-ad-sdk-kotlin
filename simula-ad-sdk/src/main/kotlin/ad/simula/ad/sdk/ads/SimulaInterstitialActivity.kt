@@ -893,8 +893,6 @@ private fun CreativeHtml(
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon) // starts the page-load timer
                         BridgeWebViewInstaller.onPageStarted(view)
-                        // Inject only relay components whose document-start registration failed.
-                        BridgeWebViewInstaller.injectFallback(view)
                     }
 
                     override fun shouldOverrideUrlLoading(
@@ -903,6 +901,7 @@ private fun CreativeHtml(
                     ): Boolean {
                         val url = request?.url?.toString() ?: return false
                         primaryCtaNavigation.navigationOverride()?.let { return it }
+                        if (request.isForMainFrame != true) return false
                         // Document-start interception handles trusted window.open/target=_blank.
                         // This remains the platform fallback for direct gesture navigations.
                         if (!request.hasGesture()) return false

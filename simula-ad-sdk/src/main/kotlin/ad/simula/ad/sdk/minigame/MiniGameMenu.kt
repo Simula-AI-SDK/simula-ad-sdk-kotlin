@@ -970,8 +970,16 @@ private fun AdIframeOverlay(
                                         originalPort == requestPort
                                     if (sameOrigin) return false
                                     if (!request.hasGesture()) return true
-                                    val admittedUrl = CreativeCtaRouter.normalizeTappedDestination(requestUrl)
-                                        ?: return true
+                                    val routePlan = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+                                        tappedUrl = requestUrl,
+                                        creativeBaseUrl = url,
+                                        trackingUrl = null,
+                                        destination = "web",
+                                    )) {
+                                        CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> return false
+                                        CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
+                                        is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
+                                    }
                                     val claim = clickGate.claim(ClickSources.FALLBACK_CTA) ?: return true
                                     clickAdmission.disable()
                                     val interaction = claim.interaction
@@ -1010,14 +1018,18 @@ private fun AdIframeOverlay(
                                         onHandoff = { _, completion ->
                                             val result = routeCoordinator.request(
                                                 route = { activity ->
-                                                    val opened = CreativeCtaRouter.open(
+                                                    val opened = CreativeCtaRouter.openPrimaryCta(
                                                         activity.applicationContext,
-                                                        admittedUrl,
+                                                        routePlan,
                                                         destination = "web",
                                                     )
                                                     if (!opened) {
-                                                        adWebView?.post {
-                                                            if (adWebView != null) runCatching { adWebView?.loadUrl(admittedUrl) }
+                                                        routePlan.tappedUrl?.let { fallbackUrl ->
+                                                            adWebView?.post {
+                                                                if (adWebView != null) {
+                                                                    runCatching { adWebView?.loadUrl(fallbackUrl) }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     opened
