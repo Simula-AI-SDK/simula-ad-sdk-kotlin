@@ -180,7 +180,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                         presentation = p,
                         recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
                         onFinish = { earned ->
-                            p.rewardEarned = earned
+                            p.rewardEarned = monotonicRewardEarned(earned, p.rewardEarned)
                             // CLOSE is deferred to completeReward (after the last fallback screen), so
                             // closing the playable alone doesn't fire the publisher close callback.
                             onClose()
@@ -305,6 +305,8 @@ internal fun initialRewardEarned(
 ): Boolean = persistedRewardEarned ||
     (gateSeconds > 0 && RewardGate.isEarned(accumulatedPlayTimeMs, gateSeconds))
 
+internal fun monotonicRewardEarned(candidate: Boolean, retained: Boolean): Boolean = candidate || retained
+
 internal fun rewardedNavigationAction(
     isMainFrame: Boolean,
     hasGesture: Boolean,
@@ -406,9 +408,9 @@ private fun RewardedMinigame(
     var bridgeUnavailable by remember { mutableStateOf(false) }
     LaunchedEffect(bridgeUnavailable) {
         if (bridgeUnavailable) {
-            rewardEarned = false
-            presentation.rewardEarned = false
-            onFinish(false)
+            val earned = monotonicRewardEarned(rewardEarned, presentation.rewardEarned)
+            rewardEarned = earned
+            onFinish(earned)
         }
     }
     val primaryCtaNavigation = presentation.primaryCtaNavigation

@@ -12,6 +12,14 @@ class RewardedNavigationPolicyTest {
     }
 
     @Test
+    fun `bridge failure cannot revoke an earned reward`() {
+        assertEquals(false, monotonicRewardEarned(candidate = false, retained = false))
+        assertEquals(true, monotonicRewardEarned(candidate = true, retained = false))
+        assertEquals(true, monotonicRewardEarned(candidate = false, retained = true))
+        assertEquals(true, monotonicRewardEarned(candidate = true, retained = true))
+    }
+
+    @Test
     fun `ordinary automatic redirects stay in WebView`() {
         listOf(
             "https://creative.example/game",
