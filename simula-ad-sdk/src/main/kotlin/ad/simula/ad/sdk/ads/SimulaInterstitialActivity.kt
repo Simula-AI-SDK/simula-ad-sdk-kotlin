@@ -205,6 +205,16 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                         if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
                         opened
                     },
+                    openAutomaticNavigation = { targetUrl ->
+                        val opened = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                            CreativeCtaRouter.openAutomaticNavigation(
+                                applicationContext,
+                                targetUrl,
+                                p.ad.destination,
+                            )
+                        if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
+                        opened
+                    },
                     // End-screen CTA routing context (deterministic store fallback).
                     ctaTrackingUrl = p.ad.trackingUrl,
                     ctaDestination = p.ad.destination,
@@ -424,18 +434,17 @@ private fun CreativeInterstitial(
             opened
         }
     }
-    fun routeAutomaticCta(route: PrimaryCtaRoute) {
+    fun routeAutomaticCta(targetUrl: String) {
         presentation.autoRedirectCoordinator.request(
             scope = autoRedirectScope,
             pendingHandoff = presentation.pendingClickHandoff(),
         ) {
-            val opened = CreativeCtaRouter.openPrimaryCta(
-                context.applicationContext,
-                route,
-                ad.destination,
-                ad.adBehavior?.storeOpen,
-                ad.androidStoreUrl,
-            )
+            val opened = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                CreativeCtaRouter.openAutomaticNavigation(
+                    context.applicationContext,
+                    targetUrl,
+                    ad.destination,
+                )
             if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
             opened
         }
@@ -656,7 +665,10 @@ private fun CreativeInterstitial(
                                     presentation.autoRedirectCoordinator.recordUserRouteOpened()
                                     routeActivity.recordClickStoreOpen(committedInteraction.source)
                                 } else {
-                                    route.tappedUrl?.let {
+                                    CreativeCtaRouter.admittedInWebViewFallback(
+                                        route.tappedUrl,
+                                        ad.trackingUrl,
+                                    )?.let {
                                         presentation.openPrimaryFallback(it, routeActivity)
                                     }
                                 }
@@ -859,8 +871,9 @@ private fun CreativeInterstitial(
  * Full-screen interstitial rendered from server-provided HTML.
  * a user-initiated link navigation (gesture) is intercepted, reported as CLICKED via
  * [onPrimaryCta], durably recorded, and routed to the advertiser destination.
- * Non-gesture navigations (impression pixels, JS/meta auto-redirects) load normally
- * so they can't fake a click. The interstitial is NOT dismissed on click — the close
+ * Ordinary non-gesture navigations load normally so they can't fake a click. A known MMP tracker
+ * or strict Play Store exit routes externally without publisher/backend click accounting. The
+ * interstitial is NOT dismissed on click — the close
  * button drives dismissal.
  */
 @Composable
@@ -870,7 +883,7 @@ private fun CreativeHtml(
     presentation: InterstitialPresentation,
     onBridgeUnavailable: () -> Unit,
     onBridgeReady: () -> Unit,
-    onAutomaticCta: (PrimaryCtaRoute) -> Unit,
+    onAutomaticCta: (String) -> Unit,
     onPrimaryCta: (PrimaryCtaRoute) -> Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -958,23 +971,17 @@ private fun CreativeHtml(
                         // Document-start interception handles trusted window.open/target=_blank.
                         // This remains the platform fallback for direct gesture navigations.
                         if (!request.hasGesture()) {
-                            return when (CreativeCtaRouter.automaticNavigationAction(
+                            return when (val plan = CreativeCtaRouter.automaticNavigationPlan(
                                 value = url,
                                 destination = presentation.ad.destination,
+                                trackingUrl = presentation.ad.trackingUrl,
                             )) {
-                                CreativeCtaRouter.AutomaticNavigationAction.ALLOW_IN_WEBVIEW -> false
-                                CreativeCtaRouter.AutomaticNavigationAction.CONSUME -> true
-                                CreativeCtaRouter.AutomaticNavigationAction.ROUTE_EXTERNALLY -> {
-                                    val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
-                                        tappedUrl = url,
-                                        creativeBaseUrl = null,
-                                        trackingUrl = presentation.ad.trackingUrl,
-                                        destination = presentation.ad.destination,
-                                    )) {
-                                        is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
-                                        else -> return true
+                                CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> false
+                                CreativeCtaRouter.AutomaticNavigationPlan.Consume -> true
+                                is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
+                                    if (presentation.automaticNavigationGate.claim()) {
+                                        onAutomaticCta(plan.targetUrl)
                                     }
-                                    onAutomaticCta(route)
                                     true
                                 }
                             }

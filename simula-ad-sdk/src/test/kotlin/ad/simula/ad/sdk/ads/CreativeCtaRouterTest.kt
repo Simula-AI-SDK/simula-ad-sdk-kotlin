@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -191,27 +192,129 @@ class CreativeCtaRouterTest {
     }
 
     @Test
-    fun `automatic navigation routes safe external schemes and consumes malformed ones`() {
+    fun `automatic navigation routes only known tracker store and safe external schemes`() {
         assertEquals(
-            CreativeCtaRouter.AutomaticNavigationAction.ALLOW_IN_WEBVIEW,
-            CreativeCtaRouter.automaticNavigationAction("https://creative.example/next", "appstore"),
+            CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView,
+            CreativeCtaRouter.automaticNavigationPlan("https://creative.example/next", "appstore"),
         )
         assertEquals(
-            CreativeCtaRouter.AutomaticNavigationAction.ROUTE_EXTERNALLY,
-            CreativeCtaRouter.automaticNavigationAction("market://details?id=com.example.app", "appstore"),
+            CreativeCtaRouter.AutomaticNavigationPlan.RouteExact(
+                "https://play.google.com/store/apps/details?id=com.example.app",
+            ),
+            CreativeCtaRouter.automaticNavigationPlan("market://details?id=com.example.app", "appstore"),
         )
         assertEquals(
-            CreativeCtaRouter.AutomaticNavigationAction.ROUTE_EXTERNALLY,
-            CreativeCtaRouter.automaticNavigationAction("partner-app://offer", "web"),
+            CreativeCtaRouter.AutomaticNavigationPlan.RouteExact("partner-app://offer"),
+            CreativeCtaRouter.automaticNavigationPlan("partner-app://offer", "web"),
         )
         assertEquals(
-            CreativeCtaRouter.AutomaticNavigationAction.CONSUME,
-            CreativeCtaRouter.automaticNavigationAction("partner-app://offer", "appstore"),
+            CreativeCtaRouter.AutomaticNavigationPlan.Consume,
+            CreativeCtaRouter.automaticNavigationPlan("partner-app://offer", "appstore"),
         )
         assertEquals(
-            CreativeCtaRouter.AutomaticNavigationAction.CONSUME,
-            CreativeCtaRouter.automaticNavigationAction("intent://details#Intent;scheme=market;end", "appstore"),
+            CreativeCtaRouter.AutomaticNavigationPlan.Consume,
+            CreativeCtaRouter.automaticNavigationPlan("intent://details#Intent;scheme=market;end", "appstore"),
         )
+        assertEquals(
+            CreativeCtaRouter.AutomaticNavigationPlan.Consume,
+            CreativeCtaRouter.automaticNavigationPlan(
+                "intent://details#Intent;scheme=market;" +
+                    "S.browser_fallback_url=http%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.example.app;end",
+                "appstore",
+            ),
+        )
+    }
+
+    @Test
+    fun `gestureless known MMP tracker routes externally without broad host matching`() {
+        val tracker = "https://Track.Example:443/click?campaign=a%2Bb&id=123#ignored"
+        assertEquals(
+            CreativeCtaRouter.AutomaticNavigationPlan.RouteExact(
+                "https://track.example/click?campaign=a%2Bb&id=123",
+            ),
+            CreativeCtaRouter.automaticNavigationPlan(
+                value = "https://track.example/click?campaign=a%2Bb&id=123",
+                destination = "appstore",
+                trackingUrl = tracker,
+            ),
+        )
+        listOf(
+            "https://track.example/other?campaign=a%2Bb&id=123",
+            "https://track.example/click?campaign=a+b&id=123",
+        ).forEach { value ->
+            assertEquals(
+                CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView,
+                CreativeCtaRouter.automaticNavigationPlan(value, "appstore", tracker),
+            )
+        }
+    }
+
+    @Test
+    fun `gestureless direct Play details keeps encoded referrer and rejects spoof URLs`() {
+        val play = "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%3Da%2Bb"
+        assertEquals(
+            CreativeCtaRouter.AutomaticNavigationPlan.RouteExact(play),
+            CreativeCtaRouter.automaticNavigationPlan(play, "appstore"),
+        )
+        listOf(
+            "https://play.google.com.evil.example/store/apps/details?id=com.example.app",
+            "http://play.google.com/store/apps/details?id=com.example.app",
+            "https://play.google.com/store/apps/details?id=",
+            "https://play.google.com/store/apps/details?id=&id=com.example.app",
+            "https://play.google.com/store/search?q=com.example.app",
+        ).forEach { value ->
+            assertEquals(
+                CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView,
+                CreativeCtaRouter.automaticNavigationPlan(value, "appstore"),
+            )
+        }
+    }
+
+    @Test
+    fun `automatic navigation gate admits only one WebView exit attempt`() {
+        val gate = AutomaticNavigationGate()
+
+        assertTrue(gate.claim())
+        assertFalse(gate.claim())
+    }
+
+    @Test
+    fun `tracker and Play destinations are never retained inside the ad WebView`() {
+        val tracker = "https://tracker.example/click?id=abc%2B123"
+        val play = "https://play.google.com/store/apps/details?id=com.example.app&referrer=abc%2B123"
+
+        assertNull(CreativeCtaRouter.admittedInWebViewFallback(tracker, tracker))
+        assertNull(CreativeCtaRouter.admittedInWebViewFallback(play, tracker))
+        assertEquals(
+            "https://advertiser.example/landing",
+            CreativeCtaRouter.admittedInWebViewFallback(
+                "https://advertiser.example/landing",
+                tracker,
+            ),
+        )
+    }
+
+    @Test
+    fun `user tapped Play URL remains an external fallback when tracker launch fails`() {
+        val play = "https://play.google.com/store/apps/details?id=com.example.app&referrer=abc%2B123"
+        val route = ad.simula.ad.sdk.network.PrimaryCtaRoute(
+            tappedUrl = play,
+            externalTarget = "https://tracker.example/click?id=abc%2B123",
+        )
+
+        assertEquals(
+            play,
+            CreativeCtaRouter.primaryCtaStoreFallback(route, "appstore", storeUrl = null),
+        )
+        assertEquals(
+            "https://play.google.com/store/apps/details?id=configured",
+            CreativeCtaRouter.primaryCtaStoreFallback(
+                route,
+                "appstore",
+                "https://play.google.com/store/apps/details?id=configured",
+            ),
+        )
+        assertNull(CreativeCtaRouter.primaryCtaStoreFallback(route, "web", storeUrl = null))
     }
 
     @Test

@@ -28,6 +28,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
@@ -149,11 +150,18 @@ internal fun NativeAdWebView(
     // deterministically wake the creative via the `onAppForeground` bridge (see character_ad.html).
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, owner, visibilityRelay) {
+        owner.session.wiring.automaticNavigationActive =
+            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_STOP -> wasStopped = true
+                Lifecycle.Event.ON_PAUSE -> owner.session.wiring.automaticNavigationActive = false
+                Lifecycle.Event.ON_STOP -> {
+                    owner.session.wiring.automaticNavigationActive = false
+                    wasStopped = true
+                }
                 Lifecycle.Event.ON_RESUME -> {
+                    owner.session.wiring.automaticNavigationActive = true
                     if (wasStopped) {
                         wasStopped = false
                         val session = owner.session
@@ -171,7 +179,10 @@ internal fun NativeAdWebView(
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        onDispose {
+            owner.session.wiring.automaticNavigationActive = false
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     // key(generation): a render-process death bumps [generation], disposing this AndroidView (its
@@ -757,7 +768,9 @@ internal class NativeAdWiring(
     @Volatile var creativeBaseUrl: String? = null
     @Volatile var destination: String = "appstore"
     @Volatile var storeUrl: String? = null
+    @Volatile var automaticNavigationActive: Boolean = false
     private val clickInteractionGate = ClickInteractionGate()
+    private var automaticNavigationClaimed = false
 
     fun adoptCallbacksFrom(other: NativeAdWiring) {
         onHeightPx = other.onHeightPx
@@ -769,6 +782,7 @@ internal class NativeAdWiring(
         trackingUrl = other.trackingUrl
         destination = other.destination
         storeUrl = other.storeUrl
+        automaticNavigationActive = other.automaticNavigationActive
     }
 
     // The WebView currently displaying this wiring's creative; set by the store on (re)attach and
@@ -860,6 +874,35 @@ internal class NativeAdWiring(
             onOpened = onAdClick,
         )
         return true
+    }
+
+    fun handleAutomaticNavigation(targetUrl: String): Boolean {
+        return when (val plan = CreativeCtaRouter.automaticNavigationPlan(
+            value = targetUrl,
+            destination = destination,
+            trackingUrl = trackingUrl,
+        )) {
+            CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> false
+            CreativeCtaRouter.AutomaticNavigationPlan.Consume -> true
+            is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
+                val currentView = webView
+                if (!automaticNavigationActive || currentView?.isAttachedToWindow != true ||
+                    currentView.windowVisibility != View.VISIBLE
+                ) return true
+                val shouldRoute = synchronized(this) {
+                    if (automaticNavigationClaimed) {
+                        false
+                    } else {
+                        automaticNavigationClaimed = true
+                        true
+                    }
+                }
+                if (shouldRoute) {
+                    CreativeCtaRouter.openAutomaticNavigation(appContext, plan.targetUrl, destination)
+                }
+                true
+            }
+        }
     }
 }
 
@@ -1029,7 +1072,7 @@ private class NativeAdWebViewClient(
         if (request.hasGesture()) {
             return wiring.handleNavigation(url, view.url)
         }
-        return false
+        return wiring.handleAutomaticNavigation(url)
     }
 }
 

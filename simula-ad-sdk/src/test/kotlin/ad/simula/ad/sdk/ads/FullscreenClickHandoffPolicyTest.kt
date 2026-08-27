@@ -728,6 +728,15 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `fallback automatic navigation is one shot per screen`() {
+        val state = FallbackPresentationState()
+
+        assertTrue(state.claimAutomaticNavigation(0))
+        assertFalse(state.claimAutomaticNavigation(0))
+        assertTrue(state.claimAutomaticNavigation(1))
+    }
+
+    @Test
     fun `fallback navigation ownership resets for the next screen`() {
         val state = FallbackPresentationState()
         state.showing(0)

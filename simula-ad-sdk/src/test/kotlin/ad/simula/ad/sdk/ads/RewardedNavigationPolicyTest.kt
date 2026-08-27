@@ -28,7 +28,7 @@ class RewardedNavigationPolicyTest {
             "https://advertiser.example/landing",
         ).forEach { target ->
             assertEquals(
-                RewardedNavigationAction.ALLOW_IN_WEBVIEW,
+                RewardedNavigationAction.AllowInWebView,
                 rewardedNavigationAction(
                     isMainFrame = true,
                     hasGesture = false,
@@ -48,16 +48,18 @@ class RewardedNavigationPolicyTest {
                 "S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.example.app;end",
         ).forEach { target ->
             assertEquals(
-                RewardedNavigationAction.ROUTE_AUTO_STORE,
+                RewardedNavigationAction.RouteAutomatic(
+                    CreativeCtaRouter.normalizeTappedDestination(target) ?: target,
+                ),
                 rewardedNavigationAction(true, false, target, "https://creative.example/game", null),
             )
         }
         assertEquals(
-            RewardedNavigationAction.CONSUME,
+            RewardedNavigationAction.Consume,
             rewardedNavigationAction(true, false, "intent://details#Intent;scheme=market;end", null, null),
         )
         assertEquals(
-            RewardedNavigationAction.ROUTE_AUTO_STORE,
+            RewardedNavigationAction.RouteAutomatic("partner-app://offer"),
             rewardedNavigationAction(
                 true,
                 false,
@@ -68,7 +70,7 @@ class RewardedNavigationPolicyTest {
             ),
         )
         assertEquals(
-            RewardedNavigationAction.CONSUME,
+            RewardedNavigationAction.Consume,
             rewardedNavigationAction(
                 true,
                 false,
@@ -83,7 +85,7 @@ class RewardedNavigationPolicyTest {
     @Test
     fun `only gestured cross-origin main-frame navigation is user CTA`() {
         assertEquals(
-            RewardedNavigationAction.ALLOW_IN_WEBVIEW,
+            RewardedNavigationAction.AllowInWebView,
             rewardedNavigationAction(
                 true,
                 true,
@@ -93,7 +95,7 @@ class RewardedNavigationPolicyTest {
             ),
         )
         assertEquals(
-            RewardedNavigationAction.ROUTE_USER_CTA,
+            RewardedNavigationAction.RouteUserCta,
             rewardedNavigationAction(
                 true,
                 true,
@@ -103,7 +105,7 @@ class RewardedNavigationPolicyTest {
             ),
         )
         assertEquals(
-            RewardedNavigationAction.ROUTE_USER_CTA,
+            RewardedNavigationAction.RouteUserCta,
             rewardedNavigationAction(
                 true,
                 true,
@@ -117,7 +119,7 @@ class RewardedNavigationPolicyTest {
     @Test
     fun `opaque rendered HTML does not inherit unused iframe origin`() {
         assertEquals(
-            RewardedNavigationAction.ROUTE_USER_CTA,
+            RewardedNavigationAction.RouteUserCta,
             rewardedNavigationAction(
                 isMainFrame = true,
                 hasGesture = true,
@@ -131,13 +133,42 @@ class RewardedNavigationPolicyTest {
     @Test
     fun `subframe navigation always stays in WebView`() {
         assertEquals(
-            RewardedNavigationAction.ALLOW_IN_WEBVIEW,
+            RewardedNavigationAction.AllowInWebView,
             rewardedNavigationAction(
                 false,
                 true,
                 "https://advertiser.example/offer",
                 "https://creative.example/game",
                 "https://creative.example/game",
+            ),
+        )
+    }
+
+    @Test
+    fun `gestureless MMP tracker and Play redirect route externally without becoming user CTA`() {
+        val tracker = "https://tracker.example/click?id=abc%2B123"
+        val play = "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%3Dabc%252B123"
+
+        assertEquals(
+            RewardedNavigationAction.RouteAutomatic(tracker),
+            rewardedNavigationAction(
+                true,
+                false,
+                tracker,
+                "https://creative.example/game",
+                null,
+                trackingUrl = tracker,
+            ),
+        )
+        assertEquals(
+            RewardedNavigationAction.RouteAutomatic(play),
+            rewardedNavigationAction(
+                true,
+                false,
+                play,
+                tracker,
+                null,
+                trackingUrl = tracker,
             ),
         )
     }

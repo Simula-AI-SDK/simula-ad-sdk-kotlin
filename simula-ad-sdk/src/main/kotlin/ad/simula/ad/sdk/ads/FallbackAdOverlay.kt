@@ -108,6 +108,7 @@ internal class FallbackPresentationState(
     private var fetchWaitGeneration = 0L
     private var fetchWaitDeadlineMs = 0L
     private val closeGateElapsedByIndex = LinkedHashMap<Int, Long>()
+    private val automaticNavigationGates = LinkedHashMap<Int, AutomaticNavigationGate>()
 
     fun showing(index: Int) {
         val nextIndex = index.coerceAtLeast(0)
@@ -132,6 +133,9 @@ internal class FallbackPresentationState(
         if (retained != null) return retained
         return emptyList<SimulaApiClient.FallbackAd>().also(::retainFetchedAds)
     }
+    fun claimAutomaticNavigation(index: Int): Boolean =
+        automaticNavigationGates.getOrPut(index.coerceAtLeast(0)) { AutomaticNavigationGate() }.claim()
+
     @Synchronized
     fun closeGateElapsedMs(index: Int): Long = closeGateElapsedByIndex[index.coerceAtLeast(0)] ?: 0L
 
@@ -212,6 +216,7 @@ internal class FallbackPresentationState(
         clickHandoffPending = false
         cancelNavigationLocked()
         closeGateElapsedByIndex.clear()
+        automaticNavigationGates.clear()
     }
 
     private fun dispatchReadyNavigation() {
@@ -315,6 +320,7 @@ internal fun FallbackAdHost(
     onFullyClosed: () -> Unit,
     autoStoreRedirect: AutoStoreRedirect? = null,
     onAutoStoreRedirect: () -> Boolean = { false },
+    openAutomaticNavigation: (String) -> Boolean = { false },
     onAdClick: (ClickInteraction) -> Unit = {},
     onStoreOpen: (ClickInteraction) -> Unit = {},
     persistClick: (String, ClickInteraction, () -> Unit) -> Unit = { _, _, complete -> complete() },
@@ -482,6 +488,14 @@ internal fun FallbackAdHost(
                         ctaTrackingUrl = ctaTrackingUrl,
                         ctaDestination = ctaDestination,
                         ctaStoreUrl = ctaStoreUrl,
+                        onAutomaticNavigation = { targetUrl ->
+                            redirects.request(
+                                scope = autoRedirectScope,
+                                pendingHandoff = pendingClickHandoff(),
+                            ) {
+                                openAutomaticNavigation(targetUrl)
+                            }
+                        },
                         onClose = {
                             if (!presentationState.advance(p.ads.size)) return@FallbackAdOverlay
                             phase = if (presentationState.stage == FallbackStage.SHOWING) {
@@ -529,6 +543,7 @@ private fun FallbackAdOverlay(
     ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
+    onAutomaticNavigation: (String) -> Unit,
     onClose: () -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -665,6 +680,22 @@ private fun FallbackAdOverlay(
                                 hasGesture = request.hasGesture(),
                                 owner = navigationOwner,
                             )?.let { return it }
+                            if (request.hasGesture() != true && request.isForMainFrame) {
+                                when (val plan = CreativeCtaRouter.automaticNavigationPlan(
+                                    value = target,
+                                    destination = ctaDestination,
+                                    trackingUrl = ctaTrackingUrl,
+                                )) {
+                                    CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> Unit
+                                    CreativeCtaRouter.AutomaticNavigationPlan.Consume -> return true
+                                    is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
+                                        if (presentationState.claimAutomaticNavigation(fallbackIndex)) {
+                                            onAutomaticNavigation(plan.targetUrl)
+                                        }
+                                        return true
+                                    }
+                                }
+                            }
                             val routePlan = when (val plan = CreativeCtaRouter.fallbackCtaTapPlan(
                                 isMainFrame = request.isForMainFrame,
                                 hasGesture = request.hasGesture(),
@@ -719,7 +750,10 @@ private fun FallbackAdOverlay(
                                         )
                                         if (opened) runCatching { onStoreOpen(committedInteraction) }
                                         if (!opened) {
-                                            routePlan.tappedUrl?.let { fallbackUrl ->
+                                            CreativeCtaRouter.admittedInWebViewFallback(
+                                                routePlan.tappedUrl,
+                                                ctaTrackingUrl,
+                                            )?.let { fallbackUrl ->
                                                 presentationState.retainNavigation(fallbackUrl)
                                             }
                                         }

@@ -83,6 +83,7 @@ internal class RewardedPresentation(
     private val clickRoute = ResumedPresentationRoute<SimulaRewardedActivity>()
     val primaryCtaNavigation = RetainedPrimaryCtaNavigationState<SimulaRewardedActivity>()
     val fallbackState = FallbackPresentationState()
+    val automaticNavigationGate = AutomaticNavigationGate()
     val storeExit by lazy(LazyThreadSafetyMode.NONE) {
         StoreExitTracker(
             adId = impressionId.takeIf { it.isNotBlank() },
