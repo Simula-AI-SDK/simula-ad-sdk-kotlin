@@ -205,12 +205,14 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                         if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
                         opened
                     },
-                    openAutomaticNavigation = { targetUrl ->
+                    openAutomaticNavigation = { targetUrl, trackerAlreadyRequested ->
                         val opened = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
                             CreativeCtaRouter.openAutomaticNavigation(
                                 applicationContext,
                                 targetUrl,
                                 p.ad.destination,
+                                p.ad.trackingUrl,
+                                trackerAlreadyRequested,
                             )
                         if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
                         opened
@@ -434,7 +436,7 @@ private fun CreativeInterstitial(
             opened
         }
     }
-    fun routeAutomaticCta(targetUrl: String) {
+    fun routeAutomaticCta(targetUrl: String, trackerAlreadyRequested: Boolean) {
         presentation.autoRedirectCoordinator.request(
             scope = autoRedirectScope,
             pendingHandoff = presentation.pendingClickHandoff(),
@@ -445,6 +447,8 @@ private fun CreativeInterstitial(
                         context.applicationContext,
                         targetUrl,
                         ad.destination,
+                        ad.trackingUrl,
+                        trackerAlreadyRequested,
                     )
                 }
             if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
@@ -885,7 +889,7 @@ private fun CreativeHtml(
     presentation: InterstitialPresentation,
     onBridgeUnavailable: () -> Unit,
     onBridgeReady: () -> Unit,
-    onAutomaticCta: (String) -> Unit,
+    onAutomaticCta: (String, Boolean) -> Unit,
     onPrimaryCta: (PrimaryCtaRoute) -> Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -955,6 +959,9 @@ private fun CreativeHtml(
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon) // starts the page-load timer
                         primaryCtaNavigation.onNavigationStarted(url, fallbackOwner)
+                        if (CreativeCtaRouter.matchesKnownTrackingUrl(url, presentation.ad.trackingUrl)) {
+                            presentation.automaticNavigationGate.markTrackerRequestedInWebView()
+                        }
                         BridgeWebViewInstaller.onPageStarted(view)
                     }
 
@@ -981,7 +988,14 @@ private fun CreativeHtml(
                                 CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> false
                                 CreativeCtaRouter.AutomaticNavigationPlan.Consume -> true
                                 is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
-                                    onAutomaticCta(plan.targetUrl)
+                                    onAutomaticCta(
+                                        plan.targetUrl,
+                                        presentation.automaticNavigationGate.wasTrackerRequestedInWebView() ||
+                                            CreativeCtaRouter.matchesKnownTrackingUrl(
+                                                view?.url,
+                                                presentation.ad.trackingUrl,
+                                            ),
+                                    )
                                     true
                                 }
                             }

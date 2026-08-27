@@ -877,7 +877,7 @@ internal class NativeAdWiring(
         return true
     }
 
-    fun handleAutomaticNavigation(targetUrl: String): Boolean {
+    fun handleAutomaticNavigation(targetUrl: String, currentPageUrl: String?): Boolean {
         return when (val plan = CreativeCtaRouter.automaticNavigationPlan(
             value = targetUrl,
             destination = destination,
@@ -891,10 +891,23 @@ internal class NativeAdWiring(
                     currentView.windowVisibility != View.VISIBLE
                 ) return true
                 automaticNavigationGate.attempt {
-                    CreativeCtaRouter.openAutomaticNavigation(appContext, plan.targetUrl, destination)
+                    CreativeCtaRouter.openAutomaticNavigation(
+                        appContext,
+                        plan.targetUrl,
+                        destination,
+                        trackingUrl,
+                        automaticNavigationGate.wasTrackerRequestedInWebView() ||
+                            CreativeCtaRouter.matchesKnownTrackingUrl(currentPageUrl, trackingUrl),
+                    )
                 }
                 true
             }
+        }
+    }
+
+    fun observeNavigationStarted(url: String?) {
+        if (CreativeCtaRouter.matchesKnownTrackingUrl(url, trackingUrl)) {
+            automaticNavigationGate.markTrackerRequestedInWebView()
         }
     }
 }
@@ -988,6 +1001,7 @@ private class NativeAdWebViewClient(
     // mirroring the interstitial/rewarded clients.
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon) // starts the page-load timer
+        wiring.observeNavigationStarted(url)
         view ?: return
         if (bridgeInjectionMode == NativeBridgeInjectionMode.PAGE_START_FALLBACK) {
             runCatching { view.evaluateJavascript(nativeBridgeScript(bridgeCapability), null) }
@@ -1065,7 +1079,7 @@ private class NativeAdWebViewClient(
         if (request.hasGesture()) {
             return wiring.handleNavigation(url, view.url)
         }
-        return wiring.handleAutomaticNavigation(url)
+        return wiring.handleAutomaticNavigation(url, view.url)
     }
 }
 

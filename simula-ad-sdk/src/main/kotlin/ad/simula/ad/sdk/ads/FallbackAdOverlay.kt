@@ -134,7 +134,17 @@ internal class FallbackPresentationState(
         return emptyList<SimulaApiClient.FallbackAd>().also(::retainFetchedAds)
     }
     fun attemptAutomaticNavigation(index: Int, open: () -> Boolean): Boolean =
-        automaticNavigationGates.getOrPut(index.coerceAtLeast(0)) { AutomaticNavigationGate() }.attempt(open)
+        automaticNavigationGate(index).attempt(open)
+
+    fun markAutomaticTrackerRequested(index: Int) {
+        automaticNavigationGate(index).markTrackerRequestedInWebView()
+    }
+
+    fun wasAutomaticTrackerRequested(index: Int): Boolean =
+        automaticNavigationGate(index).wasTrackerRequestedInWebView()
+
+    private fun automaticNavigationGate(index: Int): AutomaticNavigationGate =
+        automaticNavigationGates.getOrPut(index.coerceAtLeast(0)) { AutomaticNavigationGate() }
 
     @Synchronized
     fun closeGateElapsedMs(index: Int): Long = closeGateElapsedByIndex[index.coerceAtLeast(0)] ?: 0L
@@ -320,7 +330,7 @@ internal fun FallbackAdHost(
     onFullyClosed: () -> Unit,
     autoStoreRedirect: AutoStoreRedirect? = null,
     onAutoStoreRedirect: () -> Boolean = { false },
-    openAutomaticNavigation: (String) -> Boolean = { false },
+    openAutomaticNavigation: (String, Boolean) -> Boolean = { _, _ -> false },
     onAdClick: (ClickInteraction) -> Unit = {},
     onStoreOpen: (ClickInteraction) -> Unit = {},
     persistClick: (String, ClickInteraction, () -> Unit) -> Unit = { _, _, complete -> complete() },
@@ -488,13 +498,13 @@ internal fun FallbackAdHost(
                         ctaTrackingUrl = ctaTrackingUrl,
                         ctaDestination = ctaDestination,
                         ctaStoreUrl = ctaStoreUrl,
-                        onAutomaticNavigation = { targetUrl ->
+                        onAutomaticNavigation = { targetUrl, trackerAlreadyRequested ->
                             redirects.request(
                                 scope = autoRedirectScope,
                                 pendingHandoff = pendingClickHandoff(),
                             ) {
                                 presentationState.attemptAutomaticNavigation(p.index) {
-                                    openAutomaticNavigation(targetUrl)
+                                    openAutomaticNavigation(targetUrl, trackerAlreadyRequested)
                                 }
                             }
                         },
@@ -545,7 +555,7 @@ private fun FallbackAdOverlay(
     ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
-    onAutomaticNavigation: (String) -> Unit,
+    onAutomaticNavigation: (String, Boolean) -> Unit,
     onClose: () -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -638,6 +648,9 @@ private fun FallbackAdOverlay(
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             if (!realLoadStarted) return
                             presentationState.onNavigationStarted(url, navigationOwner)
+                            if (CreativeCtaRouter.matchesKnownTrackingUrl(url, ctaTrackingUrl)) {
+                                presentationState.markAutomaticTrackerRequested(fallbackIndex)
+                            }
                             pageCommitted = false
                             if (!url.isNullOrBlank() && (url != "about:blank" || inlineHtml != null)) {
                                 pageLoadFailed = false
@@ -691,7 +704,11 @@ private fun FallbackAdOverlay(
                                     CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> Unit
                                     CreativeCtaRouter.AutomaticNavigationPlan.Consume -> return true
                                     is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
-                                        onAutomaticNavigation(plan.targetUrl)
+                                        onAutomaticNavigation(
+                                            plan.targetUrl,
+                                            presentationState.wasAutomaticTrackerRequested(fallbackIndex) ||
+                                                CreativeCtaRouter.matchesKnownTrackingUrl(view?.url, ctaTrackingUrl),
+                                        )
                                         return true
                                     }
                                 }

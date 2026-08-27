@@ -171,12 +171,14 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                         if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
                         opened
                     },
-                    openAutomaticNavigation = { targetUrl ->
+                    openAutomaticNavigation = { targetUrl, trackerAlreadyRequested ->
                         val opened = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
                             CreativeCtaRouter.openAutomaticNavigation(
                                 applicationContext,
                                 targetUrl,
                                 p.destination,
+                                p.trackingUrl,
+                                trackerAlreadyRequested,
                             )
                         if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
                         opened
@@ -687,7 +689,7 @@ private fun RewardedMinigame(
         return true
     }
 
-    fun routeAutomaticStoreNavigation(targetUrl: String) {
+    fun routeAutomaticStoreNavigation(targetUrl: String, trackerAlreadyRequested: Boolean) {
         presentation.autoRedirectCoordinator.request(
             scope = autoRedirectScope,
             pendingHandoff = presentation.pendingClickHandoff(),
@@ -698,6 +700,8 @@ private fun RewardedMinigame(
                         context.applicationContext,
                         targetUrl,
                         presentation.destination,
+                        presentation.trackingUrl,
+                        trackerAlreadyRequested,
                     )
                 }
             if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
@@ -718,6 +722,9 @@ private fun RewardedMinigame(
                         override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
                             super.onPageStarted(view, pageUrl, favicon) // starts the page-load timer
                             primaryCtaNavigation.onNavigationStarted(pageUrl, fallbackOwner)
+                            if (CreativeCtaRouter.matchesKnownTrackingUrl(pageUrl, presentation.trackingUrl)) {
+                                presentation.automaticNavigationGate.markTrackerRequestedInWebView()
+                            }
                             BridgeWebViewInstaller.onPageStarted(view)
                         }
 
@@ -745,7 +752,14 @@ private fun RewardedMinigame(
                                 RewardedNavigationAction.Consume -> true
                                 RewardedNavigationAction.RouteUserCta -> beginPrimaryCta(requestUrl, view?.url)
                                 is RewardedNavigationAction.RouteAutomatic -> {
-                                    routeAutomaticStoreNavigation(action.targetUrl)
+                                    routeAutomaticStoreNavigation(
+                                        action.targetUrl,
+                                        presentation.automaticNavigationGate.wasTrackerRequestedInWebView() ||
+                                            CreativeCtaRouter.matchesKnownTrackingUrl(
+                                                view?.url,
+                                                presentation.trackingUrl,
+                                            ),
+                                    )
                                     true
                                 }
                             }

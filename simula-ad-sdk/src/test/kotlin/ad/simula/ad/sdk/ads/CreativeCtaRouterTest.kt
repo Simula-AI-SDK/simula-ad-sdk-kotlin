@@ -603,6 +603,115 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `automatic Play exit fires campaign tracker before direct store fallback`() {
+        val tracker = "https://tracker.example/click?campaign=abc%2B123"
+        val play = "https://play.google.com/store/apps/details?id=com.example.app&referrer=abc%2B123"
+        val trackerLaunches = mutableListOf<String>()
+
+        assertTrue(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = play,
+                destination = "appstore",
+                trackingUrl = tracker,
+                launch = { trackerLaunches += it; true },
+            ),
+        )
+        assertEquals(listOf(tracker), trackerLaunches)
+
+        val fallbackLaunches = mutableListOf<String>()
+        assertTrue(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = play,
+                destination = "appstore",
+                trackingUrl = tracker,
+                launch = { url -> fallbackLaunches += url; url == play },
+            ),
+        )
+        assertEquals(listOf(tracker, play), fallbackLaunches)
+
+        val mislabeledDestinationLaunches = mutableListOf<String>()
+        assertTrue(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = play,
+                destination = "web",
+                trackingUrl = tracker,
+                launch = { mislabeledDestinationLaunches += it; true },
+            ),
+        )
+        assertEquals(listOf(tracker), mislabeledDestinationLaunches)
+    }
+
+    @Test
+    fun `Play continuation does not fire an already requested tracker twice`() {
+        val tracker = "https://tracker.example/click?campaign=abc%2B123"
+        val play = "https://play.google.com/store/apps/details?id=com.example.app&referrer=abc%2B123"
+        val launched = mutableListOf<String>()
+
+        assertTrue(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = play,
+                destination = "appstore",
+                trackingUrl = tracker,
+                trackerAlreadyRequested = true,
+                launch = { launched += it; true },
+            ),
+        )
+        assertEquals(listOf(play), launched)
+    }
+
+    @Test
+    fun `tracker provenance survives intermediary pages before Play continuation`() {
+        val gate = AutomaticNavigationGate()
+        val tracker = "https://tracker.example/click?campaign=abc%2B123"
+        val play = "https://play.google.com/store/apps/details?id=com.example.app&referrer=abc%2B123"
+        val launched = mutableListOf<String>()
+        gate.markTrackerRequestedInWebView()
+
+        assertTrue(gate.wasTrackerRequestedInWebView())
+        assertTrue(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = play,
+                destination = "appstore",
+                trackingUrl = tracker,
+                trackerAlreadyRequested = gate.wasTrackerRequestedInWebView(),
+                launch = { launched += it; true },
+            ),
+        )
+        assertEquals(listOf(play), launched)
+    }
+
+    @Test
+    fun `automatic router independently rejects malformed Play destinations`() {
+        var launches = 0
+
+        assertFalse(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = "https://play.google.com/store/apps/details?id=",
+                destination = "appstore",
+                trackingUrl = "https://tracker.example/click",
+                launch = { launches++; true },
+            ),
+        )
+        assertEquals(0, launches)
+    }
+
+    @Test
+    fun `automatic tracker exit is launched once without replacing itself`() {
+        val tracker = "https://tracker.example/click?campaign=abc%2B123"
+        val launched = mutableListOf<String>()
+
+        assertTrue(
+            CreativeCtaRouter.routeAutomaticNavigation(
+                targetUrl = tracker,
+                destination = "appstore",
+                trackingUrl = tracker,
+                launch = { launched += it; true },
+            ),
+        )
+        assertEquals(listOf(tracker), launched)
+    }
+
+    @Test
     fun `live router never uses store fallback for web destination`() {
         val store = "https://play.google.com/store/apps/details?id=com.scrambly"
         val launched = mutableListOf<String>()

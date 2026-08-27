@@ -740,6 +740,16 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `fallback tracker provenance is retained per screen`() {
+        val state = FallbackPresentationState()
+
+        state.markAutomaticTrackerRequested(0)
+
+        assertTrue(state.wasAutomaticTrackerRequested(0))
+        assertFalse(state.wasAutomaticTrackerRequested(1))
+    }
+
+    @Test
     fun `automatic gate is untouched by stale coordinator and commits only an opened route`() {
         val coordinator = AutoRedirectCoordinator()
         val scope = Any()

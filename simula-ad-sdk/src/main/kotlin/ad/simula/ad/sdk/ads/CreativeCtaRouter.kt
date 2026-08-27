@@ -13,6 +13,15 @@ import java.net.URLDecoder
 internal class AutomaticNavigationGate {
     private var inFlight = false
     private var opened = false
+    private var trackerRequestedInWebView = false
+
+    @Synchronized
+    fun markTrackerRequestedInWebView() {
+        trackerRequestedInWebView = true
+    }
+
+    @Synchronized
+    fun wasTrackerRequestedInWebView(): Boolean = trackerRequestedInWebView
 
     fun attempt(open: () -> Boolean): Boolean {
         synchronized(this) {
@@ -378,14 +387,49 @@ internal object CreativeCtaRouter {
         )
     }
 
-    fun openAutomaticNavigation(context: Context, targetUrl: String, destination: String): Boolean {
-        val target = admittedHttpUrl(targetUrl)?.takeUnless {
-            isPlayStoreHost(it) && admittedDirectPlayStoreUrl(it) == null
+    fun openAutomaticNavigation(
+        context: Context,
+        targetUrl: String,
+        destination: String,
+        trackingUrl: String? = null,
+        trackerAlreadyRequested: Boolean = false,
+    ): Boolean = routeAutomaticNavigation(
+        targetUrl = targetUrl,
+        destination = destination,
+        trackingUrl = trackingUrl,
+        trackerAlreadyRequested = trackerAlreadyRequested,
+        launch = { launch(context, it) },
+        record = { name -> Telemetry.recordOperation(name, 0L, success = name != "mmp_route_failed") },
+    )
+
+    internal fun routeAutomaticNavigation(
+        targetUrl: String,
+        destination: String,
+        trackingUrl: String?,
+        trackerAlreadyRequested: Boolean = false,
+        launch: (String) -> Boolean,
+        record: (String) -> Unit = {},
+    ): Boolean {
+        val admittedHttp = admittedHttpUrl(targetUrl)
+        val target = if (admittedHttp != null) {
+            if (isPlayStoreHost(admittedHttp) && admittedDirectPlayStoreUrl(admittedHttp) == null) return false
+            admittedHttp
+        } else {
+            normalizeTappedDestination(targetUrl)
+                ?: admittedWebCustomDestination(targetUrl, destination)
+                ?: return false
         }
-            ?: normalizeTappedDestination(targetUrl)
-            ?: admittedWebCustomDestination(targetUrl, destination)
-            ?: return false
-        return launch(context, target)
+        if (admittedDirectPlayStoreUrl(target) != null) {
+            if (trackerAlreadyRequested) return runCatching { launch(target) }.getOrDefault(false)
+            return routeCta(
+                trackingUrl = trackingUrl,
+                destination = "appstore",
+                storeUrl = target,
+                launch = launch,
+                record = record,
+            )
+        }
+        return runCatching { launch(target) }.getOrDefault(false)
     }
 
     internal fun routeCta(
