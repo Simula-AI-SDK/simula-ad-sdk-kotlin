@@ -193,4 +193,18 @@ class NativeAdWebViewOwnershipTest {
             ),
         )
     }
+
+    @Test
+    fun `visibility relay exposes every fresh sample while deduping JavaScript pushes`() {
+        val relay = VisibilityRelay()
+        val pushed = mutableListOf<Float>()
+        val observed = mutableListOf<Float>()
+        relay.bind(pusher = pushed::add, sampleObserver = observed::add)
+
+        relay.report(1f)
+        relay.report(1f)
+
+        assertEquals(listOf(1f), pushed)
+        assertEquals(listOf(1f, 1f), observed)
+    }
 }

@@ -760,6 +760,50 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `fallback factory owner retains automatic exit before navigator binding`() {
+        val state = FallbackPresentationState()
+        val owner = Any()
+        var delivered: PendingAutomaticNavigation? = null
+        state.showing(0)
+
+        state.claimNavigationOwner(owner)
+        assertTrue(
+            state.retainAutomaticNavigation(
+                0,
+                owner,
+                "https://tracker.example/click",
+                false,
+            ),
+        )
+        assertEquals(
+            AutomaticNavigationOutcome.STORE_OPENED,
+            state.attemptAutomaticNavigation(0) { route ->
+                delivered = route
+                AutomaticNavigationOutcome.STORE_OPENED
+            },
+        )
+        assertEquals("https://tracker.example/click", delivered?.targetUrl)
+    }
+
+    @Test
+    fun `fallback replacement owner rejects stale automatic callback`() {
+        val state = FallbackPresentationState()
+        val staleOwner = Any()
+        val currentOwner = Any()
+        state.showing(0)
+        state.claimNavigationOwner(staleOwner)
+        state.claimNavigationOwner(currentOwner)
+
+        assertFalse(state.retainAutomaticNavigation(0, staleOwner, "https://tracker.example/stale", false))
+        assertTrue(state.retainAutomaticNavigation(0, currentOwner, "https://tracker.example/current", false))
+        state.unbindNavigation(staleOwner)
+        assertEquals(
+            AutomaticNavigationOutcome.STORE_OPENED,
+            state.attemptAutomaticNavigation(0) { AutomaticNavigationOutcome.STORE_OPENED },
+        )
+    }
+
+    @Test
     fun `fallback tracker provenance is retained per screen`() {
         val state = FallbackPresentationState()
         state.showing(0)

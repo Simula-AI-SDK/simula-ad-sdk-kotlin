@@ -68,7 +68,7 @@ internal fun Modifier.trackNativeAdViewability(
     val hostLoc = remember { IntArray(2) }
     val windowRect = remember { AndroidRect() }
 
-    LaunchedEffect(enabled, thresholdFraction, minVisibleMillis) {
+    LaunchedEffect(enabled, thresholdFraction, minVisibleMillis, lifecycleOwner, hostView) {
         if (!enabled) return@LaunchedEffect
         var fired = false
         // Accrue dwell only while the host is foregrounded: a backgrounded window isn't viewable, and

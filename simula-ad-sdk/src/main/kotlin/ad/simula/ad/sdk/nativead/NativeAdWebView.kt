@@ -137,8 +137,11 @@ internal fun NativeAdWebView(
     // Route the live visible fraction (from the viewability tracker) into this slot's WebView while it
     // is mounted; unbind on dispose so a retained, off-screen creative receives no further onVisibility.
     DisposableEffect(owner, visibilityRelay) {
-        visibilityRelay?.bind { ratio -> owner.session.wiring.pushVisibility(ratio) }
-        onDispose { visibilityRelay?.bind(null) }
+        visibilityRelay?.bind(
+            pusher = { ratio -> owner.session.wiring.pushVisibility(ratio) },
+            sampleObserver = { ratio -> owner.session.wiring.observeAutomaticNavigationVisibility(ratio) },
+        )
+        onDispose { visibilityRelay?.bind(pusher = null, sampleObserver = null) }
     }
 
     // App background → foreground: a hardware-accelerated WebView drops its draw functor when the window
@@ -778,12 +781,17 @@ internal class NativeAdWiring(
     @Volatile var automaticNavigationActive: Boolean = false
     @Volatile private var automaticNavigationAttached: Boolean = false
     @Volatile private var automaticVisibilityFraction: Float = -1f
+    private var automaticNavigationEligible = false
     private val clickInteractionGate = ClickInteractionGate()
     private val automaticNavigationGate = AutomaticNavigationGate()
     private val automaticNavigationVisibleRect = Rect()
     private var focusObservedView: WebView? = null
     private val windowFocusListener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
-        if (hasFocus) dispatchPendingAutomaticNavigation()
+        if (!hasFocus) {
+            automaticNavigationEligible = false
+        } else {
+            dispatchOnAutomaticNavigationEligibilityEdge()
+        }
     }
 
     fun adoptCallbacksFrom(other: NativeAdWiring) {
@@ -813,12 +821,13 @@ internal class NativeAdWiring(
     @MainThread
     fun pushVisibility(ratio: Float) {
         val clamped = ratio.coerceIn(0f, 1f)
-        val crossedIntoEligibility = automaticVisibilityFraction < NATIVE_AUTOMATIC_NAVIGATION_MIN_VISIBLE &&
-            clamped >= NATIVE_AUTOMATIC_NAVIGATION_MIN_VISIBLE
-        automaticVisibilityFraction = clamped
         val r = String.format(java.util.Locale.US, "%.2f", clamped)
         webView?.evaluateJavascript("window.onVisibility&&window.onVisibility($r)", null)
-        if (crossedIntoEligibility) dispatchPendingAutomaticNavigation()
+    }
+
+    fun observeAutomaticNavigationVisibility(ratio: Float) {
+        automaticVisibilityFraction = ratio.coerceIn(0f, 1f)
+        dispatchOnAutomaticNavigationEligibilityEdge()
     }
 
     /**
@@ -913,14 +922,34 @@ internal class NativeAdWiring(
                     automaticNavigationGate.wasTrackerRequestedInWebView() ||
                         CreativeCtaRouter.matchesKnownTrackingUrl(currentPageUrl, trackingUrl),
                 )
-                dispatchPendingAutomaticNavigation()
+                if (currentAutomaticNavigationEligible()) dispatchPendingAutomaticNavigation()
                 true
             }
         }
     }
 
     private fun dispatchPendingAutomaticNavigation() {
-        val currentView = webView ?: return
+        if (!currentAutomaticNavigationEligible()) return
+        automaticNavigationGate.attemptPending { route ->
+            CreativeCtaRouter.openAutomaticNavigation(
+                appContext,
+                route.targetUrl,
+                destination,
+                trackingUrl,
+                route.trackerAlreadyRequested,
+            )
+        }
+    }
+
+    private fun dispatchOnAutomaticNavigationEligibilityEdge() {
+        val eligible = currentAutomaticNavigationEligible()
+        val shouldDispatch = eligible && !automaticNavigationEligible
+        automaticNavigationEligible = eligible
+        if (shouldDispatch) dispatchPendingAutomaticNavigation()
+    }
+
+    private fun currentAutomaticNavigationEligible(): Boolean {
+        val currentView = webView ?: return false
         automaticNavigationVisibleRect.setEmpty()
         val globallyVisibleFraction = runCatching {
             currentView.getGlobalVisibleRect(automaticNavigationVisibleRect) &&
@@ -933,7 +962,7 @@ internal class NativeAdWiring(
                 (visibleArea.toDouble() / totalArea.toDouble()).toFloat().coerceIn(0f, 1f)
             }
         }
-        if (!nativeAutomaticNavigationEligible(
+        return nativeAutomaticNavigationEligible(
             lifecycleActive = automaticNavigationActive,
             currentOwner = currentView === webView,
             logicallyAttached = automaticNavigationAttached,
@@ -942,26 +971,19 @@ internal class NativeAdWiring(
             windowFocused = currentView.hasWindowFocus(),
             globallyVisibleFraction = globallyVisibleFraction,
             visibleFraction = automaticVisibilityFraction,
-        )) return
-        automaticNavigationGate.attemptPending { route ->
-            CreativeCtaRouter.openAutomaticNavigation(
-                appContext,
-                route.targetUrl,
-                destination,
-                trackingUrl,
-                route.trackerAlreadyRequested,
-            )
-        }
+        )
     }
 
     fun updateAutomaticNavigationActive(active: Boolean) {
         automaticNavigationActive = active
         automaticVisibilityFraction = -1f
+        automaticNavigationEligible = false
     }
 
     fun onAutomaticNavigationAttached() {
         automaticNavigationAttached = true
         automaticVisibilityFraction = -1f
+        automaticNavigationEligible = false
         val currentView = webView
         if (focusObservedView !== currentView) {
             focusObservedView?.let { observed ->
@@ -977,6 +999,7 @@ internal class NativeAdWiring(
     fun onAutomaticNavigationDetached() {
         automaticNavigationAttached = false
         automaticVisibilityFraction = -1f
+        automaticNavigationEligible = false
         focusObservedView?.let { observed ->
             runCatching { observed.viewTreeObserver.removeOnWindowFocusChangeListener(windowFocusListener) }
         }
@@ -999,6 +1022,7 @@ internal class NativeAdWiring(
  */
 internal class VisibilityRelay {
     private var pusher: ((Float) -> Unit)? = null
+    private var sampleObserver: ((Float) -> Unit)? = null
     /** Last ratio actually pushed (dedupe baseline). -1 = nothing pushed yet. */
     private var last = -1f
     /** Latest ratio the tracker reported, whether or not the push reached the page. -1 = no sample yet. */
@@ -1006,8 +1030,9 @@ internal class VisibilityRelay {
 
     /** Point the relay at the live WebView's pusher (or null to detach on dispose). */
     @MainThread
-    fun bind(pusher: ((Float) -> Unit)?) {
+    fun bind(pusher: ((Float) -> Unit)?, sampleObserver: ((Float) -> Unit)? = null) {
         this.pusher = pusher
+        this.sampleObserver = sampleObserver
         last = -1f
     }
 
@@ -1016,6 +1041,7 @@ internal class VisibilityRelay {
     fun report(ratio: Float) {
         val r = ratio.coerceIn(0f, 1f)
         latest = r
+        sampleObserver?.invoke(r)
         if (last >= 0f && kotlin.math.abs(r - last) < 0.01f) return
         last = r
         pusher?.invoke(r)

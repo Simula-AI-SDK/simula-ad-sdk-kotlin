@@ -220,11 +220,16 @@ internal class FallbackPresentationState(
     fun bindNavigation(owner: Any, navigate: (String) -> Boolean) {
         synchronized(this) {
             if (cleared) return
-            if (navigationOwner !== owner) clearBindingLocked()
-            navigationOwner = owner
+            claimNavigationOwnerLocked(owner)
             navigateInWebView = navigate
         }
         dispatchReadyNavigation()
+    }
+
+    @Synchronized
+    fun claimNavigationOwner(owner: Any) {
+        if (cleared) return
+        claimNavigationOwnerLocked(owner)
     }
 
     @Synchronized
@@ -327,6 +332,11 @@ internal class FallbackPresentationState(
         }
         navigationOwner = null
         navigateInWebView = null
+    }
+
+    private fun claimNavigationOwnerLocked(owner: Any) {
+        if (navigationOwner !== owner) clearBindingLocked()
+        navigationOwner = owner
     }
 
     private data class NavigationDelivery(
@@ -831,6 +841,8 @@ private fun FallbackAdOverlay(
                             recordRenderProcessGone("fallback_ad", detail)
                     },
                 ).apply {
+                    presentationState.claimNavigationOwner(navigationOwner)
+                    fallbackWebView = this
                     if (inlineHtml != null) {
                         // Inline html (preferred). baseUrl = the iframe origin so the end screen's own
                         // click beacon (fetch to the API) stays same-origin, exactly as loadUrl did.
@@ -840,7 +852,6 @@ private fun FallbackAdOverlay(
                         realLoadStarted = true
                         loadUrl(iframeUrl)
                     }
-                    fallbackWebView = this
                 }
             },
             // The creative fills edge-to-edge: inset only vertically (status / nav / top notch),
