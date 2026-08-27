@@ -296,6 +296,12 @@ private fun RewardedMinigame(
     recordStoreOpen: (String) -> Unit,
     onFinish: (earned: Boolean) -> Unit,
 ) {
+    val creativeSource = remember(presentation) {
+        primaryFullscreenCreativeSource(presentation.renderedHtml, presentation.iframeUrl)
+    }
+    // Routing metadata is separate from the WebView security base. HTML still loads with a null
+    // base, while the server iframe URL preserves existing same-origin CTA classification.
+    val logicalCtaBaseUrl = CreativeCtaRouter.admittedHttpUrl(presentation.iframeUrl)
     // Play-to-earn gate length, in seconds — sourced from `ad_behavior.close.delay_seconds` (the
     // same value that ungates the close button). No `ad_behavior` → 0 → instantly earned.
     val gateSeconds = presentation.adBehavior?.close?.delaySeconds ?: 0
@@ -560,7 +566,7 @@ private fun RewardedMinigame(
         if (!primaryCtaAdmission.isEnabled()) return true
         val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
             tappedUrl = tappedUrl,
-            creativeBaseUrl = presentation.iframeUrl,
+            creativeBaseUrl = logicalCtaBaseUrl,
             trackingUrl = presentation.trackingUrl,
             destination = presentation.destination,
         )) {
@@ -633,9 +639,7 @@ private fun RewardedMinigame(
     ) {
         AndroidView(
             factory = { ctx ->
-                val url = presentation.iframeUrl
-                val html = presentation.renderedHtml
-                val creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(url)
+                val creativeBaseUrl = logicalCtaBaseUrl
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : CreativeTelemetryWebViewClient("rewarded") {
@@ -651,9 +655,9 @@ private fun RewardedMinigame(
                             val requestUrl = request?.url?.toString() ?: return false
                             primaryCtaNavigation.navigationOverride()?.let { return it }
                             if (request.isForMainFrame != true) return false
-                            if (requestUrl == url) return false
+                            if (requestUrl == presentation.iframeUrl) return false
                             // Allow same-origin navigation; open external links externally.
-                            if (CreativeCtaRouter.hasSameHttpOrigin(url, requestUrl)) return false
+                            if (CreativeCtaRouter.hasSameHttpOrigin(logicalCtaBaseUrl, requestUrl)) return false
                             // External link from the playable is the CTA store-open — routed
                             // through the shared CTA router so the tapped tracker opens verbatim
                             // (referrer-preserving) with the raw store link as the deterministic
@@ -699,12 +703,13 @@ private fun RewardedMinigame(
                         if (primaryCtaAdmission.isEnabled()) beginPrimaryCta(url)
                     }
                     if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
-                    // Prefer the server-rendered HTML when present (parity with the interstitial,
-                    // which fills the surface); fall back to the iframe URL.
-                    if (html.isNotBlank()) {
-                        loadDataWithBaseURL(creativeBaseUrl, html, "text/html", "UTF-8", null)
-                    } else {
-                        loadUrl(url)
+                    when (val source = creativeSource) {
+                        is PrimaryFullscreenCreativeSource.Html -> {
+                            // Primary HTML stays opaque and never inherits iframe origin state.
+                            loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
+                        }
+                        is PrimaryFullscreenCreativeSource.Iframe -> loadUrl(source.url)
+                        null -> Unit
                     }
                     creativeWebView = this
                 }

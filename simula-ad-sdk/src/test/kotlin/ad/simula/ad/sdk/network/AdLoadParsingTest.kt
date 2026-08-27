@@ -215,11 +215,13 @@ class AdLoadParsingTest {
             {
               "impression_id": "abc-123",
               "ad_inserted": true,
+              "iframe_url": "https://example.com/fallback",
               "rendered_html": "<html><body>hi</body></html>"
             }
         """.trimIndent()
         val r = json.decodeFromString<AdLoadApiResponse>(payload)
         assertEquals("<html><body>hi</body></html>", r.renderedHtml)
+        assertEquals("https://example.com/fallback", r.iframeUrl)
     }
 
     @Test
@@ -228,6 +230,7 @@ class AdLoadParsingTest {
             """{"impression_id":"x","ad_inserted":true}""",
         )
         assertNull(r.renderedHtml)
+        assertNull(r.iframeUrl)
     }
 
     // ── Response: ad_behavior (A/B render config, v2 schema) ─────────────────────

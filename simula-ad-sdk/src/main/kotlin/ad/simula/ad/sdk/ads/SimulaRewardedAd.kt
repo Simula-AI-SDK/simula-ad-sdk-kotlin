@@ -198,8 +198,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
-                // A rewarded ad with no iframe to render is a no-fill.
-                if (ad.iframeUrl.isBlank()) {
+                if (primaryFullscreenCreativeSource(ad.renderedHtml, ad.iframeUrl) == null) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }

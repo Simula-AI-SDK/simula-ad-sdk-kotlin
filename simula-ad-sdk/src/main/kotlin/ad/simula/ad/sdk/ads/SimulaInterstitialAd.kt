@@ -197,10 +197,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
-                // Fillable only when the payload carries a non-blank `rendered_html`
-                // creative (whitespace-only HTML is treated as no-fill).
-                val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
-                if (!ad.adInserted || html == null) {
+                if (!ad.adInserted || primaryFullscreenCreativeSource(ad.renderedHtml, ad.iframeUrl) == null) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
