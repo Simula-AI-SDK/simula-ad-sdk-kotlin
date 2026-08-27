@@ -889,8 +889,7 @@ private fun CreativeHtml(
             CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> false
             CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> true
             is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> {
-                val accepted = onPrimaryCta(plan.route)
-                if (accepted) webView?.let(BridgeWebViewInstaller::disableTrustedCta)
+                onPrimaryCta(plan.route)
                 true
             }
         }
