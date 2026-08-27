@@ -16,7 +16,6 @@ import java.util.ArrayDeque
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -567,7 +566,6 @@ class FullscreenClickHandoffPolicyTest {
         val gate = ClickInteractionGate(idFactory = { "fallback" })
         var routeCompletion: ((Boolean) -> Unit)? = null
         state.showing(0)
-        assertTrue(state.clickAdmission(0).disable())
 
         coordinateDeferredClickPersistence(
             scheduler = scheduler,
@@ -705,7 +703,6 @@ class FullscreenClickHandoffPolicyTest {
         val state = FallbackPresentationState()
         val failedOwner = Any()
         state.showing(0)
-        assertTrue(state.clickAdmission(0).disable())
         state.bindNavigation(failedOwner) { false }
         state.setClickPending(true)
         assertTrue(state.retainNavigation("https://creative.example/fallback"))
@@ -716,17 +713,6 @@ class FullscreenClickHandoffPolicyTest {
         assertTrue(state.advance(total = 2))
         assertFalse(state.hasRetainedNavigation())
         assertEquals(1, state.index)
-    }
-
-    @Test
-    fun `fallback click admission persists for same index and resets for next screen`() {
-        val state = FallbackPresentationState()
-        val first = state.clickAdmission(0)
-        assertTrue(first.disable())
-
-        assertSame(first, state.clickAdmission(0))
-        assertFalse(state.clickAdmission(0).isEnabled())
-        assertTrue(state.clickAdmission(1).isEnabled())
     }
 
     @Test
@@ -745,7 +731,6 @@ class FullscreenClickHandoffPolicyTest {
     fun `fallback navigation ownership resets for the next screen`() {
         val state = FallbackPresentationState()
         state.showing(0)
-        assertTrue(state.clickAdmission(0).disable())
         state.bindNavigation(Any()) { true }
         val firstUrl = "https://creative.example/first"
         assertTrue(state.retainNavigation(firstUrl))
@@ -753,7 +738,6 @@ class FullscreenClickHandoffPolicyTest {
         assertNull(state.navigationOverride())
 
         state.showing(1)
-        assertTrue(state.clickAdmission(1).disable())
 
         assertNull(state.navigationOverride())
     }
@@ -796,19 +780,22 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
-    fun `accepted primary CTA admission remains disabled after successful route`() {
-        val admission = ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission()
-        val gate = ClickInteractionGate(idFactory = { "primary" })
+    fun `accepted primary CTA allows a later distinct interaction`() {
+        var now = 1_000L
+        var nextId = 0
+        val gate = ClickInteractionGate(
+            clockMs = { now },
+            idFactory = { "primary-${++nextId}" },
+        )
         val handoff = ClickPersistenceHandoff(
             requireNotNull(gate.claim(ClickSources.PRIMARY_CTA)),
         ) {}
 
-        assertTrue(admission.disable())
         handoff.complete(ClickPersistencePart.TELEMETRY)
         handoff.complete(ClickPersistencePart.BEACON)
         assertTrue(handoff.handoff { true })
 
-        assertFalse(admission.isEnabled())
-        assertFalse(admission.disable())
+        now += 500L
+        assertEquals("primary-2", gate.claim(ClickSources.PRIMARY_CTA)?.interaction?.id)
     }
 }

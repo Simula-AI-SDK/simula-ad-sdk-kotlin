@@ -419,7 +419,6 @@ private fun RewardedMinigame(
         }
     }
     val primaryCtaNavigation = presentation.primaryCtaNavigation
-    val primaryCtaAdmission = primaryCtaNavigation.admission
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaRewardedActivity
     DisposableEffect(presentation, fallbackOwner, fallbackActivity, creativeWebView) {
@@ -607,7 +606,6 @@ private fun RewardedMinigame(
     }
 
     fun beginPrimaryCta(tappedUrl: String, currentPageUrl: String? = creativeWebView?.url): Boolean {
-        if (!primaryCtaAdmission.isEnabled()) return true
         val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
             tappedUrl = tappedUrl,
             creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: initialPageUrl,
@@ -619,12 +617,7 @@ private fun RewardedMinigame(
             is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
         }
         val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
-        if (!primaryCtaAdmission.disable()) {
-            claim.release()
-            return true
-        }
         notifyPublisherClick { presentation.callbacks.notifyClicked() }
-        creativeWebView?.let(BridgeWebViewInstaller::disableTrustedCta)
         val interaction = claim.interaction
         coordinateDeferredClickPersistence(
             mainHandler = clickHandoffHandler,
@@ -751,7 +744,7 @@ private fun RewardedMinigame(
                 ).apply {
                     webChromeClient = CreativeTelemetryWebChromeClient("rewarded", SimulaAds.devMode)
                     val injectionMode = BridgeWebViewInstaller.install(this, bridge) { url ->
-                        if (primaryCtaAdmission.isEnabled()) beginPrimaryCta(url)
+                        beginPrimaryCta(url)
                     }
                     if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
                         post { if (creativeWebView === this) bridgeUnavailable = true }
@@ -773,7 +766,6 @@ private fun RewardedMinigame(
                             )
                             bridgeReady = true
                         }
-                        if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
                         when (val source = creativeSource) {
                             is RewardedCreativeSource.Html -> {
                                 // Primary HTML stays opaque and never inherits iframe origin state.

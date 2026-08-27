@@ -4,7 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -409,39 +408,11 @@ class ClickTrackingTest {
     }
 
     @Test
-    fun `primary CTA document admission disables permanently exactly once`() {
-        val admission = PrimaryCtaDocumentAdmission()
-
-        assertTrue(admission.isEnabled())
-        assertTrue(admission.disable())
-        assertFalse(admission.isEnabled())
-        assertFalse("disable is one-shot", admission.disable())
-        assertFalse("disabled document chain never re-enables", admission.isEnabled())
-    }
-
-    @Test
-    fun `retained primary CTA admission is shared across Activity recreation`() {
-        val state = RetainedPrimaryCtaNavigationState<Any>()
-        val firstActivity = Any()
-        val replacementActivity = Any()
-        val admission = state.admission
-        state.attachActivity(firstActivity)
-
-        assertTrue(admission.disable())
-        state.detachActivity(firstActivity)
-        state.attachActivity(replacementActivity)
-
-        assertSame(admission, state.admission)
-        assertFalse(state.admission.isEnabled())
-    }
-
-    @Test
     fun `terminal primary route delegates to normal policy without granting navigation`() {
         val state = RetainedPrimaryCtaNavigationState<Any>()
         val handoff = testHandoff("pending")
 
         assertNull(state.navigationOverride())
-        assertTrue(state.admission.disable())
         state.onHandoffCreated(handoff)
         assertEquals(true, state.navigationOverride())
 
@@ -457,7 +428,6 @@ class ClickTrackingTest {
         val handoff = testHandoff("route")
         val calls = mutableListOf<String>()
         state.attachActivity(oldActivity)
-        assertTrue(state.admission.disable())
         state.onHandoffCreated(handoff)
 
         assertTrue(state.retainFallback("https://creative.example/fallback", oldActivity))
@@ -509,7 +479,6 @@ class ClickTrackingTest {
         val handoff = testHandoff("retry")
         val calls = mutableListOf<String>()
         state.attachActivity(activity)
-        assertTrue(state.admission.disable())
         assertTrue(state.bindNavigation(failedOwner, activity) { false })
         state.onHandoffCreated(handoff)
         assertTrue(state.retainFallback("https://creative.example/fallback", activity))
@@ -536,7 +505,6 @@ class ClickTrackingTest {
         val handoff = testHandoff("async")
         val fallbackUrl = "https://creative.example/fallback"
         state.attachActivity(activity)
-        assertTrue(state.admission.disable())
         state.onHandoffCreated(handoff)
         assertTrue(state.retainFallback(fallbackUrl, activity))
         assertTrue(state.bindNavigation(Any(), activity) { true })
@@ -557,7 +525,6 @@ class ClickTrackingTest {
         val handoff = testHandoff("replacement")
         val fallbackUrl = "https://creative.example/fallback"
         state.attachActivity(activity)
-        assertTrue(state.admission.disable())
         state.onHandoffCreated(handoff)
         assertTrue(state.retainFallback(fallbackUrl, activity))
         assertTrue(state.bindNavigation(oldOwner, activity) { true })

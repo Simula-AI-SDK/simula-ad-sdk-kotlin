@@ -107,7 +107,6 @@ import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.DeclarativeClickRouteOwner
 import ad.simula.ad.sdk.network.PresentationRouteResult
-import ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission
 import ad.simula.ad.sdk.network.ResumedPresentationRoute
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
@@ -785,7 +784,6 @@ private fun AdIframeOverlay(
     var clickHandoffPending by remember { mutableStateOf(false) }
     var adWebView by remember { mutableStateOf<WebView?>(null) }
     val clickGate = remember(adId) { ClickInteractionGate() }
-    val clickAdmission = remember(adId) { PrimaryCtaDocumentAdmission() }
     val clickHandler = remember { Handler(Looper.getMainLooper()) }
     val hostActivity = remember(context) { findActivity(context) }
     val clickOwner = remember(adId, hostActivity) { DeclarativeClickRouteOwner(hostActivity) }
@@ -949,7 +947,6 @@ private fun AdIframeOverlay(
                                 ): Boolean {
                                     val requestUrl = request?.url?.toString() ?: return false
                                     if (clickHandoffPending) return true
-                                    if (!clickAdmission.isEnabled()) return false
                                     val requestUri = runCatching { Uri.parse(requestUrl) }.getOrNull() ?: return true
                                     if (requestUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
                                     if (request?.isForMainFrame != true) return false
@@ -981,7 +978,6 @@ private fun AdIframeOverlay(
                                         is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
                                     }
                                     val claim = clickGate.claim(ClickSources.FALLBACK_CTA) ?: return true
-                                    clickAdmission.disable()
                                     val interaction = claim.interaction
                                     coordinateDeferredClickPersistence(
                                         mainHandler = clickHandler,

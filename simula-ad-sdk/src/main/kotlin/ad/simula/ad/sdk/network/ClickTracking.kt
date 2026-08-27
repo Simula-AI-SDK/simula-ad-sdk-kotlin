@@ -473,29 +473,12 @@ internal data class PrimaryCtaRoute(
     val externalTarget: String?,
 )
 
-/** Once disabled, this WebView/document chain can never create another SDK-owned CTA. */
-internal class PrimaryCtaDocumentAdmission {
-    private var disabled = false
-
-    @Synchronized
-    fun isEnabled(): Boolean = !disabled
-
-    @Synchronized
-    fun disable(): Boolean {
-        if (disabled) return false
-        disabled = true
-        return true
-    }
-}
-
 /**
  * Presentation-owned primary CTA state. The presentation outlives Activity recreation, while the
  * bound Activity and WebView navigation callback must not. A failed external route is retained until
  * the handoff is terminal and a WebView owned by the current Activity has bound.
  */
 internal class RetainedPrimaryCtaNavigationState<T : Any> {
-    val admission = PrimaryCtaDocumentAdmission()
-
     private var currentActivity: WeakReference<T>? = null
     private var navigationOwner: Any? = null
     private var navigationActivity: WeakReference<T>? = null
@@ -598,7 +581,6 @@ internal class RetainedPrimaryCtaNavigationState<T : Any> {
     fun clear() {
         if (cleared) return
         cleared = true
-        admission.disable()
         currentActivity = null
         pendingHandoff = null
         pendingFallbackUrl = null

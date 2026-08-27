@@ -15,7 +15,6 @@ import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickSources
-import ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
@@ -100,7 +99,6 @@ internal class FallbackPresentationState(
         private set
     var fetchedAds: List<SimulaApiClient.FallbackAd>? = null
         private set
-    private val clickAdmissions = LinkedHashMap<Int, PrimaryCtaDocumentAdmission>()
     private var navigationOwner: Any? = null
     private var navigateInWebView: ((String) -> Boolean)? = null
     private var pendingNavigationUrl: String? = null
@@ -134,9 +132,6 @@ internal class FallbackPresentationState(
         if (retained != null) return retained
         return emptyList<SimulaApiClient.FallbackAd>().also(::retainFetchedAds)
     }
-    fun clickAdmission(index: Int): PrimaryCtaDocumentAdmission =
-        clickAdmissions.getOrPut(index.coerceAtLeast(0)) { PrimaryCtaDocumentAdmission() }
-
     @Synchronized
     fun closeGateElapsedMs(index: Int): Long = closeGateElapsedByIndex[index.coerceAtLeast(0)] ?: 0L
 
@@ -216,7 +211,6 @@ internal class FallbackPresentationState(
         cleared = true
         clickHandoffPending = false
         cancelNavigationLocked()
-        clickAdmissions.clear()
         closeGateElapsedByIndex.clear()
     }
 
@@ -544,9 +538,6 @@ private fun FallbackAdOverlay(
     // it with the host and force a repaint on foreground return — AndroidView won't pause a WebView, and
     // a hardware-accelerated WebView returns black/blank after the window loses visibility (background).
     var fallbackWebView by remember { mutableStateOf<WebView?>(null) }
-    val clickAdmission = remember(presentationState, fallbackIndex) {
-        presentationState.clickAdmission(fallbackIndex)
-    }
     val navigationOwner = remember(presentationState, fallbackIndex) { Any() }
     DisposableEffect(presentationState, navigationOwner, fallbackWebView) {
         val webView = fallbackWebView ?: return@DisposableEffect onDispose {}
@@ -694,10 +685,6 @@ private fun FallbackAdOverlay(
                             // A genuine user tap uses one native fallback_cta interaction id for durable
                             // beacon + lifecycle attribution. Programmatic redirects remain non-clicks.
                             val claim = claimClick(ClickSources.FALLBACK_CTA) ?: return true
-                            if (!clickAdmission.disable()) {
-                                claim.release()
-                                return true
-                            }
                             notifyPublisherClick { onAdClick(claim.interaction) }
                             val interaction = claim.interaction
                             coordinateDeferredClickPersistence(

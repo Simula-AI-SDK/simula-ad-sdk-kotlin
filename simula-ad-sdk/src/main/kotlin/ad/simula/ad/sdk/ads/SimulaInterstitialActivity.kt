@@ -617,10 +617,6 @@ private fun CreativeInterstitial(
                 onPrimaryCta = primaryCta@{ route ->
                     val claim = presentation.claimClick(ClickSources.PRIMARY_CTA)
                         ?: return@primaryCta false
-                    if (!presentation.primaryCtaNavigation.admission.disable()) {
-                        claim.release()
-                        return@primaryCta false
-                    }
                     if (Build.VERSION.SDK_INT >= 21) {
                         presentation.installBannerState.onPrimaryCtaAdmitted()
                     }
@@ -880,7 +876,6 @@ private fun CreativeHtml(
 ) {
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
     val primaryCtaNavigation = presentation.primaryCtaNavigation
-    val primaryCtaAdmission = primaryCtaNavigation.admission
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaInterstitialActivity
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -992,13 +987,12 @@ private fun CreativeHtml(
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
                 val injectionMode = BridgeWebViewInstaller.install(this, bridge) { url ->
-                    if (primaryCtaAdmission.isEnabled()) handlePrimaryCta(url, this)
+                    handlePrimaryCta(url, this)
                 }
                 if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
                     post { if (creativeWebView === this) onBridgeUnavailable() }
                 } else {
                     post { if (creativeWebView === this) onBridgeReady() }
-                    if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
                     loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
                 }
                 creativeWebView = this
