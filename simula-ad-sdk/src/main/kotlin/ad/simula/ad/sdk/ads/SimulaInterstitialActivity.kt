@@ -241,8 +241,8 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
     private fun reportClosed() {
         if (closed) return
         closed = true
-        storeExit?.onAdClosed() // resolve any outstanding store visit as an abandon
-        presentation?.callbacks?.onClosed()
+        runCatching { storeExit?.onAdClosed() } // resolve any outstanding store visit as an abandon
+        runCatching { presentation?.callbacks?.onClosed() }
     }
 
     override fun onResume() {
@@ -314,6 +314,34 @@ internal const val FULLSCREEN_IMPRESSION_DELAY_MS = 2_000L
  * coarse enough to stay negligible. Shared by the interstitial and rewarded Activities. */
 internal const val IMPRESSION_TICK_MS = 200L
 
+internal fun admitFullscreenDisplay(
+    alreadyReported: Boolean,
+    markReported: () -> Unit,
+    notifyDisplayed: () -> Unit,
+    enqueueShown: () -> Unit,
+): Boolean {
+    if (!alreadyReported) {
+        markReported()
+        runCatching(notifyDisplayed)
+        runCatching(enqueueShown)
+    }
+    return true
+}
+
+internal fun commitFullscreenImpression(
+    alreadyReported: Boolean,
+    markReported: () -> Unit,
+    notifyImpression: () -> Unit,
+    notifyPaid: () -> Unit,
+    enqueueSeen: () -> Unit,
+) {
+    if (alreadyReported) return
+    markReported()
+    runCatching(notifyImpression)
+    runCatching(notifyPaid)
+    runCatching(enqueueSeen)
+}
+
 /** True if the close gate's foreground dwell was already satisfied in a prior Activity instance
  * (config-change recreation), so the close should start enabled. Based on accumulated foreground
  * time so rotation can't reset the dwell. */
@@ -364,6 +392,7 @@ private fun CreativeInterstitial(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var bridgeReady by remember(presentation) { mutableStateOf(false) }
+    var displayAdmitted by remember(presentation) { mutableStateOf(presentation.displayedReported) }
     val clickHandoffHandler = remember { Handler(Looper.getMainLooper()) }
     var clickHandoffPending by remember(presentation) {
         mutableStateOf(presentation.pendingClickHandoff() != null)
@@ -496,46 +525,32 @@ private fun CreativeInterstitial(
         }
     }
 
-    // SHOWN — fired once the creative first composes
-    // (begin-to-render), reporting the `/shown` beacon. Guarded so an Activity recreation
-    // (config change) doesn't double-report.
-    LaunchedEffect(bridgeReady) {
-        if (!bridgeReady) return@LaunchedEffect
-        if (!presentation.displayedReported) {
-            presentation.displayedReported = true
-            presentation.callbacks.onDisplayed()
-            // Durable beacon (was a fire-and-forget trackShown).
-            AdBeaconManager.enqueue(
-                ad.impressionId,
-                "shown",
-                adFormat = "interstitial",
-                telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
-            )
-        }
-    }
-
     // IMPRESSION + PAID (the billable impression + paid event) — fired together once the creative
     // has been on screen for [FULLSCREEN_IMPRESSION_DELAY_MS] of FOREGROUND time after begin-to-render.
     // OMID measures viewability but does not gate us (PRD). Foreground-only (repeatOnLifecycle(RESUMED))
     // so a backgrounded ad can't accrue the delay; the accrued time lives on the presentation so a
     // config-change recreation resumes rather than restarts. The `/seen` beacon is the billing source
     // of truth; onPaid is local analytics only and needs no network (the value is already on-device).
-    LaunchedEffect(bridgeReady) {
-        if (!bridgeReady) return@LaunchedEffect
+    LaunchedEffect(displayAdmitted) {
+        if (!displayAdmitted) return@LaunchedEffect
         if (presentation.impressionReported) return@LaunchedEffect
 
         fun fireImpressionAndPaid() {
-            if (presentation.impressionReported) return
-            presentation.impressionReported = true
-            presentation.callbacks.onImpression()
-            presentation.callbacks.onPaid(ad.adValue)
-            // Durable billable-impression beacon (was a fire-and-forget trackImpression).
-            AdBeaconManager.enqueue(
-                ad.impressionId,
-                "seen",
-                adFormat = "interstitial",
-                telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
-                metadata = presentation.metadata,
+            commitFullscreenImpression(
+                alreadyReported = presentation.impressionReported,
+                markReported = { presentation.impressionReported = true },
+                notifyImpression = presentation.callbacks::onImpression,
+                notifyPaid = { presentation.callbacks.onPaid(ad.adValue) },
+                enqueueSeen = {
+                    // Durable billable-impression beacon (was a fire-and-forget trackImpression).
+                    AdBeaconManager.enqueue(
+                        ad.impressionId,
+                        "seen",
+                        adFormat = "interstitial",
+                        telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
+                        metadata = presentation.metadata,
+                    )
+                },
             )
         }
 
@@ -567,7 +582,7 @@ private fun CreativeInterstitial(
     // FallbackAdOverlay; this one is only composed during the primary creative.) Mirrors
     // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
     BackHandler(enabled = true) {
-        if (canDismissFullscreen(closeEnabled, clickHandoffPending)) onFinish()
+        if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) onFinish()
     }
 
     Box(
@@ -582,7 +597,22 @@ private fun CreativeInterstitial(
                 bridge = bridge,
                 presentation = presentation,
                 onBridgeUnavailable = onFinish,
-                onBridgeReady = { bridgeReady = true },
+                onBridgeReady = {
+                    displayAdmitted = admitFullscreenDisplay(
+                        alreadyReported = presentation.displayedReported,
+                        markReported = { presentation.displayedReported = true },
+                        notifyDisplayed = presentation.callbacks::onDisplayed,
+                        enqueueShown = {
+                            AdBeaconManager.enqueue(
+                                ad.impressionId,
+                                "shown",
+                                adFormat = "interstitial",
+                                telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
+                            )
+                        },
+                    )
+                    bridgeReady = true
+                },
                 onAutomaticCta = ::routeAutomaticCta,
                 onPrimaryCta = primaryCta@{ route ->
                     val claim = presentation.claimClick(ClickSources.PRIMARY_CTA)
@@ -671,18 +701,18 @@ private fun CreativeInterstitial(
             position = close.position,
             progressBarColor = close.progressBarColor,
             isRewardCopy = isRewardCopy,
-            enabled = canDismissFullscreen(closeEnabled, clickHandoffPending),
+            enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted),
             remaining = closeRemaining,
             progress = closeProgress.value,
             onClose = {
-                if (canDismissFullscreen(closeEnabled, clickHandoffPending)) onFinish()
+                if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) onFinish()
             },
         )
 
         // Mid-ad store prompt — pinned to the corner opposite the close button (the SDK mirrors the
         // close position horizontally) during the [closeTime/2, closeTime) window. `!closeEnabled`
         // removes it the instant the real close button appears, so the two affordances never overlap.
-        if (storePrompt != null && storePrompt.enabled && storePromptVisible && !closeEnabled) {
+        if (displayAdmitted && storePrompt != null && storePrompt.enabled && storePromptVisible && !closeEnabled) {
             // Center the badge in the same touch-target band as the close button so the two line up.
             StorePromptBadge(
                 prompt = storePrompt,
@@ -965,9 +995,9 @@ private fun CreativeHtml(
                     if (primaryCtaAdmission.isEnabled()) handlePrimaryCta(url, this)
                 }
                 if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
-                    post(onBridgeUnavailable)
+                    post { if (creativeWebView === this) onBridgeUnavailable() }
                 } else {
-                    post(onBridgeReady)
+                    post { if (creativeWebView === this) onBridgeReady() }
                     if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
                     loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
                 }

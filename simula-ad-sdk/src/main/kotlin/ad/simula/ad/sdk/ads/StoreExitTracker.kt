@@ -173,8 +173,11 @@ internal fun coordinateDeferredClickPersistence(
     return handoff
 }
 
-internal fun canDismissFullscreen(dismissUnlocked: Boolean, clickHandoffPending: Boolean): Boolean =
-    dismissUnlocked && !clickHandoffPending
+internal fun canDismissFullscreen(
+    dismissUnlocked: Boolean,
+    clickHandoffPending: Boolean,
+    displayAdmitted: Boolean = true,
+): Boolean = displayAdmitted && dismissUnlocked && !clickHandoffPending
 
 /**
  * Tracks the store-exit funnel for a single full-screen ad presentation: which click type sent the

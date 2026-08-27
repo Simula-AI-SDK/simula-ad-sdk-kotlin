@@ -197,8 +197,8 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     private fun reportClosed() {
         if (closed) return
         closed = true
-        storeExit?.onAdClosed() // resolve any outstanding store visit as an abandon
-        presentation?.let { p -> p.callbacks.onClose(p.rewardEarned, elapsedSeconds(p)) }
+        runCatching { storeExit?.onAdClosed() } // resolve any outstanding store visit as an abandon
+        presentation?.let { p -> runCatching { p.callbacks.onClose(p.rewardEarned, elapsedSeconds(p)) } }
     }
 
     override fun onResume() {
@@ -223,7 +223,9 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         reportClosed() // CLOSE fires once the whole unit (playable + all fallback screens) is done
         if (!completed) {
             completed = true
-            presentation?.let { p -> p.callbacks.onRewardCompleted(p.rewardEarned, elapsedSeconds(p)) }
+            presentation?.let { p ->
+                runCatching { p.callbacks.onRewardCompleted(p.rewardEarned, elapsedSeconds(p)) }
+            }
         }
         finishAd()
     }
@@ -251,10 +253,12 @@ internal class SimulaRewardedActivity : ComponentActivity() {
             val currentPresentation = presentation
             if (!completed && currentPresentation?.rewardEarned == true) {
                 completed = true
-                currentPresentation.callbacks.onRewardCompleted(
-                    currentPresentation.rewardEarned,
-                    elapsedSeconds(currentPresentation),
-                )
+                runCatching {
+                    currentPresentation.callbacks.onRewardCompleted(
+                        currentPresentation.rewardEarned,
+                        elapsedSeconds(currentPresentation),
+                    )
+                }
                 val serveId = currentPresentation.impressionId.takeIf { it.isNotBlank() }
                 Telemetry.recordLifecycle(
                     stage = "reward_salvaged_on_teardown",
@@ -405,6 +409,7 @@ private fun RewardedMinigame(
     // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
     var bridgeReady by remember(presentation) { mutableStateOf(false) }
+    var displayAdmitted by remember(presentation) { mutableStateOf(presentation.displayedReported) }
     var bridgeUnavailable by remember { mutableStateOf(false) }
     LaunchedEffect(bridgeUnavailable) {
         if (bridgeUnavailable) {
@@ -492,46 +497,32 @@ private fun RewardedMinigame(
         }
     }
 
-    // SHOWN — fired once the playable first composes
-    // (begin-to-render), reporting the `/shown` beacon. Guarded so an Activity recreation doesn't
-    // double-report.
-    LaunchedEffect(bridgeReady) {
-        if (!bridgeReady) return@LaunchedEffect
-        if (!presentation.displayedReported) {
-            presentation.displayedReported = true
-            presentation.callbacks.onDisplayed()
-            // Durable beacon (was a fire-and-forget trackShown).
-            AdBeaconManager.enqueue(
-                presentation.impressionId,
-                "shown",
-                adFormat = "rewarded",
-                telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
-            )
-        }
-    }
-
     // IMPRESSION + PAID (the billable impression + paid event) — fired together once the playable
     // has been on screen for [FULLSCREEN_IMPRESSION_DELAY_MS] of FOREGROUND time after begin-to-render,
     // independent of the play-to-earn reward gate. OMID measures viewability but does not gate us (PRD).
     // Foreground-only so a backgrounded playable can't accrue the delay; the accrued time lives on the
     // presentation so a config-change recreation resumes rather than restarts. The `/seen` beacon is the
     // billing source of truth; onPaid is local analytics only (value already on-device, no network).
-    LaunchedEffect(bridgeReady) {
-        if (!bridgeReady) return@LaunchedEffect
+    LaunchedEffect(displayAdmitted) {
+        if (!displayAdmitted) return@LaunchedEffect
         if (presentation.impressionReported) return@LaunchedEffect
 
         fun fireImpressionAndPaid() {
-            if (presentation.impressionReported) return
-            presentation.impressionReported = true
-            presentation.callbacks.onImpression()
-            presentation.callbacks.onPaid(presentation.adValue)
-            // Durable billable-impression beacon (was a fire-and-forget trackImpression).
-            AdBeaconManager.enqueue(
-                presentation.impressionId,
-                "seen",
-                adFormat = "rewarded",
-                telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
-                metadata = presentation.metadata,
+            commitFullscreenImpression(
+                alreadyReported = presentation.impressionReported,
+                markReported = { presentation.impressionReported = true },
+                notifyImpression = presentation.callbacks::onImpression,
+                notifyPaid = { presentation.callbacks.onPaid(presentation.adValue) },
+                enqueueSeen = {
+                    // Durable billable-impression beacon (was a fire-and-forget trackImpression).
+                    AdBeaconManager.enqueue(
+                        presentation.impressionId,
+                        "seen",
+                        adFormat = "rewarded",
+                        telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
+                        metadata = presentation.metadata,
+                    )
+                },
             )
         }
 
@@ -612,7 +603,7 @@ private fun RewardedMinigame(
 
     // No early exit: Back does nothing until the reward is earned, then it closes (earned).
     BackHandler(enabled = true) {
-        if (canDismissFullscreen(rewardEarned, clickHandoffPending)) onFinish(true)
+        if (canDismissFullscreen(rewardEarned, clickHandoffPending, displayAdmitted)) onFinish(true)
     }
 
     fun beginPrimaryCta(tappedUrl: String, currentPageUrl: String? = creativeWebView?.url): Boolean {
@@ -763,9 +754,25 @@ private fun RewardedMinigame(
                         if (primaryCtaAdmission.isEnabled()) beginPrimaryCta(url)
                     }
                     if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
-                        post { bridgeUnavailable = true }
+                        post { if (creativeWebView === this) bridgeUnavailable = true }
                     } else {
-                        post { bridgeReady = true }
+                        post {
+                            if (creativeWebView !== this) return@post
+                            displayAdmitted = admitFullscreenDisplay(
+                                alreadyReported = presentation.displayedReported,
+                                markReported = { presentation.displayedReported = true },
+                                notifyDisplayed = presentation.callbacks::onDisplayed,
+                                enqueueShown = {
+                                    AdBeaconManager.enqueue(
+                                        presentation.impressionId,
+                                        "shown",
+                                        adFormat = "rewarded",
+                                        telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
+                                    )
+                                },
+                            )
+                            bridgeReady = true
+                        }
                         if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
                         when (val source = creativeSource) {
                             is RewardedCreativeSource.Html -> {
@@ -803,18 +810,18 @@ private fun RewardedMinigame(
             position = close.position,
             progressBarColor = close.progressBarColor,
             isRewardCopy = true,
-            enabled = canDismissFullscreen(rewardEarned, clickHandoffPending),
+            enabled = canDismissFullscreen(rewardEarned, clickHandoffPending, displayAdmitted),
             remaining = secondsLeft,
             progress = closeProgress.value,
             onClose = {
-                if (canDismissFullscreen(rewardEarned, clickHandoffPending)) onFinish(true)
+                if (canDismissFullscreen(rewardEarned, clickHandoffPending, displayAdmitted)) onFinish(true)
             },
         )
 
         // Mid-ad store prompt — appears at half the play-to-earn gate and is removed the instant the
         // reward unlocks (the reward/close pill takes over). Pinned to the corner opposite the
         // reward/close pill (the SDK mirrors the close position); a tap routes to the advertised store.
-        if (storePrompt != null && storePrompt.enabled && storePromptVisible && !rewardEarned) {
+        if (displayAdmitted && storePrompt != null && storePrompt.enabled && storePromptVisible && !rewardEarned) {
             StorePromptBadge(
                 prompt = storePrompt,
                 closePosition = close.position,

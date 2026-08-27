@@ -216,7 +216,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     sessionId = session
                     impressionId = ad.impressionId
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
-                    listener?.onAdLoaded(this@SimulaRewardedAd)
+                    runCatching { listener?.onAdLoaded(this@SimulaRewardedAd) }
                 }
                 scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
@@ -330,15 +330,15 @@ class SimulaRewardedAd(val adUnitId: String) {
                 // Preview is local-only: report lifecycle but do NOT verify a reward or auto-preload.
                 callbacks = object : RewardedCallbacks {
                     override fun onDisplayed() {
-                        listener?.onAdDisplayed(this@SimulaRewardedAd)
+                        runCatching { listener?.onAdDisplayed(this@SimulaRewardedAd) }
                     }
 
                     override fun onImpression() {
-                        listener?.onAdImpression(this@SimulaRewardedAd)
+                        runCatching { listener?.onAdImpression(this@SimulaRewardedAd) }
                     }
 
                     override fun onPaid(adValue: AdValue) {
-                        listener?.onAdPaid(this@SimulaRewardedAd, adValue)
+                        runCatching { listener?.onAdPaid(this@SimulaRewardedAd, adValue) }
                     }
 
                     // Preview is local-only: complete persistence immediately, without telemetry.
@@ -355,13 +355,13 @@ class SimulaRewardedAd(val adUnitId: String) {
 
                     override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
                         state = State.Idle
-                        listener?.onAdClosed(this@SimulaRewardedAd)
+                        runCatching { listener?.onAdClosed(this@SimulaRewardedAd) }
                     }
 
                     // Preview is local-only: no verification — just signal the earned reward once the
                     // whole (screen-less) unit completes, mirroring the live onRewardCompleted timing.
                     override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
-                        if (earned) listener?.onAdEarnedReward(this@SimulaRewardedAd)
+                        if (earned) runCatching { listener?.onAdEarnedReward(this@SimulaRewardedAd) }
                     }
                 },
                 adBehavior = behavior,
@@ -436,17 +436,17 @@ class SimulaRewardedAd(val adUnitId: String) {
     private fun bridge(adId: String): RewardedCallbacks = object : RewardedCallbacks {
         override fun onDisplayed() {
             Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, adId, elapsedSinceShow(), null)
-            listener?.onAdDisplayed(this@SimulaRewardedAd)
+            runCatching { listener?.onAdDisplayed(this@SimulaRewardedAd) }
         }
 
         override fun onImpression() {
             Telemetry.recordLifecycle("impression", AD_FORMAT, adUnitId, adId, adId, elapsedSinceShow(), null)
-            listener?.onAdImpression(this@SimulaRewardedAd)
+            runCatching { listener?.onAdImpression(this@SimulaRewardedAd) }
         }
 
         override fun onPaid(adValue: AdValue) {
             Telemetry.recordLifecycle("paid", AD_FORMAT, adUnitId, adId, adId, null, null)
-            listener?.onAdPaid(this@SimulaRewardedAd, adValue)
+            runCatching { listener?.onAdPaid(this@SimulaRewardedAd, adValue) }
         }
 
         override fun persistClick(
@@ -495,7 +495,7 @@ class SimulaRewardedAd(val adUnitId: String) {
             // onRewardCompleted (after every post-game fallback ad screen), so verifying is contingent
             // on completing the whole unit. Closed bookkeeping + auto-preload still happen now.
             Telemetry.recordLifecycle("closed", AD_FORMAT, adUnitId, adId, adId, null, null)
-            listener?.onAdClosed(this@SimulaRewardedAd)
+            runCatching { listener?.onAdClosed(this@SimulaRewardedAd) }
             // Auto-preload the next ad (iOS parity), reusing the last character context.
             load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
         }
@@ -505,7 +505,7 @@ class SimulaRewardedAd(val adUnitId: String) {
             // A non-earned completion grants nothing.
             if (!earned) return
             Telemetry.recordLifecycle("reward_earned", AD_FORMAT, adUnitId, adId, adId, null, null)
-            listener?.onAdEarnedReward(this@SimulaRewardedAd)
+            runCatching { listener?.onAdEarnedReward(this@SimulaRewardedAd) }
             val sid = impressionId
             val sess = sessionId
             if (!sid.isNullOrBlank() && !sess.isNullOrBlank()) {
@@ -560,14 +560,16 @@ class SimulaRewardedAd(val adUnitId: String) {
                     }
                     handler.post {
                         val ad = weakAd.get() ?: return@post
-                        result.fold(
-                            onSuccess = { token ->
-                                ad.listener?.onAdRewardVerified(ad, token)
-                            },
-                            onFailure = { err ->
-                                ad.listener?.onAdRewardVerificationFailed(ad, err)
-                            },
-                        )
+                        runCatching {
+                            result.fold(
+                                onSuccess = { token ->
+                                    ad.listener?.onAdRewardVerified(ad, token)
+                                },
+                                onFailure = { err ->
+                                    ad.listener?.onAdRewardVerificationFailed(ad, err)
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -588,7 +590,7 @@ class SimulaRewardedAd(val adUnitId: String) {
     private fun failLoad(error: SimulaAdError) {
         state = State.Idle
         Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, elapsedSinceLoad(), error.telemetryCode())
-        listener?.onAdFailedToLoad(this, error)
+        runCatching { listener?.onAdFailedToLoad(this, error) }
     }
 
     private suspend fun failLoadOnMain(generation: Int, error: SimulaAdError) {
@@ -613,13 +615,13 @@ class SimulaRewardedAd(val adUnitId: String) {
         }
         // Observable like any other rejected load() (sampled); no real load ran, so no duration.
         Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, null, error.telemetryCode())
-        listener?.onAdFailedToLoad(this, error)
+        runCatching { listener?.onAdFailedToLoad(this, error) }
     }
 
     private fun failShow(error: SimulaAdError) {
         // State is unchanged (stays Ready / Showing) — matches the interstitial.
         Telemetry.recordLifecycle("show_fail", AD_FORMAT, adUnitId, null, null, null, error.telemetryCode())
-        listener?.onAdFailedToDisplay(this, error)
+        runCatching { listener?.onAdFailedToDisplay(this, error) }
     }
 
     /** Monotonic ms since load() began (null if not started). */

@@ -43,6 +43,70 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `display reporting commits before zero-delay dismissal is admitted`() {
+        val events = mutableListOf<String>()
+        var displayAdmitted = false
+
+        assertFalse(canDismissFullscreen(true, false, displayAdmitted))
+        displayAdmitted = admitFullscreenDisplay(
+            alreadyReported = false,
+            markReported = { events += "marked" },
+            notifyDisplayed = { events += "displayed" },
+            enqueueShown = { events += "shown" },
+        )
+
+        assertEquals(listOf("marked", "displayed", "shown"), events)
+        assertTrue(canDismissFullscreen(true, false, displayAdmitted))
+
+        displayAdmitted = admitFullscreenDisplay(
+            alreadyReported = true,
+            markReported = { events += "duplicate_mark" },
+            notifyDisplayed = { events += "duplicate_display" },
+            enqueueShown = { events += "duplicate_shown" },
+        )
+        assertTrue(displayAdmitted)
+        assertEquals(listOf("marked", "displayed", "shown"), events)
+    }
+
+    @Test
+    fun `publisher display callback failure cannot suppress durable shown enqueue`() {
+        val events = mutableListOf<String>()
+
+        assertTrue(
+            admitFullscreenDisplay(
+                alreadyReported = false,
+                markReported = { events += "marked" },
+                notifyDisplayed = { events += "displayed"; error("publisher failure") },
+                enqueueShown = { events += "shown" },
+            ),
+        )
+
+        assertEquals(listOf("marked", "displayed", "shown"), events)
+    }
+
+    @Test
+    fun `publisher impression failures cannot suppress paid callback or seen enqueue`() {
+        val events = mutableListOf<String>()
+
+        commitFullscreenImpression(
+            alreadyReported = false,
+            markReported = { events += "marked" },
+            notifyImpression = { events += "impression"; error("publisher impression failure") },
+            notifyPaid = { events += "paid"; error("publisher paid failure") },
+            enqueueSeen = { events += "seen" },
+        )
+        commitFullscreenImpression(
+            alreadyReported = true,
+            markReported = { events += "duplicate_mark" },
+            notifyImpression = { events += "duplicate_impression" },
+            notifyPaid = { events += "duplicate_paid" },
+            enqueueSeen = { events += "duplicate_seen" },
+        )
+
+        assertEquals(listOf("marked", "impression", "paid", "seen"), events)
+    }
+
+    @Test
     fun `dismissal stays blocked until persisted click handoff reaches route`() {
         val gate = ClickInteractionGate(idFactory = { "interaction" })
         val handoff = ClickPersistenceHandoff(
