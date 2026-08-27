@@ -693,11 +693,13 @@ private fun RewardedMinigame(
             pendingHandoff = presentation.pendingClickHandoff(),
         ) {
             val opened = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
-                CreativeCtaRouter.openAutomaticNavigation(
-                    context.applicationContext,
-                    targetUrl,
-                    presentation.destination,
-                )
+                presentation.automaticNavigationGate.attempt {
+                    CreativeCtaRouter.openAutomaticNavigation(
+                        context.applicationContext,
+                        targetUrl,
+                        presentation.destination,
+                    )
+                }
             if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
             opened
         }
@@ -743,9 +745,7 @@ private fun RewardedMinigame(
                                 RewardedNavigationAction.Consume -> true
                                 RewardedNavigationAction.RouteUserCta -> beginPrimaryCta(requestUrl, view?.url)
                                 is RewardedNavigationAction.RouteAutomatic -> {
-                                    if (presentation.automaticNavigationGate.claim()) {
-                                        routeAutomaticStoreNavigation(action.targetUrl)
-                                    }
+                                    routeAutomaticStoreNavigation(action.targetUrl)
                                     true
                                 }
                             }

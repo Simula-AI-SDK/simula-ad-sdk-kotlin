@@ -133,8 +133,8 @@ internal class FallbackPresentationState(
         if (retained != null) return retained
         return emptyList<SimulaApiClient.FallbackAd>().also(::retainFetchedAds)
     }
-    fun claimAutomaticNavigation(index: Int): Boolean =
-        automaticNavigationGates.getOrPut(index.coerceAtLeast(0)) { AutomaticNavigationGate() }.claim()
+    fun attemptAutomaticNavigation(index: Int, open: () -> Boolean): Boolean =
+        automaticNavigationGates.getOrPut(index.coerceAtLeast(0)) { AutomaticNavigationGate() }.attempt(open)
 
     @Synchronized
     fun closeGateElapsedMs(index: Int): Long = closeGateElapsedByIndex[index.coerceAtLeast(0)] ?: 0L
@@ -493,7 +493,9 @@ internal fun FallbackAdHost(
                                 scope = autoRedirectScope,
                                 pendingHandoff = pendingClickHandoff(),
                             ) {
-                                openAutomaticNavigation(targetUrl)
+                                presentationState.attemptAutomaticNavigation(p.index) {
+                                    openAutomaticNavigation(targetUrl)
+                                }
                             }
                         },
                         onClose = {
@@ -689,9 +691,7 @@ private fun FallbackAdOverlay(
                                     CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> Unit
                                     CreativeCtaRouter.AutomaticNavigationPlan.Consume -> return true
                                     is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
-                                        if (presentationState.claimAutomaticNavigation(fallbackIndex)) {
-                                            onAutomaticNavigation(plan.targetUrl)
-                                        }
+                                        onAutomaticNavigation(plan.targetUrl)
                                         return true
                                     }
                                 }

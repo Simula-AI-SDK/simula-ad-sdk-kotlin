@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
+import ad.simula.ad.sdk.ads.AutomaticNavigationGate
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.bridge.BRIDGE_CAPABILITY_KEY
@@ -770,7 +771,7 @@ internal class NativeAdWiring(
     @Volatile var storeUrl: String? = null
     @Volatile var automaticNavigationActive: Boolean = false
     private val clickInteractionGate = ClickInteractionGate()
-    private var automaticNavigationClaimed = false
+    private val automaticNavigationGate = AutomaticNavigationGate()
 
     fun adoptCallbacksFrom(other: NativeAdWiring) {
         onHeightPx = other.onHeightPx
@@ -889,15 +890,7 @@ internal class NativeAdWiring(
                 if (!automaticNavigationActive || currentView?.isAttachedToWindow != true ||
                     currentView.windowVisibility != View.VISIBLE
                 ) return true
-                val shouldRoute = synchronized(this) {
-                    if (automaticNavigationClaimed) {
-                        false
-                    } else {
-                        automaticNavigationClaimed = true
-                        true
-                    }
-                }
-                if (shouldRoute) {
+                automaticNavigationGate.attempt {
                     CreativeCtaRouter.openAutomaticNavigation(appContext, plan.targetUrl, destination)
                 }
                 true

@@ -11,13 +11,20 @@ import java.net.URL
 import java.net.URLDecoder
 
 internal class AutomaticNavigationGate {
-    private var claimed = false
+    private var inFlight = false
+    private var opened = false
 
-    @Synchronized
-    fun claim(): Boolean {
-        if (claimed) return false
-        claimed = true
-        return true
+    fun attempt(open: () -> Boolean): Boolean {
+        synchronized(this) {
+            if (inFlight || opened) return false
+            inFlight = true
+        }
+        val didOpen = runCatching(open).getOrDefault(false)
+        synchronized(this) {
+            inFlight = false
+            if (didOpen) opened = true
+        }
+        return didOpen
     }
 }
 

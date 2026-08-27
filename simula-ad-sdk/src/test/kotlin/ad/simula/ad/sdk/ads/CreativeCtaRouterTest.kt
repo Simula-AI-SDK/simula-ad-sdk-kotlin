@@ -271,11 +271,20 @@ class CreativeCtaRouterTest {
     }
 
     @Test
-    fun `automatic navigation gate admits only one WebView exit attempt`() {
+    fun `automatic navigation gate commits only after a successful WebView exit`() {
         val gate = AutomaticNavigationGate()
+        var attempts = 0
+        var reentrantOpened = true
 
-        assertTrue(gate.claim())
-        assertFalse(gate.claim())
+        assertFalse(gate.attempt {
+            attempts++
+            reentrantOpened = gate.attempt { true }
+            false
+        })
+        assertFalse(reentrantOpened)
+        assertTrue(gate.attempt { attempts++; true })
+        assertFalse(gate.attempt { attempts++; true })
+        assertEquals(2, attempts)
     }
 
     @Test

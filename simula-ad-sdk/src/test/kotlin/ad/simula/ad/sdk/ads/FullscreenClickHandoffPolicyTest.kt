@@ -728,12 +728,44 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
-    fun `fallback automatic navigation is one shot per screen`() {
+    fun `fallback automatic navigation retries failure and commits success per screen`() {
         val state = FallbackPresentationState()
+        var firstScreenAttempts = 0
 
-        assertTrue(state.claimAutomaticNavigation(0))
-        assertFalse(state.claimAutomaticNavigation(0))
-        assertTrue(state.claimAutomaticNavigation(1))
+        assertFalse(state.attemptAutomaticNavigation(0) { firstScreenAttempts++; false })
+        assertTrue(state.attemptAutomaticNavigation(0) { firstScreenAttempts++; true })
+        assertFalse(state.attemptAutomaticNavigation(0) { firstScreenAttempts++; true })
+        assertEquals(2, firstScreenAttempts)
+        assertTrue(state.attemptAutomaticNavigation(1) { true })
+    }
+
+    @Test
+    fun `automatic gate is untouched by stale coordinator and commits only an opened route`() {
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        val gate = AutomaticNavigationGate()
+        var opens = 0
+
+        assertEquals(
+            AutoRedirectResult.STALE,
+            coordinator.request(scope, null) { gate.attempt { opens++; true } },
+        )
+        assertEquals(0, opens)
+
+        coordinator.activate(scope)
+        assertEquals(
+            AutoRedirectResult.FAILED,
+            coordinator.request(scope, null) { gate.attempt { opens++; false } },
+        )
+        assertEquals(
+            AutoRedirectResult.OPENED,
+            coordinator.request(scope, null) { gate.attempt { opens++; true } },
+        )
+        assertEquals(
+            AutoRedirectResult.SUPPRESSED,
+            coordinator.request(scope, null) { gate.attempt { opens++; true } },
+        )
+        assertEquals(2, opens)
     }
 
     @Test

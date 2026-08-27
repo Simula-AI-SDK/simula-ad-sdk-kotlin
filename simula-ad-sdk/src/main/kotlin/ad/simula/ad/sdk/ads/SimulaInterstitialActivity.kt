@@ -440,11 +440,13 @@ private fun CreativeInterstitial(
             pendingHandoff = presentation.pendingClickHandoff(),
         ) {
             val opened = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
-                CreativeCtaRouter.openAutomaticNavigation(
-                    context.applicationContext,
-                    targetUrl,
-                    ad.destination,
-                )
+                presentation.automaticNavigationGate.attempt {
+                    CreativeCtaRouter.openAutomaticNavigation(
+                        context.applicationContext,
+                        targetUrl,
+                        ad.destination,
+                    )
+                }
             if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
             opened
         }
@@ -979,9 +981,7 @@ private fun CreativeHtml(
                                 CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> false
                                 CreativeCtaRouter.AutomaticNavigationPlan.Consume -> true
                                 is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
-                                    if (presentation.automaticNavigationGate.claim()) {
-                                        onAutomaticCta(plan.targetUrl)
-                                    }
+                                    onAutomaticCta(plan.targetUrl)
                                     true
                                 }
                             }
