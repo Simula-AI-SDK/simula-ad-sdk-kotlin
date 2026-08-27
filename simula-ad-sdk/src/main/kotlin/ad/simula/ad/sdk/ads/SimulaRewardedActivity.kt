@@ -13,7 +13,6 @@ import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.network.AdBeaconManager
-import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.PresentationRouteResult
@@ -290,6 +289,18 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     }
 }
 
+internal fun shouldRouteRewardedNavigationAsUserCta(
+    isMainFrame: Boolean,
+    hasGesture: Boolean,
+    targetUrl: String,
+    currentPageUrl: String?,
+    logicalCtaBaseUrl: String?,
+): Boolean {
+    if (!isMainFrame || !hasGesture) return false
+    val currentOrigin = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: logicalCtaBaseUrl
+    return !CreativeCtaRouter.hasSameHttpOrigin(currentOrigin, targetUrl)
+}
+
 @Composable
 private fun RewardedMinigame(
     presentation: RewardedPresentation,
@@ -297,7 +308,7 @@ private fun RewardedMinigame(
     onFinish: (earned: Boolean) -> Unit,
 ) {
     val creativeSource = remember(presentation) {
-        primaryFullscreenCreativeSource(presentation.renderedHtml, presentation.iframeUrl)
+        rewardedCreativeSource(presentation.renderedHtml, presentation.iframeUrl)
     }
     // Routing metadata is separate from the WebView security base. HTML still loads with a null
     // base, while the server iframe URL preserves existing same-origin CTA classification.
@@ -654,45 +665,14 @@ private fun RewardedMinigame(
                         ): Boolean {
                             val requestUrl = request?.url?.toString() ?: return false
                             primaryCtaNavigation.navigationOverride()?.let { return it }
-                            if (request.isForMainFrame != true) return false
-                            if (requestUrl == presentation.iframeUrl) return false
-                            // Allow same-origin navigation; open external links externally.
-                            if (CreativeCtaRouter.hasSameHttpOrigin(logicalCtaBaseUrl, requestUrl)) return false
-                            // External link from the playable is the CTA store-open — routed
-                            // through the shared CTA router so the tapped tracker opens verbatim
-                            // (referrer-preserving) with the raw store link as the deterministic
-                            // fallback. CLICKED records the admitted user gesture before this route;
-                            // only the store-exit funnel is gated on a successful launch. A false
-                            // `opened` lets the WebView navigate in place, matching the pre-router
-                            // failure behavior. Auto redirects open the store without firing CLICKED.
-                            val open = {
-                                val target = CreativeCtaRouter.preferredClickUrl(
-                                    presentation.trackingUrl,
-                                    requestUrl,
+                            if (!shouldRouteRewardedNavigationAsUserCta(
+                                    isMainFrame = request.isForMainFrame,
+                                    hasGesture = request.hasGesture(),
+                                    targetUrl = requestUrl,
+                                    currentPageUrl = view?.url,
+                                    logicalCtaBaseUrl = logicalCtaBaseUrl,
                                 )
-                                CreativeCtaRouter.open(
-                                    ctx.applicationContext,
-                                    target,
-                                    presentation.destination,
-                                    presentation.adBehavior?.storeOpen,
-                                    presentation.androidStoreUrl,
-                                )
-                            }
-                            if (request?.hasGesture() != true) {
-                                if (presentation.hasPendingClick()) return true
-                                return when (presentation.autoRedirectCoordinator.request(
-                                    scope = autoRedirectScope,
-                                    pendingHandoff = presentation.pendingClickHandoff(),
-                                ) {
-                                    val opened = open()
-                                    if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
-                                    opened
-                                }) {
-                                    AutoRedirectResult.OPENED, AutoRedirectResult.DEFERRED,
-                                    AutoRedirectResult.SUPPRESSED -> true
-                                    AutoRedirectResult.FAILED, AutoRedirectResult.STALE -> false
-                                }
-                            }
+                            ) return false
                             return beginPrimaryCta(requestUrl)
                         }
                     },
@@ -704,11 +684,11 @@ private fun RewardedMinigame(
                     }
                     if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
                     when (val source = creativeSource) {
-                        is PrimaryFullscreenCreativeSource.Html -> {
+                        is RewardedCreativeSource.Html -> {
                             // Primary HTML stays opaque and never inherits iframe origin state.
                             loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
                         }
-                        is PrimaryFullscreenCreativeSource.Iframe -> loadUrl(source.url)
+                        is RewardedCreativeSource.Iframe -> loadUrl(source.url)
                         null -> Unit
                     }
                     creativeWebView = this

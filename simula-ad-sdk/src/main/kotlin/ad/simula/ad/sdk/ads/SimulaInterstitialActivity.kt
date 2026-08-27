@@ -327,9 +327,7 @@ private fun CreativeInterstitial(
     openDestination: (SimulaApiClient.AdLoadResult) -> Boolean,
 ) {
     val ad = presentation.ad
-    val creativeSource = remember(ad) {
-        primaryFullscreenCreativeSource(ad.renderedHtml, ad.iframeUrl)
-    }
+    val html = remember(ad) { ad.renderedHtml?.takeIf { it.isNotBlank() } }
 
     // Server-driven render config (null → render today's literal close button / store path).
     val behavior = ad.adBehavior
@@ -557,10 +555,10 @@ private fun CreativeInterstitial(
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        // rendered_html is authoritative; iframe_url is used only when HTML is absent.
-        if (creativeSource != null) {
-            CreativeContent(
-                source = creativeSource,
+        // Interstitial is rendered_html-only; iframe_url is intentionally unsupported.
+        if (html != null) {
+            CreativeHtml(
+                html = html,
                 bridge = bridge,
                 presentation = presentation,
                 onPrimaryCta = primaryCta@{ route ->
@@ -809,7 +807,7 @@ private fun CreativeInterstitial(
 }
 
 /**
- * Full-screen primary creative. Server-rendered HTML wins; iframe URL is fallback only.
+ * Full-screen interstitial rendered from server-provided HTML.
  * a user-initiated link navigation (gesture) is intercepted, reported as CLICKED via
  * [onPrimaryCta], durably recorded, and routed to the advertiser destination.
  * Non-gesture navigations (impression pixels, JS/meta auto-redirects) load normally
@@ -817,8 +815,8 @@ private fun CreativeInterstitial(
  * button drives dismissal.
  */
 @Composable
-private fun CreativeContent(
-    source: PrimaryFullscreenCreativeSource,
+private fun CreativeHtml(
+    html: String,
     bridge: CreativeBridge,
     presentation: InterstitialPresentation,
     onPrimaryCta: (PrimaryCtaRoute) -> Boolean,
@@ -827,11 +825,7 @@ private fun CreativeContent(
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
     val primaryCtaNavigation = presentation.primaryCtaNavigation
     val primaryCtaAdmission = primaryCtaNavigation.admission
-    val trustedCtaBaseUrl = when (source) {
-        is PrimaryFullscreenCreativeSource.Html ->
-            CreativeCtaRouter.admittedHttpUrl(presentation.ad.creative?.bundleUrl)
-        is PrimaryFullscreenCreativeSource.Iframe -> CreativeCtaRouter.admittedHttpUrl(source.url)
-    }
+    val trustedCtaBaseUrl = CreativeCtaRouter.admittedHttpUrl(presentation.ad.creative?.bundleUrl)
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaInterstitialActivity
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -919,13 +913,7 @@ private fun CreativeContent(
                     if (primaryCtaAdmission.isEnabled()) handlePrimaryCta(url, this)
                 }
                 if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
-                when (source) {
-                    is PrimaryFullscreenCreativeSource.Html -> {
-                        // Primary HTML stays opaque and never inherits iframe origin state.
-                        loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
-                    }
-                    is PrimaryFullscreenCreativeSource.Iframe -> loadUrl(source.url)
-                }
+                loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
                 creativeWebView = this
             }
         },

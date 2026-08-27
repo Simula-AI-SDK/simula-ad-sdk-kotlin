@@ -482,7 +482,6 @@ internal object SimulaApiClient {
         // missing or can't be launched. Null when the campaign has no raw store link.
         val androidStoreUrl: String? = null,
         val renderedHtml: String?,
-        val iframeUrl: String? = null,
         // Null when the payload omits `ad_behavior` (renderer falls back to today's defaults).
         val adBehavior: AdBehavior? = null,
         // Creative descriptor (`creative` node) and experiment metadata; null when omitted.
@@ -550,7 +549,6 @@ internal object SimulaApiClient {
             trackingUrl = data.trackingUrl,
             androidStoreUrl = data.androidStoreUrl,
             renderedHtml = data.renderedHtml,
-            iframeUrl = data.iframeUrl,
             adBehavior = data.adBehavior.toDomain(),
             creative = data.creative.toDomain(),
             experiment = data.experiment.toDomain(),

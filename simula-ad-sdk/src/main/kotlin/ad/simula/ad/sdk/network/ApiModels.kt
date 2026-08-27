@@ -187,8 +187,7 @@ internal data class AdLoadApiResponse(
     // is missing or can't be launched, so the CTA still lands on the store. Null when the
     // campaign has no raw store link.
     @SerialName("android_store_url") val androidStoreUrl: String? = null,
-    // Primary source is rendered_html; iframe_url is used only when HTML is absent/blank.
-    @SerialName("iframe_url") val iframeUrl: String? = null,
+    // Server-rendered HTML creative. Interstitials intentionally do not support iframe_url.
     @SerialName("rendered_html") val renderedHtml: String? = null,
     // Cleared bid (the estimated CPM) for this serve, backend-provided. The SDK derives the
     // `adValue` from it (see [ad.simula.ad.sdk.model.AdValue.fromBidCpm]) and surfaces it on the paid

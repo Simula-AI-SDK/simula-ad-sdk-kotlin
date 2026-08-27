@@ -197,7 +197,8 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
-                if (!ad.adInserted || primaryFullscreenCreativeSource(ad.renderedHtml, ad.iframeUrl) == null) {
+                val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
+                if (!ad.adInserted || html == null) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }

@@ -198,7 +198,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
-                if (primaryFullscreenCreativeSource(ad.renderedHtml, ad.iframeUrl) == null) {
+                if (rewardedCreativeSource(ad.renderedHtml, ad.iframeUrl) == null) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
