@@ -129,7 +129,8 @@ class AdLoadParsingTest {
               "destination": "web",
               "rendered_format": "rewarded_video",
               "rendered_html": "<b>hi</b>",
-              "tracking_url": "https://track/click"
+              "tracking_url": "https://track/click",
+              "prewarm_sk_product": true
             }
         """.trimIndent()
 
@@ -142,6 +143,7 @@ class AdLoadParsingTest {
         assertEquals("rewarded_video", r.renderedFormat)
         assertEquals("<b>hi</b>", r.renderedHtml)
         assertEquals("https://track/click", r.trackingUrl)
+        assertTrue(r.prewarmSkProduct)
     }
 
     // ── Response: tolerance / defaults ──────────────────────────────────────────
@@ -156,6 +158,7 @@ class AdLoadParsingTest {
         assertNull(r.renderedFormat)
         assertNull(r.trackingUrl)
         assertNull(r.renderedHtml)
+        assertFalse(r.prewarmSkProduct)
     }
 
     @Test

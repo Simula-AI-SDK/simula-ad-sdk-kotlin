@@ -66,6 +66,7 @@ internal class InterstitialPresentation(
     val primaryCtaNavigation = RetainedPrimaryCtaNavigationState<SimulaInterstitialActivity>()
     val installBannerState = InstallBannerPresentationState(ad.adBehavior?.skoverlay)
     val fallbackState = FallbackPresentationState()
+    val automaticNavigationGate = AutomaticNavigationGate()
     val storeExit by lazy(LazyThreadSafetyMode.NONE) {
         StoreExitTracker(
             adId = ad.impressionId.takeIf { it.isNotBlank() },
@@ -144,6 +145,7 @@ internal class InterstitialPresentation(
         pendingClickHandoff = null
         clickRoute.cancel()
         primaryCtaNavigation.clear()
+        automaticNavigationGate.clear()
         fallbackState.clear()
     }
 

@@ -10,6 +10,77 @@ import java.net.URI
 import java.net.URL
 import java.net.URLDecoder
 
+internal data class PendingAutomaticNavigation(
+    val targetUrl: String,
+    val trackerAlreadyRequested: Boolean,
+)
+
+internal enum class AutomaticNavigationOutcome { STORE_OPENED, OTHER_OPENED, HANDLED, FAILED }
+
+internal class AutomaticNavigationGate {
+    private var inFlight = false
+    private var opened = false
+    private var trackerRequestedInWebView = false
+    private var pending: PendingAutomaticNavigation? = null
+
+    @Synchronized
+    fun retain(targetUrl: String, trackerAlreadyRequested: Boolean): Boolean {
+        if (opened || targetUrl.isBlank() || targetUrl.length > MAX_AUTOMATIC_NAVIGATION_URL_CHARS) return false
+        val retained = pending
+        if (retained != null && retained.targetUrl != targetUrl) return false
+        pending = PendingAutomaticNavigation(
+            targetUrl = targetUrl,
+            trackerAlreadyRequested = retained?.trackerAlreadyRequested == true ||
+                trackerAlreadyRequested || trackerRequestedInWebView,
+        )
+        return true
+    }
+
+    @Synchronized
+    fun markTrackerRequestedInWebView() {
+        trackerRequestedInWebView = true
+        pending = pending?.copy(trackerAlreadyRequested = true)
+    }
+
+    @Synchronized
+    fun wasTrackerRequestedInWebView(): Boolean = trackerRequestedInWebView
+
+    fun attemptPending(open: (PendingAutomaticNavigation) -> AutomaticNavigationOutcome): AutomaticNavigationOutcome {
+        val route = synchronized(this) {
+            if (inFlight || opened) return AutomaticNavigationOutcome.FAILED
+            val retained = pending ?: return AutomaticNavigationOutcome.FAILED
+            inFlight = true
+            retained
+        }
+        val outcome = runCatching { open(route) }.getOrDefault(AutomaticNavigationOutcome.FAILED)
+        synchronized(this) {
+            inFlight = false
+            if (outcome != AutomaticNavigationOutcome.FAILED) {
+                opened = true
+                pending = null
+            }
+        }
+        return outcome
+    }
+
+    @Synchronized
+    fun suppressPending() {
+        opened = true
+        pending = null
+    }
+
+    @Synchronized
+    fun clear() {
+        opened = true
+        pending = null
+    }
+
+    @Synchronized
+    fun hasPending(): Boolean = pending != null
+}
+
+private const val MAX_AUTOMATIC_NAVIGATION_URL_CHARS = 8 * 1024
+
 /**
  * Routes a creative's call-to-action tap to its advertiser destination.
  *
@@ -50,18 +121,17 @@ import java.net.URLDecoder
  */
 internal object CreativeCtaRouter {
 
-    internal enum class AutomaticNavigationAction { ALLOW_IN_WEBVIEW, CONSUME, ROUTE_EXTERNALLY }
+    internal sealed interface AutomaticNavigationPlan {
+        data object AllowInWebView : AutomaticNavigationPlan
+        data object Consume : AutomaticNavigationPlan
+        data class RouteExact(val targetUrl: String) : AutomaticNavigationPlan
+    }
 
     internal sealed interface PrimaryCtaTapPlan {
         data object AllowInWebView : PrimaryCtaTapPlan
         data object ConsumeWithoutClick : PrimaryCtaTapPlan
         data class Route(val route: PrimaryCtaRoute) : PrimaryCtaTapPlan
     }
-
-    /** Prefer the attribution URL carried outside rendered HTML, whose script text may HTML-escape
-     * query separators. Older payloads without that field keep using the creative's tapped URL. */
-    internal fun preferredClickUrl(trackingUrl: String?, embeddedUrl: String): String? =
-        admittedHttpUrl(trackingUrl) ?: normalizeTappedDestination(embeddedUrl)
 
     internal fun admittedHttpUrl(value: String?): String? {
         val candidate = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -138,6 +208,27 @@ internal object CreativeCtaRouter {
         )
     }
 
+    internal fun fallbackCtaTapPlan(
+        isMainFrame: Boolean,
+        hasGesture: Boolean,
+        tappedUrl: String,
+        creativeBaseUrl: String?,
+        trackingUrl: String?,
+        destination: String,
+    ): PrimaryCtaTapPlan {
+        if (!isMainFrame) return PrimaryCtaTapPlan.AllowInWebView
+        val scheme = tappedUrl.substringBefore(':', missingDelimiterValue = "").lowercase()
+        if (scheme in setOf("about", "data", "blob")) return PrimaryCtaTapPlan.AllowInWebView
+        if (!hasGesture) {
+            return if (hasSameHttpOrigin(creativeBaseUrl, tappedUrl)) {
+                PrimaryCtaTapPlan.AllowInWebView
+            } else {
+                PrimaryCtaTapPlan.ConsumeWithoutClick
+            }
+        }
+        return primaryCtaTapPlan(tappedUrl, creativeBaseUrl, trackingUrl, destination)
+    }
+
     internal fun admittedWebCustomDestination(value: String?, destination: String): String? {
         if (destination != "web") return null
         val candidate = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -150,34 +241,88 @@ internal object CreativeCtaRouter {
         return candidate.takeIf { !uri.rawSchemeSpecificPart.isNullOrBlank() }
     }
 
-    internal fun automaticNavigationAction(
+    internal fun automaticNavigationPlan(
         value: String?,
         destination: String,
-    ): AutomaticNavigationAction {
+        trackingUrl: String? = null,
+    ): AutomaticNavigationPlan {
         val candidate = value?.trim()?.takeIf { it.isNotEmpty() }
-            ?: return AutomaticNavigationAction.ALLOW_IN_WEBVIEW
-        if (candidate.hasUrlControlCharacters()) return AutomaticNavigationAction.CONSUME
+            ?: return AutomaticNavigationPlan.AllowInWebView
+        if (candidate.hasUrlControlCharacters()) return AutomaticNavigationPlan.Consume
         val separator = candidate.indexOf(':')
-        if (separator <= 0) return AutomaticNavigationAction.ALLOW_IN_WEBVIEW
+        if (separator <= 0) return AutomaticNavigationPlan.AllowInWebView
         val scheme = candidate.substring(0, separator).lowercase()
-        if (!scheme.matches(URL_SCHEME_PATTERN)) return AutomaticNavigationAction.CONSUME
-        if (scheme in INTERNAL_WEBVIEW_SCHEMES) return AutomaticNavigationAction.ALLOW_IN_WEBVIEW
+        if (!scheme.matches(URL_SCHEME_PATTERN)) return AutomaticNavigationPlan.Consume
+        if (scheme in INTERNAL_WEBVIEW_SCHEMES) return AutomaticNavigationPlan.AllowInWebView
         if (scheme == "http" || scheme == "https") {
-            return if (admittedHttpUrl(candidate) != null) {
-                AutomaticNavigationAction.ALLOW_IN_WEBVIEW
-            } else {
-                AutomaticNavigationAction.CONSUME
-            }
+            val admitted = admittedHttpUrl(candidate) ?: return AutomaticNavigationPlan.Consume
+            return if (matchesKnownTrackingUrl(admitted, trackingUrl) ||
+                admittedDirectPlayStoreUrl(admitted) != null
+            ) {
+                AutomaticNavigationPlan.RouteExact(admitted)
+            } else AutomaticNavigationPlan.AllowInWebView
         }
         val routable = when (scheme) {
-            "market", "intent" -> normalizeTappedDestination(candidate) != null
-            else -> admittedWebCustomDestination(candidate, destination) != null
+            "market", "intent" -> normalizeTappedDestination(candidate)?.takeUnless {
+                isPlayStoreHost(it) && admittedDirectPlayStoreUrl(it) == null
+            }
+            else -> admittedWebCustomDestination(candidate, destination)
         }
-        return if (routable) {
-            AutomaticNavigationAction.ROUTE_EXTERNALLY
-        } else {
-            AutomaticNavigationAction.CONSUME
+        return routable?.let(AutomaticNavigationPlan::RouteExact)
+            ?: AutomaticNavigationPlan.Consume
+    }
+
+    internal fun matchesKnownTrackingUrl(value: String?, trackingUrl: String?): Boolean {
+        val candidate = admittedHttpUrl(value)?.let { runCatching { URL(it) }.getOrNull() } ?: return false
+        val tracker = admittedHttpUrl(trackingUrl)?.let { runCatching { URL(it) }.getOrNull() } ?: return false
+        return candidate.protocol.equals(tracker.protocol, ignoreCase = true) &&
+            candidate.host.equals(tracker.host, ignoreCase = true) &&
+            candidate.effectivePort() == tracker.effectivePort() &&
+            candidate.path.orEmpty().ifEmpty { "/" } == tracker.path.orEmpty().ifEmpty { "/" } &&
+            candidate.query == tracker.query
+    }
+
+    internal fun admittedDirectPlayStoreUrl(value: String?): String? {
+        val candidate = admittedHttpUrl(value) ?: return null
+        val url = runCatching { URL(candidate) }.getOrNull() ?: return null
+        if (!url.protocol.equals("https", ignoreCase = true) ||
+            !url.host.equals("play.google.com", ignoreCase = true) ||
+            url.path != "/store/apps/details"
+        ) return null
+        var packageIdCount = 0
+        var packageId: String? = null
+        for (part in url.query?.split('&').orEmpty()) {
+            val separator = part.indexOf('=')
+            if (separator <= 0) continue
+            val key = decodeIntentValue(part.substring(0, separator)) ?: continue
+            if (!key.equals("id", ignoreCase = true)) continue
+            packageIdCount++
+            packageId = decodeIntentValue(part.substring(separator + 1)) ?: return null
         }
+        return candidate.takeIf { packageIdCount == 1 && !packageId.isNullOrBlank() }
+    }
+
+    private fun isPlayStoreHost(value: String?): Boolean {
+        val candidate = admittedHttpUrl(value) ?: return false
+        val url = runCatching { URL(candidate) }.getOrNull() ?: return false
+        return url.host.equals("play.google.com", ignoreCase = true)
+    }
+
+    internal fun admittedInWebViewFallback(value: String?, trackingUrl: String?): String? {
+        val candidate = admittedHttpUrl(value) ?: return null
+        return candidate.takeUnless {
+            matchesKnownTrackingUrl(it, trackingUrl) || admittedDirectPlayStoreUrl(it) != null
+        }
+    }
+
+    internal fun primaryCtaStoreFallback(
+        route: PrimaryCtaRoute,
+        destination: String,
+        storeUrl: String?,
+    ): String? {
+        if (destination != "appstore") return null
+        return normalizeTappedDestination(storeUrl)
+            ?: admittedDirectPlayStoreUrl(route.tappedUrl)
     }
 
     /**
@@ -242,23 +387,7 @@ internal object CreativeCtaRouter {
         }.getOrNull()
 
     /**
-     * The URL a creative CTA should open: the tracking link itself, trimmed and **verbatim**
-     * (never rewritten into a store URL), or — when the tracker is blank/missing AND the
-     * [destination] is the app store — the campaign's safely normalized [storeUrl], so the CTA deterministically
-     * lands on the store instead of silently no-oping. A web-destination CTA never falls back to
-     * the store link. `null` when nothing is applicable (the caller then no-ops). Pure and
-     * framework-free so the "never rewrite the tracker" contract can be unit-tested.
-     */
-    internal fun targetUrl(
-        trackingUrl: String?,
-        storeUrl: String? = null,
-        destination: String = "appstore",
-    ): String? =
-        admittedHttpUrl(trackingUrl)
-            ?: normalizeTappedDestination(storeUrl).takeIf { destination == "appstore" }
-
-    /**
-     * Opens the advertiser destination for a creative CTA by handing [targetUrl] to the browser.
+     * Opens the admitted tracker or deterministic app-store fallback in the browser.
      * Best-effort: a blank link or unavailable browser silently no-ops (the CLICKED event has
      * already fired upstream). When the tracker itself can't be launched and the destination is
      * the app store, the raw [storeUrl] (if distinct) is the deterministic fallback.
@@ -293,7 +422,99 @@ internal object CreativeCtaRouter {
         admittedWebCustomDestination(route.externalTarget, destination)?.let { custom ->
             return launch(context, custom)
         }
-        return open(context, route.externalTarget, destination, storeOpen, storeUrl)
+        return open(
+            context,
+            route.externalTarget,
+            destination,
+            storeOpen,
+            primaryCtaStoreFallback(route, destination, storeUrl),
+        )
+    }
+
+    fun openAutomaticNavigation(
+        context: Context,
+        targetUrl: String,
+        destination: String,
+        trackingUrl: String? = null,
+        trackerAlreadyRequested: Boolean = false,
+    ): AutomaticNavigationOutcome = routeAutomaticNavigationOutcome(
+        targetUrl = targetUrl,
+        destination = destination,
+        trackingUrl = trackingUrl,
+        trackerAlreadyRequested = trackerAlreadyRequested,
+        launch = { launch(context, it) },
+        record = { name -> Telemetry.recordOperation(name, 0L, success = name != "mmp_route_failed") },
+    )
+
+    internal fun routeAutomaticNavigation(
+        targetUrl: String,
+        destination: String,
+        trackingUrl: String?,
+        trackerAlreadyRequested: Boolean = false,
+        launch: (String) -> Boolean,
+        record: (String) -> Unit = {},
+    ): Boolean = routeAutomaticNavigationOutcome(
+        targetUrl,
+        destination,
+        trackingUrl,
+        trackerAlreadyRequested,
+        launch,
+        record,
+    ).let { it == AutomaticNavigationOutcome.STORE_OPENED || it == AutomaticNavigationOutcome.OTHER_OPENED }
+
+    internal fun routeAutomaticNavigationOutcome(
+        targetUrl: String,
+        destination: String,
+        trackingUrl: String?,
+        trackerAlreadyRequested: Boolean = false,
+        launch: (String) -> Boolean,
+        record: (String) -> Unit = {},
+    ): AutomaticNavigationOutcome {
+        val admittedHttp = admittedHttpUrl(targetUrl)
+        val target = if (admittedHttp != null) {
+            if (isPlayStoreHost(admittedHttp) && admittedDirectPlayStoreUrl(admittedHttp) == null) {
+                return AutomaticNavigationOutcome.FAILED
+            }
+            admittedHttp
+        } else {
+            normalizeTappedDestination(targetUrl)
+                ?: admittedWebCustomDestination(targetUrl, destination)
+                ?: return AutomaticNavigationOutcome.FAILED
+        }
+        val targetIsTracker = matchesKnownTrackingUrl(target, trackingUrl)
+        val storeBound = destination == "appstore" || admittedDirectPlayStoreUrl(target) != null
+        if (trackerAlreadyRequested) {
+            if (targetIsTracker) return AutomaticNavigationOutcome.HANDLED
+            return runCatching { launch(target) }.getOrDefault(false).toAutomaticNavigationOutcome(storeBound)
+        }
+        if (targetIsTracker) {
+            return runCatching { launch(target) }.getOrDefault(false)
+                .toAutomaticNavigationOutcome(destination == "appstore")
+        }
+        if (admittedDirectPlayStoreUrl(target) != null) {
+            return routeCta(
+                trackingUrl = trackingUrl,
+                destination = "appstore",
+                storeUrl = target,
+                launch = launch,
+                record = record,
+            ).toAutomaticNavigationOutcome(storeBound = true)
+        }
+        val tracker = admittedHttpUrl(trackingUrl)
+        if (tracker != null) {
+            runCatching { record("mmp_route_attempted") }
+            if (runCatching { launch(tracker) }.getOrDefault(false)) {
+                return if (storeBound) {
+                    AutomaticNavigationOutcome.STORE_OPENED
+                } else {
+                    AutomaticNavigationOutcome.OTHER_OPENED
+                }
+            }
+            val opened = runCatching { launch(target) }.getOrDefault(false)
+            if (!opened) runCatching { record("mmp_route_failed") }
+            return opened.toAutomaticNavigationOutcome(storeBound)
+        }
+        return runCatching { launch(target) }.getOrDefault(false).toAutomaticNavigationOutcome(storeBound)
     }
 
     internal fun routeCta(
@@ -335,6 +556,12 @@ internal object CreativeCtaRouter {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.applicationContext.startActivity(intent)
     }.isSuccess
+}
+
+private fun Boolean.toAutomaticNavigationOutcome(storeBound: Boolean): AutomaticNavigationOutcome = when {
+    !this -> AutomaticNavigationOutcome.FAILED
+    storeBound -> AutomaticNavigationOutcome.STORE_OPENED
+    else -> AutomaticNavigationOutcome.OTHER_OPENED
 }
 
 private fun URL.effectivePort(): Int = if (port >= 0) port else defaultPort

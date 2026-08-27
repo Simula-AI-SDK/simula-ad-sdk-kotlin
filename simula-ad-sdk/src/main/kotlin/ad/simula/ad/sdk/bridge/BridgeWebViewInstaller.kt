@@ -25,9 +25,6 @@ private const val TRUSTED_CTA_OPEN = "SIMULA_CTA_OPEN"
 private const val MAX_CTA_URL_CHARS = 8 * 1024
 private val installerJson = Json { ignoreUnknownKeys = true }
 
-internal fun activeCtaNonce(nonce: String?, disabled: Boolean): String? =
-    nonce?.takeUnless { disabled }
-
 internal enum class BridgeInjectionMode { DOCUMENT_START, PAGE_START_FALLBACK, UNAVAILABLE }
 
 internal fun bridgeInjectionMode(
@@ -47,7 +44,6 @@ internal fun bridgeInjectionMode(
 internal fun trustedCtaRelaySource(activationNonce: String): String = """
     var activationNonce = ${JsonPrimitive(activationNonce)};
     var originalOpen = window.open;
-    var ctaDisabled = false;
     var capturedUserActivation = navigator.userActivation;
     var nativeSetTimeout = window.setTimeout.bind(window);
     var trustedDispatch = false;
@@ -185,7 +181,7 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
         } catch (_) { return false; }
     }
     function forwardTrustedCta(value) {
-        if (ctaDisabled || !nativeCtaEnabled()) { return false; }
+        if (!nativeCtaEnabled()) { return false; }
         var url = resolvedUrl(value);
         if (!url || isInternalCta(url) || isSameOriginCta(url)) { return false; }
         if (gestureSequence === 0) { return false; }
@@ -204,10 +200,6 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
     window.open = function () {
         if (arguments.length > 0 && forwardTrustedCta(arguments[0])) { return null; }
         return originalOpen.apply(window, arguments);
-    };
-    window.__simulaSdkDisableCta = function () {
-        ctaDisabled = true;
-        window.open = originalOpen;
     };
     window.addEventListener('click', function (event) {
         if (!event || event.isTrusted !== true || !hasActiveUserGesture()) { return; }
@@ -296,13 +288,12 @@ ${trustedCtaRelaySource(activationNonce)}
         installationId: String,
         bridgeCapability: String,
         activationNonce: String?,
-        ctaDisabled: Boolean,
         coreDocumentStartInstalled: Boolean,
         ctaDocumentStartInstalled: Boolean,
     ): String = buildString {
         if (!coreDocumentStartInstalled) append(coreRelayScript(installationId, bridgeCapability))
         if (!ctaDocumentStartInstalled) {
-            activeCtaNonce(activationNonce, ctaDisabled)?.let { nonce ->
+            activationNonce?.let { nonce ->
                 if (isNotEmpty()) append('\n')
                 append(trustedCtaDocumentStartScript(nonce))
             }
@@ -339,7 +330,7 @@ ${trustedCtaRelaySource(activationNonce)}
         val interfaceInstalled = runCatching { webView.addJavascriptInterface(object {
             @JavascriptInterface
             fun isCtaEnabled(nonce: String?): Boolean =
-                installation.active && !installation.ctaDisabled && nonce == installation.activationNonce
+                installation.active && nonce == installation.activationNonce
 
             @JavascriptInterface
             fun postMessage(json: String?) {
@@ -359,7 +350,7 @@ ${trustedCtaRelaySource(activationNonce)}
                 trustedCtaUrl(
                     json,
                     installation.activationNonce,
-                    enabled = !installation.ctaDisabled,
+                    enabled = installation.active,
                 )?.let { url ->
                     webView.post {
                         if (installations[webView] === installation) {
@@ -414,7 +405,7 @@ ${trustedCtaRelaySource(activationNonce)}
             }.getOrNull()
             if (core != null) {
                 coreDocumentStartInstalled = true
-                val cta = activeCtaNonce(installation.activationNonce, installation.ctaDisabled)?.let { nonce ->
+                val cta = installation.activationNonce?.let { nonce ->
                     runCatching {
                         WebViewCompat.addDocumentStartJavaScript(
                             webView,
@@ -459,7 +450,6 @@ ${trustedCtaRelaySource(activationNonce)}
             installationId = installation.id,
             bridgeCapability = installation.bridgeCapability,
             activationNonce = installation.activationNonce,
-            ctaDisabled = installation.ctaDisabled,
             coreDocumentStartInstalled = installation.coreDocumentStartInstalled,
             ctaDocumentStartInstalled = installation.ctaDocumentStartInstalled,
         )
@@ -469,30 +459,6 @@ ${trustedCtaRelaySource(activationNonce)}
                 signature = "bridge:page_start_fallback_failed",
                 errorCode = it::class.java.simpleName,
             )
-        }
-    }
-
-    /** Permanently disables CTA ownership for this installation and all later documents. */
-    fun disableTrustedCta(webView: WebView) {
-        val installation = installations[webView] ?: return
-        if (installation.ctaDisabled) return
-        installation.ctaDisabled = true
-        scripts[webView]?.let { handlers ->
-            handlers.cta?.let { handler ->
-                if (runCatching { handler.remove() }.isSuccess) {
-                    handlers.cta = null
-                }
-            }
-        }
-        webView.post {
-            if (installations[webView] === installation) {
-                runCatching {
-                    webView.evaluateJavascript(
-                        "window.__simulaSdkDisableCta&&window.__simulaSdkDisableCta()",
-                        null,
-                    )
-                }
-            }
         }
     }
 
@@ -546,8 +512,6 @@ private data class BridgeInstallation(
     var ctaDocumentStartInstalled: Boolean = false
     @Volatile
     var active: Boolean = true
-    @Volatile
-    var ctaDisabled: Boolean = false
 }
 
 private data class DocumentStartScripts(

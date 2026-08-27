@@ -19,6 +19,7 @@ import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.network.AdBeaconManager
+import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickRouteStart
@@ -204,6 +205,21 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                         )
                         if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
                         opened
+                    },
+                    openAutomaticNavigation = { targetUrl, trackerAlreadyRequested ->
+                        val outcome = if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                            CreativeCtaRouter.openAutomaticNavigation(
+                                applicationContext,
+                                targetUrl,
+                                p.ad.destination,
+                                p.ad.trackingUrl,
+                                trackerAlreadyRequested,
+                            )
+                        } else AutomaticNavigationOutcome.FAILED
+                        if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                            storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
+                        }
+                        outcome
                     },
                     // End-screen CTA routing context (deterministic store fallback).
                     ctaTrackingUrl = p.ad.trackingUrl,
@@ -424,22 +440,32 @@ private fun CreativeInterstitial(
             opened
         }
     }
-    fun routeAutomaticCta(route: PrimaryCtaRoute) {
-        presentation.autoRedirectCoordinator.request(
+    fun routeAutomaticCta() {
+        val result = presentation.autoRedirectCoordinator.request(
             scope = autoRedirectScope,
             pendingHandoff = presentation.pendingClickHandoff(),
         ) {
-            val opened = CreativeCtaRouter.openPrimaryCta(
-                context.applicationContext,
-                route,
-                ad.destination,
-                ad.adBehavior?.storeOpen,
-                ad.androidStoreUrl,
-            )
-            if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
-            opened
+            val outcome = if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                presentation.automaticNavigationGate.attemptPending { route ->
+                    CreativeCtaRouter.openAutomaticNavigation(
+                        context.applicationContext,
+                        route.targetUrl,
+                        ad.destination,
+                        ad.trackingUrl,
+                        route.trackerAlreadyRequested,
+                    )
+                }
+            } else AutomaticNavigationOutcome.FAILED
+            if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                recordStoreOpen(ClickSources.AUTO_REDIRECT)
+            }
+            outcome != AutomaticNavigationOutcome.FAILED
+        }
+        if (result == AutoRedirectResult.SUPPRESSED) {
+            presentation.automaticNavigationGate.suppressPending()
         }
     }
+    LaunchedEffect(autoRedirectScope) { routeAutomaticCta() }
     val bridge = remember {
         androidCreativeBridge(
             appContext = context.applicationContext,
@@ -582,7 +608,10 @@ private fun CreativeInterstitial(
     // FallbackAdOverlay; this one is only composed during the primary creative.) Mirrors
     // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
     BackHandler(enabled = true) {
-        if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) onFinish()
+        if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) {
+            presentation.automaticNavigationGate.clear()
+            onFinish()
+        }
     }
 
     Box(
@@ -613,14 +642,14 @@ private fun CreativeInterstitial(
                     )
                     bridgeReady = true
                 },
-                onAutomaticCta = ::routeAutomaticCta,
+                onAutomaticCta = {
+                    presentation.automaticNavigationGate.retain(it.targetUrl, it.trackerAlreadyRequested)
+                    routeAutomaticCta()
+                },
+                onAutomaticNavigationReady = ::routeAutomaticCta,
                 onPrimaryCta = primaryCta@{ route ->
                     val claim = presentation.claimClick(ClickSources.PRIMARY_CTA)
                         ?: return@primaryCta false
-                    if (!presentation.primaryCtaNavigation.admission.disable()) {
-                        claim.release()
-                        return@primaryCta false
-                    }
                     if (Build.VERSION.SDK_INT >= 21) {
                         presentation.installBannerState.onPrimaryCtaAdmitted()
                     }
@@ -660,7 +689,10 @@ private fun CreativeInterstitial(
                                     presentation.autoRedirectCoordinator.recordUserRouteOpened()
                                     routeActivity.recordClickStoreOpen(committedInteraction.source)
                                 } else {
-                                    route.tappedUrl?.let {
+                                    CreativeCtaRouter.admittedInWebViewFallback(
+                                        route.tappedUrl,
+                                        ad.trackingUrl,
+                                    )?.let {
                                         presentation.openPrimaryFallback(it, routeActivity)
                                     }
                                 }
@@ -705,7 +737,10 @@ private fun CreativeInterstitial(
             remaining = closeRemaining,
             progress = closeProgress.value,
             onClose = {
-                if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) onFinish()
+                if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) {
+                    presentation.automaticNavigationGate.clear()
+                    onFinish()
+                }
             },
         )
 
@@ -863,8 +898,9 @@ private fun CreativeInterstitial(
  * Full-screen interstitial rendered from server-provided HTML.
  * a user-initiated link navigation (gesture) is intercepted, reported as CLICKED via
  * [onPrimaryCta], durably recorded, and routed to the advertiser destination.
- * Non-gesture navigations (impression pixels, JS/meta auto-redirects) load normally
- * so they can't fake a click. The interstitial is NOT dismissed on click — the close
+ * Ordinary non-gesture navigations load normally so they can't fake a click. A known MMP tracker
+ * or strict Play Store exit routes externally without publisher/backend click accounting. The
+ * interstitial is NOT dismissed on click — the close
  * button drives dismissal.
  */
 @Composable
@@ -874,13 +910,13 @@ private fun CreativeHtml(
     presentation: InterstitialPresentation,
     onBridgeUnavailable: () -> Unit,
     onBridgeReady: () -> Unit,
-    onAutomaticCta: (PrimaryCtaRoute) -> Unit,
+    onAutomaticCta: (PendingAutomaticNavigation) -> Unit,
+    onAutomaticNavigationReady: () -> Unit,
     onPrimaryCta: (PrimaryCtaRoute) -> Boolean,
     modifier: Modifier = Modifier,
 ) {
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
     val primaryCtaNavigation = presentation.primaryCtaNavigation
-    val primaryCtaAdmission = primaryCtaNavigation.admission
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaInterstitialActivity
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -894,8 +930,7 @@ private fun CreativeHtml(
             CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> false
             CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> true
             is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> {
-                val accepted = onPrimaryCta(plan.route)
-                if (accepted) webView?.let(BridgeWebViewInstaller::disableTrustedCta)
+                onPrimaryCta(plan.route)
                 true
             }
         }
@@ -925,6 +960,7 @@ private fun CreativeHtml(
                 Lifecycle.Event.ON_STOP -> wasStopped = true
                 Lifecycle.Event.ON_RESUME -> {
                     wv?.onResume()
+                    onAutomaticNavigationReady()
                     if (wasStopped) {
                         wasStopped = false
                         // A hardware-accelerated WebView drops its draw functor on background; force the
@@ -946,6 +982,9 @@ private fun CreativeHtml(
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon) // starts the page-load timer
                         primaryCtaNavigation.onNavigationStarted(url, fallbackOwner)
+                        if (CreativeCtaRouter.matchesKnownTrackingUrl(url, presentation.ad.trackingUrl)) {
+                            presentation.automaticNavigationGate.markTrackerRequestedInWebView()
+                        }
                         BridgeWebViewInstaller.onPageStarted(view)
                     }
 
@@ -964,23 +1003,26 @@ private fun CreativeHtml(
                         // Document-start interception handles trusted window.open/target=_blank.
                         // This remains the platform fallback for direct gesture navigations.
                         if (!request.hasGesture()) {
-                            return when (CreativeCtaRouter.automaticNavigationAction(
+                            return when (val plan = CreativeCtaRouter.automaticNavigationPlan(
                                 value = url,
                                 destination = presentation.ad.destination,
+                                trackingUrl = presentation.ad.trackingUrl,
                             )) {
-                                CreativeCtaRouter.AutomaticNavigationAction.ALLOW_IN_WEBVIEW -> false
-                                CreativeCtaRouter.AutomaticNavigationAction.CONSUME -> true
-                                CreativeCtaRouter.AutomaticNavigationAction.ROUTE_EXTERNALLY -> {
-                                    val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
-                                        tappedUrl = url,
-                                        creativeBaseUrl = null,
-                                        trackingUrl = presentation.ad.trackingUrl,
-                                        destination = presentation.ad.destination,
-                                    )) {
-                                        is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
-                                        else -> return true
-                                    }
-                                    onAutomaticCta(route)
+                                CreativeCtaRouter.AutomaticNavigationPlan.AllowInWebView -> false
+                                CreativeCtaRouter.AutomaticNavigationPlan.Consume -> true
+                                is CreativeCtaRouter.AutomaticNavigationPlan.RouteExact -> {
+                                    if (view !== creativeWebView) return true
+                                    onAutomaticCta(
+                                        PendingAutomaticNavigation(
+                                            targetUrl = plan.targetUrl,
+                                            trackerAlreadyRequested =
+                                                presentation.automaticNavigationGate.wasTrackerRequestedInWebView() ||
+                                                    CreativeCtaRouter.matchesKnownTrackingUrl(
+                                                        view?.url,
+                                                        presentation.ad.trackingUrl,
+                                                    ),
+                                        ),
+                                    )
                                     true
                                 }
                             }
@@ -992,13 +1034,12 @@ private fun CreativeHtml(
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
                 val injectionMode = BridgeWebViewInstaller.install(this, bridge) { url ->
-                    if (primaryCtaAdmission.isEnabled()) handlePrimaryCta(url, this)
+                    handlePrimaryCta(url, this)
                 }
                 if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
                     post { if (creativeWebView === this) onBridgeUnavailable() }
                 } else {
                     post { if (creativeWebView === this) onBridgeReady() }
-                    if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
                     loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
                 }
                 creativeWebView = this

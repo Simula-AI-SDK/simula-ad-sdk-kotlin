@@ -187,6 +187,9 @@ internal data class AdLoadApiResponse(
     // is missing or can't be launched, so the CTA still lands on the store. Null when the
     // campaign has no raw store link.
     @SerialName("android_store_url") val androidStoreUrl: String? = null,
+    // Cross-platform load flag. Android carries it for wire parity; StoreKit product prewarming is
+    // currently consumed by the iOS SDK only. Missing payloads must remain cold.
+    @SerialName("prewarm_sk_product") val prewarmSkProduct: Boolean = false,
     // Server-rendered HTML creative. Interstitials intentionally do not support iframe_url.
     @SerialName("rendered_html") val renderedHtml: String? = null,
     // Cleared bid (the estimated CPM) for this serve, backend-provided. The SDK derives the
@@ -389,6 +392,7 @@ internal data class RewardedInitApiResponse(
     @SerialName("tracking_url") val trackingUrl: String? = null,
     // Raw, unwrapped Play Store link — see [AdLoadApiResponse.androidStoreUrl].
     @SerialName("android_store_url") val androidStoreUrl: String? = null,
+    @SerialName("prewarm_sk_product") val prewarmSkProduct: Boolean = false,
     // Cleared bid (estimated CPM) for this serve — see [AdLoadApiResponse.bidAmt]. Drives `adValue`.
     @SerialName("bid_amt") val bidAmt: Double = 0.0,
     // Mirrors the interstitial response: the play-to-earn gate (`close.delay_seconds`) plus the

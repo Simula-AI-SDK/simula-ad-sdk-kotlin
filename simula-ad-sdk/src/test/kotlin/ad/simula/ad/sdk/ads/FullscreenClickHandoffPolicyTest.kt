@@ -16,7 +16,6 @@ import java.util.ArrayDeque
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -567,7 +566,6 @@ class FullscreenClickHandoffPolicyTest {
         val gate = ClickInteractionGate(idFactory = { "fallback" })
         var routeCompletion: ((Boolean) -> Unit)? = null
         state.showing(0)
-        assertTrue(state.clickAdmission(0).disable())
 
         coordinateDeferredClickPersistence(
             scheduler = scheduler,
@@ -705,7 +703,6 @@ class FullscreenClickHandoffPolicyTest {
         val state = FallbackPresentationState()
         val failedOwner = Any()
         state.showing(0)
-        assertTrue(state.clickAdmission(0).disable())
         state.bindNavigation(failedOwner) { false }
         state.setClickPending(true)
         assertTrue(state.retainNavigation("https://creative.example/fallback"))
@@ -716,17 +713,6 @@ class FullscreenClickHandoffPolicyTest {
         assertTrue(state.advance(total = 2))
         assertFalse(state.hasRetainedNavigation())
         assertEquals(1, state.index)
-    }
-
-    @Test
-    fun `fallback click admission persists for same index and resets for next screen`() {
-        val state = FallbackPresentationState()
-        val first = state.clickAdmission(0)
-        assertTrue(first.disable())
-
-        assertSame(first, state.clickAdmission(0))
-        assertFalse(state.clickAdmission(0).isEnabled())
-        assertTrue(state.clickAdmission(1).isEnabled())
     }
 
     @Test
@@ -742,10 +728,138 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `fallback automatic navigation retries failure and commits success per screen`() {
+        val state = FallbackPresentationState()
+        var firstScreenAttempts = 0
+        val firstOwner = Any()
+        state.showing(0)
+        state.bindNavigation(firstOwner) { true }
+        assertTrue(state.retainAutomaticNavigation(0, firstOwner, "https://tracker.example/first", false))
+
+        assertEquals(AutomaticNavigationOutcome.FAILED, state.attemptAutomaticNavigation(0) {
+            firstScreenAttempts++
+            AutomaticNavigationOutcome.FAILED
+        })
+        assertEquals(AutomaticNavigationOutcome.STORE_OPENED, state.attemptAutomaticNavigation(0) {
+            firstScreenAttempts++
+            AutomaticNavigationOutcome.STORE_OPENED
+        })
+        assertEquals(AutomaticNavigationOutcome.FAILED, state.attemptAutomaticNavigation(0) {
+            firstScreenAttempts++
+            AutomaticNavigationOutcome.STORE_OPENED
+        })
+        assertEquals(2, firstScreenAttempts)
+        val secondOwner = Any()
+        state.showing(1)
+        state.bindNavigation(secondOwner) { true }
+        assertTrue(state.retainAutomaticNavigation(1, secondOwner, "https://tracker.example/second", false))
+        assertEquals(
+            AutomaticNavigationOutcome.STORE_OPENED,
+            state.attemptAutomaticNavigation(1) { AutomaticNavigationOutcome.STORE_OPENED },
+        )
+    }
+
+    @Test
+    fun `fallback factory owner retains automatic exit before navigator binding`() {
+        val state = FallbackPresentationState()
+        val owner = Any()
+        var delivered: PendingAutomaticNavigation? = null
+        state.showing(0)
+
+        state.claimNavigationOwner(owner)
+        assertTrue(
+            state.retainAutomaticNavigation(
+                0,
+                owner,
+                "https://tracker.example/click",
+                false,
+            ),
+        )
+        assertEquals(
+            AutomaticNavigationOutcome.STORE_OPENED,
+            state.attemptAutomaticNavigation(0) { route ->
+                delivered = route
+                AutomaticNavigationOutcome.STORE_OPENED
+            },
+        )
+        assertEquals("https://tracker.example/click", delivered?.targetUrl)
+    }
+
+    @Test
+    fun `fallback replacement owner rejects stale automatic callback`() {
+        val state = FallbackPresentationState()
+        val staleOwner = Any()
+        val currentOwner = Any()
+        state.showing(0)
+        state.claimNavigationOwner(staleOwner)
+        state.claimNavigationOwner(currentOwner)
+
+        assertFalse(state.retainAutomaticNavigation(0, staleOwner, "https://tracker.example/stale", false))
+        assertTrue(state.retainAutomaticNavigation(0, currentOwner, "https://tracker.example/current", false))
+        state.unbindNavigation(staleOwner)
+        assertEquals(
+            AutomaticNavigationOutcome.STORE_OPENED,
+            state.attemptAutomaticNavigation(0) { AutomaticNavigationOutcome.STORE_OPENED },
+        )
+    }
+
+    @Test
+    fun `fallback tracker provenance is retained per screen`() {
+        val state = FallbackPresentationState()
+        state.showing(0)
+
+        state.markAutomaticTrackerRequested(0)
+
+        assertTrue(state.wasAutomaticTrackerRequested(0))
+        assertFalse(state.wasAutomaticTrackerRequested(1))
+    }
+
+    @Test
+    fun `automatic gate is untouched by stale coordinator and commits only an opened route`() {
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        val gate = AutomaticNavigationGate()
+        var opens = 0
+        assertTrue(gate.retain("https://tracker.example/click", false))
+
+        assertEquals(
+            AutoRedirectResult.STALE,
+            coordinator.request(scope, null) {
+                gate.attemptPending { opens++; AutomaticNavigationOutcome.STORE_OPENED } !=
+                    AutomaticNavigationOutcome.FAILED
+            },
+        )
+        assertEquals(0, opens)
+
+        coordinator.activate(scope)
+        assertEquals(
+            AutoRedirectResult.FAILED,
+            coordinator.request(scope, null) {
+                gate.attemptPending { opens++; AutomaticNavigationOutcome.FAILED } !=
+                    AutomaticNavigationOutcome.FAILED
+            },
+        )
+        assertEquals(
+            AutoRedirectResult.OPENED,
+            coordinator.request(scope, null) {
+                gate.attemptPending { opens++; AutomaticNavigationOutcome.STORE_OPENED } !=
+                    AutomaticNavigationOutcome.FAILED
+            },
+        )
+        assertEquals(
+            AutoRedirectResult.SUPPRESSED,
+            coordinator.request(scope, null) {
+                gate.attemptPending { opens++; AutomaticNavigationOutcome.STORE_OPENED } !=
+                    AutomaticNavigationOutcome.FAILED
+            },
+        )
+        assertEquals(2, opens)
+    }
+
+    @Test
     fun `fallback navigation ownership resets for the next screen`() {
         val state = FallbackPresentationState()
         state.showing(0)
-        assertTrue(state.clickAdmission(0).disable())
         state.bindNavigation(Any()) { true }
         val firstUrl = "https://creative.example/first"
         assertTrue(state.retainNavigation(firstUrl))
@@ -753,7 +867,6 @@ class FullscreenClickHandoffPolicyTest {
         assertNull(state.navigationOverride())
 
         state.showing(1)
-        assertTrue(state.clickAdmission(1).disable())
 
         assertNull(state.navigationOverride())
     }
@@ -796,19 +909,22 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
-    fun `accepted primary CTA admission remains disabled after successful route`() {
-        val admission = ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission()
-        val gate = ClickInteractionGate(idFactory = { "primary" })
+    fun `accepted primary CTA allows a later distinct interaction`() {
+        var now = 1_000L
+        var nextId = 0
+        val gate = ClickInteractionGate(
+            clockMs = { now },
+            idFactory = { "primary-${++nextId}" },
+        )
         val handoff = ClickPersistenceHandoff(
             requireNotNull(gate.claim(ClickSources.PRIMARY_CTA)),
         ) {}
 
-        assertTrue(admission.disable())
         handoff.complete(ClickPersistencePart.TELEMETRY)
         handoff.complete(ClickPersistencePart.BEACON)
         assertTrue(handoff.handoff { true })
 
-        assertFalse(admission.isEnabled())
-        assertFalse(admission.disable())
+        now += 500L
+        assertEquals("primary-2", gate.claim(ClickSources.PRIMARY_CTA)?.interaction?.id)
     }
 }

@@ -191,13 +191,6 @@ class CreativeBridgeTest {
     }
 
     @Test
-    fun disabledReplacementDocumentDoesNotReceiveTrustedCtaRelayNonce() {
-        assertEquals("nonce", activeCtaNonce("nonce", disabled = false))
-        assertNull(activeCtaNonce("nonce", disabled = true))
-        assertNull(activeCtaNonce(null, disabled = false))
-    }
-
-    @Test
     fun coreDocumentStartRelaySurvivesWithoutTrustedCtaHooks() {
         val source = BridgeWebViewInstaller.coreRelayScript("17", "bridge-capability")
 
@@ -254,7 +247,6 @@ class CreativeBridgeTest {
             installationId = "17",
             bridgeCapability = "bridge-capability",
             activationNonce = "nonce",
-            ctaDisabled = false,
             coreDocumentStartInstalled = false,
             ctaDocumentStartInstalled = false,
         )
@@ -269,7 +261,6 @@ class CreativeBridgeTest {
             installationId = "17",
             bridgeCapability = "bridge-capability",
             activationNonce = "nonce",
-            ctaDisabled = false,
             coreDocumentStartInstalled = true,
             ctaDocumentStartInstalled = false,
         )
@@ -280,8 +271,7 @@ class CreativeBridgeTest {
         val coreOnly = BridgeWebViewInstaller.fallbackRelayScript(
             installationId = "17",
             bridgeCapability = "bridge-capability",
-            activationNonce = "nonce",
-            ctaDisabled = true,
+            activationNonce = null,
             coreDocumentStartInstalled = false,
             ctaDocumentStartInstalled = false,
         )
@@ -298,6 +288,7 @@ class CreativeBridgeTest {
         assertTrue(source.contains("activation_nonce"))
         assertTrue(source.contains("'use strict';"))
         assertTrue(source.contains("if (window !== window.top) { return; }"))
+        assertFalse(source.contains("__simulaSdkDisableCta"))
         assertFalse(source.contains("nativeStringify({"))
         assertFalse(source.contains("__simulaSdkPageReady:"))
         assertFalse(source.contains("window.addEventListener('message'"))
