@@ -16,6 +16,107 @@ import org.junit.Test
 class CreativeCtaRouterTest {
 
     @Test
+    fun `primary CTA planner allows document-local actions even when tracker exists`() {
+        val tracker = "https://tracker.example/click"
+        val base = "https://creative.example/game"
+
+        listOf(
+            "#rules",
+            "/next-level",
+            "javascript:showDetails()",
+            "about:blank",
+            "data:text/plain,help",
+            "https://creative.example:443/next",
+        ).forEach { tapped ->
+            assertEquals(
+                tapped,
+                CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView,
+                CreativeCtaRouter.primaryCtaTapPlan(tapped, base, tracker, "appstore"),
+            )
+        }
+    }
+
+    @Test
+    fun `primary CTA planner selects tracker only after safe external admission`() {
+        val plan = CreativeCtaRouter.primaryCtaTapPlan(
+            tappedUrl = "market://details?id=com.example.app&referrer=click%2Bvalue",
+            creativeBaseUrl = "https://creative.example/game",
+            trackingUrl = "https://tracker.example/click?a=1%2B2",
+            destination = "appstore",
+        )
+
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.Route(
+                ad.simula.ad.sdk.network.PrimaryCtaRoute(
+                    tappedUrl = "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%2Bvalue",
+                    externalTarget = "https://tracker.example/click?a=1%2B2",
+                ),
+            ),
+            plan,
+        )
+    }
+
+    @Test
+    fun `primary CTA planner consumes unsafe exits without billing tracker`() {
+        listOf(
+            "market://details?referrer=missing-id",
+            "intent://details#Intent;scheme=market;end",
+            "custom://open/app",
+            "https://bad host.example/click",
+        ).forEach { tapped ->
+            assertEquals(
+                tapped,
+                CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick,
+                CreativeCtaRouter.primaryCtaTapPlan(
+                    tapped,
+                    "https://creative.example/game",
+                    "https://tracker.example/click",
+                    "appstore",
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `web custom scheme uses safe tracker when present and direct target otherwise`() {
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.Route(
+                ad.simula.ad.sdk.network.PrimaryCtaRoute(
+                    tappedUrl = null,
+                    externalTarget = "https://tracker.example/click",
+                ),
+            ),
+            CreativeCtaRouter.primaryCtaTapPlan(
+                "partner-app://offer",
+                "https://creative.example/game",
+                "https://tracker.example/click",
+                "web",
+            ),
+        )
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.Route(
+                ad.simula.ad.sdk.network.PrimaryCtaRoute(
+                    tappedUrl = null,
+                    externalTarget = "partner-app://offer",
+                ),
+            ),
+            CreativeCtaRouter.primaryCtaTapPlan(
+                "partner-app://offer",
+                "https://creative.example/game",
+                null,
+                "web",
+            ),
+        )
+        assertEquals(
+            "partner-app://offer",
+            CreativeCtaRouter.admittedWebCustomDestination("partner-app://offer", "web"),
+        )
+        assertNull(CreativeCtaRouter.admittedWebCustomDestination("javascript:alert(1)", "web"))
+        assertNull(CreativeCtaRouter.admittedWebCustomDestination("intent://details#Intent;end", "web"))
+        assertNull(CreativeCtaRouter.admittedWebCustomDestination("partner-app://offer", "appstore"))
+    }
+
+    @Test
     fun `top-level tracker wins over the URL embedded in HTML`() {
         val tracker = "https://tracker.example/click?a=1&b=2"
         val embedded = "https://tracker.example/click?a=1&amp;b=2"

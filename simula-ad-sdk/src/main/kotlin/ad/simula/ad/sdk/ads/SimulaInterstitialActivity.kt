@@ -563,14 +563,7 @@ private fun CreativeInterstitial(
                 html = html,
                 bridge = bridge,
                 presentation = presentation,
-                onPrimaryCta = primaryCta@{ tappedUrl ->
-                    val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(tappedUrl)
-                        ?: return@primaryCta false
-                    if (CreativeCtaRouter.hasSameHttpOrigin(
-                            ad.creative?.bundleUrl,
-                            tappedDestination,
-                        )
-                    ) return@primaryCta false
+                onPrimaryCta = primaryCta@{ route ->
                     val claim = presentation.claimClick(ClickSources.PRIMARY_CTA)
                         ?: return@primaryCta false
                     if (!presentation.primaryCtaNavigation.admission.disable()) {
@@ -582,11 +575,6 @@ private fun CreativeInterstitial(
                     }
                     notifyPublisherClick { presentation.callbacks.notifyClicked() }
                     val interaction = claim.interaction
-                    val route = PrimaryCtaRoute(
-                        tappedUrl = tappedDestination,
-                        externalTarget = CreativeCtaRouter.admittedHttpUrl(ad.trackingUrl)
-                            ?: tappedDestination,
-                    )
                     coordinateDeferredClickPersistence(
                         mainHandler = clickHandoffHandler,
                         claim = claim,
@@ -610,9 +598,9 @@ private fun CreativeInterstitial(
                                     isFinishing = routeActivity.isFinishing,
                                     isDestroyed = routeActivity.isDestroyed,
                                 )) return@routeClick false
-                                val opened = CreativeCtaRouter.open(
+                                val opened = CreativeCtaRouter.openPrimaryCta(
                                     routeActivity.applicationContext,
-                                    route.externalTarget,
+                                    route,
                                     ad.destination,
                                     null,
                                     ad.androidStoreUrl,
@@ -833,7 +821,7 @@ private fun CreativeHtml(
     html: String,
     bridge: CreativeBridge,
     presentation: InterstitialPresentation,
-    onPrimaryCta: (String) -> Boolean,
+    onPrimaryCta: (PrimaryCtaRoute) -> Boolean,
     modifier: Modifier = Modifier,
 ) {
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
@@ -843,6 +831,22 @@ private fun CreativeHtml(
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaInterstitialActivity
     val lifecycleOwner = LocalLifecycleOwner.current
+    fun handlePrimaryCta(url: String, webView: WebView?): Boolean {
+        return when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+            tappedUrl = url,
+            creativeBaseUrl = trustedCtaBaseUrl,
+            trackingUrl = presentation.ad.trackingUrl,
+            destination = presentation.ad.destination,
+        )) {
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> false
+            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> true
+            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> {
+                val accepted = onPrimaryCta(plan.route)
+                if (accepted) webView?.let(BridgeWebViewInstaller::disableTrustedCta)
+                true
+            }
+        }
+    }
     DisposableEffect(presentation, fallbackOwner, fallbackActivity, creativeWebView) {
         val activity = fallbackActivity ?: return@DisposableEffect onDispose {}
         val webView = creativeWebView ?: return@DisposableEffect onDispose {}
@@ -889,10 +893,8 @@ private fun CreativeHtml(
                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon) // starts the page-load timer
                         BridgeWebViewInstaller.onPageStarted(view)
-                        // Bridge relay fallback when document-start injection is unavailable.
-                        if (!BridgeWebViewInstaller.documentStartSupported()) {
-                            BridgeWebViewInstaller.injectFallback(view)
-                        }
+                        // Inject only relay components whose document-start registration failed.
+                        BridgeWebViewInstaller.injectFallback(view)
                     }
 
                     override fun shouldOverrideUrlLoading(
@@ -904,19 +906,14 @@ private fun CreativeHtml(
                         // Document-start interception handles trusted window.open/target=_blank.
                         // This remains the platform fallback for direct gesture navigations.
                         if (!request.hasGesture()) return false
-                        if (CreativeCtaRouter.hasSameHttpOrigin(trustedCtaBaseUrl, url)) return false
-                        val accepted = onPrimaryCta(url)
-                        if (accepted) view?.let(BridgeWebViewInstaller::disableTrustedCta)
-                        return true
+                        return handlePrimaryCta(url, view)
                     }
                 },
                 surface = "interstitial",
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
                 BridgeWebViewInstaller.install(this, bridge, trustedCtaBaseUrl = trustedCtaBaseUrl) { url ->
-                    if (primaryCtaAdmission.isEnabled() && onPrimaryCta(url)) {
-                        creativeWebView?.let(BridgeWebViewInstaller::disableTrustedCta)
-                    }
+                    if (primaryCtaAdmission.isEnabled()) handlePrimaryCta(url, this)
                 }
                 if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)
                 // Self-contained creative: asset URLs are absolute (baseURL = null).

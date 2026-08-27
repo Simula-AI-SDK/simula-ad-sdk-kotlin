@@ -198,6 +198,17 @@ internal object WebViewPool {
         }
     }
 
+    /** Permanently discard a view whose presentation cleanup could not be confirmed. */
+    @MainThread
+    internal fun discard(webView: WebView) {
+        runCatching { webView.stopLoading() }
+        runCatching { (webView.parent as? ViewGroup)?.removeView(webView) }
+        (webView.context as? MutableContextWrapper)?.let { wrapper ->
+            runCatching { wrapper.baseContext = wrapper.applicationContext }
+        }
+        runCatching { webView.destroy() }
+    }
+
     /** Destroy warm idle/resetting WebViews under memory pressure. */
     @MainThread
     internal fun trimIdle() {

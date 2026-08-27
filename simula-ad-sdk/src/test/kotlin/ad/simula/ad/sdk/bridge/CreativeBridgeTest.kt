@@ -68,6 +68,23 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun queuedMessageCannotDispatchAfterInstallationBecomesInactive() {
+        val host = FakeHost()
+        var queued: (() -> Unit)? = null
+        var active = true
+        val bridge = CreativeBridge(host, mainDispatch = { queued = it })
+
+        bridge.handle(
+            message = """{"type":"AD_EARLY_COMPLETE"}""",
+            isActive = { active },
+        ) {}
+        active = false
+        queued?.invoke()
+
+        assertEquals(0, host.earlyCompletes)
+    }
+
+    @Test
     fun malformedAndUnknownIgnored() {
         val host = FakeHost()
         var replied = false
@@ -181,6 +198,31 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun coreDocumentStartRelaySurvivesWithoutTrustedCtaHooks() {
+        val source = BridgeWebViewInstaller.coreRelayScript("17")
+
+        assertTrue(source.contains("window.addEventListener('message'"))
+        assertTrue(source.contains("__simulaSdkPageReady:17:"))
+        assertFalse(source.contains("SIMULA_CTA_OPEN"))
+        assertFalse(source.contains("window.open ="))
+        assertFalse(source.contains("activation_nonce"))
+    }
+
+    @Test
+    fun trustedCtaDocumentScriptContainsOnlyOneShotCaptureLayer() {
+        val source = BridgeWebViewInstaller.trustedCtaDocumentStartScript(
+            activationNonce = "nonce",
+            trustedCtaBaseUrl = "https://creative.example/game",
+        )
+
+        assertTrue(source.contains("SIMULA_CTA_OPEN"))
+        assertTrue(source.contains("window.open ="))
+        assertTrue(source.contains("activation_nonce"))
+        assertFalse(source.contains("__simulaSdkPageReady:"))
+        assertFalse(source.contains("window.addEventListener('message'"))
+    }
+
+    @Test
     fun trustedCtaMessageRejectsMalformedOrNonStringFields() {
         assertNull(trustedCtaUrl("malformed", "nonce"))
         assertNull(trustedCtaUrl("""{"type":"SIMULA_CTA_OPEN","url":7,"activation_nonce":"nonce"}""", "nonce"))
@@ -227,6 +269,7 @@ class CreativeBridgeTest {
         assertTrue(source.contains("trustedEventTimestamp = Number(event.timeStamp || 0)"))
         assertTrue(source.contains("return trustedDispatch && trustedEventTimestamp >= 0"))
         assertTrue(source.contains("if (!awaitingClick) { beginGesture(event); }"))
+        assertTrue(source.contains("nativeReceiver.isCtaEnabled('nonce') === true"))
         val duplicateCheck = requireNotNull(source.indexOf("if (claimedGesture === gestureSequence) { return true; }")
             .takeIf { it >= 0 })
         val activeCheck = requireNotNull(source.indexOf("if (!hasActiveUserGesture()) { return false; }")

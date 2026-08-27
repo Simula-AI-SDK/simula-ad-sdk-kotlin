@@ -124,7 +124,11 @@ internal class CreativeBridge(
      * Handle one envelope. [reply] delivers a JS string back into the page (the installer binds it
      * to `webView.evaluateJavascript`). Rejects malformed input or an unknown `type` with telemetry.
      */
-    fun handle(message: String, reply: (String) -> Unit) {
+    fun handle(
+        message: String,
+        isActive: () -> Boolean = { true },
+        reply: (String) -> Unit,
+    ) {
         val root = parseKnownCreativeBridgeMessage(
             message,
             FULL_SCREEN_BRIDGE_MESSAGE_TYPES,
@@ -135,6 +139,7 @@ internal class CreativeBridge(
         val payload = root["payload"] as? JsonObject
         try {
             mainDispatch {
+                if (!isActive()) return@mainDispatch
                 try {
                     process(type, requestId, payload, reply)
                 } catch (error: Throwable) {

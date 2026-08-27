@@ -558,8 +558,16 @@ private fun RewardedMinigame(
 
     fun beginPrimaryCta(tappedUrl: String): Boolean {
         if (!primaryCtaAdmission.isEnabled()) return true
-        val tappedDestination = CreativeCtaRouter.normalizeTappedDestination(tappedUrl) ?: return false
-        if (CreativeCtaRouter.hasSameHttpOrigin(presentation.iframeUrl, tappedDestination)) return false
+        val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+            tappedUrl = tappedUrl,
+            creativeBaseUrl = presentation.iframeUrl,
+            trackingUrl = presentation.trackingUrl,
+            destination = presentation.destination,
+        )) {
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> return false
+            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
+            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
+        }
         val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
         if (!primaryCtaAdmission.disable()) {
             claim.release()
@@ -568,11 +576,6 @@ private fun RewardedMinigame(
         notifyPublisherClick { presentation.callbacks.notifyClicked() }
         creativeWebView?.let(BridgeWebViewInstaller::disableTrustedCta)
         val interaction = claim.interaction
-        val route = PrimaryCtaRoute(
-            tappedUrl = tappedDestination,
-            externalTarget = CreativeCtaRouter.admittedHttpUrl(presentation.trackingUrl)
-                ?: tappedDestination,
-        )
         coordinateDeferredClickPersistence(
             mainHandler = clickHandoffHandler,
             claim = claim,
@@ -594,9 +597,9 @@ private fun RewardedMinigame(
                             routeActivity.isFinishing,
                             routeActivity.isDestroyed,
                         )) return@routeClick false
-                    val opened = CreativeCtaRouter.open(
+                    val opened = CreativeCtaRouter.openPrimaryCta(
                         routeActivity.applicationContext,
-                        route.externalTarget,
+                        route,
                         presentation.destination,
                         presentation.adBehavior?.storeOpen,
                         presentation.androidStoreUrl,
@@ -639,10 +642,8 @@ private fun RewardedMinigame(
                         override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
                             super.onPageStarted(view, pageUrl, favicon) // starts the page-load timer
                             BridgeWebViewInstaller.onPageStarted(view)
-                            // Bridge relay fallback when document-start injection is unavailable.
-                            if (!BridgeWebViewInstaller.documentStartSupported()) {
-                                BridgeWebViewInstaller.injectFallback(view)
-                            }
+                            // Inject only relay components whose document-start registration failed.
+                            BridgeWebViewInstaller.injectFallback(view)
                         }
 
                         override fun shouldOverrideUrlLoading(

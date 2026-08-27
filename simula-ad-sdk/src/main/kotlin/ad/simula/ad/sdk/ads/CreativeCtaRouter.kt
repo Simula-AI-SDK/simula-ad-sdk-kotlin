@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.StoreOpen
+import ad.simula.ad.sdk.network.PrimaryCtaRoute
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import android.content.Intent
@@ -49,6 +50,12 @@ import java.net.URLDecoder
  */
 internal object CreativeCtaRouter {
 
+    internal sealed interface PrimaryCtaTapPlan {
+        data object AllowInWebView : PrimaryCtaTapPlan
+        data object ConsumeWithoutClick : PrimaryCtaTapPlan
+        data class Route(val route: PrimaryCtaRoute) : PrimaryCtaTapPlan
+    }
+
     /** Prefer the attribution URL carried outside rendered HTML, whose script text may HTML-escape
      * query separators. Older payloads without that field keep using the creative's tapped URL. */
     internal fun preferredClickUrl(trackingUrl: String?, embeddedUrl: String): String? =
@@ -71,6 +78,70 @@ internal object CreativeCtaRouter {
         return firstUrl.protocol.equals(secondUrl.protocol, ignoreCase = true) &&
             firstUrl.host.equals(secondUrl.host, ignoreCase = true) &&
             firstUrl.effectivePort() == secondUrl.effectivePort()
+    }
+
+    /**
+     * Separates proof of an advertiser exit from route-target selection. A serve tracker may replace
+     * an admitted external destination, but it must never turn document-local or unsafe navigation
+     * into a billable click.
+     */
+    internal fun primaryCtaTapPlan(
+        tappedUrl: String?,
+        creativeBaseUrl: String?,
+        trackingUrl: String?,
+        destination: String,
+    ): PrimaryCtaTapPlan {
+        val candidate = tappedUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: return PrimaryCtaTapPlan.AllowInWebView
+        if (candidate.hasUrlControlCharacters()) return PrimaryCtaTapPlan.ConsumeWithoutClick
+        if (candidate.startsWith('#')) return PrimaryCtaTapPlan.AllowInWebView
+
+        val separator = candidate.indexOf(':')
+        if (separator <= 0) return PrimaryCtaTapPlan.AllowInWebView
+        val scheme = candidate.substring(0, separator).lowercase()
+        if (!scheme.matches(URL_SCHEME_PATTERN)) return PrimaryCtaTapPlan.ConsumeWithoutClick
+        if (scheme in INTERNAL_WEBVIEW_SCHEMES) return PrimaryCtaTapPlan.AllowInWebView
+
+        val tappedDestination = normalizeTappedDestination(candidate)
+        var customDestination: String? = null
+        when (scheme) {
+            "http", "https" -> {
+                if (tappedDestination == null) return PrimaryCtaTapPlan.ConsumeWithoutClick
+                if (hasSameHttpOrigin(creativeBaseUrl, tappedDestination)) {
+                    return PrimaryCtaTapPlan.AllowInWebView
+                }
+            }
+            "market", "intent" -> {
+                if (tappedDestination == null) return PrimaryCtaTapPlan.ConsumeWithoutClick
+            }
+            else -> {
+                customDestination = admittedWebCustomDestination(candidate, destination)
+                    ?: return PrimaryCtaTapPlan.ConsumeWithoutClick
+            }
+        }
+
+        val externalTarget = admittedHttpUrl(trackingUrl)
+            ?: tappedDestination
+            ?: customDestination
+            ?: return PrimaryCtaTapPlan.ConsumeWithoutClick
+        return PrimaryCtaTapPlan.Route(
+            PrimaryCtaRoute(
+                tappedUrl = tappedDestination,
+                externalTarget = externalTarget,
+            ),
+        )
+    }
+
+    internal fun admittedWebCustomDestination(value: String?, destination: String): String? {
+        if (destination != "web") return null
+        val candidate = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (candidate.hasUrlControlCharacters()) return null
+        val uri = runCatching { URI(candidate) }.getOrNull() ?: return null
+        val scheme = uri.scheme?.lowercase()?.takeIf { it.matches(URL_SCHEME_PATTERN) } ?: return null
+        if (scheme in INTERNAL_WEBVIEW_SCHEMES || scheme in setOf("http", "https", "market", "intent")) {
+            return null
+        }
+        return candidate.takeIf { !uri.rawSchemeSpecificPart.isNullOrBlank() }
     }
 
     /**
@@ -176,6 +247,19 @@ internal object CreativeCtaRouter {
         )
     }
 
+    fun openPrimaryCta(
+        context: Context,
+        route: PrimaryCtaRoute,
+        destination: String,
+        storeOpen: StoreOpen? = null,
+        storeUrl: String? = null,
+    ): Boolean {
+        admittedWebCustomDestination(route.externalTarget, destination)?.let { custom ->
+            return launch(context, custom)
+        }
+        return open(context, route.externalTarget, destination, storeOpen, storeUrl)
+    }
+
     internal fun routeCta(
         trackingUrl: String?,
         destination: String,
@@ -220,3 +304,6 @@ internal object CreativeCtaRouter {
 private fun URL.effectivePort(): Int = if (port >= 0) port else defaultPort
 
 private fun String.hasUrlControlCharacters(): Boolean = any { it.code in 0..31 || it.code == 127 }
+
+private val INTERNAL_WEBVIEW_SCHEMES = setOf("about", "blob", "data", "file", "javascript")
+private val URL_SCHEME_PATTERN = Regex("[a-z][a-z0-9+.-]*")

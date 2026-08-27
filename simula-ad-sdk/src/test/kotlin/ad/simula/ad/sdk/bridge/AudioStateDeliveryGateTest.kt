@@ -83,15 +83,16 @@ class AudioStateDeliveryGateTest {
         val events = mutableListOf<String>()
 
         cleanupBeforePooling(
-            cleanup = { events += "cleanup" },
+            cleanup = { events += "cleanup"; true },
             release = { events += "release" },
+            discard = { events += "discard" },
         )
 
         assertEquals(listOf("cleanup", "release"), events)
     }
 
     @Test
-    fun cleanupFailureCannotSkipPoolingOrEscape() {
+    fun cleanupFailureDiscardsInsteadOfPoolingOrEscaping() {
         val events = mutableListOf<String>()
 
         cleanupBeforePooling(
@@ -100,8 +101,9 @@ class AudioStateDeliveryGateTest {
                 error("failure")
             },
             release = { events += "release" },
+            discard = { events += "discard" },
         )
 
-        assertEquals(listOf("cleanup", "release"), events)
+        assertEquals(listOf("cleanup", "discard"), events)
     }
 }

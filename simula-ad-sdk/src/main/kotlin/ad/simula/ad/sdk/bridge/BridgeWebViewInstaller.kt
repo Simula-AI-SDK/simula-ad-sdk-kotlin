@@ -159,8 +159,14 @@ internal fun trustedCtaRelaySource(
                 protocol === 'javascript:';
         } catch (_) { return true; }
     }
+    function nativeCtaEnabled() {
+        try {
+            return nativeReceiver && typeof nativeReceiver.isCtaEnabled === 'function' &&
+                nativeReceiver.isCtaEnabled('$activationNonce') === true;
+        } catch (_) { return false; }
+    }
     function forwardTrustedCta(value) {
-        if (ctaDisabled) { return false; }
+        if (ctaDisabled || !nativeCtaEnabled()) { return false; }
         var url = resolvedUrl(value);
         if (!url || !trustedCtaBaseUrl || isInternalCta(url) || isSameOriginCta(url)) { return false; }
         if (gestureSequence === 0) { return false; }
@@ -210,7 +216,7 @@ internal object BridgeWebViewInstaller {
     private var nextInstallationId = 0L
 
     /** Document-start scripts added per web view, so they can be removed on re-install / release. */
-    private val scripts = WeakHashMap<WebView, ScriptHandler>()
+    private val scripts = WeakHashMap<WebView, DocumentStartScripts>()
     private val installations = WeakHashMap<WebView, BridgeInstallation>()
 
     /**
@@ -218,13 +224,7 @@ internal object BridgeWebViewInstaller {
      * dropping the SDK's own query replies (marked `__simulaSdkResponse`). Mirrors the iOS
      * `WebViewPool.postMessageScript`.
      */
-    private fun relayScript(
-        installationId: String,
-        activationNonce: String?,
-        trustedCtaBaseUrl: String?,
-    ): String {
-        val ctaRelay = activationNonce?.let { trustedCtaRelaySource(it, trustedCtaBaseUrl) }.orEmpty()
-        return """
+    internal fun coreRelayScript(installationId: String): String = """
         (function () {
             var nativeReceiver = window.$NATIVE_OBJECT;
             var nativePost = nativeReceiver && typeof nativeReceiver.postMessage === 'function'
@@ -254,18 +254,41 @@ internal object BridgeWebViewInstaller {
             } else {
                 window.addEventListener('load', notifyPageReady, false);
             }
-$ctaRelay
         })();
     """.trimIndent()
+
+    internal fun trustedCtaDocumentStartScript(
+        activationNonce: String,
+        trustedCtaBaseUrl: String?,
+    ): String = """
+        (function () {
+            var nativeReceiver = window.$NATIVE_OBJECT;
+            var nativePost = nativeReceiver && typeof nativeReceiver.postMessage === 'function'
+                ? nativeReceiver.postMessage.bind(nativeReceiver)
+                : null;
+            var nativeStringify = JSON.stringify.bind(JSON);
+${trustedCtaRelaySource(activationNonce, trustedCtaBaseUrl)}
+        })();
+    """.trimIndent()
+
+    private fun fallbackRelayScript(installation: BridgeInstallation): String = buildString {
+        if (!installation.coreDocumentStartInstalled) append(coreRelayScript(installation.id))
+        if (!installation.ctaDocumentStartInstalled) {
+            activeCtaNonce(installation.activationNonce, installation.ctaDisabled)?.let { nonce ->
+                if (isNotEmpty()) append('\n')
+                append(trustedCtaDocumentStartScript(nonce, installation.trustedCtaBaseUrl))
+            }
+        }
     }
 
     /** Whether document-start injection (the reliable, all-frames path) is available on this device. */
-    fun documentStartSupported(): Boolean =
+    fun documentStartSupported(): Boolean = runCatching {
         WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+    }.getOrDefault(false)
 
     /**
-     * Attach [bridge] to [webView]. When [documentStartSupported] is false, the caller's
-     * `WebViewClient` should call [injectFallback] in `onPageStarted` instead.
+     * Attach [bridge] to [webView]. The caller's `WebViewClient` calls [injectFallback] from
+     * `onPageStarted`; it injects only components whose document-start registration did not succeed.
      */
     fun install(
         webView: WebView,
@@ -283,7 +306,11 @@ $ctaRelay
         )
         installations[webView] = installation
 
-        webView.addJavascriptInterface(object {
+        runCatching { webView.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun isCtaEnabled(nonce: String?): Boolean =
+                installation.active && !installation.ctaDisabled && nonce == installation.activationNonce
+
             @JavascriptInterface
             fun postMessage(json: String?) {
                 // Off-main "JavaBridge" thread → the bridge hops to main; the reply runs on the
@@ -292,7 +319,11 @@ $ctaRelay
                 // after the pooled view is destroyed can't crash on a torn-down WebView.
                 json ?: return
                 readyPageId(json, installation.id)?.let { pageId ->
-                    webView.post { installation.audioObserver.onPageReady(pageId) }
+                    webView.post {
+                        if (installations[webView] === installation) {
+                            installation.audioObserver.onPageReady(pageId)
+                        }
+                    }
                     return
                 }
                 trustedCtaUrl(
@@ -307,22 +338,59 @@ $ctaRelay
                     }
                     return
                 }
-                bridge.handle(json) { js ->
-                    webView.post { runCatching { webView.evaluateJavascript(js, null) } }
+                bridge.handle(
+                    message = json,
+                    isActive = { installation.active },
+                ) { js ->
+                    webView.post {
+                        if (installations[webView] === installation) {
+                            runCatching { webView.evaluateJavascript(js, null) }
+                        }
+                    }
                 }
             }
-        }, NATIVE_OBJECT)
+        }, NATIVE_OBJECT) }.onFailure {
+            Telemetry.recordError(
+                signature = "bridge:javascript_interface_failed",
+                errorCode = it::class.java.simpleName,
+            )
+        }
 
         if (documentStartSupported()) {
-            scripts[webView] = WebViewCompat.addDocumentStartJavaScript(
-                webView,
-                relayScript(
-                    installation.id,
-                    activeCtaNonce(installation.activationNonce, installation.ctaDisabled),
-                    installation.trustedCtaBaseUrl,
-                ),
-                setOf("*"),
-            )
+            val core = runCatching {
+                WebViewCompat.addDocumentStartJavaScript(
+                    webView,
+                    coreRelayScript(installation.id),
+                    setOf("*"),
+                )
+            }.onFailure {
+                Telemetry.recordError(
+                    signature = "bridge:document_start_failed",
+                    errorCode = it::class.java.simpleName,
+                    breadcrumb = "part=core",
+                )
+            }.getOrNull()
+            if (core != null) {
+                val cta = activeCtaNonce(installation.activationNonce, installation.ctaDisabled)?.let { nonce ->
+                    runCatching {
+                        WebViewCompat.addDocumentStartJavaScript(
+                            webView,
+                            trustedCtaDocumentStartScript(nonce, installation.trustedCtaBaseUrl),
+                            setOf("*"),
+                        )
+                    }.onFailure {
+                        Telemetry.recordError(
+                            signature = "bridge:document_start_failed",
+                            errorCode = it::class.java.simpleName,
+                            breadcrumb = "part=cta",
+                        )
+                    }.getOrNull()
+                }
+                scripts[webView] = DocumentStartScripts(core = core, cta = cta)
+                installation.coreDocumentStartInstalled = true
+                installation.ctaDocumentStartInstalled =
+                    installation.activationNonce == null || cta != null
+            }
         }
     }
 
@@ -335,16 +403,8 @@ $ctaRelay
             if (installations[view] !== installation || installation.fallbackGeneration != generation) {
                 return@post
             }
-            runCatching {
-                view.evaluateJavascript(
-                    relayScript(
-                        installation.id,
-                        activeCtaNonce(installation.activationNonce, installation.ctaDisabled),
-                        installation.trustedCtaBaseUrl,
-                    ),
-                    null,
-                )
-            }
+            val source = fallbackRelayScript(installation)
+            if (source.isNotEmpty()) runCatching { view.evaluateJavascript(source, null) }
         }
     }
 
@@ -357,23 +417,38 @@ $ctaRelay
     /** Permanently disables CTA ownership for this installation and all later documents. */
     fun disableTrustedCta(webView: WebView) {
         val installation = installations[webView] ?: return
+        if (installation.ctaDisabled) return
         installation.ctaDisabled = true
-        scripts.remove(webView)?.let { runCatching { it.remove() } }
+        scripts[webView]?.let { handlers ->
+            handlers.cta?.let { handler ->
+                if (runCatching { handler.remove() }.isSuccess) {
+                    handlers.cta = null
+                    installation.ctaDocumentStartInstalled = false
+                }
+            }
+        }
         webView.post {
-            runCatching {
-                webView.evaluateJavascript(
-                    "window.__simulaSdkDisableCta&&window.__simulaSdkDisableCta()",
-                    null,
-                )
+            if (installations[webView] === installation) {
+                runCatching {
+                    webView.evaluateJavascript(
+                        "window.__simulaSdkDisableCta&&window.__simulaSdkDisableCta()",
+                        null,
+                    )
+                }
             }
         }
     }
 
     /** Remove the bridge wiring before a web view is recycled to the pool. Idempotent. */
-    fun uninstall(webView: WebView) {
-        installations.remove(webView)?.audioObserver?.close()
-        runCatching { webView.removeJavascriptInterface(NATIVE_OBJECT) }
-        scripts.remove(webView)?.let { runCatching { it.remove() } }
+    fun uninstall(webView: WebView): Boolean {
+        val installation = installations.remove(webView)
+        installation?.active = false
+        val observerClosed = runCatching { installation?.audioObserver?.close() }.isSuccess
+        val interfaceRemoved = runCatching { webView.removeJavascriptInterface(NATIVE_OBJECT) }.isSuccess
+        val handlers = scripts.remove(webView)
+        val ctaRemoved = handlers?.cta?.let { runCatching { it.remove() }.isSuccess } ?: true
+        val coreRemoved = handlers?.let { runCatching { it.core.remove() }.isSuccess } ?: true
+        return observerClosed && interfaceRemoved && ctaRemoved && coreRemoved
     }
 
     /** Tear down presentation-scoped wiring before returning the view to the shared pool. */
@@ -381,13 +456,18 @@ $ctaRelay
         cleanupBeforePooling(
             cleanup = { uninstall(webView) },
             release = { WebViewPool.release(webView) },
+            discard = { WebViewPool.discard(webView) },
         )
     }
 }
 
-internal fun cleanupBeforePooling(cleanup: () -> Unit, release: () -> Unit) {
-    runCatching(cleanup)
-    runCatching(release)
+internal fun cleanupBeforePooling(
+    cleanup: () -> Boolean,
+    release: () -> Unit,
+    discard: () -> Unit,
+) {
+    val cleaned = runCatching(cleanup).getOrDefault(false)
+    runCatching { if (cleaned) release() else discard() }
 }
 
 private data class BridgeInstallation(
@@ -398,9 +478,18 @@ private data class BridgeInstallation(
     val onTrustedCtaOpen: ((String) -> Unit)?,
 ) {
     var fallbackGeneration: Long = 0L
+    var coreDocumentStartInstalled: Boolean = false
+    var ctaDocumentStartInstalled: Boolean = false
+    @Volatile
+    var active: Boolean = true
     @Volatile
     var ctaDisabled: Boolean = false
 }
+
+private data class DocumentStartScripts(
+    val core: ScriptHandler,
+    var cta: ScriptHandler?,
+)
 
 internal fun trustedCtaUrl(
     message: String,
