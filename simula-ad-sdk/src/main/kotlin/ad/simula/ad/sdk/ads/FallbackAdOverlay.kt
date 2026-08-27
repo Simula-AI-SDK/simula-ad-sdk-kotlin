@@ -6,17 +6,22 @@ import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
+import ad.simula.ad.sdk.network.AdBeaconManager
+import ad.simula.ad.sdk.network.BeaconPersistenceOutcome
+import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
-import ad.simula.ad.sdk.network.ClickRouteOutcome
 import ad.simula.ad.sdk.network.ClickSources
-import ad.simula.ad.sdk.network.routeClaimedClick
+import ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission
+import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.SystemClock
+import android.os.Handler
+import android.os.Looper
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -62,8 +67,241 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
+import java.lang.ref.WeakReference
 import kotlin.math.ceil
 import kotlinx.coroutines.delay
+
+internal enum class FallbackStage { CONTENT, FETCHING, SHOWING, DONE }
+private const val FALLBACK_FETCH_ATTEMPTS = 2
+private const val FALLBACK_FETCH_RETRY_MS = 250L
+internal const val FALLBACK_POST_CLOSE_WAIT_MS = 2_000L
+internal const val FALLBACK_CLOSE_GATE_MS = 5_000L
+
+internal fun fallbackClickBeaconImpressionId(adId: String, serverEnabled: Boolean): String? =
+    adId.takeIf { serverEnabled && it.isNotBlank() }
+
+internal fun enqueueOwnedFallbackClickBeacon(
+    adId: String,
+    serverEnabled: Boolean,
+    completion: (BeaconPersistenceOutcome) -> Unit,
+    enqueue: (String) -> Unit,
+) {
+    val beaconId = fallbackClickBeaconImpressionId(adId, serverEnabled)
+    if (beaconId == null) completion(BeaconPersistenceOutcome.Persisted) else enqueue(beaconId)
+}
+
+internal class FallbackPresentationState(
+    private val clockMs: () -> Long = SystemClock::elapsedRealtime,
+) {
+    var stage: FallbackStage = FallbackStage.CONTENT
+        private set
+    var index: Int = 0
+        private set
+    var clickHandoffPending by mutableStateOf(false)
+        private set
+    var fetchedAds: List<SimulaApiClient.FallbackAd>? = null
+        private set
+    private val clickAdmissions = LinkedHashMap<Int, PrimaryCtaDocumentAdmission>()
+    private var navigationOwner: Any? = null
+    private var navigateInWebView: ((String) -> Boolean)? = null
+    private var pendingNavigationUrl: String? = null
+    private var activeDelivery: NavigationDelivery? = null
+    private var deliveryRevision = 0L
+    private var cleared = false
+    private var fetchWaitGeneration = 0L
+    private var fetchWaitDeadlineMs = 0L
+    private val closeGateElapsedByIndex = LinkedHashMap<Int, Long>()
+
+    fun showing(index: Int) {
+        val nextIndex = index.coerceAtLeast(0)
+        if (stage == FallbackStage.SHOWING && this.index != nextIndex) {
+            cancelNavigationLocked()
+        }
+        stage = FallbackStage.SHOWING
+        this.index = nextIndex
+    }
+    fun done() { stage = FallbackStage.DONE }
+    fun setClickPending(pending: Boolean) {
+        synchronized(this) {
+            if (cleared) return
+            clickHandoffPending = pending
+        }
+        if (!pending) dispatchReadyNavigation()
+    }
+    fun retainFetchedAds(ads: List<SimulaApiClient.FallbackAd>) { fetchedAds = ads }
+    fun fetchFailed() = Unit
+    fun terminalizeInitialFetchFailure(): List<SimulaApiClient.FallbackAd> {
+        val retained = fetchedAds
+        if (retained != null) return retained
+        return emptyList<SimulaApiClient.FallbackAd>().also(::retainFetchedAds)
+    }
+    fun clickAdmission(index: Int): PrimaryCtaDocumentAdmission =
+        clickAdmissions.getOrPut(index.coerceAtLeast(0)) { PrimaryCtaDocumentAdmission() }
+
+    @Synchronized
+    fun closeGateElapsedMs(index: Int): Long = closeGateElapsedByIndex[index.coerceAtLeast(0)] ?: 0L
+
+    @Synchronized
+    fun addCloseGateElapsedMs(index: Int, elapsedMs: Long): Long {
+        val key = index.coerceAtLeast(0)
+        val current = closeGateElapsedByIndex[key] ?: 0L
+        val remaining = FALLBACK_CLOSE_GATE_MS - current
+        val updated = current + elapsedMs.coerceIn(0L, remaining)
+        closeGateElapsedByIndex[key] = updated
+        return updated
+    }
+
+    fun startPostCloseFetchWait(): Long {
+        if (stage != FallbackStage.FETCHING) {
+            fetchWaitGeneration++
+            fetchWaitDeadlineMs = clockMs() + FALLBACK_POST_CLOSE_WAIT_MS
+            stage = FallbackStage.FETCHING
+        }
+        return fetchWaitGeneration
+    }
+
+    fun retainedPostCloseFetchWait(): Long =
+        if (stage == FallbackStage.FETCHING) fetchWaitGeneration else startPostCloseFetchWait()
+
+    fun postCloseFetchWaitRemainingMs(generation: Long): Long? {
+        if (stage != FallbackStage.FETCHING || generation != fetchWaitGeneration) return null
+        return (fetchWaitDeadlineMs - clockMs()).coerceAtLeast(0L)
+    }
+
+    fun resolvePostCloseFetchWait(
+        generation: Long,
+        ads: List<SimulaApiClient.FallbackAd>,
+    ): Boolean {
+        if (stage != FallbackStage.FETCHING || generation != fetchWaitGeneration) return false
+        if (ads.isNotEmpty()) showing(0) else done()
+        return true
+    }
+
+    fun timeoutPostCloseFetchWait(generation: Long): Boolean {
+        if (stage != FallbackStage.FETCHING || generation != fetchWaitGeneration) return false
+        done()
+        return true
+    }
+
+    fun bindNavigation(owner: Any, navigate: (String) -> Boolean) {
+        synchronized(this) {
+            if (cleared) return
+            if (navigationOwner !== owner) clearBindingLocked()
+            navigationOwner = owner
+            navigateInWebView = navigate
+        }
+        dispatchReadyNavigation()
+    }
+
+    @Synchronized
+    fun unbindNavigation(owner: Any) {
+        if (navigationOwner === owner) {
+            clearBindingLocked()
+        }
+    }
+
+    fun retainNavigation(url: String): Boolean {
+        synchronized(this) {
+            if (cleared || url.isBlank()) return false
+            if (pendingNavigationUrl == null) pendingNavigationUrl = url
+        }
+        dispatchReadyNavigation()
+        return true
+    }
+
+    @Synchronized
+    fun hasRetainedNavigation(): Boolean = pendingNavigationUrl != null
+
+    @Synchronized
+    fun clear() {
+        cleared = true
+        clickHandoffPending = false
+        cancelNavigationLocked()
+        clickAdmissions.clear()
+        closeGateElapsedByIndex.clear()
+    }
+
+    private fun dispatchReadyNavigation() {
+        val delivery = synchronized(this) {
+            if (cleared || clickHandoffPending || activeDelivery != null) return
+            val navigate = navigateInWebView ?: return
+            val url = pendingNavigationUrl ?: return
+            val owner = navigationOwner ?: return
+            NavigationDelivery(++deliveryRevision, owner, url).also { activeDelivery = it } to navigate
+        }
+        val delivered = runCatching { delivery.second(delivery.first.url) }.getOrDefault(false)
+        synchronized(this) {
+            if (activeDelivery !== delivery.first) return@synchronized
+            if (delivered && pendingNavigationUrl == delivery.first.url) {
+                pendingNavigationUrl = null
+            }
+            if (!delivered || delivery.first.permitConsumed) activeDelivery = null
+        }
+    }
+
+    @Synchronized
+    fun navigationOverride(
+        targetUrl: String? = null,
+        isMainFrame: Boolean = true,
+        hasGesture: Boolean = false,
+        owner: Any? = navigationOwner,
+    ): Boolean? {
+        if (cleared) return true
+        if (clickHandoffPending) return true
+        activeDelivery?.let { delivery ->
+            if (delivery.owner === owner && isMainFrame && !hasGesture &&
+                targetUrl == delivery.url && !delivery.permitConsumed
+            ) {
+                delivery.permitConsumed = true
+                if (pendingNavigationUrl == null) activeDelivery = null
+                return false
+            }
+            return true
+        }
+        return if (pendingNavigationUrl != null) true else null
+    }
+
+    @Synchronized
+    fun onNavigationStarted(url: String?, owner: Any? = navigationOwner) {
+        val delivery = activeDelivery ?: return
+        if (delivery.owner !== owner || url != delivery.url) return
+        delivery.permitConsumed = true
+        if (pendingNavigationUrl == null) activeDelivery = null
+    }
+
+    @Synchronized
+    fun advance(total: Int): Boolean {
+        if (clickHandoffPending || stage != FallbackStage.SHOWING) return false
+        cancelNavigationLocked()
+        if (index + 1 < total) showing(index + 1) else done()
+        return true
+    }
+
+    private fun cancelNavigationLocked() {
+        pendingNavigationUrl = null
+        activeDelivery = null
+        deliveryRevision++
+        navigationOwner = null
+        navigateInWebView = null
+    }
+
+    private fun clearBindingLocked() {
+        activeDelivery?.takeIf { it.owner === navigationOwner }?.let { delivery ->
+            if (pendingNavigationUrl == null) pendingNavigationUrl = delivery.url
+            activeDelivery = null
+            deliveryRevision++
+        }
+        navigationOwner = null
+        navigateInWebView = null
+    }
+
+    private data class NavigationDelivery(
+        val revision: Long,
+        val owner: Any,
+        val url: String,
+        var permitConsumed: Boolean = false,
+    )
+}
 
 /**
  * Hosts an ad creative and, when it closes, fetches the serve's fallback ad screens
@@ -79,11 +317,18 @@ import kotlinx.coroutines.delay
 @Composable
 internal fun FallbackAdHost(
     impressionId: String,
+    adFormat: String = "interstitial",
+    presentationState: FallbackPresentationState = remember { FallbackPresentationState() },
     onFullyClosed: () -> Unit,
     autoStoreRedirect: AutoStoreRedirect? = null,
     onAutoStoreRedirect: () -> Boolean = { false },
     onAdClick: (ClickInteraction) -> Unit = {},
+    onStoreOpen: (ClickInteraction) -> Unit = {},
+    persistClick: (String, ClickInteraction, () -> Unit) -> Unit = { _, _, complete -> complete() },
     claimClick: ((String) -> ClickInteractionClaim?)? = null,
+    routeClick: (((Context) -> Boolean, (Boolean) -> Unit) -> ClickRouteStart)? = null,
+    onClickHandoffCreated: (ClickPersistenceHandoff) -> Unit = {},
+    onClickHandoffFinished: (ClickPersistenceHandoff) -> Unit = {},
     autoRedirectCoordinator: AutoRedirectCoordinator? = null,
     pendingClickHandoff: () -> ClickPersistenceHandoff? = { null },
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
@@ -94,7 +339,24 @@ internal fun FallbackAdHost(
     ctaStoreUrl: String? = null,
     content: @Composable (onClose: () -> Unit) -> Unit,
 ) {
-    var phase by remember { mutableStateOf<FallbackPhase>(FallbackPhase.Content) }
+    var phase by remember(presentationState) {
+        mutableStateOf<FallbackPhase>(
+            when (presentationState.stage) {
+                FallbackStage.CONTENT -> FallbackPhase.Content
+                FallbackStage.FETCHING -> FallbackPhase.Fetching(
+                    presentationState.retainedPostCloseFetchWait(),
+                )
+                FallbackStage.SHOWING -> presentationState.fetchedAds
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { ads ->
+                        val index = presentationState.index.coerceIn(0, ads.lastIndex)
+                        FallbackPhase.Showing(ads, index)
+                    }
+                    ?: FallbackPhase.Done.also { presentationState.done() }
+                FallbackStage.DONE -> FallbackPhase.Done
+            },
+        )
+    }
     val fallbackClickGate = remember(impressionId) { ClickInteractionGate() }
     val clickClaim = claimClick ?: fallbackClickGate::claim
     // Fullscreen presentations pass their shared coordinator; the local instance is only for the
@@ -114,11 +376,26 @@ internal fun FallbackAdHost(
     // they present instantly on close instead of fetching then (which flashed the host behind).
     // `GET /load/fallbacks` is side-effect-free, so prefetching reports nothing prematurely.
     // null = still in flight; empty = none returned.
-    var prefetched by remember { mutableStateOf<List<SimulaApiClient.FallbackAd>?>(null) }
+    var prefetched by remember(presentationState) { mutableStateOf(presentationState.fetchedAds) }
     LaunchedEffect(impressionId) {
-        prefetched = runCatching {
-            if (impressionId.isNotBlank()) SimulaApiClient.fetchFallbacks(impressionId) else emptyList()
-        }.getOrDefault(emptyList())
+        if (prefetched == null) {
+            var fetched: List<SimulaApiClient.FallbackAd>? = null
+            for (attempt in 0 until FALLBACK_FETCH_ATTEMPTS) {
+                val result = runCatching {
+                    if (impressionId.isNotBlank()) SimulaApiClient.fetchFallbacksStrict(impressionId) else emptyList()
+                }
+                if (result.isSuccess) {
+                    fetched = result.getOrThrow()
+                    break
+                }
+                presentationState.fetchFailed()
+                if (attempt + 1 < FALLBACK_FETCH_ATTEMPTS) delay(FALLBACK_FETCH_RETRY_MS)
+            }
+            if (presentationState.stage == FallbackStage.DONE) return@LaunchedEffect
+            val resolved = fetched ?: presentationState.terminalizeInitialFetchFailure()
+            presentationState.retainFetchedAds(resolved)
+            prefetched = resolved
+        }
     }
 
     // Primary creative closed → present the prefetched screens immediately. If the prefetch is
@@ -126,9 +403,9 @@ internal fun FallbackAdHost(
     fun onPrimaryClosed() {
         val ads = prefetched
         phase = when {
-            ads == null -> FallbackPhase.Fetching
-            ads.isNotEmpty() -> FallbackPhase.Showing(ads, index = 0)
-            else -> FallbackPhase.Done
+            ads == null -> FallbackPhase.Fetching(presentationState.startPostCloseFetchWait())
+            ads.isNotEmpty() -> FallbackPhase.Showing(ads, index = 0).also { presentationState.showing(0) }
+            else -> FallbackPhase.Done.also { presentationState.done() }
         }
     }
 
@@ -138,13 +415,28 @@ internal fun FallbackAdHost(
         when (val p = phase) {
             FallbackPhase.Content -> content { onPrimaryClosed() }
             // Prefetch wasn't ready at close — hold on the black backdrop and advance when it lands.
-            FallbackPhase.Fetching -> {
+            is FallbackPhase.Fetching -> {
                 // Swallow back during this brief settle window so a fast back-press can't finish the
                 // Activity before the end screens are revealed (parity with the gated close).
                 BackHandler(enabled = true) {}
-                LaunchedEffect(prefetched) {
+                LaunchedEffect(p.generation) {
+                    val remainingMs = presentationState.postCloseFetchWaitRemainingMs(p.generation)
+                        ?: return@LaunchedEffect
+                    if (remainingMs > 0L) delay(remainingMs)
+                    if (presentationState.timeoutPostCloseFetchWait(p.generation)) {
+                        phase = FallbackPhase.Done
+                    }
+                }
+                LaunchedEffect(prefetched, p.generation) {
                     val ads = prefetched ?: return@LaunchedEffect
-                    phase = if (ads.isNotEmpty()) FallbackPhase.Showing(ads, index = 0) else FallbackPhase.Done
+                    if (!presentationState.resolvePostCloseFetchWait(p.generation, ads)) {
+                        return@LaunchedEffect
+                    }
+                    phase = if (presentationState.stage == FallbackStage.SHOWING) {
+                        FallbackPhase.Showing(ads, presentationState.index)
+                    } else {
+                        FallbackPhase.Done
+                    }
                 }
             }
             is FallbackPhase.Showing -> {
@@ -173,17 +465,37 @@ internal fun FallbackAdHost(
                         iframeUrl = ad.iframeUrl,
                         html = ad.html,
                         adId = ad.adId,
-                        onAdClick = { interaction ->
+                        nativeClickBeaconV1Enabled = ad.nativeClickBeaconV1Enabled,
+                        onAdClick = onAdClick,
+                        onStoreOpen = { interaction ->
                             redirects.recordUserRouteOpened()
-                            onAdClick(interaction)
+                            onStoreOpen(interaction)
                         },
+                        persistClick = persistClick,
                         claimClick = clickClaim,
+                        impressionId = impressionId,
+                        adFormat = adFormat,
+                        routeClick = routeClick,
+                        presentationState = presentationState,
+                        fallbackIndex = p.index,
+                        onClickHandoffCreated = { handoff ->
+                            presentationState.setClickPending(true)
+                            onClickHandoffCreated(handoff)
+                        },
+                        onClickHandoffFinished = { handoff ->
+                            presentationState.setClickPending(false)
+                            onClickHandoffFinished(handoff)
+                        },
                         ctaTrackingUrl = ctaTrackingUrl,
                         ctaDestination = ctaDestination,
                         ctaStoreUrl = ctaStoreUrl,
                         onClose = {
-                            // Reveal the next screen on each close tap; done after the last one.
-                            phase = if (p.index + 1 < p.ads.size) p.copy(index = p.index + 1) else FallbackPhase.Done
+                            if (!presentationState.advance(p.ads.size)) return@FallbackAdOverlay
+                            phase = if (presentationState.stage == FallbackStage.SHOWING) {
+                                p.copy(index = presentationState.index)
+                            } else {
+                                FallbackPhase.Done
+                            }
                         },
                     )
                 }
@@ -195,7 +507,7 @@ internal fun FallbackAdHost(
 
 private sealed interface FallbackPhase {
     data object Content : FallbackPhase
-    data object Fetching : FallbackPhase
+    data class Fetching(val generation: Long) : FallbackPhase
     data class Showing(val ads: List<SimulaApiClient.FallbackAd>, val index: Int) : FallbackPhase
     data object Done : FallbackPhase
 }
@@ -209,19 +521,43 @@ private fun FallbackAdOverlay(
     iframeUrl: String?,
     html: String? = null,
     adId: String,
+    nativeClickBeaconV1Enabled: Boolean,
     onAdClick: (ClickInteraction) -> Unit = {},
+    onStoreOpen: (ClickInteraction) -> Unit = {},
+    persistClick: (String, ClickInteraction, () -> Unit) -> Unit,
     claimClick: (String) -> ClickInteractionClaim?,
+    impressionId: String,
+    adFormat: String,
+    routeClick: (((Context) -> Boolean, (Boolean) -> Unit) -> ClickRouteStart)?,
+    presentationState: FallbackPresentationState,
+    fallbackIndex: Int,
+    onClickHandoffCreated: (ClickPersistenceHandoff) -> Unit,
+    onClickHandoffFinished: (ClickPersistenceHandoff) -> Unit,
     ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
     onClose: () -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val clickHandler = remember { Handler(Looper.getMainLooper()) }
     val inlineHtml = html?.takeIf { it.isNotBlank() }
     // The pooled fallback WebView, captured from the AndroidView factory below so we can pause/resume
     // it with the host and force a repaint on foreground return — AndroidView won't pause a WebView, and
     // a hardware-accelerated WebView returns black/blank after the window loses visibility (background).
     var fallbackWebView by remember { mutableStateOf<WebView?>(null) }
+    val clickAdmission = remember(presentationState, fallbackIndex) {
+        presentationState.clickAdmission(fallbackIndex)
+    }
+    val navigationOwner = remember(presentationState, fallbackIndex) { Any() }
+    DisposableEffect(presentationState, navigationOwner, fallbackWebView) {
+        val webView = fallbackWebView ?: return@DisposableEffect onDispose {}
+        val webViewRef = WeakReference(webView)
+        presentationState.bindNavigation(navigationOwner) { url ->
+            val target = webViewRef.get() ?: return@bindNavigation false
+            runCatching { target.loadUrl(url) }.isSuccess
+        }
+        onDispose { presentationState.unbindNavigation(navigationOwner) }
+    }
     DisposableEffect(lifecycleOwner, fallbackWebView) {
         val wv = fallbackWebView
         var wasStopped = false
@@ -242,34 +578,44 @@ private fun FallbackAdOverlay(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    var countdown by remember { mutableStateOf(5) }
+    val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex)
+    var countdown by remember(presentationState, fallbackIndex) {
+        mutableStateOf(
+            ceil((FALLBACK_CLOSE_GATE_MS - retainedGateMs).coerceAtLeast(0L) / 1000.0).toInt(),
+        )
+    }
     // A pooled WebView is transparent and may still contain about:blank. Keep an opaque layer above
     // this one WebView until its current creative has actually committed a visible frame.
     var pageCommitted by remember { mutableStateOf(false) }
     var pageLoadFailed by remember { mutableStateOf(false) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
-    val ring = remember { Animatable(0f) }
+    val ring = remember(presentationState, fallbackIndex) {
+        Animatable((retainedGateMs.toFloat() / FALLBACK_CLOSE_GATE_MS).coerceIn(0f, 1f))
+    }
     // Foreground-only 5s gate: time accrues only while the Activity is RESUMED, so leaving the app
     // pauses the countdown (parity with the interstitial / rewarded close gates). repeatOnLifecycle
     // cancels the loop when backgrounded and resumes it from the accrued time on return.
     LaunchedEffect(Unit) {
-        val totalMs = 5_000L
-        var accumulatedMs = 0L
+        var accumulatedMs = presentationState.closeGateElapsedMs(fallbackIndex)
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             // Re-anchor on each resume so the backgrounded interval is never counted.
             var lastTickMs = SystemClock.elapsedRealtime()
-            while (accumulatedMs < totalMs) {
+            while (accumulatedMs < FALLBACK_CLOSE_GATE_MS) {
                 delay(50L)
                 val now = SystemClock.elapsedRealtime()
-                accumulatedMs += now - lastTickMs
+                accumulatedMs = presentationState.addCloseGateElapsedMs(fallbackIndex, now - lastTickMs)
                 lastTickMs = now
-                ring.snapTo((accumulatedMs.toFloat() / totalMs).coerceIn(0f, 1f))
-                countdown = ceil((totalMs - accumulatedMs).coerceAtLeast(0L) / 1000.0).toInt()
+                ring.snapTo((accumulatedMs.toFloat() / FALLBACK_CLOSE_GATE_MS).coerceIn(0f, 1f))
+                countdown = ceil(
+                    (FALLBACK_CLOSE_GATE_MS - accumulatedMs).coerceAtLeast(0L) / 1000.0,
+                ).toInt()
             }
         }
     }
     // Back can only close once the countdown elapses (parity with the creative's gated close).
-    BackHandler(enabled = true) { if (countdown <= 0) onClose() }
+    BackHandler(enabled = true) {
+        if (countdown <= 0 && !presentationState.clickHandoffPending) onClose()
+    }
 
     Box(
         modifier = Modifier
@@ -284,6 +630,7 @@ private fun FallbackAdOverlay(
                     client = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             if (!realLoadStarted) return
+                            presentationState.onNavigationStarted(url, navigationOwner)
                             pageCommitted = false
                             if (!url.isNullOrBlank() && (url != "about:blank" || inlineHtml != null)) {
                                 pageLoadFailed = false
@@ -322,6 +669,12 @@ private fun FallbackAdOverlay(
                         }
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val target = request?.url?.toString() ?: return false
+                            presentationState.navigationOverride(
+                                targetUrl = target,
+                                isMainFrame = request.isForMainFrame,
+                                hasGesture = request.hasGesture(),
+                                owner = navigationOwner,
+                            )?.let { return it }
                             val targetUri = runCatching { Uri.parse(target) }.getOrNull() ?: return true
                             if (targetUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
                             // Subframes stay inside the creative and automatic cross-origin redirects
@@ -344,36 +697,77 @@ private fun FallbackAdOverlay(
                                 originPort == targetPort
                             if (sameOrigin) return false
                             if (!request.hasGesture()) return true
+                            val routePlan = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+                                tappedUrl = target,
+                                creativeBaseUrl = iframeUrl,
+                                trackingUrl = ctaTrackingUrl,
+                                destination = ctaDestination,
+                            )) {
+                                CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> return false
+                                CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
+                                is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
+                            }
                             // Route through the shared CTA router: the tapped tracker opens
                             // verbatim (referrer-preserving); the serve's raw store link is the
                             // deterministic fallback when it can't be launched. A failed launch
                             // returns false so the WebView navigates in place (the pre-router
                             // failure behavior).
-                            // A genuine user tap on the end-screen CTA is a click (parity with the creative
-                            // CTAs; programmatic redirects don't fire onClicked). The iframe self-reports its
-                            // own click beacon, so fire the publisher callback/lifecycle only — no SDK
-                            // beacon here. Its self-report cannot yet share the native interaction UUID;
-                            // preserve this ownership until a staged creative/native contract migration.
-                            return when (routeClaimedClick(
-                                claim = claimClick(ClickSources.FALLBACK_CTA),
-                                open = {
-                                    val clickTarget = CreativeCtaRouter.preferredClickUrl(
-                                        ctaTrackingUrl,
-                                        target,
-                                    )
-                                    CreativeCtaRouter.open(
-                                        ctx.applicationContext,
-                                        clickTarget,
-                                        ctaDestination,
-                                        null,
-                                        ctaStoreUrl,
-                                    )
-                                },
-                                onOpened = onAdClick,
-                            )) {
-                                ClickRouteOutcome.OPEN_FAILED -> false
-                                ClickRouteOutcome.BLOCKED, ClickRouteOutcome.OPENED -> true
+                            // A genuine user tap uses one native fallback_cta interaction id for durable
+                            // beacon + lifecycle attribution. Programmatic redirects remain non-clicks.
+                            val claim = claimClick(ClickSources.FALLBACK_CTA) ?: return true
+                            if (!clickAdmission.disable()) {
+                                claim.release()
+                                return true
                             }
+                            notifyPublisherClick { onAdClick(claim.interaction) }
+                            val interaction = claim.interaction
+                            coordinateDeferredClickPersistence(
+                                mainHandler = clickHandler,
+                                claim = claim,
+                                enqueueBeacon = { completion ->
+                                    enqueueOwnedFallbackClickBeacon(
+                                        adId = adId,
+                                        serverEnabled = nativeClickBeaconV1Enabled,
+                                        completion = completion,
+                                    ) { beaconId ->
+                                        AdBeaconManager.enqueue(
+                                            beaconId,
+                                            "click",
+                                            adFormat = adFormat,
+                                            telemetryServeId = impressionId,
+                                            interactionId = interaction.id,
+                                            clickSource = interaction.source,
+                                            onPersistenceComplete = completion,
+                                        )
+                                    }
+                                },
+                                recordTelemetry = { completion -> persistClick(adId, interaction, completion) },
+                                onHandoff = { committedInteraction, completion ->
+                                    val route = { appContext: Context ->
+                                        val opened = CreativeCtaRouter.openPrimaryCta(
+                                            appContext,
+                                            routePlan,
+                                            ctaDestination,
+                                            null,
+                                            ctaStoreUrl,
+                                        )
+                                        if (opened) runCatching { onStoreOpen(committedInteraction) }
+                                        if (!opened) {
+                                            routePlan.tappedUrl?.let { fallbackUrl ->
+                                                presentationState.retainNavigation(fallbackUrl)
+                                            }
+                                        }
+                                        opened
+                                    }
+                                    routeClick?.invoke(route, completion) ?: run {
+                                        completion(route(ctx.applicationContext))
+                                        ClickRouteStart.STARTED
+                                    }
+                                },
+                                onCreated = onClickHandoffCreated,
+                                onFinished = onClickHandoffFinished,
+                            )
+                            return true
                         }
                         // Absorb a renderer-process death so a crashing end-screen creative can't take
                         // the host app process down with it (parity with the minigame/interstitial
@@ -401,7 +795,11 @@ private fun FallbackAdOverlay(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
-            onRelease = { webView -> WebViewPool.release(webView) },
+            onRelease = { webView ->
+                if (fallbackWebView === webView) fallbackWebView = null
+                presentationState.unbindNavigation(navigationOwner)
+                WebViewPool.release(webView)
+            },
         )
 
         if (!pageCommitted) {
@@ -409,6 +807,18 @@ private fun FallbackAdOverlay(
                 Modifier
                     .fillMaxSize()
                     .background(Color.Black)
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                        }
+                    },
+            )
+        }
+
+        if (presentationState.clickHandoffPending) {
+            Box(
+                Modifier
+                    .fillMaxSize()
                     .pointerInput(Unit) {
                         awaitPointerEventScope {
                             while (true) awaitPointerEvent().changes.forEach { it.consume() }
@@ -425,7 +835,7 @@ private fun FallbackAdOverlay(
                 .size(48.dp),
             contentAlignment = Alignment.Center,
         ) {
-            if (countdown <= 0) {
+            if (countdown <= 0 && !presentationState.clickHandoffPending) {
                 // Compact close button (16dp circle) with a full 48dp tap target so it's easy to hit.
                 Box(
                     modifier = Modifier

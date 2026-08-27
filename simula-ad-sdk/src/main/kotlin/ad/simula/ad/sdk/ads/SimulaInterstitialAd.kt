@@ -197,8 +197,6 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
-                // Fillable only when the payload carries a non-blank `rendered_html`
-                // creative (whitespace-only HTML is treated as no-fill).
                 val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
                 if (!ad.adInserted || html == null) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
@@ -217,7 +215,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
-                    listener?.onAdLoaded(this@SimulaInterstitialAd)
+                    runCatching { listener?.onAdLoaded(this@SimulaInterstitialAd) }
                 }
                 scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
@@ -371,19 +369,23 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 apiKey = SimulaAds.apiKey,
                 // Preview is local-only: report lifecycle but do NOT auto-preload a real ad on close.
                 callbacks = object : InterstitialCallbacks {
-                    override fun onDisplayed() { listener?.onAdDisplayed(this@SimulaInterstitialAd) }
-                    override fun onImpression() { listener?.onAdImpression(this@SimulaInterstitialAd) }
-                    override fun onPaid(adValue: AdValue) { listener?.onAdPaid(this@SimulaInterstitialAd, adValue) }
-                    override fun onClicked(
+                    override fun onDisplayed() { runCatching { listener?.onAdDisplayed(this@SimulaInterstitialAd) } }
+                    override fun onImpression() { runCatching { listener?.onAdImpression(this@SimulaInterstitialAd) } }
+                    override fun onPaid(adValue: AdValue) {
+                        runCatching { listener?.onAdPaid(this@SimulaInterstitialAd, adValue) }
+                    }
+                    override fun persistClick(
                         interaction: ad.simula.ad.sdk.network.ClickInteraction,
                         onTelemetryPersisted: () -> Unit,
                     ) {
-                        listener?.onAdClicked(this@SimulaInterstitialAd)
                         onTelemetryPersisted()
+                    }
+                    override fun notifyClicked() {
+                        notifyPublisherClick { listener?.onAdClicked(this@SimulaInterstitialAd) }
                     }
                     override fun onClosed() {
                         state = State.Idle
-                        listener?.onAdClosed(this@SimulaInterstitialAd)
+                        runCatching { listener?.onAdClosed(this@SimulaInterstitialAd) }
                     }
                 },
             ),
@@ -452,20 +454,20 @@ class SimulaInterstitialAd(val adUnitId: String) {
     private fun bridge(adId: String): InterstitialCallbacks = object : InterstitialCallbacks {
         override fun onDisplayed() {
             Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, adId, elapsedSinceShow(), null)
-            listener?.onAdDisplayed(this@SimulaInterstitialAd)
+            runCatching { listener?.onAdDisplayed(this@SimulaInterstitialAd) }
         }
 
         override fun onImpression() {
             Telemetry.recordLifecycle("impression", AD_FORMAT, adUnitId, adId, adId, elapsedSinceShow(), null)
-            listener?.onAdImpression(this@SimulaInterstitialAd)
+            runCatching { listener?.onAdImpression(this@SimulaInterstitialAd) }
         }
 
         override fun onPaid(adValue: AdValue) {
             Telemetry.recordLifecycle("paid", AD_FORMAT, adUnitId, adId, adId, null, null)
-            listener?.onAdPaid(this@SimulaInterstitialAd, adValue)
+            runCatching { listener?.onAdPaid(this@SimulaInterstitialAd, adValue) }
         }
 
-        override fun onClicked(
+        override fun persistClick(
             interaction: ad.simula.ad.sdk.network.ClickInteraction,
             onTelemetryPersisted: () -> Unit,
         ) {
@@ -480,13 +482,35 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 critical = true,
                 onPersisted = onTelemetryPersisted,
             )
-            listener?.onAdClicked(this@SimulaInterstitialAd)
+        }
+
+        override fun persistFallbackClick(
+            adId: String,
+            serveId: String?,
+            interaction: ad.simula.ad.sdk.network.ClickInteraction,
+            onTelemetryPersisted: () -> Unit,
+        ) {
+            Telemetry.recordLifecycle(
+                stage = "click",
+                adFormat = AD_FORMAT,
+                adUnitId = adUnitId,
+                adId = adId,
+                serveId = serveId,
+                interactionId = interaction.id,
+                clickSource = interaction.source,
+                critical = true,
+                onPersisted = onTelemetryPersisted,
+            )
+        }
+
+        override fun notifyClicked() {
+            notifyPublisherClick { listener?.onAdClicked(this@SimulaInterstitialAd) }
         }
 
         override fun onClosed() {
             state = State.Idle
             Telemetry.recordLifecycle("closed", AD_FORMAT, adUnitId, adId, adId, null, null)
-            listener?.onAdClosed(this@SimulaInterstitialAd)
+            runCatching { listener?.onAdClosed(this@SimulaInterstitialAd) }
             // Auto-preload the next ad (iOS parity), reusing the last character context.
             load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
         }
@@ -506,7 +530,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
     private fun failLoad(error: SimulaAdError) {
         state = State.Idle
         Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, elapsedSinceLoad(), error.telemetryCode())
-        listener?.onAdFailedToLoad(this, error)
+        runCatching { listener?.onAdFailedToLoad(this, error) }
     }
 
     private suspend fun failLoadOnMain(generation: Int, error: SimulaAdError) {
@@ -531,13 +555,13 @@ class SimulaInterstitialAd(val adUnitId: String) {
         }
         // Observable like any other rejected load() (sampled); no real load ran, so no duration.
         Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, null, error.telemetryCode())
-        listener?.onAdFailedToLoad(this, error)
+        runCatching { listener?.onAdFailedToLoad(this, error) }
     }
 
     private fun failShow(error: SimulaAdError) {
         // State is unchanged (stays Ready / Showing) — matches Swift behavior.
         Telemetry.recordLifecycle("show_fail", AD_FORMAT, adUnitId, null, null, null, error.telemetryCode())
-        listener?.onAdFailedToDisplay(this, error)
+        runCatching { listener?.onAdFailedToDisplay(this, error) }
     }
 
     /** Monotonic ms since load() began (null if not started). */

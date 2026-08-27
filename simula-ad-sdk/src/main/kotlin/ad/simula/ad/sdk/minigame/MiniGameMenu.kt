@@ -2,10 +2,13 @@ package ad.simula.ad.sdk.minigame
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.os.Build
-import android.content.Intent
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.view.WindowManager
 import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import android.webkit.RenderProcessGoneDetail
@@ -71,6 +74,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -84,6 +88,9 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.ads.AdInfoReportOverlay
+import ad.simula.ad.sdk.ads.CreativeCtaRouter
+import ad.simula.ad.sdk.ads.coordinateDeferredClickPersistence
+import ad.simula.ad.sdk.ads.enqueueOwnedFallbackClickBeacon
 import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.image.BundledResourceImage
 import ad.simula.ad.sdk.image.CachedAsyncImage
@@ -93,10 +100,43 @@ import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.network.AdBeaconManager
+import ad.simula.ad.sdk.network.ClickInteractionGate
+import ad.simula.ad.sdk.network.ClickPersistenceHandoff
+import ad.simula.ad.sdk.network.ClickRouteStart
+import ad.simula.ad.sdk.network.ClickSources
+import ad.simula.ad.sdk.network.DeclarativeClickRouteOwner
+import ad.simula.ad.sdk.network.PresentationRouteResult
+import ad.simula.ad.sdk.network.PrimaryCtaDocumentAdmission
+import ad.simula.ad.sdk.network.ResumedPresentationRoute
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import java.util.Collections
+import java.util.IdentityHashMap
+
+internal fun <T : Any> unwrapNestedHost(
+    start: T?,
+    isHost: (T) -> Boolean,
+    parent: (T) -> T?,
+): T? {
+    val seen = Collections.newSetFromMap(IdentityHashMap<T, Boolean>())
+    var current = start
+    while (current != null && seen.add(current)) {
+        if (isHost(current)) return current
+        current = parent(current)
+    }
+    return null
+}
+
+internal fun findActivity(context: Context?): Activity? = unwrapNestedHost(
+    start = context,
+    isHost = { it is Activity },
+    parent = { (it as? ContextWrapper)?.baseContext },
+) as? Activity
 
 /**
  * Preloaded catalog for the imperative interstitial flow. When non-null, the
@@ -622,7 +662,8 @@ fun MiniGameMenu(
         if (currentFallbackAd != null) {
             val fallbackPlayableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null
             Dialog(
-                onDismissRequest = { handleAdIframeClose() },
+                // AdIframeOverlay owns Back/close gating while click persistence or routing is pending.
+                onDismissRequest = {},
                 properties = DialogProperties(
                     usePlatformDefaultWidth = false,
                     decorFitsSystemWindows = false,
@@ -638,6 +679,8 @@ fun MiniGameMenu(
                         playableHeightDp = fallbackPlayableHeightDp,
                         playableBorderColor = theme.playableBorderColor ?: "#262626",
                         adId = currentFallbackAd.adId,
+                        parentServeId = currentServeId,
+                        nativeClickBeaconV1Enabled = currentFallbackAd.nativeClickBeaconV1Enabled,
                     )
                 }
             }
@@ -726,9 +769,12 @@ private fun AdIframeOverlay(
     playableHeightDp: Float? = null,
     playableBorderColor: String = "#262626",
     adId: String = "",
+    parentServeId: String? = null,
+    nativeClickBeaconV1Enabled: Boolean = false,
 ) {
     val context = LocalContext.current
     val view = LocalView.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val inlineHtml = html?.takeIf { it.isNotBlank() }
 
     var adCountdown by remember { mutableStateOf(5) }
@@ -736,10 +782,45 @@ private fun AdIframeOverlay(
     val ringProgress = remember { Animatable(0f) }
     var adPageLoaded by remember { mutableStateOf(false) }
     var adPageFailed by remember { mutableStateOf(false) }
+    var clickHandoffPending by remember { mutableStateOf(false) }
+    var adWebView by remember { mutableStateOf<WebView?>(null) }
+    val clickGate = remember(adId) { ClickInteractionGate() }
+    val clickAdmission = remember(adId) { PrimaryCtaDocumentAdmission() }
+    val clickHandler = remember { Handler(Looper.getMainLooper()) }
+    val hostActivity = remember(context) { findActivity(context) }
+    val clickOwner = remember(adId, hostActivity) { DeclarativeClickRouteOwner(hostActivity) }
+    val routeCoordinator = clickOwner.routes
+
+    DisposableEffect(lifecycleOwner, hostActivity, clickOwner) {
+        val activity = hostActivity
+        if (activity == null) return@DisposableEffect onDispose { clickOwner.cancel() }
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> routeCoordinator.resume(activity)
+                Lifecycle.Event.ON_PAUSE -> routeCoordinator.pause(activity)
+                Lifecycle.Event.ON_DESTROY -> routeCoordinator.detach(activity)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            routeCoordinator.resume(activity)
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            routeCoordinator.detach(activity)
+            clickOwner.cancel()
+        }
+    }
 
     LaunchedEffect(Unit) {
         launch { ringProgress.animateTo(1f, tween(5000, easing = LinearEasing)) }
         repeat(5) { delay(1000); adCountdown-- }
+    }
+
+    fun closeOverlay() {
+        clickOwner.cancel()
+        onClose()
     }
 
     val isBottomSheet = playableHeightDp != null
@@ -748,7 +829,7 @@ private fun AdIframeOverlay(
 
     DisposableEffect(Unit) {
         val dialogWindow = (view.parent as? DialogWindowProvider)?.window
-        val activityWindow = (view.context as? Activity)?.window
+        val activityWindow = findActivity(view.context)?.window
         val window = dialogWindow ?: activityWindow
         if (window != null) {
             WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -766,7 +847,7 @@ private fun AdIframeOverlay(
     }
 
     BackHandler(enabled = true) {
-        if (adCountdown <= 0) onClose()
+        if (adCountdown <= 0 && !clickHandoffPending) closeOverlay()
     }
 
     Box(
@@ -867,6 +948,8 @@ private fun AdIframeOverlay(
                                     request: WebResourceRequest?,
                                 ): Boolean {
                                     val requestUrl = request?.url?.toString() ?: return false
+                                    if (clickHandoffPending) return true
+                                    if (!clickAdmission.isEnabled()) return false
                                     val requestUri = runCatching { Uri.parse(requestUrl) }.getOrNull() ?: return true
                                     if (requestUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
                                     if (request?.isForMainFrame != true) return false
@@ -887,18 +970,87 @@ private fun AdIframeOverlay(
                                         originalPort == requestPort
                                     if (sameOrigin) return false
                                     if (!request.hasGesture()) return true
-                                    // Consume the navigation either way; runCatching so a custom-scheme
-                                    // link with no installed handler can't throw ActivityNotFoundException
-                                    // into the host (matches the other CTA sites).
-                                    runCatching {
-                                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(requestUrl)))
-                                    }.onFailure {
-                                        Telemetry.recordError(
-                                            signature = "minigame:cta_open_failed",
-                                            errorCode = it::class.java.simpleName,
-                                            breadcrumb = "MiniGameMenu.adOverlay",
-                                        )
+                                    val routePlan = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+                                        tappedUrl = requestUrl,
+                                        creativeBaseUrl = url,
+                                        trackingUrl = null,
+                                        destination = "web",
+                                    )) {
+                                        CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> return false
+                                        CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
+                                        is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
                                     }
+                                    val claim = clickGate.claim(ClickSources.FALLBACK_CTA) ?: return true
+                                    clickAdmission.disable()
+                                    val interaction = claim.interaction
+                                    coordinateDeferredClickPersistence(
+                                        mainHandler = clickHandler,
+                                        claim = claim,
+                                        enqueueBeacon = { completion ->
+                                            enqueueOwnedFallbackClickBeacon(
+                                                adId = adId,
+                                                serverEnabled = nativeClickBeaconV1Enabled,
+                                                completion = completion,
+                                            ) { beaconId ->
+                                                AdBeaconManager.enqueue(
+                                                    beaconId,
+                                                    "click",
+                                                    adFormat = "interstitial",
+                                                    telemetryServeId = parentServeId.orEmpty(),
+                                                    interactionId = interaction.id,
+                                                    clickSource = interaction.source,
+                                                    onPersistenceComplete = completion,
+                                                )
+                                            }
+                                        },
+                                        recordTelemetry = { completion ->
+                                            Telemetry.recordLifecycle(
+                                                stage = "click",
+                                                adFormat = "interstitial",
+                                                adId = adId.takeIf { it.isNotBlank() },
+                                                serveId = parentServeId?.takeIf { it.isNotBlank() },
+                                                interactionId = interaction.id,
+                                                clickSource = interaction.source,
+                                                critical = true,
+                                                onPersisted = completion,
+                                            )
+                                        },
+                                        onHandoff = { _, completion ->
+                                            val result = routeCoordinator.request(
+                                                route = { activity ->
+                                                    val opened = CreativeCtaRouter.openPrimaryCta(
+                                                        activity.applicationContext,
+                                                        routePlan,
+                                                        destination = "web",
+                                                    )
+                                                    if (!opened) {
+                                                        routePlan.tappedUrl?.let { fallbackUrl ->
+                                                            adWebView?.post {
+                                                                if (adWebView != null) {
+                                                                    runCatching { adWebView?.loadUrl(fallbackUrl) }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    opened
+                                                },
+                                                completion = completion,
+                                            )
+                                            if (result == PresentationRouteResult.REJECTED) {
+                                                ClickRouteStart.REJECTED
+                                            } else {
+                                                ClickRouteStart.STARTED
+                                            }
+                                        },
+                                        onCreated = { handoff ->
+                                            clickOwner.track(handoff)
+                                            clickHandoffPending = clickOwner.hasPending()
+                                        },
+                                        onFinished = { handoff ->
+                                            clickOwner.finish(handoff)
+                                            clickHandoffPending = clickOwner.hasPending()
+                                        },
+                                    )
                                     return true
                                 }
                                 // Absorb a renderer-process death so a crashing ad creative can't
@@ -920,10 +1072,14 @@ private fun AdIframeOverlay(
                                 realLoadStarted = true
                                 loadUrl(url)
                             }
+                            adWebView = this
                         }
                     },
                     modifier = Modifier.fillMaxSize(),
-                    onRelease = { webView -> WebViewPool.release(webView) },
+                    onRelease = { webView ->
+                        if (adWebView === webView) adWebView = null
+                        WebViewPool.release(webView)
+                    },
                 )
 
                 if (!adPageLoaded) {
@@ -943,9 +1099,21 @@ private fun AdIframeOverlay(
                     }
                 }
 
-                if (adCountdown <= 0) {
+                if (clickHandoffPending) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                                }
+                            },
+                    )
+                }
+
+                if (adCountdown <= 0 && !clickHandoffPending) {
                     CloseButton(
-                        onClick = onClose,
+                        onClick = ::closeOverlay,
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(8.dp),

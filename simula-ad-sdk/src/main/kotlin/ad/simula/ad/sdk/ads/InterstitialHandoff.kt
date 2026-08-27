@@ -7,6 +7,9 @@ import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
+import ad.simula.ad.sdk.network.PresentationRouteResult
+import ad.simula.ad.sdk.network.RetainedPrimaryCtaNavigationState
+import ad.simula.ad.sdk.network.ResumedPresentationRoute
 import ad.simula.ad.sdk.network.SimulaApiClient
 import java.util.concurrent.ConcurrentHashMap
 
@@ -21,8 +24,33 @@ internal interface InterstitialCallbacks {
     /** The paid event — fired together with [onImpression], carrying the on-device estimate. */
     fun onPaid(adValue: AdValue)
 
-    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
+    fun persistClick(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
+    fun persistFallbackClick(
+        adId: String,
+        serveId: String?,
+        interaction: ClickInteraction,
+        onTelemetryPersisted: () -> Unit = {},
+    ) = persistClick(interaction, onTelemetryPersisted)
+    fun notifyClicked()
+
+    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {}) {
+        persistClick(interaction, onTelemetryPersisted)
+        notifyClicked()
+    }
     fun onClosed()
+}
+
+internal fun notifyPublisherClick(callback: () -> Unit) {
+    runCatching(callback)
+}
+
+internal fun notifyPublisherClickForClaim(
+    claim: ClickInteractionClaim?,
+    callback: (ClickInteraction) -> Unit,
+): ClickInteractionClaim? {
+    claim ?: return null
+    notifyPublisherClick { callback(claim.interaction) }
+    return claim
 }
 
 /** Everything [SimulaInterstitialActivity] needs to render one presentation. */
@@ -34,11 +62,62 @@ internal class InterstitialPresentation(
 ) {
     private val clickInteractionGate = ClickInteractionGate()
     private var pendingClickHandoff: ClickPersistenceHandoff? = null
+    private val clickRoute = ResumedPresentationRoute<SimulaInterstitialActivity>()
+    val primaryCtaNavigation = RetainedPrimaryCtaNavigationState<SimulaInterstitialActivity>()
+    val installBannerState = InstallBannerPresentationState(ad.adBehavior?.skoverlay)
+    val fallbackState = FallbackPresentationState()
+    val storeExit by lazy(LazyThreadSafetyMode.NONE) {
+        StoreExitTracker(
+            adId = ad.impressionId.takeIf { it.isNotBlank() },
+            adFormat = "interstitial",
+        )
+    }
     val autoRedirectCoordinator = AutoRedirectCoordinator()
 
-    fun claimClick(source: String): ClickInteractionClaim? = clickInteractionGate.claim(source)
+    @Synchronized
+    fun claimClick(source: String): ClickInteractionClaim? =
+        if (pendingClickHandoff == null) clickInteractionGate.claim(source) else null
 
     fun hasPendingClick(): Boolean = clickInteractionGate.hasPendingClaim()
+
+    @Synchronized
+    fun attachActivity(activity: SimulaInterstitialActivity) {
+        clickRoute.attach(activity)
+        primaryCtaNavigation.attachActivity(activity)
+    }
+
+    fun resumeActivity(activity: SimulaInterstitialActivity) {
+        clickRoute.resume(activity)
+    }
+
+    fun pauseActivity(activity: SimulaInterstitialActivity) {
+        clickRoute.pause(activity)
+    }
+
+    fun detachActivity(activity: SimulaInterstitialActivity) {
+        clickRoute.detach(activity)
+        primaryCtaNavigation.detachActivity(activity)
+    }
+
+    fun routeClick(
+        route: (SimulaInterstitialActivity) -> Boolean,
+        completion: (Boolean) -> Unit,
+    ): PresentationRouteResult = clickRoute.request(route, completion)
+
+    @Synchronized
+    fun setPrimaryFallback(
+        owner: Any,
+        activity: SimulaInterstitialActivity,
+        fallback: (String) -> Boolean,
+    ): Boolean = primaryCtaNavigation.bindNavigation(owner, activity, fallback)
+
+    @Synchronized
+    fun clearPrimaryFallback(owner: Any) {
+        primaryCtaNavigation.unbindNavigation(owner)
+    }
+
+    fun openPrimaryFallback(url: String, activity: SimulaInterstitialActivity): Boolean =
+        primaryCtaNavigation.retainFallback(url, activity)
 
     @Synchronized
     fun pendingClickHandoff(): ClickPersistenceHandoff? = pendingClickHandoff
@@ -46,12 +125,16 @@ internal class InterstitialPresentation(
     @Synchronized
     fun trackClickHandoff(handoff: ClickPersistenceHandoff) {
         pendingClickHandoff = handoff
+        primaryCtaNavigation.onHandoffCreated(handoff)
         autoRedirectCoordinator.observeUserHandoff(handoff)
     }
 
     @Synchronized
     fun clearClickHandoff(handoff: ClickPersistenceHandoff) {
-        if (pendingClickHandoff === handoff) pendingClickHandoff = null
+        if (pendingClickHandoff === handoff) {
+            pendingClickHandoff = null
+            primaryCtaNavigation.onHandoffFinished(handoff)
+        }
     }
 
     @Synchronized
@@ -59,6 +142,9 @@ internal class InterstitialPresentation(
         autoRedirectCoordinator.dispose()
         pendingClickHandoff?.cancel()
         pendingClickHandoff = null
+        clickRoute.cancel()
+        primaryCtaNavigation.clear()
+        fallbackState.clear()
     }
 
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */

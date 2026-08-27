@@ -19,13 +19,38 @@ import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
 import ad.simula.ad.sdk.telemetry.Telemetry
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+
+internal object LenientNullableBooleanSerializer : KSerializer<Boolean?> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("LenientNullableBoolean", PrimitiveKind.BOOLEAN)
+
+    override fun deserialize(decoder: Decoder): Boolean? {
+        val jsonDecoder = decoder as? JsonDecoder ?: return runCatching { decoder.decodeBoolean() }.getOrNull()
+        val primitive = jsonDecoder.decodeJsonElement() as? JsonPrimitive ?: return null
+        return primitive.takeUnless(JsonPrimitive::isString)?.booleanOrNull
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    override fun serialize(encoder: Encoder, value: Boolean?) {
+        if (value == null) encoder.encodeNull() else encoder.encodeBoolean(value)
+    }
+}
 
 @Serializable
 internal data class SessionResponse(
@@ -104,6 +129,9 @@ internal data class AdResponseBody(
 @Serializable
 internal data class FallbackAdsApiResponse(
     @SerialName("impression_id") val impressionId: String = "",
+    @SerialName("native_click_beacon_v1_enabled")
+    @Serializable(with = LenientNullableBooleanSerializer::class)
+    val nativeClickBeaconV1Enabled: Boolean? = null,
     val ads: List<FallbackAdBody> = emptyList(),
 )
 
@@ -111,6 +139,9 @@ internal data class FallbackAdsApiResponse(
 internal data class FallbackAdBody(
     // Each screen carries its own ad id (the per-screen impression for report/tracking).
     @SerialName("ad_id") val adId: String = "",
+    @SerialName("native_click_beacon_v1_enabled")
+    @Serializable(with = LenientNullableBooleanSerializer::class)
+    val nativeClickBeaconV1Enabled: Boolean? = null,
     val html: String? = null,
     @SerialName("iframe_url") val iframeUrl: String? = null,
 )
@@ -156,8 +187,7 @@ internal data class AdLoadApiResponse(
     // is missing or can't be launched, so the CTA still lands on the store. Null when the
     // campaign has no raw store link.
     @SerialName("android_store_url") val androidStoreUrl: String? = null,
-    // Server-rendered HTML creative. When present (non-blank) it is rendered
-    // full-screen in a WebView — the imperative interstitial's sole creative.
+    // Server-rendered HTML creative. Interstitials intentionally do not support iframe_url.
     @SerialName("rendered_html") val renderedHtml: String? = null,
     // Cleared bid (the estimated CPM) for this serve, backend-provided. The SDK derives the
     // `adValue` from it (see [ad.simula.ad.sdk.model.AdValue.fromBidCpm]) and surfaces it on the paid
@@ -177,6 +207,8 @@ internal data class ApiDeviceCapabilities(
     @SerialName("api_level") val apiLevel: Int = 0,
     @SerialName("play_services_available") val playServicesAvailable: Boolean = false,
     @SerialName("install_referrer_available") val installReferrerAvailable: Boolean = false,
+    // Declares SDK support only. The fallback response separately grants native beacon ownership.
+    @SerialName("native_click_beacon_v1") val nativeClickBeaconV1: Boolean = true,
 )
 
 /** Reads the running device's capabilities (Android framework). Called from the ad path only —
@@ -187,6 +219,7 @@ internal fun currentDeviceCapabilities(): ApiDeviceCapabilities = ApiDeviceCapab
     // Play Install Prompt requires API 21+; refine with a GoogleApiAvailability check if the dep is present.
     playServicesAvailable = android.os.Build.VERSION.SDK_INT >= 21,
     installReferrerAvailable = android.os.Build.VERSION.SDK_INT >= 21,
+    nativeClickBeaconV1 = true,
 )
 
 // ── Ad behavior (server-driven A/B render config) ─────────────────────────────

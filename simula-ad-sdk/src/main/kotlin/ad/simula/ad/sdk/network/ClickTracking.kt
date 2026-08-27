@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.network
 
 import androidx.annotation.MainThread
+import java.lang.ref.WeakReference
 import java.util.UUID
 
 internal object ClickSources {
@@ -32,7 +33,118 @@ internal data class ClickInteraction(
 
 internal enum class ClickPersistencePart { TELEMETRY, BEACON }
 
-internal enum class ClickHandoffResult { ROUTED, FAILED, CANCELLED }
+internal enum class ClickHandoffResult { ROUTED, ACCOUNTED, FAILED, CANCELLED }
+
+internal enum class PresentationRouteResult { EXECUTED, DEFERRED, REJECTED }
+
+internal enum class ClickRouteStart { STARTED, REJECTED }
+
+/** One current weak host plus at most one route waiting for that host to resume. */
+internal class ResumedPresentationRoute<T : Any> {
+    private data class PendingRoute<T>(
+        val route: (T) -> Boolean,
+        val completion: (Boolean) -> Unit,
+    )
+
+    private var currentHost: WeakReference<T>? = null
+    private var resumed = false
+    private var cancelled = false
+    private var pending: PendingRoute<T>? = null
+
+    @Synchronized
+    fun attach(host: T) {
+        if (cancelled) return
+        currentHost = WeakReference(host)
+        resumed = false
+    }
+
+    fun resume(host: T) {
+        val route = synchronized(this) {
+            if (cancelled || currentHost?.get() !== host) return
+            resumed = true
+            pending.also { pending = null }
+        }
+        route?.let { execute(it, host) }
+    }
+
+    @Synchronized
+    fun pause(host: T) {
+        if (currentHost?.get() === host) resumed = false
+    }
+
+    @Synchronized
+    fun detach(host: T) {
+        if (currentHost?.get() === host) {
+            currentHost = null
+            resumed = false
+        }
+    }
+
+    fun request(
+        route: (T) -> Boolean,
+        completion: (Boolean) -> Unit,
+    ): PresentationRouteResult {
+        val request = PendingRoute(route, completion)
+        val host = synchronized(this) {
+            if (cancelled) return PresentationRouteResult.REJECTED
+            val active = currentHost?.get()
+            if (active != null && resumed) return@synchronized active
+            if (pending != null) return PresentationRouteResult.REJECTED
+            pending = request
+            null
+        }
+        if (host == null) return PresentationRouteResult.DEFERRED
+        execute(request, host)
+        return PresentationRouteResult.EXECUTED
+    }
+
+    private fun execute(request: PendingRoute<T>, host: T) {
+        val opened = runCatching { request.route(host) }.getOrDefault(false)
+        runCatching { request.completion(opened) }
+    }
+
+    @Synchronized
+    fun cancel() {
+        cancelled = true
+        currentHost = null
+        resumed = false
+        pending = null
+    }
+}
+
+/** Declarative overlay owner: one host coordinator and at most one exact pending handoff. */
+internal class DeclarativeClickRouteOwner<T : Any>(host: T?) {
+    val routes = ResumedPresentationRoute<T>()
+    private var pending: ClickPersistenceHandoff? = null
+
+    init {
+        if (host == null) routes.cancel() else routes.attach(host)
+    }
+
+    @Synchronized
+    fun track(handoff: ClickPersistenceHandoff): Boolean {
+        if (pending != null) {
+            handoff.cancel()
+            return false
+        }
+        pending = handoff
+        return true
+    }
+
+    @Synchronized
+    fun finish(handoff: ClickPersistenceHandoff) {
+        if (pending === handoff) pending = null
+    }
+
+    fun cancel() {
+        val handoff = synchronized(this) { pending.also { pending = null } }
+        routes.cancel()
+        handoff?.cancel()
+    }
+
+    @Synchronized
+    fun hasPending(): Boolean = pending != null
+}
 
 internal class ClickHandoffSubscription internal constructor(
     private val cancelAction: () -> Unit,
@@ -97,7 +209,7 @@ internal class ClickPersistenceHandoff(
     @Synchronized
     fun isTerminal(): Boolean = state == State.FINISHED || state == State.CANCELLED
 
-    /** Commit immediately before routing. Persistence has already made this interaction billable. */
+    /** Persistence makes the interaction billable, so commit before the best-effort route. */
     @MainThread
     fun handoff(route: (ClickInteraction) -> Boolean): Boolean {
         val shouldRoute = synchronized(this) {
@@ -112,8 +224,43 @@ internal class ClickPersistenceHandoff(
             return false
         }
         val opened = runCatching { route(claim.interaction) }.getOrDefault(false)
-        finish(if (opened) ClickHandoffResult.ROUTED else ClickHandoffResult.FAILED)
+        finish(if (opened) ClickHandoffResult.ROUTED else ClickHandoffResult.ACCOUNTED)
         return opened
+    }
+
+    /** Commit the durable interaction, then remain pending until async routing reports its outcome. */
+    @MainThread
+    fun handoffAsync(
+        route: (ClickInteraction, (Boolean) -> Unit) -> ClickRouteStart,
+    ): Boolean {
+        val shouldRoute = synchronized(this) {
+            if (state != State.READY) return false
+            state = State.ROUTING
+            readyCallback = null
+            true
+        }
+        if (!shouldRoute) return false
+        if (!claim.commit()) {
+            synchronized(this) { state = State.FINISHED }
+            finish(ClickHandoffResult.FAILED)
+            return false
+        }
+        val start = runCatching {
+            route(claim.interaction, ::completeAsyncRoute)
+        }.getOrDefault(ClickRouteStart.REJECTED)
+        if (start == ClickRouteStart.REJECTED) completeAsyncRoute(false)
+        return start == ClickRouteStart.STARTED
+    }
+
+    private fun completeAsyncRoute(opened: Boolean) {
+        val shouldFinish = synchronized(this) {
+            if (state != State.ROUTING) return
+            state = State.FINISHED
+            true
+        }
+        if (shouldFinish) {
+            finish(if (opened) ClickHandoffResult.ROUTED else ClickHandoffResult.ACCOUNTED)
+        }
     }
 
     /**
@@ -153,7 +300,7 @@ internal class ClickPersistenceHandoff(
         listeners.forEach { listener -> runCatching { listener(result) } }
     }
 
-    private enum class State { PENDING, READY, FINISHED, CANCELLED }
+    private enum class State { PENDING, READY, ROUTING, FINISHED, CANCELLED }
 
     private companion object {
         const val MAX_RESULT_LISTENERS = 4
@@ -270,7 +417,7 @@ internal class AutoRedirectCoordinator {
             val deferred = waitingRoute.takeIf { scope != null && activeScope === scope }
             clearWaitingLocked()
             when (result) {
-                ClickHandoffResult.ROUTED -> userRouteOpened = true
+                ClickHandoffResult.ROUTED, ClickHandoffResult.ACCOUNTED -> userRouteOpened = true
                 ClickHandoffResult.FAILED, ClickHandoffResult.CANCELLED -> if (deferred != null) {
                     routeInProgress = true
                     retry = deferred
@@ -321,6 +468,184 @@ internal fun routeClaimedClick(
 
 internal const val CLICK_PERSISTENCE_WAIT_MS = 750L
 
+internal data class PrimaryCtaRoute(
+    val tappedUrl: String?,
+    val externalTarget: String?,
+)
+
+/** Once disabled, this WebView/document chain can never create another SDK-owned CTA. */
+internal class PrimaryCtaDocumentAdmission {
+    private var disabled = false
+
+    @Synchronized
+    fun isEnabled(): Boolean = !disabled
+
+    @Synchronized
+    fun disable(): Boolean {
+        if (disabled) return false
+        disabled = true
+        return true
+    }
+}
+
+/**
+ * Presentation-owned primary CTA state. The presentation outlives Activity recreation, while the
+ * bound Activity and WebView navigation callback must not. A failed external route is retained until
+ * the handoff is terminal and a WebView owned by the current Activity has bound.
+ */
+internal class RetainedPrimaryCtaNavigationState<T : Any> {
+    val admission = PrimaryCtaDocumentAdmission()
+
+    private var currentActivity: WeakReference<T>? = null
+    private var navigationOwner: Any? = null
+    private var navigationActivity: WeakReference<T>? = null
+    private var navigateInWebView: ((String) -> Boolean)? = null
+    private var pendingHandoff: ClickPersistenceHandoff? = null
+    private var pendingFallbackUrl: String? = null
+    private var activeDelivery: NavigationDelivery? = null
+    private var deliveryRevision = 0L
+    private var cleared = false
+
+    fun attachActivity(activity: T) {
+        synchronized(this) {
+            if (cleared) return
+            currentActivity = WeakReference(activity)
+            if (navigationActivity?.get() !== activity) clearBindingLocked()
+        }
+        dispatchReadyFallback()
+    }
+
+    @Synchronized
+    fun detachActivity(activity: T) {
+        if (currentActivity?.get() === activity) currentActivity = null
+        if (navigationActivity?.get() === activity) clearBindingLocked()
+    }
+
+    fun bindNavigation(owner: Any, activity: T, navigate: (String) -> Boolean): Boolean {
+        synchronized(this) {
+            if (cleared || currentActivity?.get() !== activity) return false
+            if (navigationOwner !== owner) clearBindingLocked()
+            navigationOwner = owner
+            navigationActivity = WeakReference(activity)
+            navigateInWebView = navigate
+        }
+        dispatchReadyFallback()
+        return true
+    }
+
+    @Synchronized
+    fun unbindNavigation(owner: Any) {
+        if (navigationOwner === owner) clearBindingLocked()
+    }
+
+    @Synchronized
+    fun navigationOverride(
+        targetUrl: String? = null,
+        isMainFrame: Boolean = true,
+        hasGesture: Boolean = false,
+        owner: Any? = navigationOwner,
+    ): Boolean? {
+        if (cleared) return true
+        if (pendingHandoff != null) return true
+        activeDelivery?.let { delivery ->
+            if (delivery.owner === owner && isMainFrame && !hasGesture &&
+                targetUrl == delivery.url && !delivery.permitConsumed
+            ) {
+                delivery.permitConsumed = true
+                if (pendingFallbackUrl == null) activeDelivery = null
+                return false
+            }
+            return true
+        }
+        return if (pendingFallbackUrl != null) true else null
+    }
+
+    @Synchronized
+    fun onNavigationStarted(url: String?, owner: Any? = navigationOwner) {
+        val delivery = activeDelivery ?: return
+        if (delivery.owner !== owner || url != delivery.url) return
+        delivery.permitConsumed = true
+        if (pendingFallbackUrl == null) activeDelivery = null
+    }
+
+    @Synchronized
+    fun onHandoffCreated(handoff: ClickPersistenceHandoff) {
+        if (!cleared && pendingHandoff == null) pendingHandoff = handoff
+    }
+
+    fun onHandoffFinished(handoff: ClickPersistenceHandoff) {
+        synchronized(this) {
+            if (pendingHandoff === handoff) {
+                pendingHandoff = null
+            }
+        }
+        dispatchReadyFallback()
+    }
+
+    fun retainFallback(url: String, activity: T): Boolean {
+        synchronized(this) {
+            if (cleared || url.isBlank() || currentActivity?.get() !== activity) return false
+            if (pendingFallbackUrl == null) pendingFallbackUrl = url
+        }
+        dispatchReadyFallback()
+        return true
+    }
+
+    @Synchronized
+    fun hasRetainedFallback(): Boolean = pendingFallbackUrl != null
+
+    @Synchronized
+    fun clear() {
+        if (cleared) return
+        cleared = true
+        admission.disable()
+        currentActivity = null
+        pendingHandoff = null
+        pendingFallbackUrl = null
+        activeDelivery = null
+        deliveryRevision++
+        clearBindingLocked()
+    }
+
+    private fun dispatchReadyFallback() {
+        val delivery = synchronized(this) {
+            if (cleared || pendingHandoff != null || activeDelivery != null) return
+            val current = currentActivity?.get() ?: return
+            if (navigationActivity?.get() !== current) return
+            val navigate = navigateInWebView ?: return
+            val url = pendingFallbackUrl ?: return
+            val owner = navigationOwner ?: return
+            NavigationDelivery(++deliveryRevision, owner, url).also { activeDelivery = it } to navigate
+        }
+        val delivered = runCatching { delivery.second(delivery.first.url) }.getOrDefault(false)
+        synchronized(this) {
+            if (activeDelivery !== delivery.first) return@synchronized
+            if (delivered && pendingFallbackUrl == delivery.first.url) {
+                pendingFallbackUrl = null
+            }
+            if (!delivered || delivery.first.permitConsumed) activeDelivery = null
+        }
+    }
+
+    private fun clearBindingLocked() {
+        activeDelivery?.takeIf { it.owner === navigationOwner }?.let { delivery ->
+            if (pendingFallbackUrl == null) pendingFallbackUrl = delivery.url
+            activeDelivery = null
+            deliveryRevision++
+        }
+        navigationOwner = null
+        navigationActivity = null
+        navigateInWebView = null
+    }
+
+    private data class NavigationDelivery(
+        val revision: Long,
+        val owner: Any,
+        val url: String,
+        var permitConsumed: Boolean = false,
+    )
+}
+
 /** A provisional click admission that only starts the duplicate window after [commit]. */
 internal class ClickInteractionClaim internal constructor(
     val interaction: ClickInteraction,
@@ -334,9 +659,9 @@ internal class ClickInteractionClaim internal constructor(
 
 /**
  * Presentation-scoped admission for click dispatch. WebView/navigation callbacks can fan one tap
- * out more than once; a claim blocks concurrent duplicates, but only a committed successful action
- * starts the short duplicate window. Failed actions release their claim so fallback navigation and
- * later callbacks remain eligible.
+ * out more than once; a claim blocks concurrent duplicates. Synchronous actions commit only after
+ * opening succeeds. Persistence handoffs commit before routing because their durable event cannot be
+ * undone; a failed destination then remains accounted under the same interaction id.
  */
 internal class ClickInteractionGate(
     private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },

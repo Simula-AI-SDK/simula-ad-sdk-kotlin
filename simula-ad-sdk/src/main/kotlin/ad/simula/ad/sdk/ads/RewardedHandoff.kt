@@ -8,6 +8,9 @@ import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
+import ad.simula.ad.sdk.network.PresentationRouteResult
+import ad.simula.ad.sdk.network.RetainedPrimaryCtaNavigationState
+import ad.simula.ad.sdk.network.ResumedPresentationRoute
 import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the rewarded Activity back to the [SimulaRewardedAd] instance. */
@@ -21,8 +24,20 @@ internal interface RewardedCallbacks {
     /** The paid event — fired together with [onImpression], carrying the on-device estimate. */
     fun onPaid(adValue: AdValue)
 
-    /** A user-gesture CTA / store-prompt tap (the CLICKED signal). Mirrors [InterstitialCallbacks.onClicked]. */
-    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
+    fun persistClick(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {})
+    fun persistFallbackClick(
+        adId: String,
+        serveId: String?,
+        interaction: ClickInteraction,
+        onTelemetryPersisted: () -> Unit = {},
+    ) = persistClick(interaction, onTelemetryPersisted)
+    fun notifyClicked()
+
+    /** A successfully routed CTA. Fallback HTML still owns its backend beacon. */
+    fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {}) {
+        persistClick(interaction, onTelemetryPersisted)
+        notifyClicked()
+    }
 
     /**
      * The minigame (playable) surface was dismissed. [earned] is whether the play reached the
@@ -65,11 +80,60 @@ internal class RewardedPresentation(
 ) {
     private val clickInteractionGate = ClickInteractionGate()
     private var pendingClickHandoff: ClickPersistenceHandoff? = null
+    private val clickRoute = ResumedPresentationRoute<SimulaRewardedActivity>()
+    val primaryCtaNavigation = RetainedPrimaryCtaNavigationState<SimulaRewardedActivity>()
+    val fallbackState = FallbackPresentationState()
+    val storeExit by lazy(LazyThreadSafetyMode.NONE) {
+        StoreExitTracker(
+            adId = impressionId.takeIf { it.isNotBlank() },
+            adFormat = "rewarded",
+        )
+    }
     val autoRedirectCoordinator = AutoRedirectCoordinator()
 
-    fun claimClick(source: String): ClickInteractionClaim? = clickInteractionGate.claim(source)
+    @Synchronized
+    fun claimClick(source: String): ClickInteractionClaim? =
+        if (pendingClickHandoff == null) clickInteractionGate.claim(source) else null
 
     fun hasPendingClick(): Boolean = clickInteractionGate.hasPendingClaim()
+
+    fun attachActivity(activity: SimulaRewardedActivity) {
+        clickRoute.attach(activity)
+        primaryCtaNavigation.attachActivity(activity)
+    }
+
+    fun resumeActivity(activity: SimulaRewardedActivity) {
+        clickRoute.resume(activity)
+    }
+
+    fun pauseActivity(activity: SimulaRewardedActivity) {
+        clickRoute.pause(activity)
+    }
+
+    fun detachActivity(activity: SimulaRewardedActivity) {
+        clickRoute.detach(activity)
+        primaryCtaNavigation.detachActivity(activity)
+    }
+
+    fun routeClick(
+        route: (SimulaRewardedActivity) -> Boolean,
+        completion: (Boolean) -> Unit,
+    ): PresentationRouteResult = clickRoute.request(route, completion)
+
+    @Synchronized
+    fun setPrimaryFallback(
+        owner: Any,
+        activity: SimulaRewardedActivity,
+        fallback: (String) -> Boolean,
+    ): Boolean = primaryCtaNavigation.bindNavigation(owner, activity, fallback)
+
+    @Synchronized
+    fun clearPrimaryFallback(owner: Any) {
+        primaryCtaNavigation.unbindNavigation(owner)
+    }
+
+    fun openPrimaryFallback(url: String, activity: SimulaRewardedActivity): Boolean =
+        primaryCtaNavigation.retainFallback(url, activity)
 
     @Synchronized
     fun pendingClickHandoff(): ClickPersistenceHandoff? = pendingClickHandoff
@@ -77,12 +141,16 @@ internal class RewardedPresentation(
     @Synchronized
     fun trackClickHandoff(handoff: ClickPersistenceHandoff) {
         pendingClickHandoff = handoff
+        primaryCtaNavigation.onHandoffCreated(handoff)
         autoRedirectCoordinator.observeUserHandoff(handoff)
     }
 
     @Synchronized
     fun clearClickHandoff(handoff: ClickPersistenceHandoff) {
-        if (pendingClickHandoff === handoff) pendingClickHandoff = null
+        if (pendingClickHandoff === handoff) {
+            pendingClickHandoff = null
+            primaryCtaNavigation.onHandoffFinished(handoff)
+        }
     }
 
     @Synchronized
@@ -90,6 +158,9 @@ internal class RewardedPresentation(
         autoRedirectCoordinator.dispose()
         pendingClickHandoff?.cancel()
         pendingClickHandoff = null
+        clickRoute.cancel()
+        primaryCtaNavigation.clear()
+        fallbackState.clear()
     }
 
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */

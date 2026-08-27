@@ -68,6 +68,23 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun queuedMessageCannotDispatchAfterInstallationBecomesInactive() {
+        val host = FakeHost()
+        var queued: (() -> Unit)? = null
+        var active = true
+        val bridge = CreativeBridge(host, mainDispatch = { queued = it })
+
+        bridge.handle(
+            message = """{"type":"AD_EARLY_COMPLETE"}""",
+            isActive = { active },
+        ) {}
+        active = false
+        queued?.invoke()
+
+        assertEquals(0, host.earlyCompletes)
+    }
+
+    @Test
     fun malformedAndUnknownIgnored() {
         val host = FakeHost()
         var replied = false
@@ -161,6 +178,235 @@ class CreativeBridgeTest {
         )
 
         assertEquals(listOf("malformed", "missing_type", "unknown_type", "too_large"), recorded)
+    }
+
+    @Test
+    fun trustedCtaMessageRequiresThePresentationNonce() {
+        val message = """{"type":"SIMULA_CTA_OPEN","url":"https://tracker.example/click","activation_nonce":"nonce-1"}"""
+
+        assertEquals("https://tracker.example/click", trustedCtaUrl(message, "nonce-1"))
+        assertNull(trustedCtaUrl(message, "other-presentation"))
+        assertNull(trustedCtaUrl(message, null))
+        assertNull("disabled installation rejects an already queued message", trustedCtaUrl(message, "nonce-1", false))
+    }
+
+    @Test
+    fun disabledReplacementDocumentDoesNotReceiveTrustedCtaRelayNonce() {
+        assertEquals("nonce", activeCtaNonce("nonce", disabled = false))
+        assertNull(activeCtaNonce("nonce", disabled = true))
+        assertNull(activeCtaNonce(null, disabled = false))
+    }
+
+    @Test
+    fun coreDocumentStartRelaySurvivesWithoutTrustedCtaHooks() {
+        val source = BridgeWebViewInstaller.coreRelayScript("17", "bridge-capability")
+
+        assertTrue(source.contains("if (window !== window.top) { return; }"))
+        assertTrue(source.contains("'use strict';"))
+        assertTrue(source.contains("var bridgeCapability = \"bridge-capability\""))
+        assertEquals(1, source.split("bridge-capability").size - 1)
+        assertTrue(source.contains("event.isTrusted !== true"))
+        assertTrue(source.contains("event.source !== window"))
+        assertTrue(source.contains("window.addEventListener('message'"))
+        assertTrue(source.contains("__simulaSdkPageReady:17:"))
+        assertTrue(source.contains("nativeStringify(bridgeCapability)"))
+        assertFalse(source.contains("Object.keys(envelope)"))
+        assertFalse(source.contains("SIMULA_CTA_OPEN"))
+        assertFalse(source.contains("window.open ="))
+        assertFalse(source.contains("activation_nonce"))
+    }
+
+    @Test
+    fun fullscreenBridgeSelectsPageStartFallbackForLegacyAndPartialInstallations() {
+        assertEquals(
+            BridgeInjectionMode.PAGE_START_FALLBACK,
+            bridgeInjectionMode(true, true, false, false, true, false),
+        )
+        assertEquals(
+            BridgeInjectionMode.PAGE_START_FALLBACK,
+            bridgeInjectionMode(true, true, true, false, true, false),
+        )
+        assertEquals(
+            BridgeInjectionMode.PAGE_START_FALLBACK,
+            bridgeInjectionMode(true, true, true, true, true, false),
+        )
+        assertEquals(
+            BridgeInjectionMode.DOCUMENT_START,
+            bridgeInjectionMode(true, true, true, true, true, true),
+        )
+        assertEquals(
+            BridgeInjectionMode.DOCUMENT_START,
+            bridgeInjectionMode(true, true, true, true, false, false),
+        )
+        assertEquals(
+            BridgeInjectionMode.UNAVAILABLE,
+            bridgeInjectionMode(false, true, true, true, true, true),
+        )
+        assertEquals(
+            BridgeInjectionMode.UNAVAILABLE,
+            bridgeInjectionMode(true, false, true, true, true, true),
+        )
+    }
+
+    @Test
+    fun fullscreenPageStartFallbackCarriesCurrentCapabilityAndOnlyMissingRelays() {
+        val full = BridgeWebViewInstaller.fallbackRelayScript(
+            installationId = "17",
+            bridgeCapability = "bridge-capability",
+            activationNonce = "nonce",
+            ctaDisabled = false,
+            coreDocumentStartInstalled = false,
+            ctaDocumentStartInstalled = false,
+        )
+        assertTrue(full.contains("__simulaSdkPageReady:17:"))
+        assertTrue(full.contains("var bridgeCapability = \"bridge-capability\""))
+        assertTrue(full.contains("event.isTrusted !== true"))
+        assertTrue(full.contains("event.source !== window"))
+        assertTrue(full.contains("SIMULA_CTA_OPEN"))
+        assertTrue(full.contains("var activationNonce = \"nonce\""))
+
+        val ctaOnly = BridgeWebViewInstaller.fallbackRelayScript(
+            installationId = "17",
+            bridgeCapability = "bridge-capability",
+            activationNonce = "nonce",
+            ctaDisabled = false,
+            coreDocumentStartInstalled = true,
+            ctaDocumentStartInstalled = false,
+        )
+        assertFalse(ctaOnly.contains("__simulaSdkPageReady:"))
+        assertFalse(ctaOnly.contains("bridge-capability"))
+        assertTrue(ctaOnly.contains("SIMULA_CTA_OPEN"))
+
+        val coreOnly = BridgeWebViewInstaller.fallbackRelayScript(
+            installationId = "17",
+            bridgeCapability = "bridge-capability",
+            activationNonce = "nonce",
+            ctaDisabled = true,
+            coreDocumentStartInstalled = false,
+            ctaDocumentStartInstalled = false,
+        )
+        assertTrue(coreOnly.contains("__simulaSdkPageReady:17:"))
+        assertFalse(coreOnly.contains("SIMULA_CTA_OPEN"))
+    }
+
+    @Test
+    fun trustedCtaDocumentScriptContainsOnlyOneShotCaptureLayer() {
+        val source = BridgeWebViewInstaller.trustedCtaDocumentStartScript(activationNonce = "nonce")
+
+        assertTrue(source.contains("SIMULA_CTA_OPEN"))
+        assertTrue(source.contains("window.open ="))
+        assertTrue(source.contains("activation_nonce"))
+        assertTrue(source.contains("'use strict';"))
+        assertTrue(source.contains("if (window !== window.top) { return; }"))
+        assertFalse(source.contains("nativeStringify({"))
+        assertFalse(source.contains("__simulaSdkPageReady:"))
+        assertFalse(source.contains("window.addEventListener('message'"))
+    }
+
+    @Test
+    fun genericBridgeMessagesRequireCurrentDocumentCapability() {
+        val authenticated =
+            """{"type":"AD_EARLY_COMPLETE","$BRIDGE_CAPABILITY_KEY":"current"}"""
+
+        assertEquals(authenticated, authenticatedBridgeMessage(authenticated, "current"))
+        assertNull(authenticatedBridgeMessage("""{"type":"AD_EARLY_COMPLETE"}""", "current"))
+        assertNull(
+            authenticatedBridgeMessage(
+                """{"type":"AD_EARLY_COMPLETE","$BRIDGE_CAPABILITY_KEY":"stale"}""",
+                "current",
+            ),
+        )
+        assertNull(authenticatedBridgeMessage("malformed", "current"))
+    }
+
+    @Test
+    fun trustedCtaMessageRejectsMalformedOrNonStringFields() {
+        assertNull(trustedCtaUrl("malformed", "nonce"))
+        assertNull(trustedCtaUrl("""{"type":"SIMULA_CTA_OPEN","url":7,"activation_nonce":"nonce"}""", "nonce"))
+        assertNull(trustedCtaUrl("""{"type":"SIMULA_CTA_OPEN","url":"","activation_nonce":"nonce"}""", "nonce"))
+        assertNull(trustedCtaUrl("""{"type":"AD_EARLY_COMPLETE","url":"https://x","activation_nonce":"nonce"}""", "nonce"))
+    }
+
+    @Test
+    fun trustedCtaMessageBoundsUrlAndWholeEnvelope() {
+        val acceptedUrl = "x".repeat(8 * 1024)
+        val oversizedUrl = "$acceptedUrl?"
+
+        assertEquals(
+            acceptedUrl,
+            trustedCtaUrl(
+                """{"type":"SIMULA_CTA_OPEN","url":"$acceptedUrl","activation_nonce":"nonce"}""",
+                "nonce",
+            ),
+        )
+        assertNull(
+            trustedCtaUrl(
+                """{"type":"SIMULA_CTA_OPEN","url":"$oversizedUrl","activation_nonce":"nonce"}""",
+                "nonce",
+            ),
+        )
+        assertNull(
+            trustedCtaUrl(
+                """{"type":"SIMULA_CTA_OPEN","url":"https://x","activation_nonce":"nonce","padding":"${"x".repeat(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS)}"}""",
+                "nonce",
+            ),
+        )
+    }
+
+    @Test
+    fun trustedCtaRelayRejectsNonActivationKeysAndCancelledContacts() {
+        val source = trustedCtaRelaySource("nonce")
+
+        assertTrue(source.contains("key === 'escape' || key === 'esc' || key === 'dead' || key === 'process'"))
+        assertTrue(source.contains("return !isModifierOnlyKey(key)"))
+        assertTrue(source.contains("type === 'pointercancel' || type === 'touchcancel'"))
+        assertTrue(source.contains("cancelledContact = true"))
+        assertTrue(source.contains("if (contactPending || cancelledContact) { return false; }"))
+        assertTrue(source.contains("var trustedEventTimestamp = -1"))
+        assertTrue(source.contains("trustedEventTimestamp = Number(event.timeStamp || 0)"))
+        assertTrue(source.contains("return trustedDispatch && trustedEventTimestamp >= 0"))
+        assertTrue(source.contains("if (!awaitingClick) { beginGesture(event); }"))
+        assertTrue(source.contains("var activationNonce = \"nonce\""))
+        assertTrue(source.contains("nativeReceiver.isCtaEnabled(activationNonce) === true"))
+        assertEquals(1, source.split("\"nonce\"").size - 1)
+        val duplicateCheck = requireNotNull(source.indexOf("if (claimedGesture === gestureSequence) { return true; }")
+            .takeIf { it >= 0 })
+        val activeCheck = requireNotNull(source.indexOf("if (!hasActiveUserGesture()) { return false; }")
+            .takeIf { it >= 0 })
+        assertTrue(duplicateCheck < activeCheck)
+    }
+
+    @Test
+    fun trustedCtaRelayUsesTheLiveDocumentOriginBeforeClaimingTheGesture() {
+        val source = trustedCtaRelaySource(activationNonce = "nonce")
+
+        assertTrue(source.contains("var origin = window.location && window.location.origin"))
+        assertTrue(source.contains("if (!origin || origin === 'null') { return null; }"))
+        assertTrue(source.contains("new URL(url, document.baseURI).origin === origin"))
+        assertTrue(source.contains("new URL(String(value), document.baseURI)"))
+        val sameOriginCheck = source.indexOf(
+            "if (!url || isInternalCta(url) || isSameOriginCta(url)) { return false; }",
+        )
+        val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
+        assertTrue(sameOriginCheck >= 0)
+        assertTrue(gestureClaim >= 0)
+        assertTrue(sameOriginCheck < gestureClaim)
+    }
+
+    @Test
+    fun trustedCtaRelayTreatsOpaqueDocumentsAsExternalAndRejectsInternalTargets() {
+        val source = trustedCtaRelaySource("nonce")
+
+        assertFalse(source.contains("trustedCtaBaseUrl"))
+        assertTrue(source.contains("if (!origin) { return false; }"))
+        assertTrue(source.contains("protocol === 'about:'"))
+        assertTrue(source.contains("protocol === 'data:'"))
+        assertTrue(source.contains("protocol === 'blob:'"))
+        assertTrue(source.contains("protocol === 'javascript:'"))
+        val policyCheck = source.indexOf("if (!url || isInternalCta(url) || isSameOriginCta(url)")
+        val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
+        assertTrue(policyCheck >= 0)
+        assertTrue(policyCheck < gestureClaim)
     }
 
     @Test

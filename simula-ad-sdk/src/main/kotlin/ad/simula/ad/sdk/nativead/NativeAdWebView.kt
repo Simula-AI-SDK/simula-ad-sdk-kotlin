@@ -3,7 +3,10 @@ package ad.simula.ad.sdk.nativead
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
+import ad.simula.ad.sdk.bridge.BRIDGE_CAPABILITY_KEY
 import ad.simula.ad.sdk.bridge.NATIVE_AD_BRIDGE_MESSAGE_TYPES
+import ad.simula.ad.sdk.bridge.authenticatedBridgeMessage
+import ad.simula.ad.sdk.bridge.cleanupBeforePooling
 import ad.simula.ad.sdk.bridge.parseKnownCreativeBridgeMessage
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
@@ -16,6 +19,7 @@ import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.routeClaimedClick
+import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.MutableContextWrapper
@@ -60,6 +64,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
 import java.util.WeakHashMap
+import java.util.UUID
 
 /**
  * Hosts a native-ad creative in a pooled, non-scrollable [WebView] sized to its content.
@@ -120,6 +125,7 @@ internal fun NativeAdWebView(
         wiring.onLoadError = onLoadError
         wiring.onRenderGone = { generation++ }
         wiring.onPageReady = { visibilityRelay?.flush() }
+        wiring.creativeBaseUrl = nativeCreativeInitialPageUrl(iframeUrl, renderedHtml)
         wiring.trackingUrl = trackingUrl
         wiring.destination = destination
         wiring.storeUrl = storeUrl
@@ -334,12 +340,12 @@ internal object NativeAdWebViewStore {
             return mount(session, attachment, hostContext, iframeUrl, renderedHtml, devMode)
         }
 
+        requested.wiring.loadFailed = false
         val fresh = buildWebView(requested.wiring, hostContext, iframeUrl, renderedHtml, devMode)
         requested.webView = fresh
         requested.loadedKey = creativeKey(iframeUrl, renderedHtml)
         requested.attachment = attachment
         requested.wiring.webView = fresh
-        requested.wiring.loadFailed = false
         attachment.session = requested
         attachment.owner.session = requested
 
@@ -393,24 +399,21 @@ internal object NativeAdWebViewStore {
             // A retained view whose creative load failed holds only about:blank. The view itself is
             // healthy, so recycle it to the pool and rebuild the creative fresh below — this is the
             // remount retry the still-cached fill is documented to get (see onLoadError in the slot).
-            uninstallBridge(retained)
-            WebViewPool.release(retained)
+            releaseNativeBridgeWebView(retained)
             session.webView = null
             session.loadedKey = null
             session.wiring.webView = null
         }
+        // Clear the discarded view's verdict before building; build failures re-arm it.
+        session.wiring.loadFailed = false
         val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml, devMode)
         // Adopt as the retained instance only if the slot isn't already showing one (don't orphan it).
-        session.webView?.takeIf { it !== fresh }?.let { uninstallBridge(it); WebViewPool.release(it) }
+        session.webView?.takeIf { it !== fresh }?.let(::releaseNativeBridgeWebView)
         session.webView = fresh
         session.loadedKey = creativeKey
         session.attachment = attachment
         attachment.session = session
         session.wiring.webView = fresh
-        // [loadFailed] described the view just discarded, not this fresh retry. Left sticky,
-        // release() would recycle the healthy mid-load view on scroll-out instead of retaining
-        // it. onReceivedError/onReceivedHttpError re-arm the flag if the retry fails too.
-        session.wiring.loadFailed = false
         evictIfNeeded()
         return fresh
     }
@@ -420,8 +423,7 @@ internal object NativeAdWebViewStore {
     fun release(attachment: Attachment, released: WebView) {
         val session = attachment.session
         if (session == null) {
-            uninstallBridge(released)
-            WebViewPool.release(released)
+            releaseNativeBridgeWebView(released)
             return
         }
         val disposition = nativeReleaseDisposition(
@@ -448,8 +450,7 @@ internal object NativeAdWebViewStore {
         // FAILED (it holds only the about:blank that pre-empted the error page): retaining it would
         // reattach a blank card on remount instead of retrying the load (see NativeAdWiring.loadFailed).
         if (disposition == NativeReleaseDisposition.RECYCLE) {
-            uninstallBridge(released)
-            WebViewPool.release(released)
+            releaseNativeBridgeWebView(released)
             if (released === session.webView) {
                 session.webView = null
                 session.loadedKey = null
@@ -527,8 +528,15 @@ internal object NativeAdWebViewStore {
         renderedHtml: String?,
         devMode: Boolean,
     ): WebView {
-        val docStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
-        val webView = WebViewPool.acquire(hostContext, NativeAdWebViewClient(wiring, docStart))
+        val docStart = runCatching {
+            WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+        }.getOrDefault(false)
+        val bridgeCapability = UUID.randomUUID().toString()
+        val client = NativeAdWebViewClient(wiring, bridgeCapability)
+        val webView = WebViewPool.acquire(
+            hostContext,
+            client,
+        )
         webView.webChromeClient = CreativeTelemetryWebChromeClient("character_ad", devMode)
         webView.setBackgroundColor(Color.TRANSPARENT)
         // A native ad sizes to content and must never scroll (parity with iOS, where the scroll
@@ -541,7 +549,13 @@ internal object NativeAdWebViewStore {
         // device-width viewport so 1 CSS px == 1 dp → the reported height maps straight to dp.
         webView.settings.useWideViewPort = true
         webView.settings.loadWithOverviewMode = false
-        installBridge(webView, wiring, docStart)
+        val injectionMode = installBridge(webView, wiring, docStart, bridgeCapability)
+        client.setBridgeInjectionMode(injectionMode)
+        if (injectionMode == NativeBridgeInjectionMode.UNAVAILABLE) {
+            wiring.loadFailed = true
+            runCatching { wiring.onLoadError() }
+            return webView
+        }
         when {
             // Prefer rendered_html (the inline <iframe srcdoc> creative); fall back to iframe_url.
             !renderedHtml.isNullOrBlank() -> webView.loadDataWithBaseURL(null, renderedHtml, "text/html", "utf-8", null)
@@ -553,9 +567,13 @@ internal object NativeAdWebViewStore {
     @MainThread
     private fun destroy(session: Session) {
         session.webView?.let {
-            uninstallBridge(it)
             // Never recycle a render-dead view to the pool — destroy it outright.
-            if (session.wiring.renderGone) it.destroy() else WebViewPool.release(it)
+            if (session.wiring.renderGone) {
+                uninstallBridge(it)
+                it.destroy()
+            } else {
+                releaseNativeBridgeWebView(it)
+            }
         }
         session.webView = null
         session.loadedKey = null
@@ -736,6 +754,7 @@ internal class NativeAdWiring(
     // [storeUrl] is the campaign's raw `android_store_url` — the router's deterministic fallback
     // when the tracker is missing or can't be launched (parity with interstitial/rewarded CTAs).
     @Volatile var trackingUrl: String? = null
+    @Volatile var creativeBaseUrl: String? = null
     @Volatile var destination: String = "appstore"
     @Volatile var storeUrl: String? = null
     private val clickInteractionGate = ClickInteractionGate()
@@ -746,6 +765,7 @@ internal class NativeAdWiring(
         onLoadError = other.onLoadError
         onRenderGone = other.onRenderGone
         onPageReady = other.onPageReady
+        creativeBaseUrl = other.creativeBaseUrl
         trackingUrl = other.trackingUrl
         destination = other.destination
         storeUrl = other.storeUrl
@@ -816,15 +836,30 @@ internal class NativeAdWiring(
      * navigated to; falls back to [tappedUrl] when the serve carries no tracker. The raw [storeUrl]
      * rides along so the router can deterministically land an appstore CTA on the store when the
      * tracker can't be launched (parity with the interstitial/rewarded CTAs). */
-    fun openExternal(tappedUrl: String) {
+    fun handleNavigation(tappedUrl: String, currentPageUrl: String?): Boolean {
+        val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+            tappedUrl = tappedUrl,
+            creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: creativeBaseUrl,
+            trackingUrl = trackingUrl,
+            destination = destination,
+        )) {
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> return false
+            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
+            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
+        }
         routeClaimedClick(
             claim = clickInteractionGate.claim(ClickSources.PRIMARY_CTA),
             open = {
-                val target = CreativeCtaRouter.preferredClickUrl(trackingUrl, tappedUrl)
-                CreativeCtaRouter.open(appContext, target, destination, storeUrl = storeUrl)
+                CreativeCtaRouter.openPrimaryCta(
+                    appContext,
+                    route,
+                    destination,
+                    storeUrl = storeUrl,
+                )
             },
             onOpened = onAdClick,
         )
+        return true
     }
 }
 
@@ -887,21 +922,30 @@ internal class VisibilityRelay {
     }
 }
 
-private class NativeAdJsInterface(private val wiring: NativeAdWiring) {
+private class NativeAdJsInterface(
+    private val wiring: NativeAdWiring,
+    private val bridgeCapability: String,
+) {
     @JavascriptInterface
     fun postMessage(json: String?) {
         // Runs on the WebView's JS thread. Declared nullable + no-op on null so a malformed JS
         // bridge invocation passing null can't NPE on entry before reaching handleMessage.
         json ?: return
-        wiring.handleMessage(json)
+        val authenticated = authenticatedBridgeMessage(json, bridgeCapability) ?: return
+        wiring.handleMessage(authenticated)
     }
 }
 
 private class NativeAdWebViewClient(
     private val wiring: NativeAdWiring,
-    private val documentStartSupported: Boolean,
+    private val bridgeCapability: String,
 ) : CreativeTelemetryWebViewClient("character_ad") {
     private val main = Handler(Looper.getMainLooper())
+    private var bridgeInjectionMode = NativeBridgeInjectionMode.UNAVAILABLE
+
+    fun setBridgeInjectionMode(mode: NativeBridgeInjectionMode) {
+        bridgeInjectionMode = mode
+    }
 
     // Framework callback params are declared nullable to match the platform override signatures and
     // guard against a non-conformant OEM WebView passing null (which would NPE on a non-null param) —
@@ -909,8 +953,15 @@ private class NativeAdWebViewClient(
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon) // starts the page-load timer
         view ?: return
-        // Fallback for older WebViews without document-start injection: wire the relay at page start.
-        if (!documentStartSupported) view.evaluateJavascript(BRIDGE_SCRIPT, null)
+        if (bridgeInjectionMode == NativeBridgeInjectionMode.PAGE_START_FALLBACK) {
+            runCatching { view.evaluateJavascript(nativeBridgeScript(bridgeCapability), null) }
+                .onFailure {
+                    Telemetry.recordError(
+                        signature = "native_bridge:page_start_fallback_failed",
+                        errorCode = it::class.java.simpleName,
+                    )
+                }
+        }
     }
 
     // A clean load means the (possibly just-rebuilt) creative is healthy again — reset the render-death
@@ -976,8 +1027,7 @@ private class NativeAdWebViewClient(
         if (url.startsWith("about:")) return false
         // A user-gesture main-frame navigation is a CTA tap → external browser, never inside the slot.
         if (request.hasGesture()) {
-            wiring.openExternal(url)
-            return true
+            return wiring.handleNavigation(url, view.url)
         }
         return false
     }
@@ -992,17 +1042,86 @@ private const val MAX_RENDER_RECOVERIES = 2
 /** Document-start scripts per WebView, removed on release so a pooled view never accumulates them. */
 private val scriptHandlers = WeakHashMap<WebView, ScriptHandler>()
 
-private fun installBridge(webView: WebView, wiring: NativeAdWiring, documentStartSupported: Boolean) {
-    uninstallBridge(webView) // clear any wiring left from this pooled view's prior use
-    webView.addJavascriptInterface(NativeAdJsInterface(wiring), NATIVE_BRIDGE_OBJECT)
-    if (documentStartSupported) {
-        scriptHandlers[webView] = WebViewCompat.addDocumentStartJavaScript(webView, BRIDGE_SCRIPT, setOf("*"))
-    }
+internal enum class NativeBridgeInjectionMode { DOCUMENT_START, PAGE_START_FALLBACK, UNAVAILABLE }
+
+internal fun nativeCreativeInitialPageUrl(iframeUrl: String?, renderedHtml: String?): String? =
+    iframeUrl.takeIf { renderedHtml.isNullOrBlank() }
+
+internal fun nativeBridgeInjectionMode(
+    cleanupConfirmed: Boolean,
+    interfaceInstalled: Boolean,
+    documentStartSupported: Boolean,
+    documentStartInstalled: Boolean,
+): NativeBridgeInjectionMode = when {
+    !cleanupConfirmed || !interfaceInstalled -> NativeBridgeInjectionMode.UNAVAILABLE
+    documentStartSupported && documentStartInstalled -> NativeBridgeInjectionMode.DOCUMENT_START
+    else -> NativeBridgeInjectionMode.PAGE_START_FALLBACK
 }
 
-private fun uninstallBridge(webView: WebView) {
-    runCatching { webView.removeJavascriptInterface(NATIVE_BRIDGE_OBJECT) }
-    scriptHandlers.remove(webView)?.let { runCatching { it.remove() } }
+private fun installBridge(
+    webView: WebView,
+    wiring: NativeAdWiring,
+    documentStartSupported: Boolean,
+    bridgeCapability: String,
+): NativeBridgeInjectionMode {
+    val cleanupConfirmed = uninstallBridge(webView)
+    if (!cleanupConfirmed) return NativeBridgeInjectionMode.UNAVAILABLE
+    val interfaceInstalled = runCatching {
+        webView.addJavascriptInterface(
+            NativeAdJsInterface(wiring, bridgeCapability),
+            NATIVE_BRIDGE_OBJECT,
+        )
+    }.onFailure {
+        Telemetry.recordError(
+            signature = "native_bridge:javascript_interface_failed",
+            errorCode = it::class.java.simpleName,
+        )
+    }.isSuccess
+    if (!interfaceInstalled) return NativeBridgeInjectionMode.UNAVAILABLE
+    val documentStartInstalled = if (documentStartSupported) {
+        val handler = runCatching {
+            WebViewCompat.addDocumentStartJavaScript(
+                webView,
+                nativeBridgeScript(bridgeCapability),
+                setOf("*"),
+            )
+        }.onFailure {
+            Telemetry.recordError(
+                signature = "native_bridge:document_start_failed",
+                errorCode = it::class.java.simpleName,
+            )
+        }.getOrNull()
+        if (handler != null) scriptHandlers[webView] = handler
+        handler != null
+    } else {
+        Telemetry.recordError(signature = "native_bridge:document_start_unavailable")
+        false
+    }
+    return nativeBridgeInjectionMode(
+        cleanupConfirmed = cleanupConfirmed,
+        interfaceInstalled = interfaceInstalled,
+        documentStartSupported = documentStartSupported,
+        documentStartInstalled = documentStartInstalled,
+    )
+}
+
+private fun uninstallBridge(webView: WebView): Boolean {
+    val interfaceRemoved = runCatching { webView.removeJavascriptInterface(NATIVE_BRIDGE_OBJECT) }.isSuccess
+    val handler = scriptHandlers[webView]
+    val scriptRemoved = handler?.let { runCatching { it.remove() }.isSuccess } ?: true
+    if (scriptRemoved) scriptHandlers.remove(webView)
+    return interfaceRemoved && scriptRemoved
+}
+
+private fun releaseNativeBridgeWebView(webView: WebView) {
+    cleanupBeforePooling(
+        cleanup = { uninstallBridge(webView) },
+        release = { WebViewPool.release(webView) },
+        discard = {
+            scriptHandlers.remove(webView)
+            WebViewPool.discard(webView)
+        },
+    )
 }
 
 /**
@@ -1010,8 +1129,12 @@ private fun uninstallBridge(webView: WebView) {
  * `AD_FEEDBACK`) to native, and — top frame only — reports content height so the SDK can size its
  * container. Mirrors the iOS injected script.
  */
-private val BRIDGE_SCRIPT = """
+internal fun nativeBridgeScript(bridgeCapability: String): String = """
     (function () {
+      'use strict';
+      var bridgeCapability = ${JsonPrimitive(bridgeCapability)};
+      var nativeStringify = JSON.stringify.bind(JSON);
+      var nativeParse = JSON.parse.bind(JSON);
       // Nothing in the creative may scroll: the slot is content-sized (parity with iOS, whose
       // scroll view is disabled). Native-side scrollbars/overscroll are already off, but a sub-dp
       // rounding overflow would still let a feed drag pan the viewport by the touch slop before
@@ -1062,11 +1185,18 @@ private val BRIDGE_SCRIPT = """
 
       // Relay the creative's window.postMessage (e.g. AD_FEEDBACK) to native.
       window.addEventListener('message', function (e) {
+        if (window.top !== window.self || !e || e.isTrusted !== true || e.source !== window) return;
         var d = e && e.data;
         if (!d) return;
         try {
-          if (typeof d === 'string') { if (bridge()) bridge().postMessage(d); }
-          else if (typeof d === 'object') { if (bridge()) bridge().postMessage(JSON.stringify(d)); }
+          var envelope = typeof d === 'string' ? nativeParse(d) : d;
+          if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return;
+          var serialized = nativeStringify(envelope);
+          if (!serialized || serialized.charAt(0) !== '{') return;
+          if (bridge()) bridge().postMessage(
+            '{"$BRIDGE_CAPABILITY_KEY":' + nativeStringify(bridgeCapability) +
+            ',' + serialized.substring(1)
+          );
         } catch (err) {}
       });
 
@@ -1118,7 +1248,10 @@ private val BRIDGE_SCRIPT = """
             var h = measure();
             if (h > 0 && Math.abs(h - lastH) >= 1 && bridge()) {
               lastH = h;
-              bridge().postMessage(JSON.stringify({ type: 'SIMULA_AD_HEIGHT', height: h }));
+              bridge().postMessage(
+                '{"type":"SIMULA_AD_HEIGHT","height":' + nativeStringify(h) +
+                ',"$BRIDGE_CAPABILITY_KEY":' + nativeStringify(bridgeCapability) + '}'
+              );
             }
           } catch (err) {}
         };

@@ -119,6 +119,24 @@ internal enum class BeaconPersistenceOutcome {
     Unavailable,
 }
 
+internal data class BeaconTelemetryContext(
+    val adId: String,
+    val serveId: String?,
+)
+
+internal fun beaconTelemetryContext(
+    impressionId: String,
+    telemetryServeId: String?,
+    adFormat: String? = null,
+): BeaconTelemetryContext = BeaconTelemetryContext(
+    adId = impressionId,
+    serveId = if (telemetryServeId != null) {
+        telemetryServeId.takeIf { it.isNotBlank() }
+    } else {
+        impressionId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" }
+    },
+)
+
 /**
  * Thread-safe, persistent queue that delivers impression beacons (`/shown`, `/seen`, `/click`)
  * reliably and off the UI path — the same durable, conflict-free design as
@@ -463,6 +481,7 @@ internal object AdBeaconManager {
         action: String,
         adFormat: String? = null,
         adUnitId: String? = null,
+        telemetryServeId: String? = null,
         metadata: Map<String, String>? = null,
         interactionId: String? = null,
         clickSource: String? = null,
@@ -472,14 +491,15 @@ internal object AdBeaconManager {
             runCatching { onPersistenceComplete(BeaconPersistenceOutcome.Rejected) }
             return
         }
+        val telemetryContext = beaconTelemetryContext(impressionId, telemetryServeId, adFormat)
         when (action) {
             "seen" -> Telemetry.recordLifecycle(
-                stage = "impression_fired", adFormat = adFormat, adUnitId = adUnitId, adId = impressionId,
-                serveId = impressionId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
+                stage = "impression_fired", adFormat = adFormat, adUnitId = adUnitId,
+                adId = telemetryContext.adId, serveId = telemetryContext.serveId,
             )
             "click" -> Telemetry.recordLifecycle(
-                stage = "click_fired", adFormat = adFormat, adUnitId = adUnitId, adId = impressionId,
-                serveId = impressionId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
+                stage = "click_fired", adFormat = adFormat, adUnitId = adUnitId,
+                adId = telemetryContext.adId, serveId = telemetryContext.serveId,
                 interactionId = interactionId,
                 clickSource = clickSource?.let(ClickSources::normalize),
                 critical = true,
