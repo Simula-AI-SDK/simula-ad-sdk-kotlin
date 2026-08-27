@@ -28,14 +28,10 @@ private val installerJson = Json { ignoreUnknownKeys = true }
 internal fun activeCtaNonce(nonce: String?, disabled: Boolean): String? =
     nonce?.takeUnless { disabled }
 
-internal fun trustedCtaRelaySource(
-    activationNonce: String,
-    trustedCtaBaseUrl: String? = null,
-): String = """
+internal fun trustedCtaRelaySource(activationNonce: String): String = """
     var activationNonce = ${JsonPrimitive(activationNonce)};
     var originalOpen = window.open;
     var ctaDisabled = false;
-    var trustedCtaBaseUrl = ${trustedCtaBaseUrl?.let(::JsonPrimitive) ?: "null"};
     var capturedUserActivation = navigator.userActivation;
     var nativeSetTimeout = window.setTimeout.bind(window);
     var trustedDispatch = false;
@@ -144,18 +140,24 @@ internal fun trustedCtaRelaySource(
         try { return new URL(String(value), document.baseURI).href; }
         catch (_) { return null; }
     }
-    function isSameOriginCta(url) {
-        if (!trustedCtaBaseUrl) { return false; }
+    function documentHttpOrigin() {
         try {
-            var base = new URL(trustedCtaBaseUrl);
-            var target = new URL(url, base);
-            if (base.protocol !== 'http:' && base.protocol !== 'https:') { return false; }
-            return target.origin === base.origin;
-        } catch (_) { return false; }
+            var origin = window.location && window.location.origin;
+            if (!origin || origin === 'null') { return null; }
+            var parsed = new URL(origin);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') { return null; }
+            return parsed.origin;
+        } catch (_) { return null; }
+    }
+    function isSameOriginCta(url) {
+        var origin = documentHttpOrigin();
+        if (!origin) { return false; }
+        try { return new URL(url, document.baseURI).origin === origin; }
+        catch (_) { return false; }
     }
     function isInternalCta(url) {
         try {
-            var protocol = new URL(url, trustedCtaBaseUrl || document.baseURI).protocol;
+            var protocol = new URL(url, document.baseURI).protocol;
             return protocol === 'about:' || protocol === 'data:' || protocol === 'blob:' ||
                 protocol === 'javascript:';
         } catch (_) { return true; }
@@ -169,7 +171,7 @@ internal fun trustedCtaRelaySource(
     function forwardTrustedCta(value) {
         if (ctaDisabled || !nativeCtaEnabled()) { return false; }
         var url = resolvedUrl(value);
-        if (!url || !trustedCtaBaseUrl || isInternalCta(url) || isSameOriginCta(url)) { return false; }
+        if (!url || isInternalCta(url) || isSameOriginCta(url)) { return false; }
         if (gestureSequence === 0) { return false; }
         if (claimedGesture === gestureSequence) { return true; }
         if (!hasActiveUserGesture()) { return false; }
@@ -261,10 +263,7 @@ internal object BridgeWebViewInstaller {
         })();
     """.trimIndent()
 
-    internal fun trustedCtaDocumentStartScript(
-        activationNonce: String,
-        trustedCtaBaseUrl: String?,
-    ): String = """
+    internal fun trustedCtaDocumentStartScript(activationNonce: String): String = """
         (function () {
             'use strict';
             if (window !== window.top) { return; }
@@ -273,7 +272,7 @@ internal object BridgeWebViewInstaller {
                 ? nativeReceiver.postMessage.bind(nativeReceiver)
                 : null;
             var nativeStringify = JSON.stringify.bind(JSON);
-${trustedCtaRelaySource(activationNonce, trustedCtaBaseUrl)}
+${trustedCtaRelaySource(activationNonce)}
         })();
     """.trimIndent()
 
@@ -289,21 +288,22 @@ ${trustedCtaRelaySource(activationNonce, trustedCtaBaseUrl)}
     fun install(
         webView: WebView,
         bridge: CreativeBridge,
-        trustedCtaBaseUrl: String? = null,
         onTrustedCtaOpen: ((String) -> Unit)? = null,
-    ) {
-        uninstall(webView) // clear stale wiring from this pooled view's prior use
+    ): Boolean {
+        if (!uninstall(webView)) {
+            Telemetry.recordError(signature = "bridge:stale_wiring_cleanup_failed")
+            return false
+        }
         val installation = BridgeInstallation(
             id = (++nextInstallationId).toString(),
             bridgeCapability = UUID.randomUUID().toString(),
             audioObserver = CreativeAudioStateObserver(webView),
             activationNonce = onTrustedCtaOpen?.let { UUID.randomUUID().toString() },
-            trustedCtaBaseUrl = trustedCtaBaseUrl,
             onTrustedCtaOpen = onTrustedCtaOpen,
         )
         installations[webView] = installation
 
-        runCatching { webView.addJavascriptInterface(object {
+        val interfaceInstalled = runCatching { webView.addJavascriptInterface(object {
             @JavascriptInterface
             fun isCtaEnabled(nonce: String?): Boolean =
                 installation.active && !installation.ctaDisabled && nonce == installation.activationNonce
@@ -353,6 +353,13 @@ ${trustedCtaRelaySource(activationNonce, trustedCtaBaseUrl)}
                 signature = "bridge:javascript_interface_failed",
                 errorCode = it::class.java.simpleName,
             )
+        }.isSuccess
+        if (!interfaceInstalled) {
+            installations.remove(webView)?.let {
+                it.active = false
+                runCatching { it.audioObserver.close() }
+            }
+            return false
         }
 
         if (documentStartSupported()) {
@@ -374,7 +381,7 @@ ${trustedCtaRelaySource(activationNonce, trustedCtaBaseUrl)}
                     runCatching {
                         WebViewCompat.addDocumentStartJavaScript(
                             webView,
-                            trustedCtaDocumentStartScript(nonce, installation.trustedCtaBaseUrl),
+                            trustedCtaDocumentStartScript(nonce),
                             setOf("*"),
                         )
                     }.onFailure {
@@ -388,6 +395,7 @@ ${trustedCtaRelaySource(activationNonce, trustedCtaBaseUrl)}
                 scripts[webView] = DocumentStartScripts(core = core, cta = cta)
             }
         }
+        return true
     }
 
     /** Disarm delivery as soon as a replacement main document starts navigating. */
@@ -426,9 +434,12 @@ ${trustedCtaRelaySource(activationNonce, trustedCtaBaseUrl)}
         installation?.active = false
         val observerClosed = runCatching { installation?.audioObserver?.close() }.isSuccess
         val interfaceRemoved = runCatching { webView.removeJavascriptInterface(NATIVE_OBJECT) }.isSuccess
-        val handlers = scripts.remove(webView)
+        val handlers = scripts[webView]
         val ctaRemoved = handlers?.cta?.let { runCatching { it.remove() }.isSuccess } ?: true
-        val coreRemoved = handlers?.let { runCatching { it.core.remove() }.isSuccess } ?: true
+        if (ctaRemoved) handlers?.cta = null
+        val coreRemoved = handlers?.core?.let { runCatching { it.remove() }.isSuccess } ?: true
+        if (coreRemoved) handlers?.core = null
+        if (ctaRemoved && coreRemoved) scripts.remove(webView)
         return observerClosed && interfaceRemoved && ctaRemoved && coreRemoved
     }
 
@@ -448,7 +459,11 @@ internal fun cleanupBeforePooling(
     discard: () -> Unit,
 ) {
     val cleaned = runCatching(cleanup).getOrDefault(false)
-    runCatching { if (cleaned) release() else discard() }
+    if (!cleaned) {
+        runCatching(discard)
+        return
+    }
+    if (runCatching(release).isFailure) runCatching(discard)
 }
 
 private data class BridgeInstallation(
@@ -456,7 +471,6 @@ private data class BridgeInstallation(
     val bridgeCapability: String,
     val audioObserver: CreativeAudioStateObserver,
     val activationNonce: String?,
-    val trustedCtaBaseUrl: String?,
     val onTrustedCtaOpen: ((String) -> Unit)?,
 ) {
     @Volatile
@@ -466,7 +480,7 @@ private data class BridgeInstallation(
 }
 
 private data class DocumentStartScripts(
-    val core: ScriptHandler,
+    var core: ScriptHandler?,
     var cta: ScriptHandler?,
 )
 

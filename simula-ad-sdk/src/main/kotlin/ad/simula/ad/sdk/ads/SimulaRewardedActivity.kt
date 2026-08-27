@@ -289,16 +289,39 @@ internal class SimulaRewardedActivity : ComponentActivity() {
     }
 }
 
-internal fun shouldRouteRewardedNavigationAsUserCta(
+internal enum class RewardedNavigationAction {
+    ALLOW_IN_WEBVIEW,
+    CONSUME,
+    ROUTE_USER_CTA,
+    ROUTE_AUTO_STORE,
+}
+
+internal fun rewardedNavigationAction(
     isMainFrame: Boolean,
     hasGesture: Boolean,
     targetUrl: String,
     currentPageUrl: String?,
-    logicalCtaBaseUrl: String?,
-): Boolean {
-    if (!isMainFrame || !hasGesture) return false
-    val currentOrigin = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: logicalCtaBaseUrl
-    return !CreativeCtaRouter.hasSameHttpOrigin(currentOrigin, targetUrl)
+    initialPageUrl: String?,
+): RewardedNavigationAction {
+    if (!isMainFrame) return RewardedNavigationAction.ALLOW_IN_WEBVIEW
+    if (!hasGesture) {
+        val scheme = targetUrl.substringBefore(':', missingDelimiterValue = "").lowercase()
+        if (scheme in setOf("market", "intent")) {
+            return if (CreativeCtaRouter.normalizeTappedDestination(targetUrl) != null) {
+                RewardedNavigationAction.ROUTE_AUTO_STORE
+            } else {
+                RewardedNavigationAction.CONSUME
+            }
+        }
+        return RewardedNavigationAction.ALLOW_IN_WEBVIEW
+    }
+    val currentOrigin = CreativeCtaRouter.admittedHttpUrl(currentPageUrl)
+        ?: CreativeCtaRouter.admittedHttpUrl(initialPageUrl)
+    return if (CreativeCtaRouter.hasSameHttpOrigin(currentOrigin, targetUrl)) {
+        RewardedNavigationAction.ALLOW_IN_WEBVIEW
+    } else {
+        RewardedNavigationAction.ROUTE_USER_CTA
+    }
 }
 
 @Composable
@@ -310,9 +333,10 @@ private fun RewardedMinigame(
     val creativeSource = remember(presentation) {
         rewardedCreativeSource(presentation.renderedHtml, presentation.iframeUrl)
     }
-    // Routing metadata is separate from the WebView security base. HTML still loads with a null
-    // base, while the server iframe URL preserves existing same-origin CTA classification.
-    val logicalCtaBaseUrl = CreativeCtaRouter.admittedHttpUrl(presentation.iframeUrl)
+    // Only a loaded iframe has an HTTP origin. Rendered HTML stays opaque and must not inherit the
+    // unused iframe metadata's origin for CTA classification.
+    val initialPageUrl = (creativeSource as? RewardedCreativeSource.Iframe)?.url
+        ?.let(CreativeCtaRouter::admittedHttpUrl)
     // Play-to-earn gate length, in seconds — sourced from `ad_behavior.close.delay_seconds` (the
     // same value that ungates the close button). No `ad_behavior` → 0 → instantly earned.
     val gateSeconds = presentation.adBehavior?.close?.delaySeconds ?: 0
@@ -573,11 +597,11 @@ private fun RewardedMinigame(
         if (canDismissFullscreen(rewardEarned, clickHandoffPending)) onFinish(true)
     }
 
-    fun beginPrimaryCta(tappedUrl: String): Boolean {
+    fun beginPrimaryCta(tappedUrl: String, currentPageUrl: String? = creativeWebView?.url): Boolean {
         if (!primaryCtaAdmission.isEnabled()) return true
         val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
             tappedUrl = tappedUrl,
-            creativeBaseUrl = logicalCtaBaseUrl,
+            creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: initialPageUrl,
             trackingUrl = presentation.trackingUrl,
             destination = presentation.destination,
         )) {
@@ -643,6 +667,24 @@ private fun RewardedMinigame(
         return true
     }
 
+    fun routeAutomaticStoreNavigation(tappedUrl: String) {
+        val target = CreativeCtaRouter.preferredClickUrl(presentation.trackingUrl, tappedUrl) ?: return
+        presentation.autoRedirectCoordinator.request(
+            scope = autoRedirectScope,
+            pendingHandoff = presentation.pendingClickHandoff(),
+        ) {
+            val opened = CreativeCtaRouter.open(
+                context.applicationContext,
+                target,
+                presentation.destination,
+                presentation.adBehavior?.storeOpen,
+                presentation.androidStoreUrl,
+            )
+            if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
+            opened
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -650,7 +692,6 @@ private fun RewardedMinigame(
     ) {
         AndroidView(
             factory = { ctx ->
-                val creativeBaseUrl = logicalCtaBaseUrl
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : CreativeTelemetryWebViewClient("rewarded") {
@@ -665,21 +706,27 @@ private fun RewardedMinigame(
                         ): Boolean {
                             val requestUrl = request?.url?.toString() ?: return false
                             primaryCtaNavigation.navigationOverride()?.let { return it }
-                            if (!shouldRouteRewardedNavigationAsUserCta(
-                                    isMainFrame = request.isForMainFrame,
-                                    hasGesture = request.hasGesture(),
-                                    targetUrl = requestUrl,
-                                    currentPageUrl = view?.url,
-                                    logicalCtaBaseUrl = logicalCtaBaseUrl,
-                                )
-                            ) return false
-                            return beginPrimaryCta(requestUrl)
+                            return when (rewardedNavigationAction(
+                                isMainFrame = request.isForMainFrame,
+                                hasGesture = request.hasGesture(),
+                                targetUrl = requestUrl,
+                                currentPageUrl = view?.url,
+                                initialPageUrl = initialPageUrl,
+                            )) {
+                                RewardedNavigationAction.ALLOW_IN_WEBVIEW -> false
+                                RewardedNavigationAction.CONSUME -> true
+                                RewardedNavigationAction.ROUTE_USER_CTA -> beginPrimaryCta(requestUrl, view?.url)
+                                RewardedNavigationAction.ROUTE_AUTO_STORE -> {
+                                    routeAutomaticStoreNavigation(requestUrl)
+                                    true
+                                }
+                            }
                         }
                     },
                     surface = "rewarded",
                 ).apply {
                     webChromeClient = CreativeTelemetryWebChromeClient("rewarded", SimulaAds.devMode)
-                    BridgeWebViewInstaller.install(this, bridge, trustedCtaBaseUrl = creativeBaseUrl) { url ->
+                    BridgeWebViewInstaller.install(this, bridge) { url ->
                         if (primaryCtaAdmission.isEnabled()) beginPrimaryCta(url)
                     }
                     if (!primaryCtaAdmission.isEnabled()) BridgeWebViewInstaller.disableTrustedCta(this)

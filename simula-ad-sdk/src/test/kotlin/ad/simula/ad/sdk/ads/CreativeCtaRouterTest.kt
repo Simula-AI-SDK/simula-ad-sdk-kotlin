@@ -57,6 +57,24 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `opaque document does not inherit metadata host for CTA suppression`() {
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.Route(
+                ad.simula.ad.sdk.network.PrimaryCtaRoute(
+                    tappedUrl = "https://creative.example/offer",
+                    externalTarget = "https://tracker.example/click",
+                ),
+            ),
+            CreativeCtaRouter.primaryCtaTapPlan(
+                tappedUrl = "https://creative.example/offer",
+                creativeBaseUrl = null,
+                trackingUrl = "https://tracker.example/click",
+                destination = "appstore",
+            ),
+        )
+    }
+
+    @Test
     fun `primary CTA planner consumes unsafe exits without billing tracker`() {
         listOf(
             "market://details?referrer=missing-id",
@@ -205,9 +223,24 @@ class CreativeCtaRouterTest {
             "//tracker.example/click",
             "https:///missing-host",
             "https://bad host.example/click",
+            "https://bad\u00a0host.example/click",
+            "https://bad\u200bhost.example/click",
+            "https://tracker.example:/click",
+            "https://tracker.example:-1/click",
+            "https://tracker.example:65536/click",
+            "https://[2001:db8::1]:65536/click",
             "https://tracker.example/click\nX-Injected: value",
             "https://tracker.example/click\u007f",
         ).forEach { assertNull(it, CreativeCtaRouter.admittedHttpUrl(it)) }
+    }
+
+    @Test
+    fun `URL admission accepts valid explicit port boundaries`() {
+        listOf(
+            "https://tracker.example:0/click",
+            "https://tracker.example:65535/click",
+            "https://[2001:db8::1]:443/click",
+        ).forEach { assertEquals(it, CreativeCtaRouter.admittedHttpUrl(it)) }
     }
 
     @Test

@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.bridge.BRIDGE_CAPABILITY_KEY
 import ad.simula.ad.sdk.bridge.NATIVE_AD_BRIDGE_MESSAGE_TYPES
 import ad.simula.ad.sdk.bridge.authenticatedBridgeMessage
+import ad.simula.ad.sdk.bridge.cleanupBeforePooling
 import ad.simula.ad.sdk.bridge.parseKnownCreativeBridgeMessage
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
@@ -124,7 +125,7 @@ internal fun NativeAdWebView(
         wiring.onLoadError = onLoadError
         wiring.onRenderGone = { generation++ }
         wiring.onPageReady = { visibilityRelay?.flush() }
-        wiring.creativeBaseUrl = iframeUrl
+        wiring.creativeBaseUrl = nativeCreativeInitialPageUrl(iframeUrl, renderedHtml)
         wiring.trackingUrl = trackingUrl
         wiring.destination = destination
         wiring.storeUrl = storeUrl
@@ -531,9 +532,10 @@ internal object NativeAdWebViewStore {
             WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         }.getOrDefault(false)
         val bridgeCapability = UUID.randomUUID().toString()
+        val client = NativeAdWebViewClient(wiring, bridgeCapability)
         val webView = WebViewPool.acquire(
             hostContext,
-            NativeAdWebViewClient(wiring),
+            client,
         )
         webView.webChromeClient = CreativeTelemetryWebChromeClient("character_ad", devMode)
         webView.setBackgroundColor(Color.TRANSPARENT)
@@ -547,7 +549,9 @@ internal object NativeAdWebViewStore {
         // device-width viewport so 1 CSS px == 1 dp → the reported height maps straight to dp.
         webView.settings.useWideViewPort = true
         webView.settings.loadWithOverviewMode = false
-        if (!installBridge(webView, wiring, docStart, bridgeCapability)) {
+        val injectionMode = installBridge(webView, wiring, docStart, bridgeCapability)
+        client.setBridgeInjectionMode(injectionMode)
+        if (injectionMode == NativeBridgeInjectionMode.UNAVAILABLE) {
             wiring.loadFailed = true
             runCatching { wiring.onLoadError() }
             return webView
@@ -832,10 +836,10 @@ internal class NativeAdWiring(
      * navigated to; falls back to [tappedUrl] when the serve carries no tracker. The raw [storeUrl]
      * rides along so the router can deterministically land an appstore CTA on the store when the
      * tracker can't be launched (parity with the interstitial/rewarded CTAs). */
-    fun handleNavigation(tappedUrl: String): Boolean {
+    fun handleNavigation(tappedUrl: String, currentPageUrl: String?): Boolean {
         val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
             tappedUrl = tappedUrl,
-            creativeBaseUrl = creativeBaseUrl,
+            creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: creativeBaseUrl,
             trackingUrl = trackingUrl,
             destination = destination,
         )) {
@@ -934,8 +938,14 @@ private class NativeAdJsInterface(
 
 private class NativeAdWebViewClient(
     private val wiring: NativeAdWiring,
+    private val bridgeCapability: String,
 ) : CreativeTelemetryWebViewClient("character_ad") {
     private val main = Handler(Looper.getMainLooper())
+    private var bridgeInjectionMode = NativeBridgeInjectionMode.UNAVAILABLE
+
+    fun setBridgeInjectionMode(mode: NativeBridgeInjectionMode) {
+        bridgeInjectionMode = mode
+    }
 
     // Framework callback params are declared nullable to match the platform override signatures and
     // guard against a non-conformant OEM WebView passing null (which would NPE on a non-null param) —
@@ -943,6 +953,15 @@ private class NativeAdWebViewClient(
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon) // starts the page-load timer
         view ?: return
+        if (bridgeInjectionMode == NativeBridgeInjectionMode.PAGE_START_FALLBACK) {
+            runCatching { view.evaluateJavascript(nativeBridgeScript(bridgeCapability), null) }
+                .onFailure {
+                    Telemetry.recordError(
+                        signature = "native_bridge:page_start_fallback_failed",
+                        errorCode = it::class.java.simpleName,
+                    )
+                }
+        }
     }
 
     // A clean load means the (possibly just-rebuilt) creative is healthy again — reset the render-death
@@ -1008,7 +1027,7 @@ private class NativeAdWebViewClient(
         if (url.startsWith("about:")) return false
         // A user-gesture main-frame navigation is a CTA tap → external browser, never inside the slot.
         if (request.hasGesture()) {
-            return wiring.handleNavigation(url)
+            return wiring.handleNavigation(url, view.url)
         }
         return false
     }
@@ -1023,17 +1042,30 @@ private const val MAX_RENDER_RECOVERIES = 2
 /** Document-start scripts per WebView, removed on release so a pooled view never accumulates them. */
 private val scriptHandlers = WeakHashMap<WebView, ScriptHandler>()
 
+internal enum class NativeBridgeInjectionMode { DOCUMENT_START, PAGE_START_FALLBACK, UNAVAILABLE }
+
+internal fun nativeCreativeInitialPageUrl(iframeUrl: String?, renderedHtml: String?): String? =
+    iframeUrl.takeIf { renderedHtml.isNullOrBlank() }
+
+internal fun nativeBridgeInjectionMode(
+    cleanupConfirmed: Boolean,
+    interfaceInstalled: Boolean,
+    documentStartSupported: Boolean,
+    documentStartInstalled: Boolean,
+): NativeBridgeInjectionMode = when {
+    !cleanupConfirmed || !interfaceInstalled -> NativeBridgeInjectionMode.UNAVAILABLE
+    documentStartSupported && documentStartInstalled -> NativeBridgeInjectionMode.DOCUMENT_START
+    else -> NativeBridgeInjectionMode.PAGE_START_FALLBACK
+}
+
 private fun installBridge(
     webView: WebView,
     wiring: NativeAdWiring,
     documentStartSupported: Boolean,
     bridgeCapability: String,
-): Boolean {
-    if (!uninstallBridge(webView)) return false // never layer new wiring over unconfirmed cleanup
-    if (!documentStartSupported) {
-        Telemetry.recordError(signature = "native_bridge:document_start_unavailable")
-        return false
-    }
+): NativeBridgeInjectionMode {
+    val cleanupConfirmed = uninstallBridge(webView)
+    if (!cleanupConfirmed) return NativeBridgeInjectionMode.UNAVAILABLE
     val interfaceInstalled = runCatching {
         webView.addJavascriptInterface(
             NativeAdJsInterface(wiring, bridgeCapability),
@@ -1045,8 +1077,8 @@ private fun installBridge(
             errorCode = it::class.java.simpleName,
         )
     }.isSuccess
-    if (!interfaceInstalled) return false
-    if (documentStartSupported) {
+    if (!interfaceInstalled) return NativeBridgeInjectionMode.UNAVAILABLE
+    val documentStartInstalled = if (documentStartSupported) {
         val handler = runCatching {
             WebViewCompat.addDocumentStartJavaScript(
                 webView,
@@ -1058,10 +1090,19 @@ private fun installBridge(
                 signature = "native_bridge:document_start_failed",
                 errorCode = it::class.java.simpleName,
             )
-        }.getOrNull() ?: return false
-        scriptHandlers[webView] = handler
+        }.getOrNull()
+        if (handler != null) scriptHandlers[webView] = handler
+        handler != null
+    } else {
+        Telemetry.recordError(signature = "native_bridge:document_start_unavailable")
+        false
     }
-    return true
+    return nativeBridgeInjectionMode(
+        cleanupConfirmed = cleanupConfirmed,
+        interfaceInstalled = interfaceInstalled,
+        documentStartSupported = documentStartSupported,
+        documentStartInstalled = documentStartInstalled,
+    )
 }
 
 private fun uninstallBridge(webView: WebView): Boolean {
@@ -1073,12 +1114,14 @@ private fun uninstallBridge(webView: WebView): Boolean {
 }
 
 private fun releaseNativeBridgeWebView(webView: WebView) {
-    if (uninstallBridge(webView)) {
-        WebViewPool.release(webView)
-    } else {
-        scriptHandlers.remove(webView)
-        WebViewPool.discard(webView)
-    }
+    cleanupBeforePooling(
+        cleanup = { uninstallBridge(webView) },
+        release = { WebViewPool.release(webView) },
+        discard = {
+            scriptHandlers.remove(webView)
+            WebViewPool.discard(webView)
+        },
+    )
 }
 
 /**

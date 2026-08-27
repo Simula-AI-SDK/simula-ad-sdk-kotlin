@@ -218,10 +218,7 @@ class CreativeBridgeTest {
 
     @Test
     fun trustedCtaDocumentScriptContainsOnlyOneShotCaptureLayer() {
-        val source = BridgeWebViewInstaller.trustedCtaDocumentStartScript(
-            activationNonce = "nonce",
-            trustedCtaBaseUrl = "https://creative.example/game",
-        )
+        val source = BridgeWebViewInstaller.trustedCtaDocumentStartScript(activationNonce = "nonce")
 
         assertTrue(source.contains("SIMULA_CTA_OPEN"))
         assertTrue(source.contains("window.open ="))
@@ -307,17 +304,15 @@ class CreativeBridgeTest {
     }
 
     @Test
-    fun trustedCtaRelayLeavesSameOriginPopupsToTheWebViewBeforeClaimingTheGesture() {
-        val source = trustedCtaRelaySource(
-            activationNonce = "nonce",
-            trustedCtaBaseUrl = "https://creative.example:443/game",
-        )
+    fun trustedCtaRelayUsesTheLiveDocumentOriginBeforeClaimingTheGesture() {
+        val source = trustedCtaRelaySource(activationNonce = "nonce")
 
-        assertTrue(source.contains("var trustedCtaBaseUrl = \"https://creative.example:443/game\""))
-        assertTrue(source.contains("return target.origin === base.origin"))
+        assertTrue(source.contains("var origin = window.location && window.location.origin"))
+        assertTrue(source.contains("if (!origin || origin === 'null') { return null; }"))
+        assertTrue(source.contains("new URL(url, document.baseURI).origin === origin"))
         assertTrue(source.contains("new URL(String(value), document.baseURI)"))
         val sameOriginCheck = source.indexOf(
-            "if (!url || !trustedCtaBaseUrl || isInternalCta(url) || isSameOriginCta(url)) { return false; }",
+            "if (!url || isInternalCta(url) || isSameOriginCta(url)) { return false; }",
         )
         val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
         assertTrue(sameOriginCheck >= 0)
@@ -326,15 +321,16 @@ class CreativeBridgeTest {
     }
 
     @Test
-    fun trustedCtaRelayFailsClosedWithoutOriginAndRejectsInternalDocuments() {
+    fun trustedCtaRelayTreatsOpaqueDocumentsAsExternalAndRejectsInternalTargets() {
         val source = trustedCtaRelaySource("nonce")
 
-        assertTrue(source.contains("!trustedCtaBaseUrl"))
+        assertFalse(source.contains("trustedCtaBaseUrl"))
+        assertTrue(source.contains("if (!origin) { return false; }"))
         assertTrue(source.contains("protocol === 'about:'"))
         assertTrue(source.contains("protocol === 'data:'"))
         assertTrue(source.contains("protocol === 'blob:'"))
         assertTrue(source.contains("protocol === 'javascript:'"))
-        val policyCheck = source.indexOf("if (!url || !trustedCtaBaseUrl || isInternalCta(url)")
+        val policyCheck = source.indexOf("if (!url || isInternalCta(url) || isSameOriginCta(url)")
         val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
         assertTrue(policyCheck >= 0)
         assertTrue(policyCheck < gestureClaim)

@@ -106,4 +106,30 @@ class AudioStateDeliveryGateTest {
 
         assertEquals(listOf("cleanup", "discard"), events)
     }
+
+    @Test
+    fun cleanupRejectionDiscardsInsteadOfPooling() {
+        val events = mutableListOf<String>()
+
+        cleanupBeforePooling(
+            cleanup = { events += "cleanup"; false },
+            release = { events += "release" },
+            discard = { events += "discard" },
+        )
+
+        assertEquals(listOf("cleanup", "discard"), events)
+    }
+
+    @Test
+    fun poolingFailureFallsBackToDiscardWithoutEscaping() {
+        val events = mutableListOf<String>()
+
+        cleanupBeforePooling(
+            cleanup = { events += "cleanup"; true },
+            release = { events += "release"; error("failure") },
+            discard = { events += "discard" },
+        )
+
+        assertEquals(listOf("cleanup", "release", "discard"), events)
+    }
 }

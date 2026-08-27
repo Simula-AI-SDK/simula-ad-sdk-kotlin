@@ -24,6 +24,49 @@ class NativeAdWebViewOwnershipTest {
     }
 
     @Test
+    fun `native bridge falls back at page start when document start is unavailable or fails`() {
+        assertEquals(
+            NativeBridgeInjectionMode.PAGE_START_FALLBACK,
+            nativeBridgeInjectionMode(true, true, documentStartSupported = false, documentStartInstalled = false),
+        )
+        assertEquals(
+            NativeBridgeInjectionMode.PAGE_START_FALLBACK,
+            nativeBridgeInjectionMode(true, true, documentStartSupported = true, documentStartInstalled = false),
+        )
+        assertEquals(
+            NativeBridgeInjectionMode.DOCUMENT_START,
+            nativeBridgeInjectionMode(true, true, documentStartSupported = true, documentStartInstalled = true),
+        )
+    }
+
+    @Test
+    fun `native bridge refuses install only when cleanup or interface setup is unsafe`() {
+        assertEquals(
+            NativeBridgeInjectionMode.UNAVAILABLE,
+            nativeBridgeInjectionMode(false, true, documentStartSupported = true, documentStartInstalled = true),
+        )
+        assertEquals(
+            NativeBridgeInjectionMode.UNAVAILABLE,
+            nativeBridgeInjectionMode(true, false, documentStartSupported = true, documentStartInstalled = true),
+        )
+    }
+
+    @Test
+    fun `rendered native HTML does not inherit unused iframe origin`() {
+        assertEquals(
+            "https://creative.example/game",
+            nativeCreativeInitialPageUrl("https://creative.example/game", null),
+        )
+        assertEquals(
+            null,
+            nativeCreativeInitialPageUrl(
+                "https://creative.example/game",
+                "<html><body>rendered</body></html>",
+            ),
+        )
+    }
+
+    @Test
     fun `claim reuses idle creative and never steals an attached matching session`() {
         assertEquals(
             NativeSessionClaim.REUSE,

@@ -68,7 +68,10 @@ internal object CreativeCtaRouter {
         return candidate.takeIf {
             (url.protocol.equals("http", true) || url.protocol.equals("https", true)) &&
                 url.host.isNotBlank() &&
-                url.host.none(Char::isWhitespace)
+                url.host.none { char ->
+                    char.isWhitespace() || Character.getType(char) == Character.FORMAT.toInt()
+                } &&
+                url.hasValidExplicitPort()
         }
     }
 
@@ -302,6 +305,24 @@ internal object CreativeCtaRouter {
 }
 
 private fun URL.effectivePort(): Int = if (port >= 0) port else defaultPort
+
+private fun URL.hasValidExplicitPort(): Boolean {
+    val hostAndPort = authority.substringAfterLast('@')
+    val explicitPort = if (hostAndPort.startsWith('[')) {
+        val bracket = hostAndPort.indexOf(']')
+        if (bracket < 0) return false
+        val suffix = hostAndPort.substring(bracket + 1)
+        if (suffix.isEmpty()) return true
+        if (!suffix.startsWith(':')) return false
+        suffix.substring(1)
+    } else {
+        val separator = hostAndPort.lastIndexOf(':')
+        if (separator < 0) return true
+        hostAndPort.substring(separator + 1)
+    }
+    if (explicitPort.isEmpty() || explicitPort.any { it !in '0'..'9' }) return false
+    return explicitPort.toIntOrNull()?.let { it in 0..65535 } == true
+}
 
 private fun String.hasUrlControlCharacters(): Boolean = any { it.code in 0..31 || it.code == 127 }
 
