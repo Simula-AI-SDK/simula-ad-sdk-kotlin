@@ -421,6 +421,40 @@ class ClickTrackingTest {
     }
 
     @Test
+    fun `successful external route permanently locks creative navigation across frames`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val activity = Any()
+        val handoff = testHandoff("opened")
+        state.attachActivity(activity)
+        state.onHandoffCreated(handoff)
+
+        state.lockAfterExternalOpen()
+        state.onHandoffFinished(handoff)
+
+        assertEquals(
+            true,
+            state.navigationOverride(
+                "https://tracker.example/click?dynamic=per-click",
+                isMainFrame = true,
+                hasGesture = false,
+            ),
+        )
+        assertEquals(
+            true,
+            state.navigationOverride(
+                "https://play.google.com/store/apps/details?id=example",
+                isMainFrame = false,
+                hasGesture = true,
+            ),
+        )
+        state.detachActivity(activity)
+        val replacementActivity = Any()
+        state.attachActivity(replacementActivity)
+        assertEquals(true, state.navigationOverride())
+        assertFalse(state.retainFallback("https://creative.example/late", replacementActivity))
+    }
+
+    @Test
     fun `failed primary route waits for replacement owner and drains exactly once`() {
         val state = RetainedPrimaryCtaNavigationState<Any>()
         val oldActivity = Any()

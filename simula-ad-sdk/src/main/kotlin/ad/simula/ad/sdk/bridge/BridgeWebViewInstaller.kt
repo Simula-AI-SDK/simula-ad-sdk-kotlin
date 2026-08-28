@@ -44,6 +44,7 @@ internal fun bridgeInjectionMode(
 internal fun trustedCtaRelaySource(activationNonce: String): String = """
     var activationNonce = ${JsonPrimitive(activationNonce)};
     var originalOpen = window.open;
+    var routedWindow = { closed: false, close: function () {}, focus: function () {}, blur: function () {} };
     var capturedUserActivation = navigator.userActivation;
     var nativeSetTimeout = window.setTimeout.bind(window);
     var trustedDispatch = false;
@@ -198,7 +199,7 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
         }
     }
     window.open = function () {
-        if (arguments.length > 0 && forwardTrustedCta(arguments[0])) { return null; }
+        if (arguments.length > 0 && forwardTrustedCta(arguments[0])) { return routedWindow; }
         return originalOpen.apply(window, arguments);
     };
     window.addEventListener('click', function (event) {
@@ -274,7 +275,13 @@ internal object BridgeWebViewInstaller {
     internal fun trustedCtaDocumentStartScript(activationNonce: String): String = """
         (function () {
             'use strict';
-            if (window !== window.top) { return; }
+            function isCtaFrame() {
+                if (window === window.top) { return true; }
+                try {
+                    return !!(window.frameElement && window.frameElement.hasAttribute('srcdoc'));
+                } catch (_) { return false; }
+            }
+            if (!isCtaFrame()) { return; }
             var nativeReceiver = window.$NATIVE_OBJECT;
             var nativePost = nativeReceiver && typeof nativeReceiver.postMessage === 'function'
                 ? nativeReceiver.postMessage.bind(nativeReceiver)

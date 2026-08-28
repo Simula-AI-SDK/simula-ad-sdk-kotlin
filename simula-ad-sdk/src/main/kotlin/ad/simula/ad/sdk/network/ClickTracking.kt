@@ -487,6 +487,7 @@ internal class RetainedPrimaryCtaNavigationState<T : Any> {
     private var pendingFallbackUrl: String? = null
     private var activeDelivery: NavigationDelivery? = null
     private var deliveryRevision = 0L
+    private var creativeNavigationLocked = false
     private var cleared = false
 
     fun attachActivity(activity: T) {
@@ -540,7 +541,13 @@ internal class RetainedPrimaryCtaNavigationState<T : Any> {
             }
             return true
         }
-        return if (pendingFallbackUrl != null) true else null
+        return if (pendingFallbackUrl != null || creativeNavigationLocked) true else null
+    }
+
+    /** Keep a creative that already opened externally from replacing itself with a delayed fallback. */
+    @Synchronized
+    fun lockAfterExternalOpen() {
+        if (!cleared) creativeNavigationLocked = true
     }
 
     @Synchronized
@@ -567,7 +574,9 @@ internal class RetainedPrimaryCtaNavigationState<T : Any> {
 
     fun retainFallback(url: String, activity: T): Boolean {
         synchronized(this) {
-            if (cleared || url.isBlank() || currentActivity?.get() !== activity) return false
+            if (cleared || creativeNavigationLocked || url.isBlank() || currentActivity?.get() !== activity) {
+                return false
+            }
             if (pendingFallbackUrl == null) pendingFallbackUrl = url
         }
         dispatchReadyFallback()
