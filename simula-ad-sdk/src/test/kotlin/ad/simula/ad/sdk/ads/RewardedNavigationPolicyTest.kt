@@ -20,22 +20,22 @@ class RewardedNavigationPolicyTest {
     }
 
     @Test
-    fun `renderer death fails open only after rewarded creative becomes visible`() {
+    fun `terminal creative failure fails open only after rewarded creative becomes visible`() {
         assertEquals(
             false,
-            rewardEarnedAfterRendererGone(creativeCommitted = false, candidate = false, retained = false),
+            rewardEarnedAfterCreativeFailure(creativeCommitted = false, candidate = false, retained = false),
         )
         assertEquals(
             true,
-            rewardEarnedAfterRendererGone(creativeCommitted = true, candidate = false, retained = false),
+            rewardEarnedAfterCreativeFailure(creativeCommitted = true, candidate = false, retained = false),
         )
         assertEquals(
             true,
-            rewardEarnedAfterRendererGone(creativeCommitted = false, candidate = true, retained = false),
+            rewardEarnedAfterCreativeFailure(creativeCommitted = false, candidate = true, retained = false),
         )
         assertEquals(
             true,
-            rewardEarnedAfterRendererGone(creativeCommitted = false, candidate = false, retained = true),
+            rewardEarnedAfterCreativeFailure(creativeCommitted = false, candidate = false, retained = true),
         )
     }
 

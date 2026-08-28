@@ -334,7 +334,7 @@ internal fun initialRewardEarned(
 
 internal fun monotonicRewardEarned(candidate: Boolean, retained: Boolean): Boolean = candidate || retained
 
-internal fun rewardEarnedAfterRendererGone(
+internal fun rewardEarnedAfterCreativeFailure(
     creativeCommitted: Boolean,
     candidate: Boolean,
     retained: Boolean,
@@ -480,7 +480,16 @@ private fun RewardedMinigame(
     var bridgeUnavailable by remember(presentation) {
         mutableStateOf(presentation.primaryCreativeUnavailable)
     }
-    fun markBridgeUnavailable() {
+    fun markBridgeUnavailable(preserveVisibleReward: Boolean = false) {
+        if (preserveVisibleReward) {
+            val earned = rewardEarnedAfterCreativeFailure(
+                creativeCommitted = presentation.creativeExposed,
+                candidate = rewardEarned,
+                retained = presentation.rewardEarned,
+            )
+            presentation.rewardEarned = earned
+            rewardEarned = earned
+        }
         presentation.automaticNavigationGate.clear()
         presentation.autoRedirectCoordinator.deactivate(autoRedirectScope)
         presentation.primaryCreativeUnavailable = true
@@ -821,7 +830,7 @@ private fun RewardedMinigame(
                                 mainFrameLoadFailed = true
                                 presentation.clearPrimaryFallback(fallbackOwner)
                                 runCatching { view?.visibility = View.INVISIBLE }
-                                markBridgeUnavailable()
+                                markBridgeUnavailable(preserveVisibleReward = true)
                             }
                         }
 
@@ -837,7 +846,7 @@ private fun RewardedMinigame(
                                 mainFrameLoadFailed = true
                                 presentation.clearPrimaryFallback(fallbackOwner)
                                 runCatching { view?.visibility = View.INVISIBLE }
-                                markBridgeUnavailable()
+                                markBridgeUnavailable(preserveVisibleReward = true)
                             }
                         }
 
@@ -857,14 +866,7 @@ private fun RewardedMinigame(
                                 view.visibility = View.INVISIBLE
                                 // Once content was visibly committed, renderer loss is SDK failure,
                                 // not an early user exit; fail open so the user keeps the reward.
-                                val earned = rewardEarnedAfterRendererGone(
-                                    creativeCommitted = presentation.creativeExposed,
-                                    candidate = rewardEarned,
-                                    retained = presentation.rewardEarned,
-                                )
-                                presentation.rewardEarned = earned
-                                rewardEarned = earned
-                                markBridgeUnavailable()
+                                markBridgeUnavailable(preserveVisibleReward = true)
                             }
                             return true
                         }
