@@ -761,6 +761,7 @@ private fun RewardedMinigame(
                                 // dead surface immediately and let the existing graceful failure path
                                 // complete the rewarded creative without exposing a black screen.
                                 rendererGone = true
+                                presentation.clearPrimaryFallback(fallbackOwner)
                                 view.visibility = View.INVISIBLE
                                 markBridgeUnavailable()
                             }

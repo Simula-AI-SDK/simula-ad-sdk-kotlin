@@ -1014,6 +1014,7 @@ private fun CreativeHtml(
                             // hardware surface cannot leave the fullscreen Activity black.
                             rendererGone = true
                             presentation.automaticNavigationGate.clear()
+                            presentation.clearPrimaryFallback(fallbackOwner)
                             view.visibility = View.INVISIBLE
                             runCatching(onBridgeUnavailable)
                         }
