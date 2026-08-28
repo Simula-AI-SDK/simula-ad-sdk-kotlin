@@ -329,6 +329,12 @@ internal fun initialRewardEarned(
 
 internal fun monotonicRewardEarned(candidate: Boolean, retained: Boolean): Boolean = candidate || retained
 
+internal fun rewardEarnedAfterRendererGone(
+    creativeCommitted: Boolean,
+    candidate: Boolean,
+    retained: Boolean,
+): Boolean = creativeCommitted || candidate || retained
+
 internal fun rewardedNavigationAction(
     isMainFrame: Boolean,
     hasGesture: Boolean,
@@ -457,6 +463,7 @@ private fun RewardedMinigame(
     // a WebView on its own, so a rewarded ad left open behind the home screen would keep running.
     // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
+    var creativeCommitted by remember { mutableStateOf(false) }
     var rendererGone by remember { mutableStateOf(false) }
     var bridgeReady by remember(presentation) { mutableStateOf(false) }
     var displayAdmitted by remember(presentation) { mutableStateOf(presentation.displayedReported) }
@@ -751,6 +758,11 @@ private fun RewardedMinigame(
                             BridgeWebViewInstaller.onPageStarted(view)
                         }
 
+                        override fun onPageCommitVisible(view: WebView?, url: String?) {
+                            super.onPageCommitVisible(view, url)
+                            if (view != null && view === creativeWebView) creativeCommitted = true
+                        }
+
                         override fun onRenderProcessGone(
                             view: WebView?,
                             detail: RenderProcessGoneDetail?,
@@ -763,6 +775,15 @@ private fun RewardedMinigame(
                                 rendererGone = true
                                 presentation.clearPrimaryFallback(fallbackOwner)
                                 view.visibility = View.INVISIBLE
+                                // Once content was visibly committed, renderer loss is SDK failure,
+                                // not an early user exit; fail open so the user keeps the reward.
+                                val earned = rewardEarnedAfterRendererGone(
+                                    creativeCommitted = creativeCommitted,
+                                    candidate = rewardEarned,
+                                    retained = presentation.rewardEarned,
+                                )
+                                presentation.rewardEarned = earned
+                                rewardEarned = earned
                                 markBridgeUnavailable()
                             }
                             return absorbed

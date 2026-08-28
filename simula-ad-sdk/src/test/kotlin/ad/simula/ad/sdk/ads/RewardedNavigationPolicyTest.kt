@@ -20,6 +20,26 @@ class RewardedNavigationPolicyTest {
     }
 
     @Test
+    fun `renderer death fails open only after rewarded creative becomes visible`() {
+        assertEquals(
+            false,
+            rewardEarnedAfterRendererGone(creativeCommitted = false, candidate = false, retained = false),
+        )
+        assertEquals(
+            true,
+            rewardEarnedAfterRendererGone(creativeCommitted = true, candidate = false, retained = false),
+        )
+        assertEquals(
+            true,
+            rewardEarnedAfterRendererGone(creativeCommitted = false, candidate = true, retained = false),
+        )
+        assertEquals(
+            true,
+            rewardEarnedAfterRendererGone(creativeCommitted = false, candidate = false, retained = true),
+        )
+    }
+
+    @Test
     fun `ordinary automatic redirects stay in WebView`() {
         listOf(
             "https://creative.example/game",
