@@ -28,8 +28,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.View
 import android.view.WindowManager
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -57,6 +61,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -160,6 +165,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     onClickHandoffFinished = p::clearClickHandoff,
                     autoRedirectCoordinator = p.autoRedirectCoordinator,
                     pendingClickHandoff = p::pendingClickHandoff,
+                    storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
                         val opened = CreativeCtaRouter.open(
@@ -194,6 +200,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                 ) { onClose ->
                     RewardedMinigame(
                         presentation = p,
+                        storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
                         recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
                         onFinish = { earned ->
                             p.rewardEarned = monotonicRewardEarned(earned, p.rewardEarned)
@@ -327,6 +334,19 @@ internal fun initialRewardEarned(
 
 internal fun monotonicRewardEarned(candidate: Boolean, retained: Boolean): Boolean = candidate || retained
 
+internal fun rewardEarnedAfterCreativeFailure(
+    everCreativeReady: Boolean,
+    candidate: Boolean,
+    retained: Boolean,
+): Boolean = everCreativeReady || candidate || retained
+
+internal fun rewardedDismissalDisplayAdmitted(
+    currentDisplayAdmitted: Boolean,
+    previouslyDisplayed: Boolean,
+): Boolean = currentDisplayAdmitted || previouslyDisplayed
+
+private const val REWARDED_CREATIVE_COMMIT_TIMEOUT_MS = 10_000L
+
 internal fun rewardedNavigationAction(
     isMainFrame: Boolean,
     hasGesture: Boolean,
@@ -362,6 +382,7 @@ internal fun rewardedNavigationAction(
 @Composable
 private fun RewardedMinigame(
     presentation: RewardedPresentation,
+    storeVisitPending: Boolean,
     recordStoreOpen: (String) -> Unit,
     onFinish: (earned: Boolean) -> Unit,
 ) {
@@ -455,14 +476,47 @@ private fun RewardedMinigame(
     // a WebView on its own, so a rewarded ad left open behind the home screen would keep running.
     // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
+    var creativeCommitted by remember(presentation) { mutableStateOf(false) }
+    var rendererGone by remember { mutableStateOf(false) }
+    var bridgeInstalled by remember(presentation) { mutableStateOf(false) }
+    var creativeCommitTimeout by remember { mutableStateOf<Runnable?>(null) }
+    val htmlReadiness = remember(presentation) { RewardedHtmlReadinessGate() }
+    val commitTimeoutBudget = remember(presentation) {
+        ForegroundTimeoutBudget(REWARDED_CREATIVE_COMMIT_TIMEOUT_MS)
+    }
     var bridgeReady by remember(presentation) { mutableStateOf(false) }
-    var displayAdmitted by remember(presentation) { mutableStateOf(presentation.displayedReported) }
-    var bridgeUnavailable by remember { mutableStateOf(false) }
-    LaunchedEffect(bridgeUnavailable) {
-        if (bridgeUnavailable) {
+    var displayAdmitted by remember(presentation) { mutableStateOf(false) }
+    var bridgeUnavailable by remember(presentation) {
+        mutableStateOf(presentation.primaryCreativeUnavailable)
+    }
+    fun markBridgeUnavailable() {
+        val earned = rewardEarnedAfterCreativeFailure(
+            everCreativeReady = presentation.everCreativeReady,
+            candidate = rewardEarned,
+            retained = presentation.rewardEarned,
+        )
+        presentation.rewardEarned = earned
+        rewardEarned = earned
+        presentation.automaticNavigationGate.clear()
+        presentation.autoRedirectCoordinator.deactivate(autoRedirectScope)
+        presentation.primaryCreativeUnavailable = true
+        bridgeUnavailable = true
+    }
+    var unavailableExitIssued by remember(presentation) { mutableStateOf(false) }
+    LaunchedEffect(bridgeUnavailable, clickHandoffPending, storeVisitPending) {
+        if (!bridgeUnavailable || clickHandoffPending) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            withFrameNanos { }
+            if (!shouldExitUnavailableCreative(
+                    creativeUnavailable = bridgeUnavailable,
+                    clickHandoffPending = clickHandoffPending,
+                    storeVisitPending = storeVisitPending,
+                )
+            ) return@repeatOnLifecycle
+            if (unavailableExitIssued) return@repeatOnLifecycle
+            unavailableExitIssued = true
             val earned = monotonicRewardEarned(rewardEarned, presentation.rewardEarned)
             rewardEarned = earned
-            presentation.automaticNavigationGate.clear()
             onFinish(earned)
         }
     }
@@ -487,16 +541,28 @@ private fun RewardedMinigame(
         var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE -> wv?.onPause()
+                Lifecycle.Event.ON_PAUSE -> {
+                    creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
+                    commitTimeoutBudget.pause(SystemClock.elapsedRealtime())
+                    if (!rendererGone) wv?.onPause()
+                }
                 Lifecycle.Event.ON_STOP -> wasStopped = true
                 Lifecycle.Event.ON_RESUME -> {
+                    if (rendererGone) return@LifecycleEventObserver
+                    creativeCommitTimeout?.takeIf { !creativeCommitted && !bridgeUnavailable }?.let { timeout ->
+                        clickHandoffHandler.removeCallbacks(timeout)
+                        clickHandoffHandler.postDelayed(
+                            timeout,
+                            commitTimeoutBudget.resume(SystemClock.elapsedRealtime()),
+                        )
+                    }
                     wv?.onResume()
                     routeAutomaticStoreNavigation()
                     if (wasStopped) {
                         wasStopped = false
                         // A hardware-accelerated WebView drops its draw functor on background; force the
                         // visibility transition that recreates it, else the creative returns black/blank.
-                        wv?.repaintOnNextFrame()
+                        wv?.repaintOnNextFrame { !rendererGone }
                     }
                 }
                 else -> Unit
@@ -651,7 +717,13 @@ private fun RewardedMinigame(
 
     // No early exit: Back does nothing until the reward is earned, then it closes (earned).
     BackHandler(enabled = true) {
-        if (canDismissFullscreen(rewardEarned, clickHandoffPending, displayAdmitted)) {
+        if (canDismissFullscreen(
+                rewardEarned,
+                clickHandoffPending,
+                rewardedDismissalDisplayAdmitted(displayAdmitted, presentation.displayedReported),
+                storeVisitPending,
+            )
+        ) {
             presentation.automaticNavigationGate.clear()
             onFinish(true)
         }
@@ -724,23 +796,160 @@ private fun RewardedMinigame(
         return true
     }
 
+    fun admitCreativeCommit(view: WebView?, qualified: Boolean) {
+        if (!qualified || view == null || view !== creativeWebView || rendererGone || bridgeUnavailable) return
+        creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
+        creativeCommitTimeout = null
+        commitTimeoutBudget.complete()
+        htmlReadiness.terminate()
+        creativeCommitted = true
+        presentation.everCreativeReady = true
+        if (bridgeInstalled && !bridgeReady) {
+            displayAdmitted = admitFullscreenDisplay(
+                alreadyReported = presentation.displayedReported,
+                markReported = { presentation.displayedReported = true },
+                notifyDisplayed = presentation.callbacks::onDisplayed,
+                enqueueShown = {
+                    AdBeaconManager.enqueue(
+                        presentation.impressionId,
+                        "shown",
+                        adFormat = "rewarded",
+                        telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
+                    )
+                },
+            )
+            bridgeReady = true
+        }
+    }
+
+    fun requestHtmlVisualFence(view: WebView?, qualified: Boolean) {
+        if (!qualified || view == null || view !== creativeWebView || rendererGone || bridgeUnavailable) return
+        val request = htmlReadiness.onPageReady() ?: return
+        runCatching {
+            view.postVisualStateCallback(
+                request,
+                object : WebView.VisualStateCallback() {
+                    override fun onComplete(requestId: Long) {
+                        admitCreativeCommit(
+                            view = view,
+                            qualified = htmlReadiness.acceptVisualState(requestId),
+                        )
+                    }
+                },
+            )
+        }.onFailure {
+            htmlReadiness.terminate()
+            if (creativeWebView === view) markBridgeUnavailable()
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        AndroidView(
+        if (!bridgeUnavailable) AndroidView(
             factory = { ctx ->
+                var realLoadArmed = false
+                var mainFrameLoadFailed = false
+                var bridgeMode = BridgeInjectionMode.UNAVAILABLE
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : CreativeTelemetryWebViewClient("rewarded") {
                         override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
                             super.onPageStarted(view, pageUrl, favicon) // starts the page-load timer
+                            if (creativeSource is RewardedCreativeSource.Html && view === creativeWebView) {
+                                htmlReadiness.onPageStarted()
+                            }
                             primaryCtaNavigation.onNavigationStarted(pageUrl, fallbackOwner)
                             if (CreativeCtaRouter.matchesKnownTrackingUrl(pageUrl, presentation.trackingUrl)) {
                                 presentation.automaticNavigationGate.markTrackerRequestedInWebView()
                             }
                             BridgeWebViewInstaller.onPageStarted(view)
+                        }
+
+                        override fun onPageCommitVisible(view: WebView?, url: String?) {
+                            super.onPageCommitVisible(view, url)
+                            admitCreativeCommit(
+                                view = view,
+                                qualified = isQualifiedRewardedCreativeCommit(
+                                    source = creativeSource,
+                                    loadArmed = realLoadArmed,
+                                    mainFrameFailed = mainFrameLoadFailed,
+                                    url = url,
+                                ),
+                            )
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            requestHtmlVisualFence(
+                                view = view,
+                                qualified = bridgeMode == BridgeInjectionMode.PAGE_START_FALLBACK &&
+                                    creativeSource is RewardedCreativeSource.Html &&
+                                    realLoadArmed &&
+                                    !mainFrameLoadFailed &&
+                                    url == "about:blank",
+                            )
+                        }
+
+                        override fun onReceivedError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            error: WebResourceError?,
+                        ) {
+                            super.onReceivedError(view, request, error)
+                            if (view === creativeWebView && request?.isForMainFrame == true) {
+                                creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
+                                creativeCommitTimeout = null
+                                commitTimeoutBudget.complete()
+                                htmlReadiness.terminate()
+                                mainFrameLoadFailed = true
+                                presentation.clearPrimaryFallback(fallbackOwner)
+                                runCatching { view?.visibility = View.INVISIBLE }
+                                markBridgeUnavailable()
+                            }
+                        }
+
+                        override fun onReceivedHttpError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            errorResponse: WebResourceResponse?,
+                        ) {
+                            super.onReceivedHttpError(view, request, errorResponse)
+                            if (view === creativeWebView && request?.isForMainFrame == true) {
+                                creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
+                                creativeCommitTimeout = null
+                                commitTimeoutBudget.complete()
+                                htmlReadiness.terminate()
+                                mainFrameLoadFailed = true
+                                presentation.clearPrimaryFallback(fallbackOwner)
+                                runCatching { view?.visibility = View.INVISIBLE }
+                                markBridgeUnavailable()
+                            }
+                        }
+
+                        override fun onRenderProcessGone(
+                            view: WebView?,
+                            detail: RenderProcessGoneDetail?,
+                        ): Boolean {
+                            runCatching { super.onRenderProcessGone(view, detail) }
+                            if (view != null && view === creativeWebView) {
+                                creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
+                                creativeCommitTimeout = null
+                                commitTimeoutBudget.complete()
+                                htmlReadiness.terminate()
+                                // A renderer-dead WebView cannot be resumed or repainted. Remove its
+                                // dead surface immediately and let the existing graceful failure path
+                                // complete the rewarded creative without exposing a black screen.
+                                rendererGone = true
+                                presentation.clearPrimaryFallback(fallbackOwner)
+                                view.visibility = View.INVISIBLE
+                                // Once content was visibly committed, renderer loss is SDK failure,
+                                // not an early user exit; fail open so the user keeps the reward.
+                                markBridgeUnavailable()
+                            }
+                            return true
                         }
 
                         override fun shouldOverrideUrlLoading(
@@ -785,39 +994,63 @@ private fun RewardedMinigame(
                     surface = "rewarded",
                 ).apply {
                     webChromeClient = CreativeTelemetryWebChromeClient("rewarded", SimulaAds.devMode)
-                    val injectionMode = BridgeWebViewInstaller.install(this, bridge) { url ->
-                        beginPrimaryCta(url)
-                    }
+                    val target = this
+                    val injectionMode = BridgeWebViewInstaller.install(
+                        webView = this,
+                        bridge = bridge,
+                        onTrustedCtaOpen = { url -> beginPrimaryCta(url) },
+                        onPageReady = {
+                            requestHtmlVisualFence(
+                                view = target,
+                                qualified = bridgeMode == BridgeInjectionMode.DOCUMENT_START &&
+                                    creativeSource is RewardedCreativeSource.Html &&
+                                    realLoadArmed &&
+                                    !mainFrameLoadFailed,
+                            )
+                        },
+                    )
+                    bridgeMode = injectionMode
                     if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
-                        post { if (creativeWebView === this) bridgeUnavailable = true }
+                        post { if (creativeWebView === this) markBridgeUnavailable() }
                     } else {
                         post {
-                            if (creativeWebView !== this) return@post
-                            displayAdmitted = admitFullscreenDisplay(
-                                alreadyReported = presentation.displayedReported,
-                                markReported = { presentation.displayedReported = true },
-                                notifyDisplayed = presentation.callbacks::onDisplayed,
-                                enqueueShown = {
-                                    AdBeaconManager.enqueue(
-                                        presentation.impressionId,
-                                        "shown",
-                                        adFormat = "rewarded",
-                                        telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
-                                    )
-                                },
+                            if (creativeWebView !== this || rendererGone || bridgeUnavailable) return@post
+                            bridgeInstalled = true
+                            admitCreativeCommit(this, creativeCommitted)
+                        }
+                        creativeWebView = this
+                        realLoadArmed = true
+                        val timeout = Runnable {
+                            if (creativeWebView === this && !creativeCommitted && !rendererGone && !bridgeUnavailable) {
+                                commitTimeoutBudget.complete()
+                                htmlReadiness.terminate()
+                                mainFrameLoadFailed = true
+                                presentation.clearPrimaryFallback(fallbackOwner)
+                                runCatching { visibility = View.INVISIBLE }
+                                markBridgeUnavailable()
+                            }
+                        }
+                        creativeCommitTimeout = timeout
+                        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                            clickHandoffHandler.postDelayed(
+                                timeout,
+                                commitTimeoutBudget.resume(SystemClock.elapsedRealtime()),
                             )
-                            bridgeReady = true
                         }
                         when (val source = creativeSource) {
                             is RewardedCreativeSource.Html -> {
                                 // Primary HTML stays opaque and never inherits iframe origin state.
-                                loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
+                                htmlReadiness.arm()
+                                runCatching {
+                                    loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
+                                }.onFailure { markBridgeUnavailable() }
                             }
-                            is RewardedCreativeSource.Iframe -> loadUrl(source.url)
-                            null -> Unit
+                            is RewardedCreativeSource.Iframe -> runCatching { loadUrl(source.url) }
+                                .onFailure { markBridgeUnavailable() }
+                            null -> markBridgeUnavailable()
                         }
                     }
-                    creativeWebView = this
+                    if (creativeWebView == null) creativeWebView = this
                 }
             },
             // The game canvas fills edge-to-edge: inset only vertically (status / nav / top
@@ -829,9 +1062,17 @@ private fun RewardedMinigame(
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
             onRelease = { webView ->
+                creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
+                creativeCommitTimeout = null
+                commitTimeoutBudget.complete()
+                htmlReadiness.terminate()
                 if (creativeWebView === webView) creativeWebView = null
                 presentation.clearPrimaryFallback(fallbackOwner)
-                BridgeWebViewInstaller.release(webView)
+                if (rendererGone) {
+                    BridgeWebViewInstaller.releaseAfterRendererGone(webView)
+                } else {
+                    BridgeWebViewInstaller.release(webView)
+                }
             },
         )
 
@@ -844,11 +1085,22 @@ private fun RewardedMinigame(
             position = close.position,
             progressBarColor = close.progressBarColor,
             isRewardCopy = true,
-            enabled = canDismissFullscreen(rewardEarned, clickHandoffPending, displayAdmitted),
+            enabled = canDismissFullscreen(
+                rewardEarned,
+                clickHandoffPending,
+                rewardedDismissalDisplayAdmitted(displayAdmitted, presentation.displayedReported),
+                storeVisitPending,
+            ),
             remaining = secondsLeft,
             progress = closeProgress.value,
             onClose = {
-                if (canDismissFullscreen(rewardEarned, clickHandoffPending, displayAdmitted)) {
+                if (canDismissFullscreen(
+                        rewardEarned,
+                        clickHandoffPending,
+                        rewardedDismissalDisplayAdmitted(displayAdmitted, presentation.displayedReported),
+                        storeVisitPending,
+                    )
+                ) {
                     presentation.automaticNavigationGate.clear()
                     onFinish(true)
                 }

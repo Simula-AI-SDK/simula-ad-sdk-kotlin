@@ -451,6 +451,28 @@ class ClickTrackingTest {
     }
 
     @Test
+    fun `renderer-dead primary owner never receives failed route fallback`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val activity = Any()
+        val deadOwner = Any()
+        val replacementOwner = Any()
+        val handoff = testHandoff("renderer-gone")
+        val calls = mutableListOf<String>()
+        state.attachActivity(activity)
+        state.bindNavigation(deadOwner, activity) { calls.add("dead:$it") }
+        state.onHandoffCreated(handoff)
+
+        state.unbindNavigation(deadOwner)
+        assertTrue(state.retainFallback("https://creative.example/fallback", activity))
+        state.onHandoffFinished(handoff)
+
+        assertTrue(calls.isEmpty())
+        assertTrue(state.hasRetainedFallback())
+        state.bindNavigation(replacementOwner, activity) { calls.add("replacement:$it") }
+        assertEquals(listOf("replacement:https://creative.example/fallback"), calls)
+    }
+
+    @Test
     fun `stale primary owner cannot clear replacement binding`() {
         val state = RetainedPrimaryCtaNavigationState<Any>()
         val activity = Any()

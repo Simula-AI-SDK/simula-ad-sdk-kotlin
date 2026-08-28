@@ -36,7 +36,9 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.View
 import android.view.WindowManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -78,6 +80,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -194,6 +197,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     onClickHandoffFinished = p::clearClickHandoff,
                     autoRedirectCoordinator = p.autoRedirectCoordinator,
                     pendingClickHandoff = p::pendingClickHandoff,
+                    storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
                         val opened = CreativeCtaRouter.open(
@@ -228,6 +232,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                 ) { onClose ->
                     CreativeInterstitial(
                         presentation = p,
+                        storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
                         onFinish = {
                             // CLOSED is deferred to finishAd (after the last fallback screen), so
                             // closing the playable alone doesn't fire the publisher close callback.
@@ -367,6 +372,7 @@ private fun gateAlreadyElapsed(p: InterstitialPresentation, total: Duration): Bo
 @Composable
 private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
+    storeVisitPending: Boolean,
     onFinish: () -> Unit,
     recordStoreOpen: (String) -> Unit,
     openDestination: (SimulaApiClient.AdLoadResult) -> Boolean,
@@ -413,6 +419,9 @@ private fun CreativeInterstitial(
     var clickHandoffPending by remember(presentation) {
         mutableStateOf(presentation.pendingClickHandoff() != null)
     }
+    var bridgeUnavailable by remember(presentation) {
+        mutableStateOf(presentation.primaryCreativeUnavailable)
+    }
     DisposableEffect(presentation) {
         val subscription = presentation.pendingClickHandoff()?.addResultListener {
             clickHandoffPending = false
@@ -423,6 +432,28 @@ private fun CreativeInterstitial(
     DisposableEffect(presentation.autoRedirectCoordinator, autoRedirectScope) {
         presentation.autoRedirectCoordinator.activate(autoRedirectScope)
         onDispose { presentation.autoRedirectCoordinator.deactivate(autoRedirectScope) }
+    }
+    fun markBridgeUnavailable() {
+        presentation.automaticNavigationGate.clear()
+        presentation.autoRedirectCoordinator.deactivate(autoRedirectScope)
+        presentation.primaryCreativeUnavailable = true
+        bridgeUnavailable = true
+    }
+    var unavailableExitIssued by remember(presentation) { mutableStateOf(false) }
+    LaunchedEffect(bridgeUnavailable, clickHandoffPending, storeVisitPending) {
+        if (!bridgeUnavailable || clickHandoffPending) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            withFrameNanos { }
+            if (shouldExitUnavailableCreative(
+                    creativeUnavailable = bridgeUnavailable,
+                    clickHandoffPending = clickHandoffPending,
+                    storeVisitPending = storeVisitPending,
+                ) && !unavailableExitIssued
+            ) {
+                unavailableExitIssued = true
+                runCatching(onFinish)
+            }
+        }
     }
     // auto_store_redirect: open the advertiser store once (no user tap). PLAYABLE_END fires when the
     // close button appears (below); END_SCREEN_1/2_OPEN fire when the creative navigates to the
@@ -608,7 +639,7 @@ private fun CreativeInterstitial(
     // FallbackAdOverlay; this one is only composed during the primary creative.) Mirrors
     // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
     BackHandler(enabled = true) {
-        if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) {
+        if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending)) {
             presentation.automaticNavigationGate.clear()
             onFinish()
         }
@@ -620,12 +651,12 @@ private fun CreativeInterstitial(
             .background(Color.Black),
     ) {
         // Interstitial is rendered_html-only; iframe_url is intentionally unsupported.
-        if (html != null) {
+        if (html != null && !bridgeUnavailable) {
             CreativeHtml(
                 html = html,
                 bridge = bridge,
                 presentation = presentation,
-                onBridgeUnavailable = onFinish,
+                onBridgeUnavailable = ::markBridgeUnavailable,
                 onBridgeReady = {
                     displayAdmitted = admitFullscreenDisplay(
                         alreadyReported = presentation.displayedReported,
@@ -733,11 +764,11 @@ private fun CreativeInterstitial(
             position = close.position,
             progressBarColor = close.progressBarColor,
             isRewardCopy = isRewardCopy,
-            enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted),
+            enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending),
             remaining = closeRemaining,
             progress = closeProgress.value,
             onClose = {
-                if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted)) {
+                if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending)) {
                     presentation.automaticNavigationGate.clear()
                     onFinish()
                 }
@@ -916,6 +947,7 @@ private fun CreativeHtml(
     modifier: Modifier = Modifier,
 ) {
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
+    var rendererGone by remember { mutableStateOf(false) }
     val primaryCtaNavigation = presentation.primaryCtaNavigation
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaInterstitialActivity
@@ -956,16 +988,17 @@ private fun CreativeHtml(
         var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE -> wv?.onPause()
+                Lifecycle.Event.ON_PAUSE -> if (!rendererGone) wv?.onPause()
                 Lifecycle.Event.ON_STOP -> wasStopped = true
                 Lifecycle.Event.ON_RESUME -> {
+                    if (rendererGone) return@LifecycleEventObserver
                     wv?.onResume()
                     onAutomaticNavigationReady()
                     if (wasStopped) {
                         wasStopped = false
                         // A hardware-accelerated WebView drops its draw functor on background; force the
                         // visibility transition that recreates it, else the creative returns black/blank.
-                        wv?.repaintOnNextFrame()
+                        wv?.repaintOnNextFrame { !rendererGone }
                     }
                 }
                 else -> Unit
@@ -986,6 +1019,24 @@ private fun CreativeHtml(
                             presentation.automaticNavigationGate.markTrackerRequestedInWebView()
                         }
                         BridgeWebViewInstaller.onPageStarted(view)
+                    }
+
+                    override fun onRenderProcessGone(
+                        view: WebView?,
+                        detail: RenderProcessGoneDetail?,
+                    ): Boolean {
+                        runCatching { super.onRenderProcessGone(view, detail) }
+                        if (view != null && view === creativeWebView) {
+                            // Android documents this WebView as permanently unusable. Hide it before
+                            // advancing through the existing unavailable-creative path so its dead
+                            // hardware surface cannot leave the fullscreen Activity black.
+                            rendererGone = true
+                            presentation.automaticNavigationGate.clear()
+                            presentation.clearPrimaryFallback(fallbackOwner)
+                            view.visibility = View.INVISIBLE
+                            runCatching(onBridgeUnavailable)
+                        }
+                        return true
                     }
 
                     override fun shouldOverrideUrlLoading(
@@ -1033,9 +1084,11 @@ private fun CreativeHtml(
                 surface = "interstitial",
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
-                val injectionMode = BridgeWebViewInstaller.install(this, bridge) { url ->
-                    handlePrimaryCta(url, this)
-                }
+                val injectionMode = BridgeWebViewInstaller.install(
+                    webView = this,
+                    bridge = bridge,
+                    onTrustedCtaOpen = { url -> handlePrimaryCta(url, this) },
+                )
                 if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
                     post { if (creativeWebView === this) onBridgeUnavailable() }
                 } else {
@@ -1049,7 +1102,11 @@ private fun CreativeHtml(
         onRelease = { webView ->
             if (creativeWebView === webView) creativeWebView = null
             presentation.clearPrimaryFallback(fallbackOwner)
-            BridgeWebViewInstaller.release(webView)
+            if (rendererGone) {
+                BridgeWebViewInstaller.releaseAfterRendererGone(webView)
+            } else {
+                BridgeWebViewInstaller.release(webView)
+            }
         },
     )
 }

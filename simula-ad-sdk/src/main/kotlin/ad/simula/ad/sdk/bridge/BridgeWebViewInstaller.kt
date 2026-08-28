@@ -313,6 +313,7 @@ ${trustedCtaRelaySource(activationNonce)}
         webView: WebView,
         bridge: CreativeBridge,
         onTrustedCtaOpen: ((String) -> Unit)? = null,
+        onPageReady: ((String) -> Unit)? = null,
     ): BridgeInjectionMode {
         if (!uninstall(webView)) {
             Telemetry.recordError(signature = "bridge:stale_wiring_cleanup_failed")
@@ -324,6 +325,7 @@ ${trustedCtaRelaySource(activationNonce)}
             audioObserver = CreativeAudioStateObserver(webView),
             activationNonce = onTrustedCtaOpen?.let { UUID.randomUUID().toString() },
             onTrustedCtaOpen = onTrustedCtaOpen,
+            onPageReady = onPageReady,
         )
         installations[webView] = installation
 
@@ -343,6 +345,7 @@ ${trustedCtaRelaySource(activationNonce)}
                     webView.post {
                         if (installations[webView] === installation) {
                             installation.audioObserver.onPageReady(pageId)
+                            runCatching { installation.onPageReady?.invoke(pageId) }
                         }
                     }
                     return
@@ -477,6 +480,15 @@ ${trustedCtaRelaySource(activationNonce)}
         return observerClosed && interfaceRemoved && ctaRemoved && coreRemoved
     }
 
+    /** Drop native bridge ownership after renderer death without calling into the dead WebView. */
+    fun uninstallAfterRendererGone(webView: WebView) {
+        installations.remove(webView)?.let { installation ->
+            installation.active = false
+            runCatching { installation.audioObserver.close() }
+        }
+        scripts.remove(webView)
+    }
+
     /** Tear down presentation-scoped wiring before returning the view to the shared pool. */
     fun release(webView: WebView) {
         cleanupBeforePooling(
@@ -484,6 +496,11 @@ ${trustedCtaRelaySource(activationNonce)}
             release = { WebViewPool.release(webView) },
             discard = { WebViewPool.discard(webView) },
         )
+    }
+
+    fun releaseAfterRendererGone(webView: WebView) {
+        runCatching { uninstallAfterRendererGone(webView) }
+        WebViewPool.discardAfterRendererGone(webView)
     }
 }
 
@@ -506,6 +523,7 @@ private data class BridgeInstallation(
     val audioObserver: CreativeAudioStateObserver,
     val activationNonce: String?,
     val onTrustedCtaOpen: ((String) -> Unit)?,
+    val onPageReady: ((String) -> Unit)?,
 ) {
     var injectionMode: BridgeInjectionMode = BridgeInjectionMode.UNAVAILABLE
     var coreDocumentStartInstalled: Boolean = false

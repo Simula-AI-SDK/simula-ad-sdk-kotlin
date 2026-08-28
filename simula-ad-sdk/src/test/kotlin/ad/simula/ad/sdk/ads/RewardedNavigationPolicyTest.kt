@@ -20,6 +20,33 @@ class RewardedNavigationPolicyTest {
     }
 
     @Test
+    fun `terminal creative failure fails open only after rewarded creative becomes visible`() {
+        assertEquals(
+            false,
+            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = false, retained = false),
+        )
+        assertEquals(
+            true,
+            rewardEarnedAfterCreativeFailure(everCreativeReady = true, candidate = false, retained = false),
+        )
+        assertEquals(
+            true,
+            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = true, retained = false),
+        )
+        assertEquals(
+            true,
+            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = false, retained = true),
+        )
+    }
+
+    @Test
+    fun `rotation retains dismissal admission without admitting replacement display`() {
+        assertEquals(false, rewardedDismissalDisplayAdmitted(false, previouslyDisplayed = false))
+        assertEquals(true, rewardedDismissalDisplayAdmitted(false, previouslyDisplayed = true))
+        assertEquals(true, rewardedDismissalDisplayAdmitted(true, previouslyDisplayed = false))
+    }
+
+    @Test
     fun `ordinary automatic redirects stay in WebView`() {
         listOf(
             "https://creative.example/game",

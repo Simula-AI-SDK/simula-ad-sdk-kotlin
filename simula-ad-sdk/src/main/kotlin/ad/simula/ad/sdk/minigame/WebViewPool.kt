@@ -28,6 +28,9 @@ private const val RESET_TIMEOUT_MS = 2_000L
 private const val RESET_URL_PREFIX = "https://sdk.simula.invalid/webview-reset"
 private const val RESET_HTML = "<html><body></body></html>"
 
+internal fun isWebViewPoolResetUrl(url: String?): Boolean =
+    url?.startsWith(RESET_URL_PREFIX) == true
+
 /**
  * Prewarms and recycles [WebView] instances so the game / post-game ad iframe
  * opens without paying the cold chromium renderer-process startup on the
@@ -206,6 +209,13 @@ internal object WebViewPool {
         (webView.context as? MutableContextWrapper)?.let { wrapper ->
             runCatching { wrapper.baseContext = wrapper.applicationContext }
         }
+        runCatching { webView.destroy() }
+    }
+
+    /** Destroy a renderer-dead view without invoking WebView loading/reset APIs. */
+    @MainThread
+    internal fun discardAfterRendererGone(webView: WebView) {
+        runCatching { (webView.parent as? ViewGroup)?.removeView(webView) }
         runCatching { webView.destroy() }
     }
 
