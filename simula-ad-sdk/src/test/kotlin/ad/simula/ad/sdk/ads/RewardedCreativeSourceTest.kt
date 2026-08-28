@@ -53,5 +53,10 @@ class RewardedCreativeSourceTest {
         assertTrue(isQualifiedRewardedCreativeCommit(iframe, true, false, "https://creative.example/ready"))
         val preview = RewardedCreativeSource.Iframe("data:text/html,<html>preview</html>")
         assertTrue(isQualifiedRewardedCreativeCommit(preview, true, false, preview.url))
+
+        assertFalse(isQualifiedRewardedHtmlVisualState(html, loadArmed = false, mainFrameFailed = false))
+        assertFalse(isQualifiedRewardedHtmlVisualState(html, loadArmed = true, mainFrameFailed = true))
+        assertTrue(isQualifiedRewardedHtmlVisualState(html, loadArmed = true, mainFrameFailed = false))
+        assertFalse(isQualifiedRewardedHtmlVisualState(iframe, loadArmed = true, mainFrameFailed = false))
     }
 }

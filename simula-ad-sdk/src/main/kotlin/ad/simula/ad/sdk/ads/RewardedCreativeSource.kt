@@ -37,3 +37,9 @@ internal fun isQualifiedRewardedCreativeCommit(
         null -> false
     }
 }
+
+internal fun isQualifiedRewardedHtmlVisualState(
+    source: RewardedCreativeSource?,
+    loadArmed: Boolean,
+    mainFrameFailed: Boolean,
+): Boolean = source is RewardedCreativeSource.Html && loadArmed && !mainFrameFailed

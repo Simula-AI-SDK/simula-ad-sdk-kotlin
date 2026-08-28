@@ -480,16 +480,14 @@ private fun RewardedMinigame(
     var bridgeUnavailable by remember(presentation) {
         mutableStateOf(presentation.primaryCreativeUnavailable)
     }
-    fun markBridgeUnavailable(preserveVisibleReward: Boolean = false) {
-        if (preserveVisibleReward) {
-            val earned = rewardEarnedAfterCreativeFailure(
-                creativeCommitted = presentation.creativeExposed,
-                candidate = rewardEarned,
-                retained = presentation.rewardEarned,
-            )
-            presentation.rewardEarned = earned
-            rewardEarned = earned
-        }
+    fun markBridgeUnavailable() {
+        val earned = rewardEarnedAfterCreativeFailure(
+            creativeCommitted = presentation.creativeExposed,
+            candidate = rewardEarned,
+            retained = presentation.rewardEarned,
+        )
+        presentation.rewardEarned = earned
+        rewardEarned = earned
         presentation.automaticNavigationGate.clear()
         presentation.autoRedirectCoordinator.deactivate(autoRedirectScope)
         presentation.primaryCreativeUnavailable = true
@@ -779,6 +777,15 @@ private fun RewardedMinigame(
         return true
     }
 
+    fun admitCreativeCommit(view: WebView?, qualified: Boolean) {
+        if (!qualified || view == null || view !== creativeWebView || rendererGone || bridgeUnavailable) return
+        creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
+        creativeCommitTimeout = null
+        creativeCommitted = true
+        presentation.creativeExposed = true
+        if (bridgeInstalled) bridgeReady = true
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -802,20 +809,15 @@ private fun RewardedMinigame(
 
                         override fun onPageCommitVisible(view: WebView?, url: String?) {
                             super.onPageCommitVisible(view, url)
-                            if (view != null && view === creativeWebView && !rendererGone &&
-                                isQualifiedRewardedCreativeCommit(
+                            admitCreativeCommit(
+                                view = view,
+                                qualified = isQualifiedRewardedCreativeCommit(
                                     source = creativeSource,
                                     loadArmed = realLoadArmed,
                                     mainFrameFailed = mainFrameLoadFailed,
                                     url = url,
-                                )
-                            ) {
-                                creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
-                                creativeCommitTimeout = null
-                                creativeCommitted = true
-                                presentation.creativeExposed = true
-                                if (bridgeInstalled) bridgeReady = true
-                            }
+                                ),
+                            )
                         }
 
                         override fun onReceivedError(
@@ -830,7 +832,7 @@ private fun RewardedMinigame(
                                 mainFrameLoadFailed = true
                                 presentation.clearPrimaryFallback(fallbackOwner)
                                 runCatching { view?.visibility = View.INVISIBLE }
-                                markBridgeUnavailable(preserveVisibleReward = true)
+                                markBridgeUnavailable()
                             }
                         }
 
@@ -846,7 +848,7 @@ private fun RewardedMinigame(
                                 mainFrameLoadFailed = true
                                 presentation.clearPrimaryFallback(fallbackOwner)
                                 runCatching { view?.visibility = View.INVISIBLE }
-                                markBridgeUnavailable(preserveVisibleReward = true)
+                                markBridgeUnavailable()
                             }
                         }
 
@@ -866,7 +868,7 @@ private fun RewardedMinigame(
                                 view.visibility = View.INVISIBLE
                                 // Once content was visibly committed, renderer loss is SDK failure,
                                 // not an early user exit; fail open so the user keeps the reward.
-                                markBridgeUnavailable(preserveVisibleReward = true)
+                                markBridgeUnavailable()
                             }
                             return true
                         }
@@ -955,6 +957,24 @@ private fun RewardedMinigame(
                             is RewardedCreativeSource.Html -> {
                                 // Primary HTML stays opaque and never inherits iframe origin state.
                                 loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
+                                val target = this
+                                runCatching {
+                                    postVisualStateCallback(
+                                        System.nanoTime(),
+                                        object : WebView.VisualStateCallback() {
+                                            override fun onComplete(requestId: Long) {
+                                                admitCreativeCommit(
+                                                    view = target,
+                                                    qualified = isQualifiedRewardedHtmlVisualState(
+                                                        source = creativeSource,
+                                                        loadArmed = realLoadArmed,
+                                                        mainFrameFailed = mainFrameLoadFailed,
+                                                    ),
+                                                )
+                                            }
+                                        },
+                                    )
+                                }
                             }
                             is RewardedCreativeSource.Iframe -> loadUrl(source.url)
                             null -> Unit
