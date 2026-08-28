@@ -457,6 +457,7 @@ private fun RewardedMinigame(
     // a WebView on its own, so a rewarded ad left open behind the home screen would keep running.
     // Resume when the host returns to the foreground. (The native-ad path pauses off-screen views too.)
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
+    var rendererGone by remember { mutableStateOf(false) }
     var bridgeReady by remember(presentation) { mutableStateOf(false) }
     var displayAdmitted by remember(presentation) { mutableStateOf(presentation.displayedReported) }
     var bridgeUnavailable by remember { mutableStateOf(false) }
@@ -492,13 +493,14 @@ private fun RewardedMinigame(
                 Lifecycle.Event.ON_PAUSE -> wv?.onPause()
                 Lifecycle.Event.ON_STOP -> wasStopped = true
                 Lifecycle.Event.ON_RESUME -> {
+                    if (rendererGone) return@LifecycleEventObserver
                     wv?.onResume()
                     routeAutomaticStoreNavigation()
                     if (wasStopped) {
                         wasStopped = false
                         // A hardware-accelerated WebView drops its draw functor on background; force the
                         // visibility transition that recreates it, else the creative returns black/blank.
-                        wv?.repaintOnNextFrame()
+                        wv?.repaintOnNextFrame { !rendererGone }
                     }
                 }
                 else -> Unit
@@ -754,6 +756,8 @@ private fun RewardedMinigame(
                                 // A renderer-dead WebView cannot be resumed or repainted. Remove its
                                 // dead surface immediately and let the existing graceful failure path
                                 // complete the rewarded creative without exposing a black screen.
+                                rendererGone = true
+                                presentation.automaticNavigationGate.clear()
                                 view.visibility = View.INVISIBLE
                                 bridgeUnavailable = true
                             }

@@ -918,6 +918,7 @@ private fun CreativeHtml(
     modifier: Modifier = Modifier,
 ) {
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
+    var rendererGone by remember { mutableStateOf(false) }
     val primaryCtaNavigation = presentation.primaryCtaNavigation
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaInterstitialActivity
@@ -961,13 +962,14 @@ private fun CreativeHtml(
                 Lifecycle.Event.ON_PAUSE -> wv?.onPause()
                 Lifecycle.Event.ON_STOP -> wasStopped = true
                 Lifecycle.Event.ON_RESUME -> {
+                    if (rendererGone) return@LifecycleEventObserver
                     wv?.onResume()
                     onAutomaticNavigationReady()
                     if (wasStopped) {
                         wasStopped = false
                         // A hardware-accelerated WebView drops its draw functor on background; force the
                         // visibility transition that recreates it, else the creative returns black/blank.
-                        wv?.repaintOnNextFrame()
+                        wv?.repaintOnNextFrame { !rendererGone }
                     }
                 }
                 else -> Unit
@@ -999,6 +1001,8 @@ private fun CreativeHtml(
                             // Android documents this WebView as permanently unusable. Hide it before
                             // advancing through the existing unavailable-creative path so its dead
                             // hardware surface cannot leave the fullscreen Activity black.
+                            rendererGone = true
+                            presentation.automaticNavigationGate.clear()
                             view.visibility = View.INVISIBLE
                             runCatching(onBridgeUnavailable)
                         }

@@ -19,12 +19,14 @@ import androidx.annotation.MainThread
  * hidden for at most one frame, showing whatever (transparent) background is behind it — never
  * black — in the meantime.
  *
- * Call from the main thread (lifecycle observers / Compose effects).
+ * Call from the main thread (lifecycle observers / Compose effects). [shouldReveal] lets a terminal
+ * renderer-death callback cancel a reveal that was already queued for the next frame.
  */
 @MainThread
-internal fun WebView.repaintOnNextFrame() {
+internal fun WebView.repaintOnNextFrame(shouldReveal: () -> Boolean = { true }) {
     visibility = View.INVISIBLE
     val reveal = Runnable {
+        if (!runCatching(shouldReveal).getOrDefault(false)) return@Runnable
         visibility = View.VISIBLE
         invalidate()
     }
