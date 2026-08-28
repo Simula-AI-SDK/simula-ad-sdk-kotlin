@@ -455,6 +455,25 @@ class ClickTrackingTest {
     }
 
     @Test
+    fun `successful retry invalidates an older failed route fallback permit`() {
+        val state = RetainedPrimaryCtaNavigationState<Any>()
+        val activity = Any()
+        val owner = Any()
+        val fallbackUrl = "https://creative.example/failed-route"
+        val handoff = testHandoff("failed")
+        state.attachActivity(activity)
+        state.onHandoffCreated(handoff)
+        assertTrue(state.retainFallback(fallbackUrl, activity))
+        assertTrue(state.bindNavigation(owner, activity) { true })
+        state.onHandoffFinished(handoff)
+
+        state.lockAfterExternalOpen()
+
+        assertFalse(state.hasRetainedFallback())
+        assertEquals(true, state.navigationOverride(fallbackUrl, true, false, owner))
+    }
+
+    @Test
     fun `failed primary route waits for replacement owner and drains exactly once`() {
         val state = RetainedPrimaryCtaNavigationState<Any>()
         val oldActivity = Any()

@@ -547,7 +547,11 @@ internal class RetainedPrimaryCtaNavigationState<T : Any> {
     /** Keep a creative that already opened externally from replacing itself with a delayed fallback. */
     @Synchronized
     fun lockAfterExternalOpen() {
-        if (!cleared) creativeNavigationLocked = true
+        if (cleared) return
+        creativeNavigationLocked = true
+        pendingFallbackUrl = null
+        activeDelivery = null
+        deliveryRevision++
     }
 
     @Synchronized
