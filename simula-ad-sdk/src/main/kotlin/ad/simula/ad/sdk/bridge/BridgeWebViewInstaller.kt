@@ -313,6 +313,7 @@ ${trustedCtaRelaySource(activationNonce)}
         webView: WebView,
         bridge: CreativeBridge,
         onTrustedCtaOpen: ((String) -> Unit)? = null,
+        onPageReady: ((String) -> Unit)? = null,
     ): BridgeInjectionMode {
         if (!uninstall(webView)) {
             Telemetry.recordError(signature = "bridge:stale_wiring_cleanup_failed")
@@ -324,6 +325,7 @@ ${trustedCtaRelaySource(activationNonce)}
             audioObserver = CreativeAudioStateObserver(webView),
             activationNonce = onTrustedCtaOpen?.let { UUID.randomUUID().toString() },
             onTrustedCtaOpen = onTrustedCtaOpen,
+            onPageReady = onPageReady,
         )
         installations[webView] = installation
 
@@ -343,6 +345,7 @@ ${trustedCtaRelaySource(activationNonce)}
                     webView.post {
                         if (installations[webView] === installation) {
                             installation.audioObserver.onPageReady(pageId)
+                            runCatching { installation.onPageReady?.invoke(pageId) }
                         }
                     }
                     return
@@ -520,6 +523,7 @@ private data class BridgeInstallation(
     val audioObserver: CreativeAudioStateObserver,
     val activationNonce: String?,
     val onTrustedCtaOpen: ((String) -> Unit)?,
+    val onPageReady: ((String) -> Unit)?,
 ) {
     var injectionMode: BridgeInjectionMode = BridgeInjectionMode.UNAVAILABLE
     var coreDocumentStartInstalled: Boolean = false

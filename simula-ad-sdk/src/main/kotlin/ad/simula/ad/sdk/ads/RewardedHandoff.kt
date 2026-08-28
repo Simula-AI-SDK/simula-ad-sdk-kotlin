@@ -185,7 +185,7 @@ internal class RewardedPresentation(
     var rewardEarned = false
 
     /** Sticky evidence that this serve committed its intended creative at least once. */
-    var creativeExposed = false
+    var everCreativeReady = false
 
     /**
      * Foreground-only accumulated play time, in milliseconds. Time accrues only while

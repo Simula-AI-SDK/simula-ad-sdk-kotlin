@@ -335,10 +335,10 @@ internal fun initialRewardEarned(
 internal fun monotonicRewardEarned(candidate: Boolean, retained: Boolean): Boolean = candidate || retained
 
 internal fun rewardEarnedAfterCreativeFailure(
-    creativeCommitted: Boolean,
+    everCreativeReady: Boolean,
     candidate: Boolean,
     retained: Boolean,
-): Boolean = creativeCommitted || candidate || retained
+): Boolean = everCreativeReady || candidate || retained
 
 private const val REWARDED_CREATIVE_COMMIT_TIMEOUT_MS = 10_000L
 
@@ -475,14 +475,18 @@ private fun RewardedMinigame(
     var rendererGone by remember { mutableStateOf(false) }
     var bridgeInstalled by remember(presentation) { mutableStateOf(false) }
     var creativeCommitTimeout by remember { mutableStateOf<Runnable?>(null) }
+    val htmlReadiness = remember(presentation) { RewardedHtmlReadinessGate() }
+    val commitTimeoutBudget = remember(presentation) {
+        ForegroundTimeoutBudget(REWARDED_CREATIVE_COMMIT_TIMEOUT_MS)
+    }
     var bridgeReady by remember(presentation) { mutableStateOf(false) }
-    var displayAdmitted by remember(presentation) { mutableStateOf(presentation.displayedReported) }
+    var displayAdmitted by remember(presentation) { mutableStateOf(false) }
     var bridgeUnavailable by remember(presentation) {
         mutableStateOf(presentation.primaryCreativeUnavailable)
     }
     fun markBridgeUnavailable() {
         val earned = rewardEarnedAfterCreativeFailure(
-            creativeCommitted = presentation.creativeExposed,
+            everCreativeReady = presentation.everCreativeReady,
             candidate = rewardEarned,
             retained = presentation.rewardEarned,
         )
@@ -534,6 +538,7 @@ private fun RewardedMinigame(
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> {
                     creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
+                    commitTimeoutBudget.pause(SystemClock.elapsedRealtime())
                     if (!rendererGone) wv?.onPause()
                 }
                 Lifecycle.Event.ON_STOP -> wasStopped = true
@@ -541,7 +546,10 @@ private fun RewardedMinigame(
                     if (rendererGone) return@LifecycleEventObserver
                     creativeCommitTimeout?.takeIf { !creativeCommitted && !bridgeUnavailable }?.let { timeout ->
                         clickHandoffHandler.removeCallbacks(timeout)
-                        clickHandoffHandler.postDelayed(timeout, REWARDED_CREATIVE_COMMIT_TIMEOUT_MS)
+                        clickHandoffHandler.postDelayed(
+                            timeout,
+                            commitTimeoutBudget.resume(SystemClock.elapsedRealtime()),
+                        )
                     }
                     wv?.onResume()
                     routeAutomaticStoreNavigation()
@@ -781,9 +789,47 @@ private fun RewardedMinigame(
         if (!qualified || view == null || view !== creativeWebView || rendererGone || bridgeUnavailable) return
         creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
         creativeCommitTimeout = null
+        commitTimeoutBudget.complete()
+        htmlReadiness.terminate()
         creativeCommitted = true
-        presentation.creativeExposed = true
-        if (bridgeInstalled) bridgeReady = true
+        presentation.everCreativeReady = true
+        if (bridgeInstalled && !bridgeReady) {
+            displayAdmitted = admitFullscreenDisplay(
+                alreadyReported = presentation.displayedReported,
+                markReported = { presentation.displayedReported = true },
+                notifyDisplayed = presentation.callbacks::onDisplayed,
+                enqueueShown = {
+                    AdBeaconManager.enqueue(
+                        presentation.impressionId,
+                        "shown",
+                        adFormat = "rewarded",
+                        telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
+                    )
+                },
+            )
+            bridgeReady = true
+        }
+    }
+
+    fun requestHtmlVisualFence(view: WebView?, qualified: Boolean) {
+        if (!qualified || view == null || view !== creativeWebView || rendererGone || bridgeUnavailable) return
+        val request = htmlReadiness.onPageReady() ?: return
+        runCatching {
+            view.postVisualStateCallback(
+                request,
+                object : WebView.VisualStateCallback() {
+                    override fun onComplete(requestId: Long) {
+                        admitCreativeCommit(
+                            view = view,
+                            qualified = htmlReadiness.acceptVisualState(requestId),
+                        )
+                    }
+                },
+            )
+        }.onFailure {
+            htmlReadiness.terminate()
+            if (creativeWebView === view) markBridgeUnavailable()
+        }
     }
 
     Box(
@@ -795,11 +841,15 @@ private fun RewardedMinigame(
             factory = { ctx ->
                 var realLoadArmed = false
                 var mainFrameLoadFailed = false
+                var bridgeMode = BridgeInjectionMode.UNAVAILABLE
                 WebViewPool.acquire(
                     context = ctx,
                     client = object : CreativeTelemetryWebViewClient("rewarded") {
                         override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
                             super.onPageStarted(view, pageUrl, favicon) // starts the page-load timer
+                            if (creativeSource is RewardedCreativeSource.Html && view === creativeWebView) {
+                                htmlReadiness.onPageStarted()
+                            }
                             primaryCtaNavigation.onNavigationStarted(pageUrl, fallbackOwner)
                             if (CreativeCtaRouter.matchesKnownTrackingUrl(pageUrl, presentation.trackingUrl)) {
                                 presentation.automaticNavigationGate.markTrackerRequestedInWebView()
@@ -820,6 +870,18 @@ private fun RewardedMinigame(
                             )
                         }
 
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            requestHtmlVisualFence(
+                                view = view,
+                                qualified = bridgeMode == BridgeInjectionMode.PAGE_START_FALLBACK &&
+                                    creativeSource is RewardedCreativeSource.Html &&
+                                    realLoadArmed &&
+                                    !mainFrameLoadFailed &&
+                                    url == "about:blank",
+                            )
+                        }
+
                         override fun onReceivedError(
                             view: WebView?,
                             request: WebResourceRequest?,
@@ -829,6 +891,8 @@ private fun RewardedMinigame(
                             if (view === creativeWebView && request?.isForMainFrame == true) {
                                 creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
                                 creativeCommitTimeout = null
+                                commitTimeoutBudget.complete()
+                                htmlReadiness.terminate()
                                 mainFrameLoadFailed = true
                                 presentation.clearPrimaryFallback(fallbackOwner)
                                 runCatching { view?.visibility = View.INVISIBLE }
@@ -845,6 +909,8 @@ private fun RewardedMinigame(
                             if (view === creativeWebView && request?.isForMainFrame == true) {
                                 creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
                                 creativeCommitTimeout = null
+                                commitTimeoutBudget.complete()
+                                htmlReadiness.terminate()
                                 mainFrameLoadFailed = true
                                 presentation.clearPrimaryFallback(fallbackOwner)
                                 runCatching { view?.visibility = View.INVISIBLE }
@@ -860,6 +926,8 @@ private fun RewardedMinigame(
                             if (view != null && view === creativeWebView) {
                                 creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
                                 creativeCommitTimeout = null
+                                commitTimeoutBudget.complete()
+                                htmlReadiness.terminate()
                                 // A renderer-dead WebView cannot be resumed or repainted. Remove its
                                 // dead surface immediately and let the existing graceful failure path
                                 // complete the rewarded creative without exposing a black screen.
@@ -915,34 +983,36 @@ private fun RewardedMinigame(
                     surface = "rewarded",
                 ).apply {
                     webChromeClient = CreativeTelemetryWebChromeClient("rewarded", SimulaAds.devMode)
-                    val injectionMode = BridgeWebViewInstaller.install(this, bridge) { url ->
-                        beginPrimaryCta(url)
-                    }
+                    val target = this
+                    val injectionMode = BridgeWebViewInstaller.install(
+                        webView = this,
+                        bridge = bridge,
+                        onTrustedCtaOpen = { url -> beginPrimaryCta(url) },
+                        onPageReady = {
+                            requestHtmlVisualFence(
+                                view = target,
+                                qualified = bridgeMode == BridgeInjectionMode.DOCUMENT_START &&
+                                    creativeSource is RewardedCreativeSource.Html &&
+                                    realLoadArmed &&
+                                    !mainFrameLoadFailed,
+                            )
+                        },
+                    )
+                    bridgeMode = injectionMode
                     if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
                         post { if (creativeWebView === this) markBridgeUnavailable() }
                     } else {
                         post {
                             if (creativeWebView !== this || rendererGone || bridgeUnavailable) return@post
-                            displayAdmitted = admitFullscreenDisplay(
-                                alreadyReported = presentation.displayedReported,
-                                markReported = { presentation.displayedReported = true },
-                                notifyDisplayed = presentation.callbacks::onDisplayed,
-                                enqueueShown = {
-                                    AdBeaconManager.enqueue(
-                                        presentation.impressionId,
-                                        "shown",
-                                        adFormat = "rewarded",
-                                        telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
-                                    )
-                                },
-                            )
                             bridgeInstalled = true
-                            if (creativeCommitted) bridgeReady = true
+                            admitCreativeCommit(this, creativeCommitted)
                         }
                         creativeWebView = this
                         realLoadArmed = true
                         val timeout = Runnable {
                             if (creativeWebView === this && !creativeCommitted && !rendererGone && !bridgeUnavailable) {
+                                commitTimeoutBudget.complete()
+                                htmlReadiness.terminate()
                                 mainFrameLoadFailed = true
                                 presentation.clearPrimaryFallback(fallbackOwner)
                                 runCatching { visibility = View.INVISIBLE }
@@ -951,33 +1021,22 @@ private fun RewardedMinigame(
                         }
                         creativeCommitTimeout = timeout
                         if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                            clickHandoffHandler.postDelayed(timeout, REWARDED_CREATIVE_COMMIT_TIMEOUT_MS)
+                            clickHandoffHandler.postDelayed(
+                                timeout,
+                                commitTimeoutBudget.resume(SystemClock.elapsedRealtime()),
+                            )
                         }
                         when (val source = creativeSource) {
                             is RewardedCreativeSource.Html -> {
                                 // Primary HTML stays opaque and never inherits iframe origin state.
-                                loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
-                                val target = this
+                                htmlReadiness.arm()
                                 runCatching {
-                                    postVisualStateCallback(
-                                        System.nanoTime(),
-                                        object : WebView.VisualStateCallback() {
-                                            override fun onComplete(requestId: Long) {
-                                                admitCreativeCommit(
-                                                    view = target,
-                                                    qualified = isQualifiedRewardedHtmlVisualState(
-                                                        source = creativeSource,
-                                                        loadArmed = realLoadArmed,
-                                                        mainFrameFailed = mainFrameLoadFailed,
-                                                    ),
-                                                )
-                                            }
-                                        },
-                                    )
-                                }
+                                    loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
+                                }.onFailure { markBridgeUnavailable() }
                             }
-                            is RewardedCreativeSource.Iframe -> loadUrl(source.url)
-                            null -> Unit
+                            is RewardedCreativeSource.Iframe -> runCatching { loadUrl(source.url) }
+                                .onFailure { markBridgeUnavailable() }
+                            null -> markBridgeUnavailable()
                         }
                     }
                     if (creativeWebView == null) creativeWebView = this
@@ -994,6 +1053,8 @@ private fun RewardedMinigame(
             onRelease = { webView ->
                 creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
                 creativeCommitTimeout = null
+                commitTimeoutBudget.complete()
+                htmlReadiness.terminate()
                 if (creativeWebView === webView) creativeWebView = null
                 presentation.clearPrimaryFallback(fallbackOwner)
                 if (rendererGone) {

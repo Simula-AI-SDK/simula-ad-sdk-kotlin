@@ -1084,9 +1084,11 @@ private fun CreativeHtml(
                 surface = "interstitial",
             ).apply {
                 webChromeClient = CreativeTelemetryWebChromeClient("interstitial", SimulaAds.devMode)
-                val injectionMode = BridgeWebViewInstaller.install(this, bridge) { url ->
-                    handlePrimaryCta(url, this)
-                }
+                val injectionMode = BridgeWebViewInstaller.install(
+                    webView = this,
+                    bridge = bridge,
+                    onTrustedCtaOpen = { url -> handlePrimaryCta(url, this) },
+                )
                 if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
                     post { if (creativeWebView === this) onBridgeUnavailable() }
                 } else {

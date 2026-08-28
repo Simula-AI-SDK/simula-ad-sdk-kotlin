@@ -23,19 +23,19 @@ class RewardedNavigationPolicyTest {
     fun `terminal creative failure fails open only after rewarded creative becomes visible`() {
         assertEquals(
             false,
-            rewardEarnedAfterCreativeFailure(creativeCommitted = false, candidate = false, retained = false),
+            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = false, retained = false),
         )
         assertEquals(
             true,
-            rewardEarnedAfterCreativeFailure(creativeCommitted = true, candidate = false, retained = false),
+            rewardEarnedAfterCreativeFailure(everCreativeReady = true, candidate = false, retained = false),
         )
         assertEquals(
             true,
-            rewardEarnedAfterCreativeFailure(creativeCommitted = false, candidate = true, retained = false),
+            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = true, retained = false),
         )
         assertEquals(
             true,
-            rewardEarnedAfterCreativeFailure(creativeCommitted = false, candidate = false, retained = true),
+            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = false, retained = true),
         )
     }
 

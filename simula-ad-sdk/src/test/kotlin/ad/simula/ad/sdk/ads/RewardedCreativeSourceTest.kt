@@ -39,7 +39,7 @@ class RewardedCreativeSourceTest {
 
         assertFalse(isQualifiedRewardedCreativeCommit(html, false, false, "about:blank"))
         assertFalse(isQualifiedRewardedCreativeCommit(html, true, true, "about:blank"))
-        assertTrue(isQualifiedRewardedCreativeCommit(html, true, false, "about:blank"))
+        assertFalse(isQualifiedRewardedCreativeCommit(html, true, false, "about:blank"))
         assertFalse(isQualifiedRewardedCreativeCommit(iframe, true, false, "about:blank"))
         assertTrue(isQualifiedRewardedCreativeCommit(iframe, true, false, "https://other.example/game"))
         assertFalse(
@@ -53,10 +53,51 @@ class RewardedCreativeSourceTest {
         assertTrue(isQualifiedRewardedCreativeCommit(iframe, true, false, "https://creative.example/ready"))
         val preview = RewardedCreativeSource.Iframe("data:text/html,<html>preview</html>")
         assertTrue(isQualifiedRewardedCreativeCommit(preview, true, false, preview.url))
+    }
 
-        assertFalse(isQualifiedRewardedHtmlVisualState(html, loadArmed = false, mainFrameFailed = false))
-        assertFalse(isQualifiedRewardedHtmlVisualState(html, loadArmed = true, mainFrameFailed = true))
-        assertTrue(isQualifiedRewardedHtmlVisualState(html, loadArmed = true, mainFrameFailed = false))
-        assertFalse(isQualifiedRewardedHtmlVisualState(iframe, loadArmed = true, mainFrameFailed = false))
+    @Test
+    fun `HTML readiness requires current installation page ready before visual state`() {
+        val gate = RewardedHtmlReadinessGate()
+
+        assertNull(gate.onPageReady())
+        gate.arm()
+        val stale = requireNotNull(gate.onPageReady())
+        gate.onPageStarted()
+        assertFalse(gate.acceptVisualState(stale))
+
+        val current = requireNotNull(gate.onPageReady())
+        assertTrue(gate.acceptVisualState(current))
+        assertFalse(gate.acceptVisualState(current))
+
+        gate.arm()
+        gate.onPageStarted()
+        gate.onPageStarted()
+        assertNull(gate.onPageReady())
+    }
+
+    @Test
+    fun `HTML readiness terminal state rejects late visual callbacks`() {
+        val gate = RewardedHtmlReadinessGate()
+        gate.arm()
+        val request = requireNotNull(gate.onPageReady())
+
+        gate.terminate()
+
+        assertFalse(gate.acceptVisualState(request))
+        assertNull(gate.onPageReady())
+    }
+
+    @Test
+    fun `creative timeout retains remaining foreground budget`() {
+        val budget = ForegroundTimeoutBudget(totalMs = 10_000L)
+
+        assertEquals(10_000L, budget.resume(nowMs = 1_000L))
+        budget.pause(nowMs = 4_000L)
+        assertEquals(7_000L, budget.resume(nowMs = 9_000L))
+        budget.pause(nowMs = 10_500L)
+        assertEquals(5_500L, budget.resume(nowMs = 20_000L))
+
+        budget.complete()
+        assertEquals(0L, budget.resume(nowMs = 21_000L))
     }
 }
