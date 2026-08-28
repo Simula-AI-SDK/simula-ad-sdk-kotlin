@@ -11,6 +11,9 @@ import ad.simula.ad.sdk.network.PresentationRouteResult
 import ad.simula.ad.sdk.network.RetainedPrimaryCtaNavigationState
 import ad.simula.ad.sdk.network.ResumedPresentationRoute
 import ad.simula.ad.sdk.network.SimulaApiClient
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the interstitial Activity back to the [SimulaInterstitialAd] instance. */
@@ -74,6 +77,7 @@ internal class InterstitialPresentation(
         )
     }
     val autoRedirectCoordinator = AutoRedirectCoordinator()
+    var primaryCreativeUnavailable by mutableStateOf(false)
 
     @Synchronized
     fun claimClick(source: String): ClickInteractionClaim? =

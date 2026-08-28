@@ -112,6 +112,7 @@ internal class FallbackPresentationState(
     private var fetchWaitDeadlineMs = 0L
     private val closeGateElapsedByIndex = LinkedHashMap<Int, Long>()
     private val automaticNavigationGates = LinkedHashMap<Int, AutomaticNavigationGate>()
+    private val rendererAbandonedIndices = mutableSetOf<Int>()
 
     fun showing(index: Int) {
         val nextIndex = index.coerceAtLeast(0)
@@ -123,6 +124,7 @@ internal class FallbackPresentationState(
         this.index = nextIndex
     }
     fun done() {
+        cancelNavigationLocked()
         stage = FallbackStage.DONE
         automaticNavigationGates.clear()
     }
@@ -164,13 +166,22 @@ internal class FallbackPresentationState(
 
     @Synchronized
     fun abandonRenderer(index: Int, owner: Any): Boolean {
-        if (cleared || stage != FallbackStage.SHOWING || this.index != index || navigationOwner !== owner) {
+        val normalizedIndex = index.coerceAtLeast(0)
+        if (cleared || stage != FallbackStage.SHOWING || this.index != index ||
+            normalizedIndex in rendererAbandonedIndices
+        ) {
             return false
         }
-        automaticNavigationGates[index.coerceAtLeast(0)]?.clear()
-        clearBindingLocked()
+        val currentOwner = navigationOwner
+        if (currentOwner != null && currentOwner !== owner) return false
+        automaticNavigationGates[normalizedIndex]?.clear()
+        cancelNavigationLocked()
+        rendererAbandonedIndices += normalizedIndex
         return true
     }
+
+    @Synchronized
+    fun isRendererAbandoned(index: Int): Boolean = index.coerceAtLeast(0) in rendererAbandonedIndices
 
     fun markAutomaticTrackerRequested(index: Int) {
         if (stage != FallbackStage.SHOWING || this.index != index) return
@@ -270,6 +281,7 @@ internal class FallbackPresentationState(
         cancelNavigationLocked()
         closeGateElapsedByIndex.clear()
         automaticNavigationGates.clear()
+        rendererAbandonedIndices.clear()
     }
 
     private fun dispatchReadyNavigation() {
@@ -390,7 +402,7 @@ internal fun FallbackAdHost(
     onClickHandoffFinished: (ClickPersistenceHandoff) -> Unit = {},
     autoRedirectCoordinator: AutoRedirectCoordinator? = null,
     pendingClickHandoff: () -> ClickPersistenceHandoff? = { null },
-    hasPendingStoreVisit: () -> Boolean = { false },
+    storeVisitPending: Boolean = false,
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
     // through the shared router (tracker verbatim, raw store link as the deterministic fallback).
     // Defaults preserve today's behavior when no context is available.
@@ -566,7 +578,7 @@ internal fun FallbackAdHost(
                         ctaStoreUrl = ctaStoreUrl,
                         onAutomaticNavigation = ::dispatchAutomaticNavigation,
                         onRendererUnavailable = { redirects.deactivate(autoRedirectScope) },
-                        hasPendingStoreVisit = hasPendingStoreVisit,
+                        storeVisitPending = storeVisitPending,
                         onClose = {
                             if (!presentationState.advance(p.ads.size)) return@FallbackAdOverlay
                             phase = if (presentationState.stage == FallbackStage.SHOWING) {
@@ -616,7 +628,7 @@ private fun FallbackAdOverlay(
     ctaStoreUrl: String? = null,
     onAutomaticNavigation: () -> Unit,
     onRendererUnavailable: () -> Unit,
-    hasPendingStoreVisit: () -> Boolean,
+    storeVisitPending: Boolean,
     onClose: () -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -625,8 +637,11 @@ private fun FallbackAdOverlay(
     // The pooled fallback WebView, captured from the AndroidView factory below so we can pause/resume
     // it with the host and force a repaint on foreground return — AndroidView won't pause a WebView, and
     // a hardware-accelerated WebView returns black/blank after the window loses visibility (background).
+    val retainedRendererAbandonment = presentationState.isRendererAbandoned(fallbackIndex)
     var fallbackWebView by remember { mutableStateOf<WebView?>(null) }
-    var rendererGone by remember { mutableStateOf(false) }
+    var rendererGone by remember(presentationState, fallbackIndex) {
+        mutableStateOf(retainedRendererAbandonment)
+    }
     val navigationOwner = remember(presentationState, fallbackIndex) { Any() }
     DisposableEffect(presentationState, navigationOwner, fallbackWebView) {
         val webView = fallbackWebView ?: return@DisposableEffect onDispose {}
@@ -659,16 +674,27 @@ private fun FallbackAdOverlay(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    LaunchedEffect(rendererGone, presentationState.clickHandoffPending) {
-        if (!rendererGone || presentationState.clickHandoffPending) return@LaunchedEffect
+    var rendererOwnsPhase by remember(presentationState, fallbackIndex) {
+        mutableStateOf(retainedRendererAbandonment)
+    }
+    var unavailableExitIssued by remember { mutableStateOf(false) }
+    fun closeOnce() {
+        if (unavailableExitIssued) return
+        unavailableExitIssued = true
+        runCatching(onClose)
+    }
+    LaunchedEffect(rendererGone, rendererOwnsPhase, presentationState.clickHandoffPending, storeVisitPending) {
+        if (!rendererGone || !rendererOwnsPhase || presentationState.clickHandoffPending) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
             if (shouldExitUnavailableCreative(
                     creativeUnavailable = rendererGone,
                     clickHandoffPending = presentationState.clickHandoffPending,
-                    storeVisitPending = hasPendingStoreVisit(),
-                )
-            ) runCatching(onClose)
+                    storeVisitPending = storeVisitPending,
+                ) && !unavailableExitIssued
+            ) {
+                closeOnce()
+            }
         }
     }
     val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex)
@@ -707,7 +733,7 @@ private fun FallbackAdOverlay(
     }
     // Back can only close once the countdown elapses (parity with the creative's gated close).
     BackHandler(enabled = true) {
-        if (countdown <= 0 && !presentationState.clickHandoffPending) onClose()
+        if (countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitPending) closeOnce()
     }
 
     Box(
@@ -715,7 +741,7 @@ private fun FallbackAdOverlay(
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        AndroidView(
+        if (!rendererGone) AndroidView(
             factory = { ctx ->
                 var realLoadStarted = false
                 WebViewPool.acquire(
@@ -869,15 +895,18 @@ private fun FallbackAdOverlay(
                             view: WebView?,
                             detail: RenderProcessGoneDetail?,
                         ): Boolean {
-                            val absorbed = recordRenderProcessGone("fallback_ad", detail)
-                            if (view != null && view === fallbackWebView &&
-                                presentationState.abandonRenderer(fallbackIndex, navigationOwner)
-                            ) {
+                            runCatching { recordRenderProcessGone("fallback_ad", detail) }
+                            if (view != null && view === fallbackWebView) {
                                 rendererGone = true
-                                view.visibility = View.INVISIBLE
+                                rendererOwnsPhase = presentationState.abandonRenderer(
+                                    fallbackIndex,
+                                    navigationOwner,
+                                )
+                                runCatching { view.visibility = View.INVISIBLE }
                                 runCatching(onRendererUnavailable)
+                                fallbackWebView = null
                             }
-                            return absorbed
+                            return true
                         }
                     },
                 ).apply {
@@ -904,7 +933,11 @@ private fun FallbackAdOverlay(
             onRelease = { webView ->
                 if (fallbackWebView === webView) fallbackWebView = null
                 presentationState.unbindNavigation(navigationOwner)
-                WebViewPool.release(webView)
+                if (rendererGone) {
+                    WebViewPool.discardAfterRendererGone(webView)
+                } else {
+                    WebViewPool.release(webView)
+                }
             },
         )
 
@@ -941,12 +974,12 @@ private fun FallbackAdOverlay(
                 .size(48.dp),
             contentAlignment = Alignment.Center,
         ) {
-            if (countdown <= 0 && !presentationState.clickHandoffPending) {
+            if (countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitPending) {
                 // Compact close button (16dp circle) with a full 48dp tap target so it's easy to hit.
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .clickable(onClick = onClose),
+                        .clickable(onClick = ::closeOnce),
                     contentAlignment = Alignment.Center,
                 ) {
                     Box(

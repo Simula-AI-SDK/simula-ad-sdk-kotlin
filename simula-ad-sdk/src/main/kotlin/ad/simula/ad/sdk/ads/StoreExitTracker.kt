@@ -10,7 +10,11 @@ import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 
 internal interface ClickHandoffScheduler {
     fun post(block: Runnable)
@@ -177,13 +181,59 @@ internal fun canDismissFullscreen(
     dismissUnlocked: Boolean,
     clickHandoffPending: Boolean,
     displayAdmitted: Boolean = true,
-): Boolean = displayAdmitted && dismissUnlocked && !clickHandoffPending
+    storeVisitPending: Boolean = false,
+): Boolean = displayAdmitted && dismissUnlocked && !clickHandoffPending && !storeVisitPending
 
 internal fun shouldExitUnavailableCreative(
     creativeUnavailable: Boolean,
     clickHandoffPending: Boolean,
     storeVisitPending: Boolean,
 ): Boolean = creativeUnavailable && !clickHandoffPending && !storeVisitPending
+
+internal enum class StoreVisitPhase { NONE, LAUNCHING, AWAY }
+
+internal data class ResolvedStoreVisit(val trigger: String, val openedAtMs: Long)
+
+internal class StoreVisitLifecycle {
+    var phase: StoreVisitPhase = StoreVisitPhase.NONE
+        private set
+    private var trigger: String? = null
+    private var openedAtMs = 0L
+
+    fun open(trigger: String, openedAtMs: Long): ResolvedStoreVisit? {
+        val replaced = abandon()
+        this.trigger = trigger
+        this.openedAtMs = openedAtMs
+        phase = StoreVisitPhase.LAUNCHING
+        return replaced
+    }
+
+    fun pause(): Boolean {
+        if (phase != StoreVisitPhase.LAUNCHING) return false
+        phase = StoreVisitPhase.AWAY
+        return true
+    }
+
+    fun resume(): ResolvedStoreVisit? =
+        if (phase == StoreVisitPhase.AWAY) resolve() else null
+
+    fun launchTimedOut(): ResolvedStoreVisit? =
+        if (phase == StoreVisitPhase.LAUNCHING) resolve() else null
+
+    fun abandon(): ResolvedStoreVisit? =
+        if (phase == StoreVisitPhase.NONE) null else resolve()
+
+    private fun resolve(): ResolvedStoreVisit? {
+        val currentTrigger = trigger ?: return null
+        val resolved = ResolvedStoreVisit(currentTrigger, openedAtMs)
+        trigger = null
+        openedAtMs = 0L
+        phase = StoreVisitPhase.NONE
+        return resolved
+    }
+}
+
+internal const val STORE_LAUNCH_SETTLE_MS = 2_000L
 
 /**
  * Tracks the store-exit funnel for a single full-screen ad presentation: which click type sent the
@@ -200,15 +250,25 @@ internal class StoreExitTracker(
     private val adFormat: String?,
     private val adUnitId: String? = null,
 ) {
+    private val mainHandler by lazy(LazyThreadSafetyMode.NONE) { Handler(Looper.getMainLooper()) }
+    private val visit = StoreVisitLifecycle()
+    private val launchTimeout = Runnable {
+        val timedOut = visit.launchTimedOut()
+        if (timedOut != null) {
+            Telemetry.recordError(
+                signature = "store:launch_no_pause",
+                breadcrumb = "surface=fullscreen",
+            )
+        }
+        storeVisitPending = visit.phase != StoreVisitPhase.NONE
+    }
     private var foregroundMs: Long = 0L
     private var resumedAt: Long = SystemClock.elapsedRealtime()
     private var inForeground: Boolean = true
 
-    // The in-flight store visit, if any (the trigger that opened it + when it opened).
-    private var pendingTrigger: String? = null
-    private var openedAt: Long = 0L
+    private var storeVisitPending by mutableStateOf(false)
 
-    fun hasPendingStoreVisit(): Boolean = pendingTrigger != null
+    fun hasPendingStoreVisit(): Boolean = storeVisitPending
 
     /** Activity resumed. A resume while a store visit is outstanding is the return from the store. */
     fun onResume() {
@@ -217,17 +277,18 @@ internal class StoreExitTracker(
             resumedAt = now
             inForeground = true
         }
-        val trigger = pendingTrigger ?: return
-        pendingTrigger = null
+        val resolved = visit.resume() ?: return
+        mainHandler.removeCallbacks(launchTimeout)
+        storeVisitPending = false
         Telemetry.recordLifecycle(
             stage = "store_returned",
             adFormat = adFormat,
             adUnitId = adUnitId,
             adId = adId,
             serveId = adId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
-            durationMs = (now - openedAt).coerceAtLeast(0L), // time away
+            durationMs = (now - resolved.openedAtMs).coerceAtLeast(0L), // time away
             errorCode = null,
-            trigger = trigger,
+            trigger = resolved.trigger,
         )
     }
 
@@ -237,6 +298,7 @@ internal class StoreExitTracker(
             foregroundMs += (SystemClock.elapsedRealtime() - resumedAt).coerceAtLeast(0L)
             inForeground = false
         }
+        if (visit.pause()) mainHandler.removeCallbacks(launchTimeout)
     }
 
     /**
@@ -247,8 +309,10 @@ internal class StoreExitTracker(
         val now = SystemClock.elapsedRealtime()
         val dwellMs = foregroundMs + if (inForeground) (now - resumedAt).coerceAtLeast(0L) else 0L
         val storeExitTrigger = ClickSources.storeExitTrigger(trigger)
-        openedAt = now
-        pendingTrigger = storeExitTrigger
+        visit.open(storeExitTrigger, now)?.let(::recordAbandoned)
+        storeVisitPending = true
+        mainHandler.removeCallbacks(launchTimeout)
+        mainHandler.postDelayed(launchTimeout, STORE_LAUNCH_SETTLE_MS)
         Telemetry.recordLifecycle(
             stage = "store_opened",
             adFormat = adFormat,
@@ -263,8 +327,13 @@ internal class StoreExitTracker(
 
     /** The ad closed / tore down. If a store visit never resolved with a return, it's an abandon. */
     fun onAdClosed() {
-        val trigger = pendingTrigger ?: return
-        pendingTrigger = null
+        mainHandler.removeCallbacks(launchTimeout)
+        val resolved = visit.abandon() ?: return
+        storeVisitPending = false
+        recordAbandoned(resolved)
+    }
+
+    private fun recordAbandoned(resolved: ResolvedStoreVisit) {
         Telemetry.recordLifecycle(
             stage = "store_abandoned",
             adFormat = adFormat,
@@ -273,7 +342,7 @@ internal class StoreExitTracker(
             serveId = adId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
             durationMs = null,
             errorCode = null,
-            trigger = trigger,
+            trigger = resolved.trigger,
         )
     }
 }

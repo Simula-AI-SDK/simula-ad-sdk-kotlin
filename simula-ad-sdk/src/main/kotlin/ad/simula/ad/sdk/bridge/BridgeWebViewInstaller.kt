@@ -477,6 +477,15 @@ ${trustedCtaRelaySource(activationNonce)}
         return observerClosed && interfaceRemoved && ctaRemoved && coreRemoved
     }
 
+    /** Drop native bridge ownership after renderer death without calling into the dead WebView. */
+    fun uninstallAfterRendererGone(webView: WebView) {
+        installations.remove(webView)?.let { installation ->
+            installation.active = false
+            runCatching { installation.audioObserver.close() }
+        }
+        scripts.remove(webView)
+    }
+
     /** Tear down presentation-scoped wiring before returning the view to the shared pool. */
     fun release(webView: WebView) {
         cleanupBeforePooling(
@@ -484,6 +493,11 @@ ${trustedCtaRelaySource(activationNonce)}
             release = { WebViewPool.release(webView) },
             discard = { WebViewPool.discard(webView) },
         )
+    }
+
+    fun releaseAfterRendererGone(webView: WebView) {
+        runCatching { uninstallAfterRendererGone(webView) }
+        WebViewPool.discardAfterRendererGone(webView)
     }
 }
 

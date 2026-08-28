@@ -38,6 +38,7 @@ class FullscreenClickHandoffPolicyTest {
         assertFalse(canDismissFullscreen(dismissUnlocked = false, clickHandoffPending = false))
         assertFalse(canDismissFullscreen(dismissUnlocked = false, clickHandoffPending = true))
         assertFalse(canDismissFullscreen(dismissUnlocked = true, clickHandoffPending = true))
+        assertFalse(canDismissFullscreen(true, clickHandoffPending = false, storeVisitPending = true))
         assertTrue(canDismissFullscreen(dismissUnlocked = true, clickHandoffPending = false))
     }
 
@@ -47,6 +48,31 @@ class FullscreenClickHandoffPolicyTest {
         assertFalse(shouldExitUnavailableCreative(true, clickHandoffPending = true, storeVisitPending = false))
         assertFalse(shouldExitUnavailableCreative(true, clickHandoffPending = false, storeVisitPending = true))
         assertTrue(shouldExitUnavailableCreative(true, clickHandoffPending = false, storeVisitPending = false))
+    }
+
+    @Test
+    fun `store visit requires an actual pause before resume counts as return`() {
+        val visit = StoreVisitLifecycle()
+
+        assertNull(visit.open("cta", openedAtMs = 100L))
+        assertEquals(StoreVisitPhase.LAUNCHING, visit.phase)
+        assertNull(visit.resume())
+        assertEquals(StoreVisitPhase.LAUNCHING, visit.phase)
+
+        assertTrue(visit.pause())
+        assertEquals(StoreVisitPhase.AWAY, visit.phase)
+        assertEquals(ResolvedStoreVisit("cta", 100L), visit.resume())
+        assertEquals(StoreVisitPhase.NONE, visit.phase)
+    }
+
+    @Test
+    fun `store launch timeout resolves a visit that never pauses`() {
+        val visit = StoreVisitLifecycle()
+        visit.open("store_prompt", openedAtMs = 200L)
+
+        assertEquals(ResolvedStoreVisit("store_prompt", 200L), visit.launchTimedOut())
+        assertEquals(StoreVisitPhase.NONE, visit.phase)
+        assertNull(visit.launchTimedOut())
     }
 
     @Test
@@ -735,6 +761,7 @@ class FullscreenClickHandoffPolicyTest {
         state.setClickPending(true)
 
         assertTrue(state.abandonRenderer(0, owner))
+        assertFalse(state.hasRetainedNavigation())
 
         assertEquals(
             AutomaticNavigationOutcome.FAILED,
@@ -750,6 +777,34 @@ class FullscreenClickHandoffPolicyTest {
         assertTrue(state.advance(total = 2))
         assertFalse(state.hasRetainedNavigation())
         assertEquals(1, state.index)
+    }
+
+    @Test
+    fun `stale fallback renderer cannot abandon replacement owner`() {
+        val state = FallbackPresentationState()
+        val staleOwner = Any()
+        val replacementOwner = Any()
+        val calls = mutableListOf<String>()
+        state.showing(0)
+        state.bindNavigation(staleOwner) { calls.add("stale:$it") }
+        state.bindNavigation(replacementOwner) { calls.add("replacement:$it") }
+
+        assertFalse(state.abandonRenderer(0, staleOwner))
+        assertTrue(state.retainNavigation("https://creative.example/current"))
+        assertEquals(listOf("replacement:https://creative.example/current"), calls)
+        assertEquals(0, state.index)
+    }
+
+    @Test
+    fun `current fallback renderer can abandon after its navigation binding cleared`() {
+        val state = FallbackPresentationState()
+        val owner = Any()
+        state.showing(0)
+        state.bindNavigation(owner) { true }
+        state.unbindNavigation(owner)
+
+        assertTrue(state.abandonRenderer(0, owner))
+        assertTrue(state.isRendererAbandoned(0))
     }
 
     @Test

@@ -11,6 +11,9 @@ import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.PresentationRouteResult
 import ad.simula.ad.sdk.network.RetainedPrimaryCtaNavigationState
 import ad.simula.ad.sdk.network.ResumedPresentationRoute
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import java.util.concurrent.ConcurrentHashMap
 
 /** Bridge from the rewarded Activity back to the [SimulaRewardedAd] instance. */
@@ -91,6 +94,7 @@ internal class RewardedPresentation(
         )
     }
     val autoRedirectCoordinator = AutoRedirectCoordinator()
+    var primaryCreativeUnavailable by mutableStateOf(false)
 
     @Synchronized
     fun claimClick(source: String): ClickInteractionClaim? =
@@ -179,6 +183,9 @@ internal class RewardedPresentation(
 
     /** Set true once the required play duration elapses; gates the reward. */
     var rewardEarned = false
+
+    /** Sticky evidence that this serve committed its intended creative at least once. */
+    var creativeExposed = false
 
     /**
      * Foreground-only accumulated play time, in milliseconds. Time accrues only while
