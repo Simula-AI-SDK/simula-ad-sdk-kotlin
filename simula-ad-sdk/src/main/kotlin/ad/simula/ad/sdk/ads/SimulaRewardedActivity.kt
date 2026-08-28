@@ -59,6 +59,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -162,6 +163,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     onClickHandoffFinished = p::clearClickHandoff,
                     autoRedirectCoordinator = p.autoRedirectCoordinator,
                     pendingClickHandoff = p::pendingClickHandoff,
+                    hasPendingStoreVisit = { storeExit?.hasPendingStoreVisit() == true },
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
                         val opened = CreativeCtaRouter.open(
@@ -196,6 +198,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                 ) { onClose ->
                     RewardedMinigame(
                         presentation = p,
+                        hasPendingStoreVisit = { storeExit?.hasPendingStoreVisit() == true },
                         recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
                         onFinish = { earned ->
                             p.rewardEarned = monotonicRewardEarned(earned, p.rewardEarned)
@@ -370,6 +373,7 @@ internal fun rewardedNavigationAction(
 @Composable
 private fun RewardedMinigame(
     presentation: RewardedPresentation,
+    hasPendingStoreVisit: () -> Boolean,
     recordStoreOpen: (String) -> Unit,
     onFinish: (earned: Boolean) -> Unit,
 ) {
@@ -474,7 +478,15 @@ private fun RewardedMinigame(
         bridgeUnavailable = true
     }
     LaunchedEffect(bridgeUnavailable, clickHandoffPending) {
-        if (shouldExitUnavailableCreative(bridgeUnavailable, clickHandoffPending)) {
+        if (!bridgeUnavailable || clickHandoffPending) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            withFrameNanos { }
+            if (!shouldExitUnavailableCreative(
+                    creativeUnavailable = bridgeUnavailable,
+                    clickHandoffPending = clickHandoffPending,
+                    storeVisitPending = hasPendingStoreVisit(),
+                )
+            ) return@repeatOnLifecycle
             val earned = monotonicRewardEarned(rewardEarned, presentation.rewardEarned)
             rewardEarned = earned
             onFinish(earned)

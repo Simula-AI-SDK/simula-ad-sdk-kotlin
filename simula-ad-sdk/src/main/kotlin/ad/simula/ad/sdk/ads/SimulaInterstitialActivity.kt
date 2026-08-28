@@ -80,6 +80,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -196,6 +197,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     onClickHandoffFinished = p::clearClickHandoff,
                     autoRedirectCoordinator = p.autoRedirectCoordinator,
                     pendingClickHandoff = p::pendingClickHandoff,
+                    hasPendingStoreVisit = { storeExit?.hasPendingStoreVisit() == true },
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = {
                         val opened = CreativeCtaRouter.open(
@@ -230,6 +232,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                 ) { onClose ->
                     CreativeInterstitial(
                         presentation = p,
+                        hasPendingStoreVisit = { storeExit?.hasPendingStoreVisit() == true },
                         onFinish = {
                             // CLOSED is deferred to finishAd (after the last fallback screen), so
                             // closing the playable alone doesn't fire the publisher close callback.
@@ -369,6 +372,7 @@ private fun gateAlreadyElapsed(p: InterstitialPresentation, total: Duration): Bo
 @Composable
 private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
+    hasPendingStoreVisit: () -> Boolean,
     onFinish: () -> Unit,
     recordStoreOpen: (String) -> Unit,
     openDestination: (SimulaApiClient.AdLoadResult) -> Boolean,
@@ -433,8 +437,15 @@ private fun CreativeInterstitial(
         bridgeUnavailable = true
     }
     LaunchedEffect(bridgeUnavailable, clickHandoffPending) {
-        if (shouldExitUnavailableCreative(bridgeUnavailable, clickHandoffPending)) {
-            runCatching(onFinish)
+        if (!bridgeUnavailable || clickHandoffPending) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            withFrameNanos { }
+            if (shouldExitUnavailableCreative(
+                    creativeUnavailable = bridgeUnavailable,
+                    clickHandoffPending = clickHandoffPending,
+                    storeVisitPending = hasPendingStoreVisit(),
+                )
+            ) runCatching(onFinish)
         }
     }
     // auto_store_redirect: open the advertiser store once (no user tap). PLAYABLE_END fires when the

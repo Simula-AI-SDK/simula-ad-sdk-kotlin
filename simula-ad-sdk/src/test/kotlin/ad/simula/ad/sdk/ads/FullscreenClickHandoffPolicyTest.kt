@@ -43,9 +43,10 @@ class FullscreenClickHandoffPolicyTest {
 
     @Test
     fun `unavailable creative waits for pending click handoff before exit`() {
-        assertFalse(shouldExitUnavailableCreative(creativeUnavailable = false, clickHandoffPending = false))
-        assertFalse(shouldExitUnavailableCreative(creativeUnavailable = true, clickHandoffPending = true))
-        assertTrue(shouldExitUnavailableCreative(creativeUnavailable = true, clickHandoffPending = false))
+        assertFalse(shouldExitUnavailableCreative(false, clickHandoffPending = false, storeVisitPending = false))
+        assertFalse(shouldExitUnavailableCreative(true, clickHandoffPending = true, storeVisitPending = false))
+        assertFalse(shouldExitUnavailableCreative(true, clickHandoffPending = false, storeVisitPending = true))
+        assertTrue(shouldExitUnavailableCreative(true, clickHandoffPending = false, storeVisitPending = false))
     }
 
     @Test

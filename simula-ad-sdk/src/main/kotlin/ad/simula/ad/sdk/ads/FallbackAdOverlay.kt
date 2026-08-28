@@ -52,6 +52,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -389,6 +390,7 @@ internal fun FallbackAdHost(
     onClickHandoffFinished: (ClickPersistenceHandoff) -> Unit = {},
     autoRedirectCoordinator: AutoRedirectCoordinator? = null,
     pendingClickHandoff: () -> ClickPersistenceHandoff? = { null },
+    hasPendingStoreVisit: () -> Boolean = { false },
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
     // through the shared router (tracker verbatim, raw store link as the deterministic fallback).
     // Defaults preserve today's behavior when no context is available.
@@ -564,6 +566,7 @@ internal fun FallbackAdHost(
                         ctaStoreUrl = ctaStoreUrl,
                         onAutomaticNavigation = ::dispatchAutomaticNavigation,
                         onRendererUnavailable = { redirects.deactivate(autoRedirectScope) },
+                        hasPendingStoreVisit = hasPendingStoreVisit,
                         onClose = {
                             if (!presentationState.advance(p.ads.size)) return@FallbackAdOverlay
                             phase = if (presentationState.stage == FallbackStage.SHOWING) {
@@ -613,6 +616,7 @@ private fun FallbackAdOverlay(
     ctaStoreUrl: String? = null,
     onAutomaticNavigation: () -> Unit,
     onRendererUnavailable: () -> Unit,
+    hasPendingStoreVisit: () -> Boolean,
     onClose: () -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -656,7 +660,16 @@ private fun FallbackAdOverlay(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(rendererGone, presentationState.clickHandoffPending) {
-        if (rendererGone && !presentationState.clickHandoffPending) runCatching(onClose)
+        if (!rendererGone || presentationState.clickHandoffPending) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            withFrameNanos { }
+            if (shouldExitUnavailableCreative(
+                    creativeUnavailable = rendererGone,
+                    clickHandoffPending = presentationState.clickHandoffPending,
+                    storeVisitPending = hasPendingStoreVisit(),
+                )
+            ) runCatching(onClose)
+        }
     }
     val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex)
     var countdown by remember(presentationState, fallbackIndex) {

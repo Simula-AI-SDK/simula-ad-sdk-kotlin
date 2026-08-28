@@ -182,7 +182,8 @@ internal fun canDismissFullscreen(
 internal fun shouldExitUnavailableCreative(
     creativeUnavailable: Boolean,
     clickHandoffPending: Boolean,
-): Boolean = creativeUnavailable && !clickHandoffPending
+    storeVisitPending: Boolean,
+): Boolean = creativeUnavailable && !clickHandoffPending && !storeVisitPending
 
 /**
  * Tracks the store-exit funnel for a single full-screen ad presentation: which click type sent the
@@ -206,6 +207,8 @@ internal class StoreExitTracker(
     // The in-flight store visit, if any (the trigger that opened it + when it opened).
     private var pendingTrigger: String? = null
     private var openedAt: Long = 0L
+
+    fun hasPendingStoreVisit(): Boolean = pendingTrigger != null
 
     /** Activity resumed. A resume while a store visit is outstanding is the return from the store. */
     fun onResume() {
