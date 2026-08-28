@@ -29,13 +29,13 @@ internal fun WebView.repaintOnNextFrame() {
         invalidate()
     }
     if (isAttachedToWindow) {
-        post(reveal) // already on the window → reveal on the next frame
+        postOnAnimation(reveal)
         return
     }
     addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
         override fun onViewAttachedToWindow(v: View) {
             v.removeOnAttachStateChangeListener(this)
-            v.post(reveal)
+            v.postOnAnimation(reveal)
         }
 
         override fun onViewDetachedFromWindow(v: View) {

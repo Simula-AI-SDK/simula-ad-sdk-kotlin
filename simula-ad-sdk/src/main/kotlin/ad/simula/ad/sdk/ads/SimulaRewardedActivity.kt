@@ -28,7 +28,9 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.View
 import android.view.WindowManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -741,6 +743,21 @@ private fun RewardedMinigame(
                                 presentation.automaticNavigationGate.markTrackerRequestedInWebView()
                             }
                             BridgeWebViewInstaller.onPageStarted(view)
+                        }
+
+                        override fun onRenderProcessGone(
+                            view: WebView?,
+                            detail: RenderProcessGoneDetail?,
+                        ): Boolean {
+                            val absorbed = super.onRenderProcessGone(view, detail)
+                            if (view != null && view === creativeWebView) {
+                                // A renderer-dead WebView cannot be resumed or repainted. Remove its
+                                // dead surface immediately and let the existing graceful failure path
+                                // complete the rewarded creative without exposing a black screen.
+                                view.visibility = View.INVISIBLE
+                                bridgeUnavailable = true
+                            }
+                            return absorbed
                         }
 
                         override fun shouldOverrideUrlLoading(

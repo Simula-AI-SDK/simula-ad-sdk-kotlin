@@ -36,7 +36,9 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.View
 import android.view.WindowManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -986,6 +988,21 @@ private fun CreativeHtml(
                             presentation.automaticNavigationGate.markTrackerRequestedInWebView()
                         }
                         BridgeWebViewInstaller.onPageStarted(view)
+                    }
+
+                    override fun onRenderProcessGone(
+                        view: WebView?,
+                        detail: RenderProcessGoneDetail?,
+                    ): Boolean {
+                        val absorbed = super.onRenderProcessGone(view, detail)
+                        if (view != null && view === creativeWebView) {
+                            // Android documents this WebView as permanently unusable. Hide it before
+                            // advancing through the existing unavailable-creative path so its dead
+                            // hardware surface cannot leave the fullscreen Activity black.
+                            view.visibility = View.INVISIBLE
+                            runCatching(onBridgeUnavailable)
+                        }
+                        return absorbed
                     }
 
                     override fun shouldOverrideUrlLoading(
