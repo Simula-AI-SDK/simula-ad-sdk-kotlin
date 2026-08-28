@@ -40,6 +40,13 @@ class RewardedNavigationPolicyTest {
     }
 
     @Test
+    fun `rotation retains dismissal admission without admitting replacement display`() {
+        assertEquals(false, rewardedDismissalDisplayAdmitted(false, previouslyDisplayed = false))
+        assertEquals(true, rewardedDismissalDisplayAdmitted(false, previouslyDisplayed = true))
+        assertEquals(true, rewardedDismissalDisplayAdmitted(true, previouslyDisplayed = false))
+    }
+
+    @Test
     fun `ordinary automatic redirects stay in WebView`() {
         listOf(
             "https://creative.example/game",

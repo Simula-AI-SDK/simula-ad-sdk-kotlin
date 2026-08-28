@@ -340,6 +340,11 @@ internal fun rewardEarnedAfterCreativeFailure(
     retained: Boolean,
 ): Boolean = everCreativeReady || candidate || retained
 
+internal fun rewardedDismissalDisplayAdmitted(
+    currentDisplayAdmitted: Boolean,
+    previouslyDisplayed: Boolean,
+): Boolean = currentDisplayAdmitted || previouslyDisplayed
+
 private const val REWARDED_CREATIVE_COMMIT_TIMEOUT_MS = 10_000L
 
 internal fun rewardedNavigationAction(
@@ -712,7 +717,13 @@ private fun RewardedMinigame(
 
     // No early exit: Back does nothing until the reward is earned, then it closes (earned).
     BackHandler(enabled = true) {
-        if (canDismissFullscreen(rewardEarned, clickHandoffPending, displayAdmitted, storeVisitPending)) {
+        if (canDismissFullscreen(
+                rewardEarned,
+                clickHandoffPending,
+                rewardedDismissalDisplayAdmitted(displayAdmitted, presentation.displayedReported),
+                storeVisitPending,
+            )
+        ) {
             presentation.automaticNavigationGate.clear()
             onFinish(true)
         }
@@ -1074,11 +1085,22 @@ private fun RewardedMinigame(
             position = close.position,
             progressBarColor = close.progressBarColor,
             isRewardCopy = true,
-            enabled = canDismissFullscreen(rewardEarned, clickHandoffPending, displayAdmitted, storeVisitPending),
+            enabled = canDismissFullscreen(
+                rewardEarned,
+                clickHandoffPending,
+                rewardedDismissalDisplayAdmitted(displayAdmitted, presentation.displayedReported),
+                storeVisitPending,
+            ),
             remaining = secondsLeft,
             progress = closeProgress.value,
             onClose = {
-                if (canDismissFullscreen(rewardEarned, clickHandoffPending, displayAdmitted, storeVisitPending)) {
+                if (canDismissFullscreen(
+                        rewardEarned,
+                        clickHandoffPending,
+                        rewardedDismissalDisplayAdmitted(displayAdmitted, presentation.displayedReported),
+                        storeVisitPending,
+                    )
+                ) {
                     presentation.automaticNavigationGate.clear()
                     onFinish(true)
                 }
