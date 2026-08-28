@@ -158,15 +158,32 @@ class RewardedNavigationPolicyTest {
     }
 
     @Test
-    fun `subframe navigation always stays in WebView`() {
+    fun `gestured subframe advertiser exit routes as user CTA`() {
         assertEquals(
-            RewardedNavigationAction.AllowInWebView,
+            RewardedNavigationAction.RouteUserCta,
             rewardedNavigationAction(
                 false,
                 true,
                 "https://advertiser.example/offer",
                 "https://creative.example/game",
                 "https://creative.example/game",
+            ),
+        )
+    }
+
+    @Test
+    fun `gestureless subframe tracker routes automatically without becoming user CTA`() {
+        val tracker = "https://tracker.example/click?id=abc"
+
+        assertEquals(
+            RewardedNavigationAction.RouteAutomatic(tracker),
+            rewardedNavigationAction(
+                isMainFrame = false,
+                hasGesture = false,
+                targetUrl = tracker,
+                currentPageUrl = "about:blank",
+                initialPageUrl = null,
+                trackingUrl = tracker,
             ),
         )
     }

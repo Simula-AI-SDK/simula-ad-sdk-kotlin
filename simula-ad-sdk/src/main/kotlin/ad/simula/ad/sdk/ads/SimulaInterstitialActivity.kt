@@ -717,6 +717,7 @@ private fun CreativeInterstitial(
                                     ad.androidStoreUrl,
                                 )
                                 if (opened) {
+                                    presentation.primaryCtaNavigation.lockAfterExternalOpen()
                                     presentation.autoRedirectCoordinator.recordUserRouteOpened()
                                     routeActivity.recordClickStoreOpen(committedInteraction.source)
                                 } else {
@@ -1050,9 +1051,9 @@ private fun CreativeHtml(
                             hasGesture = request.hasGesture(),
                             owner = fallbackOwner,
                         )?.let { return it }
-                        if (request.isForMainFrame != true) return false
-                        // Document-start interception handles trusted window.open/target=_blank.
-                        // This remains the platform fallback for direct gesture navigations.
+                        // Document-start interception handles trusted window.open/target=_blank in
+                        // both the wrapper and its srcdoc playable. This remains the platform
+                        // fallback for legacy WebViews and direct navigations from either frame.
                         if (!request.hasGesture()) {
                             return when (val plan = CreativeCtaRouter.automaticNavigationPlan(
                                 value = url,

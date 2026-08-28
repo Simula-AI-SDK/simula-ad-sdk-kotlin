@@ -356,7 +356,6 @@ internal fun rewardedNavigationAction(
     destination: String = "appstore",
     trackingUrl: String? = null,
 ): RewardedNavigationAction {
-    if (!isMainFrame) return RewardedNavigationAction.AllowInWebView
     if (!hasGesture) {
         return when (val plan = CreativeCtaRouter.automaticNavigationPlan(
             targetUrl,
@@ -772,6 +771,7 @@ private fun RewardedMinigame(
                         presentation.androidStoreUrl,
                     )
                     if (opened) {
+                        presentation.primaryCtaNavigation.lockAfterExternalOpen()
                         presentation.autoRedirectCoordinator.recordUserRouteOpened()
                         routeActivity.recordClickStoreOpen(committedInteraction.source)
                     } else {
