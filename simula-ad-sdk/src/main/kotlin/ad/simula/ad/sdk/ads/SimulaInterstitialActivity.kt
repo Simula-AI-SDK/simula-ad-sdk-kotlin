@@ -415,6 +415,7 @@ private fun CreativeInterstitial(
     var clickHandoffPending by remember(presentation) {
         mutableStateOf(presentation.pendingClickHandoff() != null)
     }
+    var bridgeUnavailable by remember { mutableStateOf(false) }
     DisposableEffect(presentation) {
         val subscription = presentation.pendingClickHandoff()?.addResultListener {
             clickHandoffPending = false
@@ -425,6 +426,16 @@ private fun CreativeInterstitial(
     DisposableEffect(presentation.autoRedirectCoordinator, autoRedirectScope) {
         presentation.autoRedirectCoordinator.activate(autoRedirectScope)
         onDispose { presentation.autoRedirectCoordinator.deactivate(autoRedirectScope) }
+    }
+    fun markBridgeUnavailable() {
+        presentation.automaticNavigationGate.clear()
+        presentation.autoRedirectCoordinator.deactivate(autoRedirectScope)
+        bridgeUnavailable = true
+    }
+    LaunchedEffect(bridgeUnavailable, clickHandoffPending) {
+        if (shouldExitUnavailableCreative(bridgeUnavailable, clickHandoffPending)) {
+            runCatching(onFinish)
+        }
     }
     // auto_store_redirect: open the advertiser store once (no user tap). PLAYABLE_END fires when the
     // close button appears (below); END_SCREEN_1/2_OPEN fire when the creative navigates to the
@@ -627,7 +638,7 @@ private fun CreativeInterstitial(
                 html = html,
                 bridge = bridge,
                 presentation = presentation,
-                onBridgeUnavailable = onFinish,
+                onBridgeUnavailable = ::markBridgeUnavailable,
                 onBridgeReady = {
                     displayAdmitted = admitFullscreenDisplay(
                         alreadyReported = presentation.displayedReported,

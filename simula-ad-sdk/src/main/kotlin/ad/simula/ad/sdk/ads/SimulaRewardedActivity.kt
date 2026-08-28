@@ -461,11 +461,15 @@ private fun RewardedMinigame(
     var bridgeReady by remember(presentation) { mutableStateOf(false) }
     var displayAdmitted by remember(presentation) { mutableStateOf(presentation.displayedReported) }
     var bridgeUnavailable by remember { mutableStateOf(false) }
-    LaunchedEffect(bridgeUnavailable) {
-        if (bridgeUnavailable) {
+    fun markBridgeUnavailable() {
+        presentation.automaticNavigationGate.clear()
+        presentation.autoRedirectCoordinator.deactivate(autoRedirectScope)
+        bridgeUnavailable = true
+    }
+    LaunchedEffect(bridgeUnavailable, clickHandoffPending) {
+        if (shouldExitUnavailableCreative(bridgeUnavailable, clickHandoffPending)) {
             val earned = monotonicRewardEarned(rewardEarned, presentation.rewardEarned)
             rewardEarned = earned
-            presentation.automaticNavigationGate.clear()
             onFinish(earned)
         }
     }
@@ -757,9 +761,8 @@ private fun RewardedMinigame(
                                 // dead surface immediately and let the existing graceful failure path
                                 // complete the rewarded creative without exposing a black screen.
                                 rendererGone = true
-                                presentation.automaticNavigationGate.clear()
                                 view.visibility = View.INVISIBLE
-                                bridgeUnavailable = true
+                                markBridgeUnavailable()
                             }
                             return absorbed
                         }
@@ -810,7 +813,7 @@ private fun RewardedMinigame(
                         beginPrimaryCta(url)
                     }
                     if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
-                        post { if (creativeWebView === this) bridgeUnavailable = true }
+                        post { if (creativeWebView === this) markBridgeUnavailable() }
                     } else {
                         post {
                             if (creativeWebView !== this) return@post

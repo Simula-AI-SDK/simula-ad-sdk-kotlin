@@ -179,6 +179,11 @@ internal fun canDismissFullscreen(
     displayAdmitted: Boolean = true,
 ): Boolean = displayAdmitted && dismissUnlocked && !clickHandoffPending
 
+internal fun shouldExitUnavailableCreative(
+    creativeUnavailable: Boolean,
+    clickHandoffPending: Boolean,
+): Boolean = creativeUnavailable && !clickHandoffPending
+
 /**
  * Tracks the store-exit funnel for a single full-screen ad presentation: which click type sent the
  * user to the store, how long they were away, and whether they came back. Emits `store_opened`,

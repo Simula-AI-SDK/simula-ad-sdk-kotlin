@@ -42,6 +42,13 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `unavailable creative waits for pending click handoff before exit`() {
+        assertFalse(shouldExitUnavailableCreative(creativeUnavailable = false, clickHandoffPending = false))
+        assertFalse(shouldExitUnavailableCreative(creativeUnavailable = true, clickHandoffPending = true))
+        assertTrue(shouldExitUnavailableCreative(creativeUnavailable = true, clickHandoffPending = false))
+    }
+
+    @Test
     fun `display reporting commits before zero-delay dismissal is admitted`() {
         val events = mutableListOf<String>()
         var displayAdmitted = false
