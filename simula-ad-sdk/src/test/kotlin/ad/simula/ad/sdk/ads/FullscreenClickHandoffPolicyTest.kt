@@ -716,6 +716,35 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `renderer death cancels current fallback navigation before advancing`() {
+        val state = FallbackPresentationState()
+        val owner = Any()
+        var automaticOpens = 0
+        state.showing(0)
+        state.bindNavigation(owner) { true }
+        assertTrue(state.retainNavigation("https://creative.example/fallback"))
+        assertTrue(state.retainAutomaticNavigation(0, owner, "https://tracker.example/click", false))
+        state.setClickPending(true)
+
+        assertTrue(state.abandonRenderer(0, owner))
+
+        assertEquals(
+            AutomaticNavigationOutcome.FAILED,
+            state.attemptAutomaticNavigation(0) {
+                automaticOpens++
+                AutomaticNavigationOutcome.STORE_OPENED
+            },
+        )
+        assertEquals(0, automaticOpens)
+        assertFalse(state.abandonRenderer(0, Any()))
+        assertFalse(state.advance(total = 2))
+        state.setClickPending(false)
+        assertTrue(state.advance(total = 2))
+        assertFalse(state.hasRetainedNavigation())
+        assertEquals(1, state.index)
+    }
+
+    @Test
     fun `fallback close gate progress survives recreation per screen`() {
         val state = FallbackPresentationState()
 

@@ -959,7 +959,7 @@ private fun CreativeHtml(
         var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE -> wv?.onPause()
+                Lifecycle.Event.ON_PAUSE -> if (!rendererGone) wv?.onPause()
                 Lifecycle.Event.ON_STOP -> wasStopped = true
                 Lifecycle.Event.ON_RESUME -> {
                     if (rendererGone) return@LifecycleEventObserver

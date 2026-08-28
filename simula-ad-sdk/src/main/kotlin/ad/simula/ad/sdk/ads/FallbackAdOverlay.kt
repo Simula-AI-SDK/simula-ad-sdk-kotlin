@@ -21,6 +21,7 @@ import android.graphics.Bitmap
 import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -158,6 +159,16 @@ internal class FallbackPresentationState(
 
     fun suppressAutomaticNavigation(index: Int) {
         automaticNavigationGates[index.coerceAtLeast(0)]?.suppressPending()
+    }
+
+    @Synchronized
+    fun abandonRenderer(index: Int, owner: Any): Boolean {
+        if (cleared || stage != FallbackStage.SHOWING || this.index != index || navigationOwner !== owner) {
+            return false
+        }
+        automaticNavigationGates[index.coerceAtLeast(0)]?.clear()
+        clearBindingLocked()
+        return true
     }
 
     fun markAutomaticTrackerRequested(index: Int) {
@@ -552,6 +563,7 @@ internal fun FallbackAdHost(
                         ctaDestination = ctaDestination,
                         ctaStoreUrl = ctaStoreUrl,
                         onAutomaticNavigation = ::dispatchAutomaticNavigation,
+                        onRendererUnavailable = { redirects.deactivate(autoRedirectScope) },
                         onClose = {
                             if (!presentationState.advance(p.ads.size)) return@FallbackAdOverlay
                             phase = if (presentationState.stage == FallbackStage.SHOWING) {
@@ -600,6 +612,7 @@ private fun FallbackAdOverlay(
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
     onAutomaticNavigation: () -> Unit,
+    onRendererUnavailable: () -> Unit,
     onClose: () -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -609,6 +622,7 @@ private fun FallbackAdOverlay(
     // it with the host and force a repaint on foreground return — AndroidView won't pause a WebView, and
     // a hardware-accelerated WebView returns black/blank after the window loses visibility (background).
     var fallbackWebView by remember { mutableStateOf<WebView?>(null) }
+    var rendererGone by remember { mutableStateOf(false) }
     val navigationOwner = remember(presentationState, fallbackIndex) { Any() }
     DisposableEffect(presentationState, navigationOwner, fallbackWebView) {
         val webView = fallbackWebView ?: return@DisposableEffect onDispose {}
@@ -624,14 +638,15 @@ private fun FallbackAdOverlay(
         var wasStopped = false
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE -> wv?.onPause()
+                Lifecycle.Event.ON_PAUSE -> if (!rendererGone) wv?.onPause()
                 Lifecycle.Event.ON_STOP -> wasStopped = true
                 Lifecycle.Event.ON_RESUME -> {
+                    if (rendererGone) return@LifecycleEventObserver
                     wv?.onResume()
                     onAutomaticNavigation()
                     if (wasStopped) {
                         wasStopped = false
-                        wv?.repaintOnNextFrame()
+                        wv?.repaintOnNextFrame { !rendererGone }
                     }
                 }
                 else -> Unit
@@ -639,6 +654,9 @@ private fun FallbackAdOverlay(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(rendererGone, presentationState.clickHandoffPending) {
+        if (rendererGone && !presentationState.clickHandoffPending) runCatching(onClose)
     }
     val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex)
     var countdown by remember(presentationState, fallbackIndex) {
@@ -834,11 +852,20 @@ private fun FallbackAdOverlay(
                             )
                             return true
                         }
-                        // Absorb a renderer-process death so a crashing end-screen creative can't take
-                        // the host app process down with it (parity with the minigame/interstitial
-                        // clients; surfaced as telemetry).
-                        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
-                            recordRenderProcessGone("fallback_ad", detail)
+                        override fun onRenderProcessGone(
+                            view: WebView?,
+                            detail: RenderProcessGoneDetail?,
+                        ): Boolean {
+                            val absorbed = recordRenderProcessGone("fallback_ad", detail)
+                            if (view != null && view === fallbackWebView &&
+                                presentationState.abandonRenderer(fallbackIndex, navigationOwner)
+                            ) {
+                                rendererGone = true
+                                view.visibility = View.INVISIBLE
+                                runCatching(onRendererUnavailable)
+                            }
+                            return absorbed
+                        }
                     },
                 ).apply {
                     presentationState.claimNavigationOwner(navigationOwner)
