@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -37,6 +38,7 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import ad.simula.ad.sdk.model.Defaults
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.MiniGameTheme
@@ -52,6 +54,19 @@ private const val DOT_SIZE_EDGE = 6
 private const val DESKTOP_PAGE_SIZE = 4
 private const val SWIPE_THRESHOLD = 50f
 private const val CAROUSEL_GAP_DP = 12f
+
+internal fun boundedCarouselSnapTarget(startPosition: Float, projectedPosition: Float): Float {
+    if (!startPosition.isFinite()) return 0f
+    val origin = kotlin.math.round(startPosition)
+    if (!projectedPosition.isFinite()) return origin
+    return kotlin.math.round(projectedPosition).coerceIn(origin - 1f, origin + 1f)
+}
+
+internal fun carouselGameIndex(position: Float, gameCount: Int): Int {
+    if (gameCount <= 0 || !position.isFinite()) return 0
+    val rawIndex = kotlin.math.round(position).toInt()
+    return ((rawIndex % gameCount) + gameCount) % gameCount
+}
 
 /**
  * Responsive game grid: mobile carousel (<768dp) or tablet 4-column grid (>=768dp).
@@ -119,6 +134,10 @@ private fun MobileCarousel(
     val scrollPosition = remember { Animatable(0f) }
     val velocityTracker = remember { VelocityTracker() }
     val scope = rememberCoroutineScope()
+    var dragStartPosition by remember { mutableFloatStateOf(0f) }
+    val indicatorColor = remember(theme.secondaryFontColor) {
+        ColorUtil.parseColor(theme.secondaryFontColor ?: Defaults.MiniGameMenuTheme.SECONDARY_FONT_COLOR)
+    }
 
     Box(
         modifier = Modifier
@@ -128,6 +147,7 @@ private fun MobileCarousel(
                 detectHorizontalDragGestures(
                     onDragStart = {
                         // Stop any ongoing fling animation so user takes control
+                        dragStartPosition = scrollPosition.value
                         scope.launch { scrollPosition.stop() }
                         velocityTracker.resetTracking()
                     },
@@ -135,10 +155,10 @@ private fun MobileCarousel(
                         val velocityPx = velocityTracker.calculateVelocity().x
                         val velocityCards = velocityPx / cardStepPx
 
-                        // Project where scroll would land with momentum, snap to nearest
+                        // Keep each gesture to one catalog step so no game is skipped.
                         val decayFactor = 0.4f
                         val projected = scrollPosition.value - velocityCards * decayFactor
-                        val snapTarget = kotlin.math.round(projected).toFloat()
+                        val snapTarget = boundedCarouselSnapTarget(dragStartPosition, projected)
 
                         scope.launch {
                             scrollPosition.animateTo(
@@ -164,6 +184,7 @@ private fun MobileCarousel(
     ) {
         val currentPos = scrollPosition.value
         val centerIndex = kotlin.math.round(currentPos).toInt()
+        val currentGameIndex = carouselGameIndex(centerIndex.toFloat(), n)
 
         // Render visible cards: center ±2
         // key(rawIndex) preserves each card's composable state (loaded images etc.)
@@ -195,6 +216,15 @@ private fun MobileCarousel(
                 )
             }
         }
+
+        Text(
+            text = "${currentGameIndex + 1} / $n",
+            color = indicatorColor,
+            fontSize = 12.sp,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 4.dp),
+        )
     }
 }
 
