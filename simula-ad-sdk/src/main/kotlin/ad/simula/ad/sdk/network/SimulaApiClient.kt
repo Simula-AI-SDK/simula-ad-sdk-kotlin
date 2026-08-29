@@ -265,8 +265,8 @@ internal object SimulaApiClient {
      * Fetch the game catalog. Returns menuId + list of games.
      * Handles both new format (catalog field) and legacy format (data field).
      *
-     * [sessionId] is passed through as the `session_id` query param when available (the
-     * backend ties the catalog to the session); omitted when null/blank.
+     * [sessionId] is retained for source compatibility. The public v2 catalog is
+     * session-independent so every supported game remains available in the menu.
      */
     suspend fun fetchCatalog(sessionId: String? = null): CatalogResult = coalesce(catalogUrl(sessionId)) {
       withContext(Dispatchers.IO) {
@@ -319,13 +319,9 @@ internal object SimulaApiClient {
       }
     }
 
-    /** Builds the catalog request URL, adding `session_id` when available. Pure/testable. */
-    internal fun catalogUrl(sessionId: String?): String = buildString {
-        append("$API_BASE_URL/minigames/catalog")
-        if (!sessionId.isNullOrBlank()) {
-            append("?session_id=${URLEncoder.encode(sessionId, "UTF-8")}")
-        }
-    }
+    /** Builds the session-independent public catalog URL. Pure/testable. */
+    @Suppress("UNUSED_PARAMETER")
+    internal fun catalogUrl(sessionId: String?): String = "$API_BASE_URL/minigames/catalogv2"
 
     // ── Character Picker ──────────────────────────────────────────────────────
 
