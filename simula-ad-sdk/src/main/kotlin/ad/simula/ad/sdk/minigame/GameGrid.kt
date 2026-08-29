@@ -52,15 +52,6 @@ private const val DOT_SIZE_EDGE = 6
 private const val DESKTOP_PAGE_SIZE = 4
 private const val SWIPE_THRESHOLD = 50f
 private const val CAROUSEL_GAP_DP = 12f
-private const val DEFAULT_MAX_GAMES_TO_SHOW = 6
-
-internal fun limitGamesForMenu(
-    games: List<GameData>,
-    maxGamesToShow: Int,
-): List<GameData> {
-    val limit = maxGamesToShow.takeIf { it > 0 } ?: DEFAULT_MAX_GAMES_TO_SHOW
-    return games.take(limit)
-}
 
 /**
  * Responsive game grid: mobile carousel (<768dp) or tablet 4-column grid (>=768dp).
@@ -71,27 +62,25 @@ internal fun limitGamesForMenu(
 @Composable
 internal fun GameGrid(
     games: List<GameData>,
-    maxGamesToShow: Int,
     charID: String,
     theme: MiniGameTheme,
     onGameSelect: (gameId: String, gameName: String) -> Unit,
     menuId: String? = null,
 ) {
-    val displayedGames = limitGamesForMenu(games, maxGamesToShow)
-    if (displayedGames.isEmpty()) return
+    if (games.isEmpty()) return
 
     val screenWidthDp = LocalConfiguration.current.screenWidthDp
     val isMobile = screenWidthDp < 768
 
     if (isMobile) {
         MobileCarousel(
-            games = displayedGames,
+            games = games,
             onGameSelect = onGameSelect,
             theme = theme,
         )
     } else {
         TabletGrid(
-            games = displayedGames,
+            games = games,
             onGameSelect = onGameSelect,
             theme = theme,
         )

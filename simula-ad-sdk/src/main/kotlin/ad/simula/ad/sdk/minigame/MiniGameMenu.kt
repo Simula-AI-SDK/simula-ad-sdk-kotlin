@@ -641,7 +641,6 @@ fun MiniGameMenu(
                                     else -> {
                                         GameGrid(
                                             games = games,
-                                            maxGamesToShow = maxGamesToShow,
                                             charID = charID,
                                             theme = theme,
                                             onGameSelect = { gameId, gameName ->
