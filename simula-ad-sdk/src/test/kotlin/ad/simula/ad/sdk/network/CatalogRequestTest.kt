@@ -1,38 +1,20 @@
 package ad.simula.ad.sdk.network
 
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * Verifies the catalog request URL carries `session_id` when available and omits it otherwise.
+ * Verifies the catalog always uses the session-independent all-games endpoint.
  * Pure URL construction — no network.
  */
 class CatalogRequestTest {
 
     @Test
-    fun `catalog url appends session_id when present`() {
-        val url = SimulaApiClient.catalogUrl("sess_9")
-        assertTrue(url.endsWith("/minigames/catalog?session_id=sess_9"))
-    }
+    fun `catalog url is independent of session`() {
+        val expected = "https://simula-api-701226639755.us-central1.run.app/minigames/catalogv2"
 
-    @Test
-    fun `catalog url omits session_id when null`() {
-        val url = SimulaApiClient.catalogUrl(null)
-        assertTrue(url.endsWith("/minigames/catalog"))
-        assertFalse(url.contains("session_id"))
-    }
-
-    @Test
-    fun `catalog url omits session_id when blank`() {
-        assertFalse(SimulaApiClient.catalogUrl("   ").contains("session_id"))
-    }
-
-    @Test
-    fun `catalog url encodes special characters in session_id`() {
-        val url = SimulaApiClient.catalogUrl("a b&c")
-        // URLEncoder (form-encoding): space -> '+', '&' -> '%26'.
-        assertTrue(url.endsWith("?session_id=a+b%26c"))
-        assertFalse(url.contains("a b&c"))
+        assertEquals(expected, SimulaApiClient.catalogUrl("sess_9"))
+        assertEquals(expected, SimulaApiClient.catalogUrl(null))
+        assertEquals(expected, SimulaApiClient.catalogUrl("a b&c"))
     }
 }
