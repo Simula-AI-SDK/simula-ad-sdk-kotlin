@@ -194,12 +194,21 @@ class CreativeBridgeTest {
     fun coreDocumentStartRelaySurvivesWithoutTrustedCtaHooks() {
         val source = BridgeWebViewInstaller.coreRelayScript("17", "bridge-capability")
 
-        assertTrue(source.contains("if (window !== window.top) { return; }"))
+        assertTrue(source.contains("window.parent === window.top"))
+        assertTrue(source.contains("window.frameElement.hasAttribute('srcdoc')"))
+        assertTrue(source.contains("window.frameElement === window.top.document.querySelector('iframe[srcdoc]')"))
+        assertTrue(source.contains("if (!isTop && !isDirectSrcdoc) { return; }"))
         assertTrue(source.contains("'use strict';"))
         assertTrue(source.contains("var bridgeCapability = \"bridge-capability\""))
         assertEquals(1, source.split("bridge-capability").size - 1)
         assertTrue(source.contains("event.isTrusted !== true"))
-        assertTrue(source.contains("event.source !== window"))
+        assertTrue(source.contains("function isCreativeRootSource(source)"))
+        assertTrue(source.contains("source === window"))
+        assertTrue(source.contains("document.querySelector('iframe[srcdoc]')"))
+        assertTrue(source.contains("frame.contentWindow !== source"))
+        assertTrue(source.contains("String(source.location.href) === 'about:srcdoc'"))
+        assertTrue(source.contains("!isCreativeRootSource(event.source)"))
+        assertTrue(source.contains("envelope.__simulaSdkResponse"))
         assertTrue(source.contains("window.addEventListener('message'"))
         assertTrue(source.contains("__simulaSdkPageReady:17:"))
         assertTrue(source.contains("nativeStringify(bridgeCapability)"))
@@ -253,7 +262,7 @@ class CreativeBridgeTest {
         assertTrue(full.contains("__simulaSdkPageReady:17:"))
         assertTrue(full.contains("var bridgeCapability = \"bridge-capability\""))
         assertTrue(full.contains("event.isTrusted !== true"))
-        assertTrue(full.contains("event.source !== window"))
+        assertTrue(full.contains("!isCreativeRootSource(event.source)"))
         assertTrue(full.contains("SIMULA_CTA_OPEN"))
         assertTrue(full.contains("var activationNonce = \"nonce\""))
 
@@ -434,6 +443,22 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun nativeRepliesTargetOnlyTopAndDirectSrcdocCreativeRoots() {
+        val source = buildCreativeBridgeMessage(
+            AUDIO_STATE_CHANGED,
+            CreativeAudioState(muted = false, volume = 42).payload(),
+        )
+
+        assertTrue(source.contains("if (window !== window.top) { return; }"))
+        assertTrue(source.contains("deliver(window)"))
+        assertTrue(source.contains("document.querySelector('iframe[srcdoc]')"))
+        assertTrue(source.contains("target = frame && frame.contentWindow"))
+        assertTrue(source.contains("String(target.location.href) !== 'about:srcdoc'"))
+        assertFalse(source.contains("window.frames"))
+        assertFalse(source.contains("contentWindow.frames"))
+    }
+
+    @Test
     fun getOrientationEchoesNumericRequestId() {
         val reply = capture("""{"type":"GET_ORIENTATION","requestId":7}""")
         // The numeric requestId is echoed back as a number, not a string.
@@ -489,7 +514,7 @@ class CreativeBridgeTest {
         assertEquals(listOf("DispatchFailure"), errorCodes)
     }
 
-    /** Drives a query and parses the `window.postMessage(<json>, '*');` reply into a [JsonObject]. */
+    /** Drives a query and parses the generated delivery script's message into a [JsonObject]. */
     private fun capture(message: String): JsonObject {
         var js: String? = null
         bridge(FakeHost()).handle(message) { js = it }
@@ -497,9 +522,15 @@ class CreativeBridgeTest {
         return parseScript(raw)
     }
 
-    private fun parseScript(script: String): JsonObject = Json.parseToJsonElement(
-        script.removePrefix("window.postMessage(").removeSuffix(", '*');"),
-    ).jsonObject
+    private fun parseScript(script: String): JsonObject {
+        val prefix = "var message = "
+        val start = script.indexOf(prefix)
+        require(start >= 0) { "missing message declaration: $script" }
+        val jsonStart = start + prefix.length
+        val jsonEnd = script.indexOf(';', jsonStart)
+        require(jsonEnd > jsonStart) { "unterminated message declaration: $script" }
+        return Json.parseToJsonElement(script.substring(jsonStart, jsonEnd)).jsonObject
+    }
 
     private fun messageOfLength(type: String, length: Int): String {
         val prefix = "{\"type\":\"$type\",\"padding\":\""
