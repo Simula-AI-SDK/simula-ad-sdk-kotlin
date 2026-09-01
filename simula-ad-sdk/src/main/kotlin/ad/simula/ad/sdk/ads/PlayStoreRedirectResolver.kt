@@ -12,6 +12,7 @@ internal fun interface RedirectHeadClient {
 }
 
 internal enum class RedirectFallbackReason {
+    MISSING_USER_AGENT,
     TIMEOUT,
     HOP_LIMIT,
     LOOP,
@@ -26,7 +27,7 @@ internal enum class RedirectFallbackReason {
 internal sealed interface PlayStoreRedirectResolution {
     data class Resolved(val url: String, val redirects: Int) : PlayStoreRedirectResolution
     data class BrowserFallback(
-        val originalUrl: String,
+        val url: String,
         val reason: RedirectFallbackReason,
         val redirects: Int,
     ) : PlayStoreRedirectResolution
@@ -61,6 +62,9 @@ internal class PlayStoreRedirectResolver(
         CreativeCtaRouter.admittedDirectPlayStoreUrl(original)?.let {
             return PlayStoreRedirectResolution.Resolved(it, 0)
         }
+        if (userAgent.isNullOrBlank()) {
+            return fallback(original, RedirectFallbackReason.MISSING_USER_AGENT, 0)
+        }
 
         val deadlineNanos = startedAtNanos.saturatingAdd(totalTimeoutMs * NANOS_PER_MILLISECOND)
         val visited = HashSet<String>(maxRedirects + 1)
@@ -82,7 +86,10 @@ internal class PlayStoreRedirectResolver(
             }
 
             if (response.code !in REDIRECT_CODES) {
-                return fallback(original, RedirectFallbackReason.NON_REDIRECT, redirects)
+                // Unity opens the terminal URL after a successful HEAD instead of replaying every
+                // earlier tracker hop. Non-success statuses still use the original safe fallback.
+                val browserUrl = current.takeIf { response.code in 200..299 } ?: original
+                return fallback(browserUrl, RedirectFallbackReason.NON_REDIRECT, redirects)
             }
             if (response.locations.isEmpty() || response.locations.all { it.isBlank() }) {
                 return fallback(original, RedirectFallbackReason.MISSING_LOCATION, redirects)
@@ -145,7 +152,7 @@ internal class PlayStoreRedirectResolver(
         if (this > Long.MAX_VALUE - other) Long.MAX_VALUE else this + other
 
     private companion object {
-        const val MAX_REDIRECTS = 5
+        const val MAX_REDIRECTS = 10
         const val TOTAL_TIMEOUT_MS = 1_500L
         const val NANOS_PER_MILLISECOND = 1_000_000L
         const val MAX_URL_CHARS = 8 * 1024

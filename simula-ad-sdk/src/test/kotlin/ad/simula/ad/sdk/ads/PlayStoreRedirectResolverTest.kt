@@ -59,7 +59,7 @@ class PlayStoreRedirectResolverTest {
         )
         val resolver = resolver(calls) { _, _, _ -> responses.removeFirst() }
 
-        val result = resolver.resolve("https://tracker.example/a/click", null, 0L)
+        val result = resolver.resolve("https://tracker.example/a/click", "Browser UA", 0L)
 
         assertEquals(
             PlayStoreRedirectResolution.Resolved(
@@ -81,7 +81,52 @@ class PlayStoreRedirectResolverTest {
 
         assertEquals(
             PlayStoreRedirectResolution.BrowserFallback(original, RedirectFallbackReason.NON_REDIRECT, 0),
-            resolver.resolve(original, null, 0L),
+            resolver.resolve(original, "Browser UA", 0L),
+        )
+    }
+
+    @Test
+    fun `missing browser user agent skips probe and opens browser fallback`() = runTest {
+        val original = "https://tracker.example/click"
+        listOf<String?>(null, "", "   ").forEach { missingUserAgent ->
+            val calls = mutableListOf<Call>()
+            val resolver = resolver(calls) { _, _, _ -> error("probe must not run") }
+
+            assertEquals(
+                PlayStoreRedirectResolution.BrowserFallback(
+                    original,
+                    RedirectFallbackReason.MISSING_USER_AGENT,
+                    0,
+                ),
+                resolver.resolve(original, missingUserAgent, 0L),
+            )
+            assertTrue(calls.isEmpty())
+        }
+    }
+
+    @Test
+    fun `successful terminal response opens current hop instead of replaying original chain`() = runTest {
+        val calls = mutableListOf<Call>()
+        val terminal = "https://tracker.example/landing?click=a%2Bb"
+        val responses = ArrayDeque(
+            listOf(
+                response(302, terminal),
+                response(200),
+            ),
+        )
+        val resolver = resolver(calls) { _, _, _ -> responses.removeFirst() }
+
+        assertEquals(
+            PlayStoreRedirectResolution.BrowserFallback(
+                terminal,
+                RedirectFallbackReason.NON_REDIRECT,
+                1,
+            ),
+            resolver.resolve("https://tracker.example/click", "Browser UA", 0L),
+        )
+        assertEquals(
+            listOf("https://tracker.example/click", terminal),
+            calls.map(Call::url),
         )
     }
 
@@ -92,29 +137,53 @@ class PlayStoreRedirectResolverTest {
 
         assertEquals(
             PlayStoreRedirectResolution.BrowserFallback(original, RedirectFallbackReason.TRANSPORT, 0),
-            resolver.resolve(original, null, 0L),
+            resolver.resolve(original, "Browser UA", 0L),
         )
     }
 
     @Test
-    fun `five non Play redirects stop at hop limit`() = runTest {
+    fun `ten non Play redirects stop at Unity parity hop limit`() = runTest {
         val calls = mutableListOf<Call>()
         val resolver = resolver(calls) { url, _, _ ->
             val hop = url.substringAfterLast('/').toIntOrNull() ?: 0
             response(302, "https://tracker.example/${hop + 1}")
         }
 
-        val result = resolver.resolve("https://tracker.example/0", null, 0L)
+        val result = resolver.resolve("https://tracker.example/0", "Browser UA", 0L)
 
         assertEquals(
             PlayStoreRedirectResolution.BrowserFallback(
                 "https://tracker.example/0",
                 RedirectFallbackReason.HOP_LIMIT,
-                5,
+                10,
             ),
             result,
         )
-        assertEquals(5, calls.size)
+        assertEquals(10, calls.size)
+    }
+
+    @Test
+    fun `all redirect hops share one shrinking total deadline`() = runTest {
+        val calls = mutableListOf<Call>()
+        val resolver = PlayStoreRedirectResolver(
+            client = RedirectHeadClient { url, timeoutMs, userAgent ->
+                calls += Call(url, timeoutMs, userAgent)
+                delay(400L)
+                val hop = url.substringAfterLast('/').toIntOrNull() ?: 0
+                response(302, "https://tracker.example/${hop + 1}")
+            },
+            clockNanos = { testScheduler.currentTime * 1_000_000L },
+        )
+
+        assertEquals(
+            PlayStoreRedirectResolution.BrowserFallback(
+                "https://tracker.example/0",
+                RedirectFallbackReason.TIMEOUT,
+                3,
+            ),
+            resolver.resolve("https://tracker.example/0", "Browser UA", 0L),
+        )
+        assertEquals(listOf(1_500L, 1_100L, 700L, 300L), calls.map(Call::timeoutMs))
     }
 
     @Test
@@ -122,7 +191,7 @@ class PlayStoreRedirectResolverTest {
         val calls = mutableListOf<Call>()
         val resolver = resolver(calls) { _, _, _ -> response(302, "https://tracker.example/click") }
 
-        val result = resolver.resolve("https://tracker.example/click", null, 0L)
+        val result = resolver.resolve("https://tracker.example/click", "Browser UA", 0L)
 
         assertEquals(
             PlayStoreRedirectResolution.BrowserFallback(
@@ -148,11 +217,11 @@ class PlayStoreRedirectResolverTest {
 
         assertEquals(
             PlayStoreRedirectResolution.BrowserFallback(original, RedirectFallbackReason.AMBIGUOUS_LOCATION, 0),
-            ambiguous.resolve(original, null, 0L),
+            ambiguous.resolve(original, "Browser UA", 0L),
         )
         assertEquals(
             PlayStoreRedirectResolution.BrowserFallback(original, RedirectFallbackReason.DOWNGRADE, 0),
-            downgrade.resolve(original, null, 0L),
+            downgrade.resolve(original, "Browser UA", 0L),
         )
     }
 
@@ -168,7 +237,7 @@ class PlayStoreRedirectResolverTest {
         )
         testScheduler.advanceTimeBy(750L)
 
-        resolver.resolve("https://tracker.example/click", null, startedAtNanos = 0L)
+        resolver.resolve("https://tracker.example/click", "Browser UA", startedAtNanos = 0L)
 
         assertEquals(750L, calls.single().timeoutMs)
     }
@@ -185,7 +254,7 @@ class PlayStoreRedirectResolverTest {
             clockNanos = { testScheduler.currentTime * 1_000_000L },
         )
 
-        val result = resolver.resolve("https://tracker.example/click", null, 0L)
+        val result = resolver.resolve("https://tracker.example/click", "Browser UA", 0L)
 
         assertEquals(
             PlayStoreRedirectResolution.BrowserFallback(
@@ -204,7 +273,7 @@ class PlayStoreRedirectResolverTest {
             entered.complete(Unit)
             awaitCancellation()
         }
-        val result = async { resolver.resolve("https://tracker.example/click", null, 0L) }
+        val result = async { resolver.resolve("https://tracker.example/click", "Browser UA", 0L) }
         entered.await()
 
         result.cancel()

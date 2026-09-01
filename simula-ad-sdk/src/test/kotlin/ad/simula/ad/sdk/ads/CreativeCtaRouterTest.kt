@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.network.SimulaHttp
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -908,6 +909,38 @@ class CreativeCtaRouterTest {
                 targetUrl = intent,
                 destination = "web",
                 trackingUrl = tracker,
+            ),
+        )
+    }
+
+    @Test
+    fun `prepared appstore route opens terminal 2xx hop instead of replaying tracker`() = runTest {
+        val tracker = "https://tracker.example/click"
+        val terminal = "https://tracker.example/landing?click=a%2Bb"
+        val responses = ArrayDeque(
+            listOf(
+                SimulaHttp.RedirectHeadResponse(302, listOf(terminal)),
+                SimulaHttp.RedirectHeadResponse(200, emptyList()),
+            ),
+        )
+        val resolver = PlayStoreRedirectResolver(
+            client = RedirectHeadClient { _, _, _ -> responses.removeFirst() },
+            clockNanos = { 0L },
+        )
+
+        assertEquals(
+            PreparedCtaOpen.Launch(
+                url = terminal,
+                fallbackUrl = "https://play.google.com/store/apps/details?id=com.example.app",
+                storeBound = true,
+            ),
+            CreativeCtaRouter.prepare(
+                trackingUrl = tracker,
+                destination = "appstore",
+                storeUrl = "https://play.google.com/store/apps/details?id=com.example.app",
+                startedAtNanos = 0L,
+                userAgent = "Browser UA",
+                resolver = resolver,
             ),
         )
     }

@@ -485,6 +485,7 @@ internal object CreativeCtaRouter {
         storeUrl: String? = null,
         startedAtNanos: Long = System.nanoTime(),
         userAgent: String? = SimulaUserAgent.browserValue,
+        resolver: PlayStoreRedirectResolver = redirectResolver,
     ): PreparedCtaOpen {
         val tracker = admittedHttpUrl(trackingUrl)
         val store = admittedStoreFallback(storeUrl).takeIf { destination == "appstore" }
@@ -502,7 +503,7 @@ internal object CreativeCtaRouter {
 
         val resolveStarted = System.nanoTime()
         runCatching { Telemetry.recordOperation("mmp_resolve_attempted", 0L, success = true) }
-        return when (val resolution = redirectResolver.resolve(tracker, userAgent, startedAtNanos)) {
+        return when (val resolution = resolver.resolve(tracker, userAgent, startedAtNanos)) {
             is PlayStoreRedirectResolution.Resolved -> {
                 runCatching {
                     Telemetry.recordOperation(
@@ -526,8 +527,8 @@ internal object CreativeCtaRouter {
                     )
                 }
                 PreparedCtaOpen.Launch(
-                    url = resolution.originalUrl,
-                    fallbackUrl = store?.takeIf { it != resolution.originalUrl },
+                    url = resolution.url,
+                    fallbackUrl = store?.takeIf { it != resolution.url },
                     storeBound = true,
                 )
             }
