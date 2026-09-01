@@ -11,11 +11,13 @@ import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.BeaconPersistenceOutcome
 import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickSources
+import ad.simula.ad.sdk.network.PresentationRouteResult
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
@@ -158,6 +160,25 @@ internal class FallbackPresentationState(
     ): AutomaticNavigationOutcome {
         if (stage != FallbackStage.SHOWING || this.index != index) return AutomaticNavigationOutcome.FAILED
         return automaticNavigationGate(index).attemptPending(open)
+    }
+
+    fun beginAutomaticNavigation(index: Int): AutomaticNavigationAttempt? {
+        if (stage != FallbackStage.SHOWING || this.index != index) return null
+        return automaticNavigationGate(index).beginPending()
+    }
+
+    fun isAutomaticNavigationActive(index: Int, attempt: AutomaticNavigationAttempt): Boolean =
+        stage == FallbackStage.SHOWING && this.index == index &&
+            automaticNavigationGate(index).isActive(attempt)
+
+    fun completeAutomaticNavigation(
+        index: Int,
+        attempt: AutomaticNavigationAttempt,
+        outcome: AutomaticNavigationOutcome,
+    ): Boolean = automaticNavigationGate(index).complete(attempt, outcome)
+
+    fun abandonAutomaticNavigation(index: Int) {
+        automaticNavigationGates[index.coerceAtLeast(0)]?.abandonInFlight()
     }
 
     fun suppressAutomaticNavigation(index: Int) {
@@ -389,9 +410,14 @@ internal fun FallbackAdHost(
     presentationState: FallbackPresentationState = remember { FallbackPresentationState() },
     onFullyClosed: () -> Unit,
     autoStoreRedirect: AutoStoreRedirect? = null,
-    onAutoStoreRedirect: () -> Boolean = { false },
-    openAutomaticNavigation: (String, Boolean) -> AutomaticNavigationOutcome = { _, _ ->
-        AutomaticNavigationOutcome.FAILED
+    onAutoStoreRedirect: (() -> Boolean, (Boolean) -> Unit) -> Unit = { _, completion -> completion(false) },
+    openAutomaticNavigation: (
+        String,
+        Boolean,
+        () -> Boolean,
+        (AutomaticNavigationOutcome) -> Unit,
+    ) -> Unit = { _, _, _, completion ->
+        completion(AutomaticNavigationOutcome.FAILED)
     },
     onAdClick: (ClickInteraction) -> Unit = {},
     onStoreOpen: (ClickInteraction) -> Unit = {},
@@ -404,7 +430,7 @@ internal fun FallbackAdHost(
     pendingClickHandoff: () -> ClickPersistenceHandoff? = { null },
     storeVisitPending: Boolean = false,
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
-    // through the shared router (tracker verbatim, raw store link as the deterministic fallback).
+    // through the shared router (direct resolved Play URL, raw store link as deterministic fallback).
     // Defaults preserve today's behavior when no context is available.
     ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
@@ -515,14 +541,26 @@ internal fun FallbackAdHost(
                 val ad = p.ads[p.index]
                 val autoRedirectScope = remember(impressionId, p.index) { Any() }
                 fun dispatchAutomaticNavigation() {
-                    val result = redirects.request(
+                    val result = redirects.requestAsync(
                         scope = autoRedirectScope,
                         pendingHandoff = pendingClickHandoff(),
-                    ) {
-                        val outcome = presentationState.attemptAutomaticNavigation(p.index) { route ->
-                            openAutomaticNavigation(route.targetUrl, route.trackerAlreadyRequested)
+                    ) { routeCanOpen, completion ->
+                        val attempt = presentationState.beginAutomaticNavigation(p.index)
+                        if (attempt == null) {
+                            completion(false)
+                            return@requestAsync
                         }
-                        outcome != AutomaticNavigationOutcome.FAILED
+                        openAutomaticNavigation(
+                            attempt.route.targetUrl,
+                            attempt.route.trackerAlreadyRequested,
+                            {
+                                routeCanOpen() && redirects.isActive(autoRedirectScope) &&
+                                    presentationState.isAutomaticNavigationActive(p.index, attempt)
+                            },
+                        ) { outcome ->
+                            presentationState.completeAutomaticNavigation(p.index, attempt, outcome)
+                            completion(outcome != AutomaticNavigationOutcome.FAILED)
+                        }
                     }
                     if (result == AutoRedirectResult.SUPPRESSED) {
                         presentationState.suppressAutomaticNavigation(p.index)
@@ -530,7 +568,10 @@ internal fun FallbackAdHost(
                 }
                 DisposableEffect(redirects, autoRedirectScope) {
                     redirects.activate(autoRedirectScope)
-                    onDispose { redirects.deactivate(autoRedirectScope) }
+                    onDispose {
+                        presentationState.abandonAutomaticNavigation(p.index)
+                        redirects.deactivate(autoRedirectScope)
+                    }
                 }
                 LaunchedEffect(autoRedirectScope) { dispatchAutomaticNavigation() }
                 // Fire the auto store redirect when the END_SCREEN_N fallback screen is presented.
@@ -538,11 +579,15 @@ internal fun FallbackAdHost(
                     if (autoStoreRedirect?.enabled == true &&
                         autoStoreRedirect.trigger == endScreenTriggerForIndex(p.index)
                     ) {
-                        redirects.request(
+                        redirects.requestAsync(
                             scope = autoRedirectScope,
                             pendingHandoff = pendingClickHandoff(),
-                            route = onAutoStoreRedirect,
-                        )
+                        ) { routeCanOpen, completion ->
+                            onAutoStoreRedirect(
+                                { routeCanOpen() && redirects.isActive(autoRedirectScope) },
+                                completion,
+                            )
+                        }
                     }
                 }
                 // key() so each screen gets fresh overlay state (countdown, WebView) — without it the
@@ -830,9 +875,9 @@ private fun FallbackAdOverlay(
                                 CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
                                 is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
                             }
-                            // Route through the shared CTA router: the tapped tracker opens
-                            // verbatim (referrer-preserving); the serve's raw store link is the
-                            // deterministic fallback when it can't be launched. A failed launch
+                            // Route through the shared CTA router: app-store trackers resolve to an
+                            // exact referrer-preserving Play URL; the serve's raw store link is the
+                            // deterministic fallback when it cannot be launched. A failed launch
                             // returns false so the WebView navigates in place (the pre-router
                             // failure behavior).
                             // A genuine user tap uses one native fallback_cta interaction id for durable
@@ -840,6 +885,7 @@ private fun FallbackAdOverlay(
                             val claim = claimClick(ClickSources.FALLBACK_CTA) ?: return true
                             notifyPublisherClick { onAdClick(claim.interaction) }
                             val interaction = claim.interaction
+                            val routeStartedAtNanos = System.nanoTime()
                             coordinateDeferredClickPersistence(
                                 mainHandler = clickHandler,
                                 claim = claim,
@@ -862,29 +908,45 @@ private fun FallbackAdOverlay(
                                 },
                                 recordTelemetry = { completion -> persistClick(adId, interaction, completion) },
                                 onHandoff = { committedInteraction, completion ->
-                                    val route = { appContext: Context ->
-                                        val opened = CreativeCtaRouter.openPrimaryCta(
-                                            appContext,
-                                            routePlan,
-                                            ctaDestination,
-                                            null,
-                                            ctaStoreUrl,
-                                        )
-                                        if (opened) runCatching { onStoreOpen(committedInteraction) }
-                                        if (!opened) {
-                                            CreativeCtaRouter.admittedInWebViewFallback(
-                                                routePlan.tappedUrl,
-                                                ctaTrackingUrl,
-                                            )?.let { fallbackUrl ->
-                                                presentationState.retainNavigation(fallbackUrl)
+                                    prepareDeferredCtaRoute(
+                                        prepare = {
+                                            CreativeCtaRouter.preparePrimaryCta(
+                                                routePlan,
+                                                ctaDestination,
+                                                ctaStoreUrl,
+                                                routeStartedAtNanos,
+                                            )
+                                        },
+                                        requestRoute = { route: (Context) -> Boolean, routeCompletion ->
+                                            val start = routeClick?.invoke(route, routeCompletion)
+                                            if (start == null) {
+                                                routeCompletion(route(ctx))
+                                                PresentationRouteResult.EXECUTED
+                                            } else if (start == ClickRouteStart.REJECTED) {
+                                                PresentationRouteResult.REJECTED
+                                            } else {
+                                                PresentationRouteResult.EXECUTED
                                             }
-                                        }
-                                        opened
-                                    }
-                                    routeClick?.invoke(route, completion) ?: run {
-                                        completion(route(ctx.applicationContext))
-                                        ClickRouteStart.STARTED
-                                    }
+                                        },
+                                        completion = completion,
+                                        open = { routeContext, prepared ->
+                                            val outcome = CreativeCtaRouter.launchPrepared(routeContext, prepared)
+                                            val opened = outcome != AutomaticNavigationOutcome.FAILED &&
+                                                outcome != AutomaticNavigationOutcome.HANDLED
+                                            if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                                                runCatching { onStoreOpen(committedInteraction) }
+                                            }
+                                            if (!opened) {
+                                                CreativeCtaRouter.admittedInWebViewFallback(
+                                                    routePlan.tappedUrl,
+                                                    ctaTrackingUrl,
+                                                )?.let { fallbackUrl ->
+                                                    presentationState.retainNavigation(fallbackUrl)
+                                                }
+                                            }
+                                            opened
+                                        },
+                                    )
                                 },
                                 onCreated = onClickHandoffCreated,
                                 onFinished = onClickHandoffFinished,
@@ -910,6 +972,7 @@ private fun FallbackAdOverlay(
                         }
                     },
                 ).apply {
+                    SimulaUserAgent.captureBrowser(runCatching { settings.userAgentString }.getOrNull())
                     presentationState.claimNavigationOwner(navigationOwner)
                     fallbackWebView = this
                     if (inlineHtml != null) {

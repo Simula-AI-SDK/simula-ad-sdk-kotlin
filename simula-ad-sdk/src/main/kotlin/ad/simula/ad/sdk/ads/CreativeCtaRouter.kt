@@ -1,25 +1,51 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.StoreOpen
+import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.network.PrimaryCtaRoute
+import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.telemetry.Telemetry
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import java.net.URI
 import java.net.URL
 import java.net.URLDecoder
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 internal data class PendingAutomaticNavigation(
     val targetUrl: String,
     val trackerAlreadyRequested: Boolean,
 )
 
+internal class AutomaticNavigationAttempt internal constructor(
+    internal val revision: Long,
+    val route: PendingAutomaticNavigation,
+)
+
 internal enum class AutomaticNavigationOutcome { STORE_OPENED, OTHER_OPENED, HANDLED, FAILED }
+
+internal sealed interface PreparedCtaOpen {
+    data class Launch(
+        val url: String,
+        val fallbackUrl: String?,
+        val storeBound: Boolean,
+    ) : PreparedCtaOpen
+
+    data object Handled : PreparedCtaOpen
+    data object Failed : PreparedCtaOpen
+}
 
 internal class AutomaticNavigationGate {
     private var inFlight = false
     private var opened = false
+    private var revision = 0L
     private var trackerRequestedInWebView = false
     private var pending: PendingAutomaticNavigation? = null
 
@@ -46,31 +72,55 @@ internal class AutomaticNavigationGate {
     fun wasTrackerRequestedInWebView(): Boolean = trackerRequestedInWebView
 
     fun attemptPending(open: (PendingAutomaticNavigation) -> AutomaticNavigationOutcome): AutomaticNavigationOutcome {
-        val route = synchronized(this) {
-            if (inFlight || opened) return AutomaticNavigationOutcome.FAILED
-            val retained = pending ?: return AutomaticNavigationOutcome.FAILED
-            inFlight = true
-            retained
-        }
-        val outcome = runCatching { open(route) }.getOrDefault(AutomaticNavigationOutcome.FAILED)
+        val attempt = beginPending() ?: return AutomaticNavigationOutcome.FAILED
+        val outcome = runCatching { open(attempt.route) }.getOrDefault(AutomaticNavigationOutcome.FAILED)
+        complete(attempt, outcome)
+        return outcome
+    }
+
+    @Synchronized
+    fun beginPending(): AutomaticNavigationAttempt? {
+        if (inFlight || opened) return null
+        val retained = pending ?: return null
+        inFlight = true
+        return AutomaticNavigationAttempt(++revision, retained)
+    }
+
+    @Synchronized
+    fun isActive(attempt: AutomaticNavigationAttempt): Boolean =
+        inFlight && !opened && revision == attempt.revision
+
+    fun complete(attempt: AutomaticNavigationAttempt, outcome: AutomaticNavigationOutcome): Boolean {
         synchronized(this) {
+            if (!inFlight || revision != attempt.revision) return false
             inFlight = false
             if (outcome != AutomaticNavigationOutcome.FAILED) {
                 opened = true
                 pending = null
             }
         }
-        return outcome
+        return true
+    }
+
+    @Synchronized
+    fun abandonInFlight() {
+        if (!inFlight || opened) return
+        revision++
+        inFlight = false
     }
 
     @Synchronized
     fun suppressPending() {
+        revision++
+        inFlight = false
         opened = true
         pending = null
     }
 
     @Synchronized
     fun clear() {
+        revision++
+        inFlight = false
         opened = true
         pending = null
     }
@@ -84,42 +134,24 @@ private const val MAX_AUTOMATIC_NAVIGATION_URL_CHARS = 8 * 1024
 /**
  * Routes a creative's call-to-action tap to its advertiser destination.
  *
- * A creative's [trackingUrl] is an MMP click tracker (AppsFlyer, Adjust, etc.). We open it
- * **directly** in the browser and let the tracker perform its own 30x redirect to the store —
- * we never resolve the chain ourselves or rebuild a store intent. This is what preserves
- * attribution end-to-end:
+ * App-store trackers use the same bounded no-follow HEAD chain as the Unity SDK. A strict final
+ * Play details URL is launched exactly as returned, preserving its install-referrer query without
+ * rendering intermediary tracker pages. Inconclusive chains fall back to opening the original
+ * tracker in the browser so the tap is never swallowed.
  *
- * - The real browser navigation is what registers the **click** with the MMP (with the device's
- *   own user-agent / IP, which the MMP fingerprints).
- * - For Play Store CTAs the tracker redirects to
- *   `https://play.google.com/store/apps/details?id=…&referrer=…`; the Play Store app intercepts
- *   that https link and records the `referrer`, which the Google Play Install Referrer API reads
- *   at install time. That `referrer` is the *only* signal that ties the **install** back to the
- *   click — see https://developer.android.com/google/play/installreferrer.
+ * **Deterministic store fallback** ([storeUrl], the campaign's raw `android_store_url`): a strict
+ * raw Play link covers a missing tracker or an unavailable handler. It never replaces a resolved
+ * referrer-bearing Play URL.
  *
- * The previous implementation resolved the redirect chain and relaunched a bare
- * `market://details?id=…` intent; that dropped the `referrer` query parameter (breaking install
- * attribution) and fired the tracker from a non-browser request (risking user-agent/IP mismatch
- * and double-counted clicks). We deliberately do neither now.
+ * The final Play URL is never reduced to a package id or rebuilt as `market://`: doing so previously
+ * dropped `referrer` and broke install attribution. Web destinations retain browser routing.
  *
- * **Deterministic store fallback** ([storeUrl], the campaign's raw `android_store_url`): the raw
- * Play link is used only when the tracker can't carry the click at all — a blank/missing
- * [trackingUrl] (previously a silent no-op) or a tracker `startActivity` that throws — so the CTA
- * still lands deterministically on the store. It never *replaces* an openable tracker: unlike the
- * iOS router (which opens `SKStoreProductViewController` from `ios_store_url` and fires the
- * tracker in the background), Android's install attribution rides the Play `referrer`, which only
- * survives the real browser navigation through the tracker.
- *
- * [destination] and [storeOpen] are retained for wire compatibility but no longer branch Android
- * behavior — every CTA opens its tracking link verbatim. (`storeOpen == INLINE_INSTALL` previously
- * tried an undocumented `market://…&overlay=true` half-sheet, which cannot carry the `referrer`;
- * preserving attribution takes precedence over that experiment.)
- *
- * The `startActivity` is wrapped in [runCatching] so a missing/unavailable browser can never crash
- * the host, and uses the application context + `FLAG_ACTIVITY_NEW_TASK` so the open survives the ad
- * Activity being auto-dismissed.
+ * Every `startActivity` is wrapped in [runCatching]. A live Activity is preferred; application
+ * context plus `FLAG_ACTIVITY_NEW_TASK` is the safe fallback for surfaces without one.
  */
 internal object CreativeCtaRouter {
+
+    private val redirectResolver = PlayStoreRedirectResolver()
 
     internal sealed interface AutomaticNavigationPlan {
         data object AllowInWebView : AutomaticNavigationPlan
@@ -446,6 +478,171 @@ internal object CreativeCtaRouter {
         record = { name -> Telemetry.recordOperation(name, 0L, success = name != "mmp_route_failed") },
     )
 
+    /** Resolve an app-store tracker using Unity's bounded no-follow HEAD flow. */
+    internal suspend fun prepare(
+        trackingUrl: String?,
+        destination: String,
+        storeUrl: String? = null,
+        startedAtNanos: Long = System.nanoTime(),
+        userAgent: String? = SimulaUserAgent.browserValue,
+    ): PreparedCtaOpen {
+        val tracker = admittedHttpUrl(trackingUrl)
+        val store = admittedStoreFallback(storeUrl).takeIf { destination == "appstore" }
+        val initial = tracker ?: store ?: return PreparedCtaOpen.Failed
+        if (destination != "appstore" || tracker == null) {
+            return PreparedCtaOpen.Launch(
+                url = initial,
+                fallbackUrl = null,
+                storeBound = admittedDirectPlayStoreUrl(initial) != null,
+            )
+        }
+        admittedDirectPlayStoreUrl(tracker)?.let { direct ->
+            return PreparedCtaOpen.Launch(direct, store?.takeIf { it != direct }, storeBound = true)
+        }
+
+        val resolveStarted = System.nanoTime()
+        runCatching { Telemetry.recordOperation("mmp_resolve_attempted", 0L, success = true) }
+        return when (val resolution = redirectResolver.resolve(tracker, userAgent, startedAtNanos)) {
+            is PlayStoreRedirectResolution.Resolved -> {
+                runCatching {
+                    Telemetry.recordOperation(
+                        "mmp_resolve_store_success",
+                        elapsedMs(resolveStarted),
+                        success = true,
+                    )
+                }
+                PreparedCtaOpen.Launch(
+                    url = resolution.url,
+                    fallbackUrl = store?.takeIf { it != resolution.url },
+                    storeBound = true,
+                )
+            }
+            is PlayStoreRedirectResolution.BrowserFallback -> {
+                runCatching {
+                    Telemetry.recordOperation(
+                        "mmp_resolve_${resolution.reason.name.lowercase()}",
+                        elapsedMs(resolveStarted),
+                        success = false,
+                    )
+                }
+                PreparedCtaOpen.Launch(
+                    url = resolution.originalUrl,
+                    fallbackUrl = store?.takeIf { it != resolution.originalUrl },
+                    storeBound = true,
+                )
+            }
+        }
+    }
+
+    internal suspend fun preparePrimaryCta(
+        route: PrimaryCtaRoute,
+        destination: String,
+        storeUrl: String? = null,
+        startedAtNanos: Long = System.nanoTime(),
+        userAgent: String? = SimulaUserAgent.browserValue,
+    ): PreparedCtaOpen {
+        admittedWebCustomDestination(route.externalTarget, destination)?.let { custom ->
+            return PreparedCtaOpen.Launch(custom, null, storeBound = false)
+        }
+        return prepare(
+            trackingUrl = route.externalTarget,
+            destination = destination,
+            storeUrl = primaryCtaStoreFallback(route, destination, storeUrl),
+            startedAtNanos = startedAtNanos,
+            userAgent = userAgent,
+        )
+    }
+
+    internal suspend fun prepareAutomaticNavigation(
+        targetUrl: String,
+        destination: String,
+        trackingUrl: String? = null,
+        trackerAlreadyRequested: Boolean = false,
+        startedAtNanos: Long = System.nanoTime(),
+        userAgent: String? = SimulaUserAgent.browserValue,
+    ): PreparedCtaOpen {
+        val admittedHttp = admittedHttpUrl(targetUrl)
+        val target = if (admittedHttp != null) {
+            if (isPlayStoreHost(admittedHttp) && admittedDirectPlayStoreUrl(admittedHttp) == null) {
+                return PreparedCtaOpen.Failed
+            }
+            admittedHttp
+        } else {
+            normalizeTappedDestination(targetUrl)
+                ?: admittedWebCustomDestination(targetUrl, destination)
+                ?: return PreparedCtaOpen.Failed
+        }
+        val targetIsTracker = matchesKnownTrackingUrl(target, trackingUrl)
+        if (trackerAlreadyRequested) {
+            return if (targetIsTracker) PreparedCtaOpen.Handled else PreparedCtaOpen.Launch(
+                url = target,
+                fallbackUrl = null,
+                storeBound = admittedDirectPlayStoreUrl(target) != null,
+            )
+        }
+        if (targetIsTracker) {
+            return prepare(target, destination, startedAtNanos = startedAtNanos, userAgent = userAgent)
+        }
+        admittedDirectPlayStoreUrl(target)?.let { play ->
+            return prepare(
+                trackingUrl = trackingUrl,
+                destination = "appstore",
+                storeUrl = play,
+                startedAtNanos = startedAtNanos,
+                userAgent = userAgent,
+            )
+        }
+        val tracker = admittedHttpUrl(trackingUrl)
+        return if (tracker != null) {
+            when (val prepared = prepare(
+                tracker,
+                destination,
+                startedAtNanos = startedAtNanos,
+                userAgent = userAgent,
+            )) {
+                is PreparedCtaOpen.Launch -> prepared.copy(
+                    fallbackUrl = prepared.fallbackUrl ?: target.takeIf { it != prepared.url },
+                )
+                else -> prepared
+            }
+        } else {
+            PreparedCtaOpen.Launch(target, null, storeBound = false)
+        }
+    }
+
+    internal fun launchPrepared(context: Context, prepared: PreparedCtaOpen): AutomaticNavigationOutcome = when (prepared) {
+        PreparedCtaOpen.Failed -> AutomaticNavigationOutcome.FAILED
+        PreparedCtaOpen.Handled -> AutomaticNavigationOutcome.HANDLED
+        is PreparedCtaOpen.Launch -> {
+            val openedPrimary = launchUrl(context, prepared.url)
+            val opened = openedPrimary || prepared.fallbackUrl?.let { launchUrl(context, it) } == true
+            if (!opened) {
+                runCatching { Telemetry.recordOperation("mmp_route_failed", 0L, success = false) }
+                AutomaticNavigationOutcome.FAILED
+            } else if (prepared.storeBound) {
+                AutomaticNavigationOutcome.STORE_OPENED
+            } else {
+                AutomaticNavigationOutcome.OTHER_OPENED
+            }
+        }
+    }
+
+    internal fun prepareInBackground(
+        prepare: suspend () -> PreparedCtaOpen,
+        onPrepared: (PreparedCtaOpen) -> Unit,
+    ): Job = SimulaScope.launch {
+        val prepared = try {
+            prepare()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            PreparedCtaOpen.Failed
+        }
+        withContext(Dispatchers.Main.immediate) {
+            runCatching { onPrepared(prepared) }
+        }
+    }
+
     internal fun routeAutomaticNavigation(
         targetUrl: String,
         destination: String,
@@ -551,11 +748,40 @@ internal object CreativeCtaRouter {
         return opened
     }
 
-    private fun launch(context: Context, url: String): Boolean = runCatching {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.applicationContext.startActivity(intent)
-    }.isSuccess
+    private fun admittedStoreFallback(value: String?): String? =
+        normalizeTappedDestination(value)?.let(::admittedDirectPlayStoreUrl)
+
+    private fun elapsedMs(startNanos: Long): Long =
+        ((System.nanoTime() - startNanos).coerceAtLeast(0L) / 1_000_000L)
+
+    private fun launch(context: Context, url: String): Boolean = launchUrl(context, url)
+
+    private fun launchUrl(context: Context, url: String): Boolean {
+        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+        val activity = context.findActivity()?.takeUnless { it.isFinishing || it.isDestroyed }
+        val launchContext = activity ?: context.applicationContext
+        val directPlay = admittedDirectPlayStoreUrl(url) != null
+        if (directPlay) {
+            val playIntent = Intent(Intent.ACTION_VIEW, uri).setPackage(PLAY_STORE_PACKAGE)
+            if (activity == null) playIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (runCatching { launchContext.startActivity(playIntent) }.isSuccess) return true
+        }
+        val intent = Intent(Intent.ACTION_VIEW, uri)
+        if (activity == null) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return runCatching { launchContext.startActivity(intent) }.isSuccess
+    }
+
+    private const val PLAY_STORE_PACKAGE = "com.android.vending"
+}
+
+private fun Context.findActivity(): Activity? {
+    var current: Context? = this
+    val seen = HashSet<Context>(4)
+    while (current != null && seen.add(current)) {
+        if (current is Activity) return current
+        current = (current as? ContextWrapper)?.baseContext
+    }
+    return null
 }
 
 private fun Boolean.toAutomaticNavigationOutcome(storeBound: Boolean): AutomaticNavigationOutcome = when {

@@ -24,4 +24,12 @@ class SimulaUserAgentTest {
             ua,
         )
     }
+
+    @Test
+    fun `browser user agent capture ignores blank replacement`() {
+        SimulaUserAgent.captureBrowser("Mozilla/5.0 WebView")
+        SimulaUserAgent.captureBrowser("  ")
+
+        assertEquals("Mozilla/5.0 WebView", SimulaUserAgent.browserValue)
+    }
 }

@@ -374,6 +374,77 @@ class ClickTrackingTest {
     }
 
     @Test
+    fun `async auto redirect waits for actual route completion`() {
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        var completion: ((Boolean) -> Unit)? = null
+        coordinator.activate(scope)
+
+        assertEquals(
+            AutoRedirectResult.DEFERRED,
+            coordinator.requestAsync(scope, null) { _, routeCompletion -> completion = routeCompletion },
+        )
+        assertEquals(
+            AutoRedirectResult.DEFERRED,
+            coordinator.requestAsync(scope, null) { _, _ -> error("must not start twice") },
+        )
+
+        completion?.invoke(true)
+
+        assertEquals(
+            AutoRedirectResult.SUPPRESSED,
+            coordinator.request(scope, null) { true },
+        )
+    }
+
+    @Test
+    fun `stale async auto redirect cannot suppress replacement scope`() {
+        val coordinator = AutoRedirectCoordinator()
+        val first = Any()
+        val second = Any()
+        var staleCompletion: ((Boolean) -> Unit)? = null
+        coordinator.activate(first)
+        coordinator.requestAsync(first, null) { _, routeCompletion -> staleCompletion = routeCompletion }
+
+        coordinator.deactivate(first)
+        coordinator.activate(second)
+        staleCompletion?.invoke(true)
+
+        assertEquals(
+            AutoRedirectResult.OPENED,
+            coordinator.request(second, null) { true },
+        )
+    }
+
+    @Test
+    fun `user handoff preempts in flight auto route and retries only after cancellation`() {
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        val completions = mutableListOf<(Boolean) -> Unit>()
+        val canOpen = mutableListOf<() -> Boolean>()
+        val handoff = testHandoff("user")
+        coordinator.activate(scope)
+        coordinator.requestAsync(scope, null) { routeCanOpen, routeCompletion ->
+            canOpen += routeCanOpen
+            completions += routeCompletion
+        }
+
+        coordinator.observeUserHandoff(handoff)
+
+        assertFalse(coordinator.isActive(scope))
+        assertFalse(canOpen.single().invoke())
+        completions.single().invoke(true)
+        assertEquals(1, completions.size)
+
+        handoff.cancel()
+
+        assertEquals(2, completions.size)
+        assertTrue(canOpen.last().invoke())
+        completions.last().invoke(true)
+        assertEquals(AutoRedirectResult.SUPPRESSED, coordinator.request(scope, null) { true })
+    }
+
+    @Test
     fun `duplicate deferred requests stay suppressed after accounted click`() {
         val gate = ClickInteractionGate(idFactory = { "user" })
         val handoff = ClickPersistenceHandoff(

@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.ads
 
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -7,12 +8,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Tier-0 regression guard for click-through attribution: the CTA must open the MMP tracking link
- * **verbatim** and never rewrite it into a `market://`/Play Store URL — rewriting strips the
- * `referrer` the Google Play Install Referrer API needs, breaking install attribution. The raw
- * store link is only the deterministic fallback when the tracker is blank/missing — it must never
- * replace an available tracker. Framework launch is verified manually; here we lock the pure
- * planner and router contracts.
+ * Tier-0 guards for URL admission and fallback selection. Redirect resolution has separate tests;
+ * these contracts ensure no route rebuilds a Play destination as a lossy `market://` package URL.
  */
 class CreativeCtaRouterTest {
 
@@ -759,6 +756,34 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `cleared automatic attempt rejects stale completion`() {
+        val gate = AutomaticNavigationGate()
+        assertTrue(gate.retain("https://tracker.example/click", false))
+        val attempt = requireNotNull(gate.beginPending())
+
+        gate.clear()
+
+        assertFalse(gate.isActive(attempt))
+        assertFalse(gate.complete(attempt, AutomaticNavigationOutcome.STORE_OPENED))
+        assertFalse(gate.hasPending())
+    }
+
+    @Test
+    fun `abandoned automatic attempt remains retryable after owner replacement`() {
+        val gate = AutomaticNavigationGate()
+        assertTrue(gate.retain("https://tracker.example/click", false))
+        val stale = requireNotNull(gate.beginPending())
+
+        gate.abandonInFlight()
+        val replacement = requireNotNull(gate.beginPending())
+
+        assertFalse(gate.isActive(stale))
+        assertTrue(gate.isActive(replacement))
+        assertTrue(gate.complete(replacement, AutomaticNavigationOutcome.STORE_OPENED))
+        assertFalse(gate.hasPending())
+    }
+
+    @Test
     fun `automatic router independently rejects malformed Play destinations`() {
         var launches = 0
 
@@ -836,6 +861,46 @@ class CreativeCtaRouterTest {
             ),
         )
         assertEquals(listOf(custom), continuationLaunches)
+    }
+
+    @Test
+    fun `async automatic planner preserves custom fallback after tracker`() = runTest {
+        val tracker = "https://tracker.example/click?campaign=custom"
+        val custom = "partner-app://offer"
+
+        assertEquals(
+            PreparedCtaOpen.Launch(
+                url = tracker,
+                fallbackUrl = custom,
+                storeBound = false,
+            ),
+            CreativeCtaRouter.prepareAutomaticNavigation(
+                targetUrl = custom,
+                destination = "web",
+                trackingUrl = tracker,
+            ),
+        )
+    }
+
+    @Test
+    fun `async automatic planner preserves decoded intent fallback after tracker`() = runTest {
+        val tracker = "https://tracker.example/click?campaign=intent"
+        val fallback = "https://advertiser.example/offer?source=simula%2Bauto"
+        val intent = "intent://offer#Intent;scheme=https;" +
+            "S.browser_fallback_url=https%3A%2F%2Fadvertiser.example%2Foffer%3Fsource%3Dsimula%252Bauto;end"
+
+        assertEquals(
+            PreparedCtaOpen.Launch(
+                url = tracker,
+                fallbackUrl = fallback,
+                storeBound = false,
+            ),
+            CreativeCtaRouter.prepareAutomaticNavigation(
+                targetUrl = intent,
+                destination = "web",
+                trackingUrl = tracker,
+            ),
+        )
     }
 
     @Test

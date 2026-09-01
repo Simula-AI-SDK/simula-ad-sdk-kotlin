@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickPersistencePart
 import ad.simula.ad.sdk.network.ClickRouteStart
+import ad.simula.ad.sdk.network.PresentationRouteResult
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.os.Handler
@@ -15,6 +16,8 @@ import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 
 internal interface ClickHandoffScheduler {
     fun post(block: Runnable)
@@ -175,6 +178,77 @@ internal fun coordinateDeferredClickPersistence(
         recordTelemetry { handoff.complete(ClickPersistencePart.TELEMETRY) }
     }
     return handoff
+}
+
+internal fun <T : Any> prepareDeferredCtaRoute(
+    prepare: suspend () -> PreparedCtaOpen,
+    requestRoute: (route: (T) -> Boolean, completion: (Boolean) -> Unit) -> PresentationRouteResult,
+    completion: (Boolean) -> Unit,
+    open: (T, PreparedCtaOpen) -> Boolean,
+): ClickRouteStart {
+    CreativeCtaRouter.prepareInBackground(prepare) { prepared ->
+        val result = requestRoute({ host -> open(host, prepared) }, completion)
+        if (result == PresentationRouteResult.REJECTED) completion(false)
+    }
+    return ClickRouteStart.STARTED
+}
+
+internal fun prepareAutomaticCtaRoute(
+    gate: AutomaticNavigationGate,
+    prepare: suspend (PendingAutomaticNavigation) -> PreparedCtaOpen,
+    canOpen: () -> Boolean,
+    open: (PreparedCtaOpen) -> AutomaticNavigationOutcome,
+    completion: (Boolean) -> Unit,
+) {
+    val attempt = gate.beginPending()
+    if (attempt == null) {
+        completion(false)
+        return
+    }
+    CreativeCtaRouter.prepareInBackground(
+        prepare = { prepare(attempt.route) },
+        onPrepared = { prepared ->
+            if (!gate.isActive(attempt) || !canOpen()) {
+                gate.complete(attempt, AutomaticNavigationOutcome.FAILED)
+                completion(false)
+                return@prepareInBackground
+            }
+            val outcome = runCatching { open(prepared) }.getOrDefault(AutomaticNavigationOutcome.FAILED)
+            gate.complete(attempt, outcome)
+            completion(outcome != AutomaticNavigationOutcome.FAILED)
+        },
+    )
+}
+
+internal fun runWhenLifecycleResumed(
+    lifecycle: Lifecycle,
+    canRun: () -> Boolean,
+    onResumed: () -> Unit,
+    onUnavailable: () -> Unit,
+) {
+    if (!canRun() || lifecycle.currentState == Lifecycle.State.DESTROYED) {
+        onUnavailable()
+        return
+    }
+    if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+        onResumed()
+        return
+    }
+    lateinit var observer: LifecycleEventObserver
+    observer = LifecycleEventObserver { _, event ->
+        when (event) {
+            Lifecycle.Event.ON_RESUME -> {
+                lifecycle.removeObserver(observer)
+                if (canRun()) onResumed() else onUnavailable()
+            }
+            Lifecycle.Event.ON_DESTROY -> {
+                lifecycle.removeObserver(observer)
+                onUnavailable()
+            }
+            else -> Unit
+        }
+    }
+    lifecycle.addObserver(observer)
 }
 
 internal fun canDismissFullscreen(

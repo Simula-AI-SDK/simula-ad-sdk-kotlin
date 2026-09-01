@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.InputStream
@@ -11,6 +12,7 @@ import java.net.URI
 import java.net.URL
 import java.net.UnknownHostException
 import java.util.zip.GZIPInputStream
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLException
 
 /**
@@ -35,6 +37,11 @@ internal object SimulaHttp {
     data class Response(val code: Int, val body: String) {
         val isSuccessful: Boolean get() = code in 200..299
     }
+
+    data class RedirectHeadResponse(
+        val code: Int,
+        val locations: List<String>,
+    )
 
     /**
      * Perform an HTTP request and read the response body as a UTF-8 string.
@@ -126,10 +133,80 @@ internal object SimulaHttp {
         }
     }
 
+    /**
+     * One public redirect probe. Unlike normal API requests this deliberately sends no Simula
+     * device, privacy, authorization, or connection headers to the third-party destination.
+     */
+    suspend fun requestRedirectHead(
+        url: String,
+        timeoutMs: Long,
+        userAgent: String?,
+        openConnection: (String) -> HttpURLConnection = { target ->
+            URL(target).openConnection() as? HttpURLConnection
+                ?: throw IOException("Expected an HttpURLConnection")
+        },
+    ): RedirectHeadResponse = suspendCancellableCoroutine { continuation ->
+        val activeConnection = AtomicReference<HttpURLConnection?>(null)
+        continuation.invokeOnCancellation {
+            // HttpURLConnection is blocking; cancellation must abort the socket from the cancelling
+            // thread rather than waiting for the IO worker to observe coroutine cancellation.
+            runCatching { activeConnection.getAndSet(null)?.disconnect() }
+        }
+        Dispatchers.IO.dispatch(continuation.context, Runnable {
+            if (!continuation.isActive) return@Runnable
+            var conn: HttpURLConnection? = null
+            try {
+                val started = System.nanoTime()
+                val boundedTimeoutMs = timeoutMs.coerceIn(1L, Int.MAX_VALUE.toLong())
+                conn = openConnection(url)
+                activeConnection.set(conn)
+                if (!continuation.isActive) {
+                    runCatching { activeConnection.getAndSet(null)?.disconnect() }
+                    return@Runnable
+                }
+                configureRedirectHeadConnection(conn, boundedTimeoutMs.toInt(), userAgent)
+                conn.connect()
+                conn.readTimeout = remainingTimeoutMs(started, boundedTimeoutMs)
+                val code = conn.responseCode
+                val locations = conn.headerFields.orEmpty().entries
+                    .filter { (name, _) -> name?.equals("Location", ignoreCase = true) == true }
+                    .flatMap { it.value.orEmpty() }
+                runCatching { (conn.errorStream ?: conn.inputStream)?.close() }
+                activeConnection.compareAndSet(conn, null)
+                continuation.resumeWith(Result.success(RedirectHeadResponse(code, locations)))
+            } catch (e: Throwable) {
+                // Exceptional connections are not reusable; abort them so a timed-out probe cannot
+                // continue in the background and race the browser fallback.
+                activeConnection.compareAndSet(conn, null)
+                runCatching { conn?.disconnect() }
+                continuation.resumeWith(Result.failure(e))
+            }
+        })
+    }
+
     /** Non-2xx response from [requestBytes]; an [IOException] so existing callers treat it as a fetch failure. */
     private class HttpStatusException(statusCode: Int, url: String) : IOException("HTTP $statusCode for $url")
 
     private fun elapsedMs(startNanos: Long): Long = (System.nanoTime() - startNanos) / 1_000_000
+
+    private fun remainingTimeoutMs(startNanos: Long, timeoutMs: Long): Int {
+        val elapsedMs = ((System.nanoTime() - startNanos).coerceAtLeast(0L) / 1_000_000L)
+        return (timeoutMs - elapsedMs).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    internal fun configureRedirectHeadConnection(
+        conn: HttpURLConnection,
+        timeoutMs: Int,
+        userAgent: String?,
+    ) {
+        conn.requestMethod = "HEAD"
+        conn.connectTimeout = timeoutMs.coerceAtLeast(1)
+        conn.readTimeout = timeoutMs.coerceAtLeast(1)
+        conn.instanceFollowRedirects = false
+        conn.useCaches = false
+        conn.setRequestProperty("Accept", "*/*")
+        userAgent?.takeIf { it.isNotBlank() }?.let { conn.setRequestProperty("User-Agent", it) }
+    }
 
     /** Request path only (no scheme/host/query) so telemetry carries no PII-bearing query params. */
     private fun pathOf(url: String): String =

@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.bridge
 
 import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.network.SimulaUserAgent
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
@@ -322,6 +323,7 @@ ${trustedCtaRelaySource(activationNonce)}
         onTrustedCtaOpen: ((String) -> Unit)? = null,
         onPageReady: ((String) -> Unit)? = null,
     ): BridgeInjectionMode {
+        SimulaUserAgent.captureBrowser(runCatching { webView.settings.userAgentString }.getOrNull())
         if (!uninstall(webView)) {
             Telemetry.recordError(signature = "bridge:stale_wiring_cleanup_failed")
             return BridgeInjectionMode.UNAVAILABLE
