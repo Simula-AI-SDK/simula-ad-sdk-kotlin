@@ -380,6 +380,16 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `market destination accepts Adjust trailing slash and preserves referrer`() {
+        assertEquals(
+            "https://play.google.com/store/apps/details?id=com.example.app&referrer=adjust%3Dabc%252B123",
+            CreativeCtaRouter.normalizeTappedDestination(
+                "market://details/?id=com.example.app&referrer=adjust%3Dabc%252B123",
+            ),
+        )
+    }
+
+    @Test
     fun `normalized market store fallback is used directly when tracker is missing`() {
         val market = "market://details?id=com.example.app&referrer=click%2Bvalue"
         val https = "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%2Bvalue"
@@ -420,7 +430,6 @@ class CreativeCtaRouterTest {
             "market://details",
             "market://details?id=",
             "market://details?id=%20",
-            "market://details/?id=com.example.app",
             "market://details?id=com.example.app#fragment",
             "market://search?q=example",
             "market://details?referrer=abc",

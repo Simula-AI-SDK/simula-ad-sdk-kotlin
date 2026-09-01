@@ -27,6 +27,28 @@ class PlayStoreRedirectResolverTest {
     }
 
     @Test
+    fun `strict Adjust market location preserves referrer when converted to Play HTTPS`() = runTest {
+        val calls = mutableListOf<Call>()
+        val resolver = resolver(calls) { _, _, _ ->
+            response(
+                302,
+                "market://details/?id=com.example.app&" +
+                    "referrer=adjust_reftag%3DcZHZlf9YWb0ru%26utm_source%3DSimula",
+            )
+        }
+
+        assertEquals(
+            PlayStoreRedirectResolution.Resolved(
+                "https://play.google.com/store/apps/details?id=com.example.app&" +
+                    "referrer=adjust_reftag%3DcZHZlf9YWb0ru%26utm_source%3DSimula",
+                1,
+            ),
+            resolver.resolve("https://app.adjust.com/226m4iih", "Browser UA", 0L),
+        )
+        assertEquals(1, calls.size)
+    }
+
+    @Test
     fun `relative locations resolve against each hop`() = runTest {
         val calls = mutableListOf<Call>()
         val responses = ArrayDeque(

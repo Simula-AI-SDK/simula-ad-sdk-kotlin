@@ -120,6 +120,9 @@ internal class PlayStoreRedirectResolver(
     private fun resolveLocation(current: String, location: String): String? {
         val candidate = location.trim().takeIf { it.isNotEmpty() && it.length <= MAX_URL_CHARS } ?: return null
         CreativeCtaRouter.admittedHttpUrl(candidate)?.let { return it }
+        CreativeCtaRouter.normalizeTappedDestination(candidate)?.let { normalized ->
+            CreativeCtaRouter.admittedDirectPlayStoreUrl(normalized)?.let { return it }
+        }
         val uri = runCatching { URI(candidate) }.getOrNull() ?: return null
         if (uri.isAbsolute) return null
         val resolved = runCatching { URL(URL(current), candidate).toExternalForm() }.getOrNull() ?: return null

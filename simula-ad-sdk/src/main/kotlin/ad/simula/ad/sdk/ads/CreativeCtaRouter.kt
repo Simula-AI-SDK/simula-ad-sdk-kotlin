@@ -378,7 +378,7 @@ internal object CreativeCtaRouter {
         val uri = runCatching { URI(candidate) }.getOrNull() ?: return null
         if (!uri.scheme.equals("market", ignoreCase = true)) return null
         if (!uri.rawAuthority.equals("details", ignoreCase = true)) return null
-        if (!uri.rawPath.isNullOrEmpty() || uri.rawFragment != null) return null
+        if (uri.rawPath.orEmpty() !in setOf("", "/") || uri.rawFragment != null) return null
         val rawQuery = uri.rawQuery?.takeIf { it.isNotEmpty() } ?: return null
         val hasPackageId = rawQuery.split('&').any { part ->
             val separator = part.indexOf('=')
