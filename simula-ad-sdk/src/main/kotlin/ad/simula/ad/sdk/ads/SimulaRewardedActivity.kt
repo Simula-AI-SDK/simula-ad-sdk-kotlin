@@ -790,17 +790,8 @@ private fun RewardedMinigame(
         }
     }
 
-    fun beginPrimaryCta(tappedUrl: String, currentPageUrl: String? = creativeWebView?.url): Boolean {
-        val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
-            tappedUrl = tappedUrl,
-            creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: initialPageUrl,
-            trackingUrl = presentation.trackingUrl,
-            destination = presentation.destination,
-        )) {
-            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> return false
-            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
-            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
-        }
+    fun beginPrimaryCtaRoute(route: PrimaryCtaRoute, storeRequest: Boolean = false): Boolean {
+        if (storeRequest && !presentation.creativeStoreRequest.canRequest()) return true
         val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
         notifyPublisherClick { presentation.callbacks.notifyClicked() }
         val interaction = claim.interaction
@@ -833,6 +824,9 @@ private fun RewardedMinigame(
                     requestRoute = presentation::routeClick,
                     completion = completion,
                     open = { routeActivity, prepared ->
+                        if (storeRequest && !presentation.creativeStoreRequest.canOpen()) {
+                            return@prepareDeferredCtaRoute false
+                        }
                         if (!canRouteFromCurrentFullscreenActivity(
                                 routeActivity.isFinishing,
                                 routeActivity.isDestroyed,
@@ -858,15 +852,32 @@ private fun RewardedMinigame(
                 )
             },
             onCreated = { handoff ->
+                if (storeRequest && !presentation.creativeStoreRequest.track(handoff)) {
+                    return@coordinateDeferredClickPersistence
+                }
                 presentation.trackClickHandoff(handoff)
                 clickHandoffPending = true
             },
             onFinished = { handoff ->
+                if (storeRequest) presentation.creativeStoreRequest.finish(handoff)
                 presentation.clearClickHandoff(handoff)
                 clickHandoffPending = presentation.pendingClickHandoff() != null
             },
         )
         return true
+    }
+
+    fun beginPrimaryCta(tappedUrl: String, currentPageUrl: String? = creativeWebView?.url): Boolean {
+        return when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+            tappedUrl = tappedUrl,
+            creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: initialPageUrl,
+            trackingUrl = presentation.trackingUrl,
+            destination = presentation.destination,
+        )) {
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> false
+            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> true
+            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> beginPrimaryCtaRoute(plan.route)
+        }
     }
 
     fun admitCreativeCommit(view: WebView?, qualified: Boolean) {
@@ -1072,6 +1083,14 @@ private fun RewardedMinigame(
                         webView = this,
                         bridge = bridge,
                         onTrustedCtaOpen = { url -> beginPrimaryCta(url) },
+                        onTrustedStoreOpen = {
+                            CreativeCtaRouter.trustedStoreRoute(
+                                destination = presentation.destination,
+                                trackingUrl = presentation.trackingUrl,
+                                storeUrl = presentation.androidStoreUrl,
+                            )?.let { route -> beginPrimaryCtaRoute(route, storeRequest = true) }
+                        },
+                        onTrustedStoreDismiss = { presentation.creativeStoreRequest.dismiss() },
                         onPageReady = {
                             requestHtmlVisualFence(
                                 view = target,

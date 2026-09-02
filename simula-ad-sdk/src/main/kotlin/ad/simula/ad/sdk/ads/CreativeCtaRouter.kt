@@ -248,6 +248,29 @@ internal object CreativeCtaRouter {
         )
     }
 
+    /** Builds an app-store CTA exclusively from validated metadata owned by the current serve. */
+    internal fun trustedStoreRoute(
+        destination: String,
+        trackingUrl: String?,
+        storeUrl: String?,
+    ): PrimaryCtaRoute? {
+        if (destination != "appstore") return null
+        val tracker = admittedHttpUrl(trackingUrl)
+        val store = admittedStoreFallback(storeUrl)
+        return when {
+            tracker != null -> PrimaryCtaRoute(
+                tappedUrl = store,
+                externalTarget = tracker,
+                externalTargetIsTracker = true,
+            )
+            store != null -> PrimaryCtaRoute(
+                tappedUrl = store,
+                externalTarget = store,
+            )
+            else -> null
+        }
+    }
+
     internal fun fallbackCtaTapPlan(
         isMainFrame: Boolean,
         hasGesture: Boolean,
