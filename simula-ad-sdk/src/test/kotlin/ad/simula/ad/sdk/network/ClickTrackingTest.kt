@@ -398,6 +398,34 @@ class ClickTrackingTest {
     }
 
     @Test
+    fun `overlapping one shot auto route runs after active route fails`() {
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        val completions = mutableListOf<(Boolean) -> Unit>()
+        val attempts = mutableListOf<String>()
+        coordinator.activate(scope)
+
+        coordinator.requestAsync(scope, null) { _, completion ->
+            attempts += "first"
+            completions += completion
+        }
+        assertEquals(
+            AutoRedirectResult.DEFERRED,
+            coordinator.requestAsync(scope, null) { _, completion ->
+                attempts += "second"
+                completions += completion
+            },
+        )
+        assertEquals(listOf("first"), attempts)
+
+        completions.first().invoke(false)
+
+        assertEquals(listOf("first", "second"), attempts)
+        completions.last().invoke(true)
+        assertEquals(AutoRedirectResult.SUPPRESSED, coordinator.request(scope, null) { true })
+    }
+
+    @Test
     fun `stale async auto redirect cannot suppress replacement scope`() {
         val coordinator = AutoRedirectCoordinator()
         val first = Any()

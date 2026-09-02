@@ -31,11 +31,17 @@ internal class AutomaticNavigationAttempt internal constructor(
 
 internal enum class AutomaticNavigationOutcome { STORE_OPENED, OTHER_OPENED, HANDLED, FAILED }
 
+internal enum class CtaTargetSource { MMP, RAW_STORE, DIRECT }
+
+internal data class PreparedCtaTarget(
+    val url: String,
+    val source: CtaTargetSource,
+)
+
 internal sealed interface PreparedCtaOpen {
     data class Launch(
-        val url: String,
-        val fallbackUrl: String?,
-        val storeBound: Boolean,
+        val primary: PreparedCtaTarget,
+        val fallback: PreparedCtaTarget?,
     ) : PreparedCtaOpen
 
     data object Handled : PreparedCtaOpen
@@ -228,7 +234,8 @@ internal object CreativeCtaRouter {
             }
         }
 
-        val externalTarget = admittedHttpUrl(trackingUrl)
+        val admittedTracker = admittedHttpUrl(trackingUrl)
+        val externalTarget = admittedTracker
             ?: tappedDestination
             ?: customDestination
             ?: return PrimaryCtaTapPlan.ConsumeWithoutClick
@@ -236,6 +243,7 @@ internal object CreativeCtaRouter {
             PrimaryCtaRoute(
                 tappedUrl = tappedDestination,
                 externalTarget = externalTarget,
+                externalTargetIsTracker = admittedTracker != null,
             ),
         )
     }
@@ -454,6 +462,18 @@ internal object CreativeCtaRouter {
         admittedWebCustomDestination(route.externalTarget, destination)?.let { custom ->
             return launch(context, custom)
         }
+        if (!route.externalTargetIsTracker) {
+            val direct = normalizeTappedDestination(route.externalTarget) ?: return false
+            val fallback = admittedStoreFallback(primaryCtaStoreFallback(route, destination, storeUrl))
+                ?.takeIf { it != direct }
+            return launchPrepared(
+                context,
+                PreparedCtaOpen.Launch(
+                    primary = PreparedCtaTarget(direct, CtaTargetSource.DIRECT),
+                    fallback = fallback?.let { PreparedCtaTarget(it, CtaTargetSource.RAW_STORE) },
+                ),
+            ) != AutomaticNavigationOutcome.FAILED
+        }
         return open(
             context,
             route.externalTarget,
@@ -492,13 +512,20 @@ internal object CreativeCtaRouter {
         val initial = tracker ?: store ?: return PreparedCtaOpen.Failed
         if (destination != "appstore" || tracker == null) {
             return PreparedCtaOpen.Launch(
-                url = initial,
-                fallbackUrl = null,
-                storeBound = admittedDirectPlayStoreUrl(initial) != null,
+                primary = PreparedCtaTarget(
+                    initial,
+                    if (tracker != null) CtaTargetSource.MMP else CtaTargetSource.RAW_STORE,
+                ),
+                fallback = null,
             )
         }
         admittedDirectPlayStoreUrl(tracker)?.let { direct ->
-            return PreparedCtaOpen.Launch(direct, store?.takeIf { it != direct }, storeBound = true)
+            return PreparedCtaOpen.Launch(
+                primary = PreparedCtaTarget(direct, CtaTargetSource.MMP),
+                fallback = store?.takeIf { it != direct }?.let {
+                    PreparedCtaTarget(it, CtaTargetSource.RAW_STORE)
+                },
+            )
         }
 
         val resolveStarted = System.nanoTime()
@@ -513,9 +540,10 @@ internal object CreativeCtaRouter {
                     )
                 }
                 PreparedCtaOpen.Launch(
-                    url = resolution.url,
-                    fallbackUrl = store?.takeIf { it != resolution.url },
-                    storeBound = true,
+                    primary = PreparedCtaTarget(resolution.url, CtaTargetSource.MMP),
+                    fallback = store?.takeIf { it != resolution.url }?.let {
+                        PreparedCtaTarget(it, CtaTargetSource.RAW_STORE)
+                    },
                 )
             }
             is PlayStoreRedirectResolution.BrowserFallback -> {
@@ -527,9 +555,10 @@ internal object CreativeCtaRouter {
                     )
                 }
                 PreparedCtaOpen.Launch(
-                    url = resolution.url,
-                    fallbackUrl = store?.takeIf { it != resolution.url },
-                    storeBound = true,
+                    primary = PreparedCtaTarget(resolution.url, CtaTargetSource.MMP),
+                    fallback = store?.takeIf { it != resolution.url }?.let {
+                        PreparedCtaTarget(it, CtaTargetSource.RAW_STORE)
+                    },
                 )
             }
         }
@@ -542,15 +571,23 @@ internal object CreativeCtaRouter {
         startedAtNanos: Long = System.nanoTime(),
         userAgent: String? = SimulaUserAgent.browserValue,
     ): PreparedCtaOpen {
-        admittedWebCustomDestination(route.externalTarget, destination)?.let { custom ->
-            return PreparedCtaOpen.Launch(custom, null, storeBound = false)
+        if (route.externalTargetIsTracker) {
+            return prepare(
+                trackingUrl = route.externalTarget,
+                destination = destination,
+                storeUrl = primaryCtaStoreFallback(route, destination, storeUrl),
+                startedAtNanos = startedAtNanos,
+                userAgent = userAgent,
+            )
         }
-        return prepare(
-            trackingUrl = route.externalTarget,
-            destination = destination,
-            storeUrl = primaryCtaStoreFallback(route, destination, storeUrl),
-            startedAtNanos = startedAtNanos,
-            userAgent = userAgent,
+        val direct = admittedWebCustomDestination(route.externalTarget, destination)
+            ?: normalizeTappedDestination(route.externalTarget)
+            ?: return PreparedCtaOpen.Failed
+        val fallback = admittedStoreFallback(primaryCtaStoreFallback(route, destination, storeUrl))
+            ?.takeIf { it != direct }
+        return PreparedCtaOpen.Launch(
+            primary = PreparedCtaTarget(direct, CtaTargetSource.DIRECT),
+            fallback = fallback?.let { PreparedCtaTarget(it, CtaTargetSource.RAW_STORE) },
         )
     }
 
@@ -576,9 +613,8 @@ internal object CreativeCtaRouter {
         val targetIsTracker = matchesKnownTrackingUrl(target, trackingUrl)
         if (trackerAlreadyRequested) {
             return if (targetIsTracker) PreparedCtaOpen.Handled else PreparedCtaOpen.Launch(
-                url = target,
-                fallbackUrl = null,
-                storeBound = admittedDirectPlayStoreUrl(target) != null,
+                primary = PreparedCtaTarget(target, CtaTargetSource.DIRECT),
+                fallback = null,
             )
         }
         if (targetIsTracker) {
@@ -602,25 +638,57 @@ internal object CreativeCtaRouter {
                 userAgent = userAgent,
             )) {
                 is PreparedCtaOpen.Launch -> prepared.copy(
-                    fallbackUrl = prepared.fallbackUrl ?: target.takeIf { it != prepared.url },
+                    fallback = prepared.fallback ?: target.takeIf { it != prepared.primary.url }?.let {
+                        PreparedCtaTarget(it, CtaTargetSource.DIRECT)
+                    },
                 )
                 else -> prepared
             }
         } else {
-            PreparedCtaOpen.Launch(target, null, storeBound = false)
+            PreparedCtaOpen.Launch(
+                primary = PreparedCtaTarget(target, CtaTargetSource.DIRECT),
+                fallback = null,
+            )
         }
     }
 
-    internal fun launchPrepared(context: Context, prepared: PreparedCtaOpen): AutomaticNavigationOutcome = when (prepared) {
+    internal fun launchPrepared(context: Context, prepared: PreparedCtaOpen): AutomaticNavigationOutcome =
+        launchPrepared(
+            prepared = prepared,
+            launch = { launchUrl(context, it) },
+            record = { name -> Telemetry.recordOperation(name, 0L, success = name != "mmp_route_failed") },
+        )
+
+    internal fun launchPrepared(
+        prepared: PreparedCtaOpen,
+        launch: (String) -> Boolean,
+        record: (String) -> Unit = {},
+    ): AutomaticNavigationOutcome = when (prepared) {
         PreparedCtaOpen.Failed -> AutomaticNavigationOutcome.FAILED
         PreparedCtaOpen.Handled -> AutomaticNavigationOutcome.HANDLED
         is PreparedCtaOpen.Launch -> {
-            val openedPrimary = launchUrl(context, prepared.url)
-            val opened = openedPrimary || prepared.fallbackUrl?.let { launchUrl(context, it) } == true
-            if (!opened) {
-                runCatching { Telemetry.recordOperation("mmp_route_failed", 0L, success = false) }
+            var mmpAttempted = false
+            fun attempt(target: PreparedCtaTarget): Boolean {
+                when (target.source) {
+                    CtaTargetSource.MMP -> {
+                        mmpAttempted = true
+                        runCatching { record("mmp_route_attempted") }
+                    }
+                    CtaTargetSource.RAW_STORE -> runCatching { record("mmp_raw_store_fallback") }
+                    CtaTargetSource.DIRECT -> Unit
+                }
+                return runCatching { launch(target.url) }.getOrDefault(false)
+            }
+
+            val openedTarget = if (attempt(prepared.primary)) {
+                prepared.primary
+            } else {
+                prepared.fallback?.takeIf(::attempt)
+            }
+            if (openedTarget == null) {
+                if (mmpAttempted) runCatching { record("mmp_route_failed") }
                 AutomaticNavigationOutcome.FAILED
-            } else if (prepared.storeBound) {
+            } else if (admittedDirectPlayStoreUrl(openedTarget.url) != null) {
                 AutomaticNavigationOutcome.STORE_OPENED
             } else {
                 AutomaticNavigationOutcome.OTHER_OPENED

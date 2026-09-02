@@ -131,6 +131,7 @@ internal class InterstitialPresentation(
     fun trackClickHandoff(handoff: ClickPersistenceHandoff) {
         pendingClickHandoff = handoff
         primaryCtaNavigation.onHandoffCreated(handoff)
+        automaticNavigationGate.abandonInFlight()
         autoRedirectCoordinator.observeUserHandoff(handoff)
     }
 

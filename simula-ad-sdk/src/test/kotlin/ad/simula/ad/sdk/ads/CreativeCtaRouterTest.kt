@@ -49,6 +49,7 @@ class CreativeCtaRouterTest {
                 ad.simula.ad.sdk.network.PrimaryCtaRoute(
                     tappedUrl = "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%2Bvalue",
                     externalTarget = "https://tracker.example/click?a=1%2B2",
+                    externalTargetIsTracker = true,
                 ),
             ),
             plan,
@@ -62,6 +63,7 @@ class CreativeCtaRouterTest {
                 ad.simula.ad.sdk.network.PrimaryCtaRoute(
                     tappedUrl = "https://creative.example/offer",
                     externalTarget = "https://tracker.example/click",
+                    externalTargetIsTracker = true,
                 ),
             ),
             CreativeCtaRouter.primaryCtaTapPlan(
@@ -101,6 +103,7 @@ class CreativeCtaRouterTest {
                 ad.simula.ad.sdk.network.PrimaryCtaRoute(
                     tappedUrl = null,
                     externalTarget = "https://tracker.example/click",
+                    externalTargetIsTracker = true,
                 ),
             ),
             CreativeCtaRouter.primaryCtaTapPlan(
@@ -607,6 +610,7 @@ class CreativeCtaRouterTest {
                 ad.simula.ad.sdk.network.PrimaryCtaRoute(
                     tappedUrl = "https://other.example/next",
                     externalTarget = tracker,
+                    externalTargetIsTracker = true,
                 ),
             ),
             CreativeCtaRouter.fallbackCtaTapPlan(
@@ -880,9 +884,8 @@ class CreativeCtaRouterTest {
 
         assertEquals(
             PreparedCtaOpen.Launch(
-                url = tracker,
-                fallbackUrl = custom,
-                storeBound = false,
+                primary = PreparedCtaTarget(tracker, CtaTargetSource.MMP),
+                fallback = PreparedCtaTarget(custom, CtaTargetSource.DIRECT),
             ),
             CreativeCtaRouter.prepareAutomaticNavigation(
                 targetUrl = custom,
@@ -901,9 +904,8 @@ class CreativeCtaRouterTest {
 
         assertEquals(
             PreparedCtaOpen.Launch(
-                url = tracker,
-                fallbackUrl = fallback,
-                storeBound = false,
+                primary = PreparedCtaTarget(tracker, CtaTargetSource.MMP),
+                fallback = PreparedCtaTarget(fallback, CtaTargetSource.DIRECT),
             ),
             CreativeCtaRouter.prepareAutomaticNavigation(
                 targetUrl = intent,
@@ -930,9 +932,11 @@ class CreativeCtaRouterTest {
 
         assertEquals(
             PreparedCtaOpen.Launch(
-                url = terminal,
-                fallbackUrl = "https://play.google.com/store/apps/details?id=com.example.app",
-                storeBound = true,
+                primary = PreparedCtaTarget(terminal, CtaTargetSource.MMP),
+                fallback = PreparedCtaTarget(
+                    "https://play.google.com/store/apps/details?id=com.example.app",
+                    CtaTargetSource.RAW_STORE,
+                ),
             ),
             CreativeCtaRouter.prepare(
                 trackingUrl = tracker,
@@ -942,6 +946,110 @@ class CreativeCtaRouterTest {
                 userAgent = "Browser UA",
                 resolver = resolver,
             ),
+        )
+    }
+
+    @Test
+    fun `prepared launch restores MMP and raw store telemetry in attempt order`() {
+        val tracker = PreparedCtaTarget("https://tracker.example/click", CtaTargetSource.MMP)
+        val store = PreparedCtaTarget(
+            "https://play.google.com/store/apps/details?id=com.example.app",
+            CtaTargetSource.RAW_STORE,
+        )
+        val launches = mutableListOf<String>()
+        val diagnostics = mutableListOf<String>()
+
+        assertEquals(
+            AutomaticNavigationOutcome.STORE_OPENED,
+            CreativeCtaRouter.launchPrepared(
+                prepared = PreparedCtaOpen.Launch(tracker, store),
+                launch = { url -> launches += url; url == store.url },
+                record = diagnostics::add,
+            ),
+        )
+        assertEquals(listOf(tracker.url, store.url), launches)
+        assertEquals(listOf("mmp_route_attempted", "mmp_raw_store_fallback"), diagnostics)
+    }
+
+    @Test
+    fun `failed prepared MMP route emits failure but direct and raw routes do not`() {
+        val diagnostics = mutableListOf<String>()
+        assertEquals(
+            AutomaticNavigationOutcome.FAILED,
+            CreativeCtaRouter.launchPrepared(
+                PreparedCtaOpen.Launch(
+                    PreparedCtaTarget("https://tracker.example/click", CtaTargetSource.MMP),
+                    PreparedCtaTarget(
+                        "https://play.google.com/store/apps/details?id=com.example.app",
+                        CtaTargetSource.RAW_STORE,
+                    ),
+                ),
+                launch = { false },
+                record = diagnostics::add,
+            ),
+        )
+        assertEquals(
+            listOf("mmp_route_attempted", "mmp_raw_store_fallback", "mmp_route_failed"),
+            diagnostics,
+        )
+
+        diagnostics.clear()
+        listOf(
+            PreparedCtaTarget("partner-app://offer", CtaTargetSource.DIRECT),
+            PreparedCtaTarget(
+                "https://play.google.com/store/apps/details?id=com.example.app",
+                CtaTargetSource.RAW_STORE,
+            ),
+        ).forEach { target ->
+            CreativeCtaRouter.launchPrepared(
+                PreparedCtaOpen.Launch(target, null),
+                launch = { false },
+                record = diagnostics::add,
+            )
+        }
+        assertEquals(listOf("mmp_raw_store_fallback"), diagnostics)
+    }
+
+    @Test
+    fun `prepared launch derives store outcome from URL that actually opened`() {
+        val terminal = PreparedCtaTarget(
+            "https://tracker.example/landing?click=a%2Bb",
+            CtaTargetSource.MMP,
+        )
+        val play = PreparedCtaTarget(
+            "https://play.google.com/store/apps/details?id=com.example.app",
+            CtaTargetSource.MMP,
+        )
+
+        assertEquals(
+            AutomaticNavigationOutcome.OTHER_OPENED,
+            CreativeCtaRouter.launchPrepared(PreparedCtaOpen.Launch(terminal, null), launch = { true }),
+        )
+        assertEquals(
+            AutomaticNavigationOutcome.STORE_OPENED,
+            CreativeCtaRouter.launchPrepared(PreparedCtaOpen.Launch(play, null), launch = { true }),
+        )
+    }
+
+    @Test
+    fun `primary CTA without tracker remains direct and does not probe`() = runTest {
+        val tapped = "https://advertiser.example/offer"
+        val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+            tappedUrl = tapped,
+            creativeBaseUrl = "https://creative.example/ad",
+            trackingUrl = null,
+            destination = "appstore",
+        )) {
+            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
+            else -> error("expected external route")
+        }
+
+        assertEquals(
+            PreparedCtaOpen.Launch(
+                primary = PreparedCtaTarget(tapped, CtaTargetSource.DIRECT),
+                fallback = null,
+            ),
+            CreativeCtaRouter.preparePrimaryCta(route, destination = "appstore"),
         )
     }
 

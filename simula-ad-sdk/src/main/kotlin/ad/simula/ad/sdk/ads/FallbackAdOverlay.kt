@@ -611,6 +611,7 @@ internal fun FallbackAdHost(
                         presentationState = presentationState,
                         fallbackIndex = p.index,
                         onClickHandoffCreated = { handoff ->
+                            presentationState.abandonAutomaticNavigation(p.index)
                             presentationState.setClickPending(true)
                             onClickHandoffCreated(handoff)
                         },

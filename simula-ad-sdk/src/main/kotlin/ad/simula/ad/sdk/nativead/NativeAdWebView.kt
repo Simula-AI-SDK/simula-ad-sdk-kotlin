@@ -64,6 +64,7 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
@@ -786,7 +787,7 @@ internal class NativeAdWiring(
     private val clickInteractionGate = ClickInteractionGate()
     private val automaticNavigationGate = AutomaticNavigationGate()
     private var userCtaInFlight = false
-    private var routeOwnerGeneration = 0L
+    private var automaticNavigationJob: Job? = null
     private val automaticNavigationVisibleRect = Rect()
     private var focusObservedView: WebView? = null
     private val windowFocusListener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
@@ -894,9 +895,10 @@ internal class NativeAdWiring(
         val claim = clickInteractionGate.claim(ClickSources.PRIMARY_CTA) ?: return true
         userCtaInFlight = true
         automaticNavigationEligible = false
+        automaticNavigationJob?.cancel()
+        automaticNavigationJob = null
         automaticNavigationGate.abandonInFlight()
         val routeStartedAtNanos = System.nanoTime()
-        val admittedRouteOwnerGeneration = routeOwnerGeneration
         val routeView = webView
         val currentContext = routeView?.context
         val routeContext = (currentContext as? MutableContextWrapper)?.baseContext
@@ -912,14 +914,7 @@ internal class NativeAdWiring(
                 )
             },
             onPrepared = { prepared ->
-                val routeStillActive = routeOwnerGeneration == admittedRouteOwnerGeneration &&
-                    automaticNavigationActive && automaticNavigationAttached &&
-                    webView === routeView && routeView?.isAttachedToWindow == true && routeView.hasWindowFocus()
-                val outcome = if (routeStillActive) {
-                    CreativeCtaRouter.launchPrepared(routeContext, prepared)
-                } else {
-                    AutomaticNavigationOutcome.FAILED
-                }
+                val outcome = CreativeCtaRouter.launchPrepared(routeContext, prepared)
                 val opened = outcome != AutomaticNavigationOutcome.FAILED &&
                     outcome != AutomaticNavigationOutcome.HANDLED
                 if (!opened) {
@@ -963,7 +958,7 @@ internal class NativeAdWiring(
     private fun dispatchPendingAutomaticNavigation() {
         if (!currentAutomaticNavigationEligible()) return
         val attempt = automaticNavigationGate.beginPending() ?: return
-        CreativeCtaRouter.prepareInBackground(
+        automaticNavigationJob = CreativeCtaRouter.prepareInBackground(
             prepare = {
                 CreativeCtaRouter.prepareAutomaticNavigation(
                     attempt.route.targetUrl,
@@ -973,6 +968,7 @@ internal class NativeAdWiring(
                 )
             },
             onPrepared = { prepared ->
+                automaticNavigationJob = null
                 val outcome = if (automaticNavigationGate.isActive(attempt) && currentAutomaticNavigationEligible()) {
                     webView?.context?.let { CreativeCtaRouter.launchPrepared(it, prepared) }
                         ?: AutomaticNavigationOutcome.FAILED
@@ -1019,14 +1015,12 @@ internal class NativeAdWiring(
     }
 
     fun updateAutomaticNavigationActive(active: Boolean) {
-        if (automaticNavigationActive != active) routeOwnerGeneration++
         automaticNavigationActive = active
         automaticVisibilityFraction = -1f
         automaticNavigationEligible = false
     }
 
     fun onAutomaticNavigationAttached() {
-        routeOwnerGeneration++
         automaticNavigationAttached = true
         automaticVisibilityFraction = -1f
         automaticNavigationEligible = false
@@ -1043,7 +1037,9 @@ internal class NativeAdWiring(
     }
 
     fun onAutomaticNavigationDetached() {
-        routeOwnerGeneration++
+        automaticNavigationJob?.cancel()
+        automaticNavigationJob = null
+        automaticNavigationGate.abandonInFlight()
         automaticNavigationAttached = false
         automaticVisibilityFraction = -1f
         automaticNavigationEligible = false

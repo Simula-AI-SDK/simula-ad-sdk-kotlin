@@ -331,6 +331,8 @@ internal class AutoRedirectCoordinator {
     private var waitingRoute: AsyncAutoRoute? = null
     private var activeRouteScope: Any? = null
     private var activeRoute: AsyncAutoRoute? = null
+    private var queuedRouteScope: Any? = null
+    private var queuedRoute: AsyncAutoRoute? = null
     private var observedHandoff: ClickPersistenceHandoff? = null
     private var handoffSubscription: ClickHandoffSubscription? = null
     private var routeGeneration = 0L
@@ -339,6 +341,7 @@ internal class AutoRedirectCoordinator {
         synchronized(this) {
             if (disposed || activeScope === scope) return
             clearWaitingLocked()
+            clearQueuedRouteLocked()
             routeInProgress = false
             routeGeneration++
             clearActiveRouteLocked()
@@ -354,6 +357,7 @@ internal class AutoRedirectCoordinator {
         synchronized(this) {
             if (activeScope !== scope) return
             clearWaitingLocked()
+            clearQueuedRouteLocked()
             routeInProgress = false
             routeGeneration++
             clearActiveRouteLocked()
@@ -366,6 +370,7 @@ internal class AutoRedirectCoordinator {
             if (disposed) return
             disposed = true
             clearWaitingLocked()
+            clearQueuedRouteLocked()
             clearObservedHandoffLocked()
             routeInProgress = false
             routeGeneration++
@@ -383,6 +388,7 @@ internal class AutoRedirectCoordinator {
             routeGeneration++
             clearActiveRouteLocked()
             clearWaitingLocked()
+            clearQueuedRouteLocked()
         }
     }
 
@@ -398,6 +404,7 @@ internal class AutoRedirectCoordinator {
                 routeInProgress = false
                 routeGeneration++
                 clearActiveRouteLocked()
+                clearQueuedRouteLocked()
                 waitingScope = inFlightScope
                 waitingRoute = inFlightRoute
             }
@@ -423,7 +430,14 @@ internal class AutoRedirectCoordinator {
         val deferred = synchronized(this) {
             if (disposed || activeScope !== scope) return AutoRedirectResult.STALE
             if (redirectOpened || userRouteOpened) return AutoRedirectResult.SUPPRESSED
-            if (routeInProgress || waitingScope === scope) return AutoRedirectResult.DEFERRED
+            if (routeInProgress) {
+                if (queuedRoute == null) {
+                    queuedRouteScope = scope
+                    queuedRoute = route
+                }
+                return AutoRedirectResult.DEFERRED
+            }
+            if (waitingScope === scope) return AutoRedirectResult.DEFERRED
             if (pendingHandoff != null && observedHandoff === pendingHandoff) {
                 waitingScope = scope
                 waitingRoute = route
@@ -477,13 +491,32 @@ internal class AutoRedirectCoordinator {
         var synchronousResult: Boolean? = null
         var starting = true
         val completion: (Boolean) -> Unit = { opened ->
+            var nextScope: Any? = null
+            var nextRoute: AsyncAutoRoute? = null
             synchronized(this) {
                 if (disposed || generation != routeGeneration || activeScope !== scope) return@synchronized
                 routeInProgress = false
                 clearActiveRouteLocked()
-                if (opened) redirectOpened = true
+                if (opened) {
+                    redirectOpened = true
+                    clearQueuedRouteLocked()
+                } else {
+                    val queuedScope = queuedRouteScope
+                    val queued = queuedRoute
+                    clearQueuedRouteLocked()
+                    if (queuedScope != null && queued != null && activeScope === queuedScope &&
+                        !userRouteOpened && observedHandoff == null
+                    ) {
+                        routeInProgress = true
+                        nextScope = queuedScope
+                        nextRoute = queued
+                    }
+                }
                 if (starting) synchronousResult = opened
             }
+            val retryScope = nextScope
+            val retryRoute = nextRoute
+            if (retryScope != null && retryRoute != null) attemptRoute(retryScope, retryRoute)
         }
         val canOpen = {
             synchronized(this) {
@@ -508,6 +541,11 @@ internal class AutoRedirectCoordinator {
     private fun clearActiveRouteLocked() {
         activeRouteScope = null
         activeRoute = null
+    }
+
+    private fun clearQueuedRouteLocked() {
+        queuedRouteScope = null
+        queuedRoute = null
     }
 
     private fun clearObservedHandoffLocked() {
@@ -540,6 +578,7 @@ internal const val CLICK_PERSISTENCE_WAIT_MS = 750L
 internal data class PrimaryCtaRoute(
     val tappedUrl: String?,
     val externalTarget: String?,
+    val externalTargetIsTracker: Boolean = false,
 )
 
 /**
