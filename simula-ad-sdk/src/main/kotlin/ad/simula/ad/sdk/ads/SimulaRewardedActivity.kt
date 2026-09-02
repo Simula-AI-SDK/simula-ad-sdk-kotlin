@@ -790,7 +790,8 @@ private fun RewardedMinigame(
         }
     }
 
-    fun beginPrimaryCtaRoute(route: PrimaryCtaRoute): Boolean {
+    fun beginPrimaryCtaRoute(route: PrimaryCtaRoute, storeRequest: Boolean = false): Boolean {
+        if (storeRequest && !presentation.creativeStoreRequest.canRequest()) return true
         val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
         notifyPublisherClick { presentation.callbacks.notifyClicked() }
         val interaction = claim.interaction
@@ -823,6 +824,9 @@ private fun RewardedMinigame(
                     requestRoute = presentation::routeClick,
                     completion = completion,
                     open = { routeActivity, prepared ->
+                        if (storeRequest && !presentation.creativeStoreRequest.canOpen()) {
+                            return@prepareDeferredCtaRoute false
+                        }
                         if (!canRouteFromCurrentFullscreenActivity(
                                 routeActivity.isFinishing,
                                 routeActivity.isDestroyed,
@@ -848,10 +852,14 @@ private fun RewardedMinigame(
                 )
             },
             onCreated = { handoff ->
+                if (storeRequest && !presentation.creativeStoreRequest.track(handoff)) {
+                    return@coordinateDeferredClickPersistence
+                }
                 presentation.trackClickHandoff(handoff)
                 clickHandoffPending = true
             },
             onFinished = { handoff ->
+                if (storeRequest) presentation.creativeStoreRequest.finish(handoff)
                 presentation.clearClickHandoff(handoff)
                 clickHandoffPending = presentation.pendingClickHandoff() != null
             },
@@ -1080,10 +1088,9 @@ private fun RewardedMinigame(
                                 destination = presentation.destination,
                                 trackingUrl = presentation.trackingUrl,
                                 storeUrl = presentation.androidStoreUrl,
-                            )?.let(::beginPrimaryCtaRoute)
+                            )?.let { route -> beginPrimaryCtaRoute(route, storeRequest = true) }
                         },
-                        // Rewarded currently owns no install banner; keep the authenticated API a no-op.
-                        onTrustedStoreDismiss = {},
+                        onTrustedStoreDismiss = { presentation.creativeStoreRequest.dismiss() },
                         onPageReady = {
                             requestHtmlVisualFence(
                                 view = target,
