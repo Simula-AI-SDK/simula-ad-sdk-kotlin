@@ -195,6 +195,37 @@ class NativeAdWebViewOwnershipTest {
     }
 
     @Test
+    fun `native user route requires its original active attached owner`() {
+        assertTrue(
+            nativeUserNavigationEligible(
+                revisionMatches = true,
+                userCtaInFlight = true,
+                lifecycleActive = true,
+                currentOwner = true,
+                logicallyAttached = true,
+                attachedToWindow = true,
+                shown = true,
+                windowFocused = true,
+            ),
+        )
+        repeat(8) { index ->
+            val flags = MutableList(8) { true }.also { it[index] = false }
+            assertFalse(
+                nativeUserNavigationEligible(
+                    revisionMatches = flags[0],
+                    userCtaInFlight = flags[1],
+                    lifecycleActive = flags[2],
+                    currentOwner = flags[3],
+                    logicallyAttached = flags[4],
+                    attachedToWindow = flags[5],
+                    shown = flags[6],
+                    windowFocused = flags[7],
+                ),
+            )
+        }
+    }
+
+    @Test
     fun `visibility relay exposes every fresh sample while deduping JavaScript pushes`() {
         val relay = VisibilityRelay()
         val pushed = mutableListOf<Float>()

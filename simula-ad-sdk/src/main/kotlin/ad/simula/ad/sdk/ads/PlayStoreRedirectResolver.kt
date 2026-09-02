@@ -17,6 +17,8 @@ internal enum class RedirectFallbackReason {
     HOP_LIMIT,
     LOOP,
     TRANSPORT,
+    PRIVATE_NETWORK,
+    COOKIE_ISOLATION,
     NON_REDIRECT,
     MISSING_LOCATION,
     AMBIGUOUS_LOCATION,
@@ -52,7 +54,7 @@ internal class PlayStoreRedirectResolver(
                 RedirectFallbackReason.INVALID_LOCATION,
                 0,
             )
-        if (original.length > MAX_URL_CHARS) {
+        if (!hasBoundedUrlSize(original)) {
             return PlayStoreRedirectResolution.BrowserFallback(
                 original,
                 RedirectFallbackReason.INVALID_LOCATION,
@@ -81,15 +83,16 @@ internal class PlayStoreRedirectResolver(
                 return fallback(original, RedirectFallbackReason.TIMEOUT, redirects)
             } catch (e: CancellationException) {
                 throw e
+            } catch (_: SimulaHttp.RedirectTargetRejectedException) {
+                return fallback(original, RedirectFallbackReason.PRIVATE_NETWORK, redirects)
+            } catch (_: SimulaHttp.RedirectCookieIsolationException) {
+                return fallback(original, RedirectFallbackReason.COOKIE_ISOLATION, redirects)
             } catch (_: Throwable) {
                 return fallback(original, RedirectFallbackReason.TRANSPORT, redirects)
             }
 
             if (response.code !in REDIRECT_CODES) {
-                // Unity opens the terminal URL after a successful HEAD instead of replaying every
-                // earlier tracker hop. Non-success statuses still use the original safe fallback.
-                val browserUrl = current.takeIf { response.code in 200..299 } ?: original
-                return fallback(browserUrl, RedirectFallbackReason.NON_REDIRECT, redirects)
+                return fallback(original, RedirectFallbackReason.NON_REDIRECT, redirects)
             }
             if (response.locations.isEmpty() || response.locations.all { it.isBlank() }) {
                 return fallback(original, RedirectFallbackReason.MISSING_LOCATION, redirects)
@@ -107,11 +110,11 @@ internal class PlayStoreRedirectResolver(
             CreativeCtaRouter.admittedDirectPlayStoreUrl(next)?.let {
                 return PlayStoreRedirectResolution.Resolved(it, redirects)
             }
-            if (redirects >= maxRedirects) {
-                return fallback(original, RedirectFallbackReason.HOP_LIMIT, redirects)
-            }
             if (!visited.add(loopKey(next))) {
                 return fallback(original, RedirectFallbackReason.LOOP, redirects)
+            }
+            if (redirects >= maxRedirects) {
+                return fallback(original, RedirectFallbackReason.HOP_LIMIT, redirects)
             }
             current = next
         }
@@ -125,7 +128,7 @@ internal class PlayStoreRedirectResolver(
     }
 
     private fun resolveLocation(current: String, location: String): String? {
-        val candidate = location.trim().takeIf { it.isNotEmpty() && it.length <= MAX_URL_CHARS } ?: return null
+        val candidate = location.trim().takeIf { it.isNotEmpty() && hasBoundedUrlSize(it) } ?: return null
         CreativeCtaRouter.admittedHttpUrl(candidate)?.let { return it }
         CreativeCtaRouter.normalizeTappedDestination(candidate)?.let { normalized ->
             CreativeCtaRouter.admittedDirectPlayStoreUrl(normalized)?.let { return it }
@@ -133,7 +136,7 @@ internal class PlayStoreRedirectResolver(
         val uri = runCatching { URI(candidate) }.getOrNull() ?: return null
         if (uri.isAbsolute) return null
         val resolved = runCatching { URL(URL(current), candidate).toExternalForm() }.getOrNull() ?: return null
-        return CreativeCtaRouter.admittedHttpUrl(resolved)?.takeIf { it.length <= MAX_URL_CHARS }
+        return CreativeCtaRouter.admittedHttpUrl(resolved)?.takeIf(::hasBoundedUrlSize)
     }
 
     private fun loopKey(url: String): String = runCatching {
@@ -151,11 +154,14 @@ internal class PlayStoreRedirectResolver(
     private fun Long.saturatingAdd(other: Long): Long =
         if (this > Long.MAX_VALUE - other) Long.MAX_VALUE else this + other
 
+    private fun hasBoundedUrlSize(value: String): Boolean =
+        value.length <= MAX_URL_BYTES && value.toByteArray(Charsets.UTF_8).size <= MAX_URL_BYTES
+
     private companion object {
-        const val MAX_REDIRECTS = 10
+        const val MAX_REDIRECTS = 5
         const val TOTAL_TIMEOUT_MS = 1_500L
         const val NANOS_PER_MILLISECOND = 1_000_000L
-        const val MAX_URL_CHARS = 8 * 1024
+        const val MAX_URL_BYTES = 8 * 1024
         val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
     }
 }

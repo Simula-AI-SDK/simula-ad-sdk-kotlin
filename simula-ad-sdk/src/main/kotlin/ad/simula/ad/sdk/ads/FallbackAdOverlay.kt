@@ -410,13 +410,15 @@ internal fun FallbackAdHost(
     presentationState: FallbackPresentationState = remember { FallbackPresentationState() },
     onFullyClosed: () -> Unit,
     autoStoreRedirect: AutoStoreRedirect? = null,
-    onAutoStoreRedirect: (() -> Boolean, (Boolean) -> Unit) -> Unit = { _, completion -> completion(false) },
+    onAutoStoreRedirect: (() -> Boolean, (Boolean) -> Unit, ((() -> Unit) -> Unit)) -> Unit =
+        { _, completion, _ -> completion(false) },
     openAutomaticNavigation: (
         String,
         Boolean,
         () -> Boolean,
         (AutomaticNavigationOutcome) -> Unit,
-    ) -> Unit = { _, _, _, completion ->
+        ((() -> Unit) -> Unit),
+    ) -> Unit = { _, _, _, completion, _ ->
         completion(AutomaticNavigationOutcome.FAILED)
     },
     onAdClick: (ClickInteraction) -> Unit = {},
@@ -544,7 +546,7 @@ internal fun FallbackAdHost(
                     val result = redirects.requestAsync(
                         scope = autoRedirectScope,
                         pendingHandoff = pendingClickHandoff(),
-                    ) { routeCanOpen, completion ->
+                    ) { routeCanOpen, completion, registerCancellation ->
                         val attempt = presentationState.beginAutomaticNavigation(p.index)
                         if (attempt == null) {
                             completion(false)
@@ -557,10 +559,17 @@ internal fun FallbackAdHost(
                                 routeCanOpen() && redirects.isActive(autoRedirectScope) &&
                                     presentationState.isAutomaticNavigationActive(p.index, attempt)
                             },
-                        ) { outcome ->
-                            presentationState.completeAutomaticNavigation(p.index, attempt, outcome)
-                            completion(outcome != AutomaticNavigationOutcome.FAILED)
-                        }
+                            { outcome ->
+                                presentationState.completeAutomaticNavigation(p.index, attempt, outcome)
+                                completion(outcome != AutomaticNavigationOutcome.FAILED)
+                            },
+                            { cancellation ->
+                                registerCancellation {
+                                    cancellation()
+                                    presentationState.abandonAutomaticNavigation(p.index)
+                                }
+                            },
+                        )
                     }
                     if (result == AutoRedirectResult.SUPPRESSED) {
                         presentationState.suppressAutomaticNavigation(p.index)
@@ -582,10 +591,11 @@ internal fun FallbackAdHost(
                         redirects.requestAsync(
                             scope = autoRedirectScope,
                             pendingHandoff = pendingClickHandoff(),
-                        ) { routeCanOpen, completion ->
+                        ) { routeCanOpen, completion, registerCancellation ->
                             onAutoStoreRedirect(
                                 { routeCanOpen() && redirects.isActive(autoRedirectScope) },
                                 completion,
+                                registerCancellation,
                             )
                         }
                     }

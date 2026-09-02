@@ -6,7 +6,11 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.InputStream
+import java.net.CookieHandler
 import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.Inet4Address
+import java.net.Inet6Address
 import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.URL
@@ -42,6 +46,9 @@ internal object SimulaHttp {
         val code: Int,
         val locations: List<String>,
     )
+
+    internal class RedirectTargetRejectedException : IOException("Redirect target is not public")
+    internal class RedirectCookieIsolationException : IOException("Redirect cookie isolation unavailable")
 
     /**
      * Perform an HTTP request and read the response body as a UTF-8 string.
@@ -145,6 +152,8 @@ internal object SimulaHttp {
             URL(target).openConnection() as? HttpURLConnection
                 ?: throw IOException("Expected an HttpURLConnection")
         },
+        validateTarget: (String) -> Unit = ::validatePublicRedirectTarget,
+        validateCookieIsolation: () -> Unit = ::validateRedirectCookieIsolation,
     ): RedirectHeadResponse = suspendCancellableCoroutine { continuation ->
         val activeConnection = AtomicReference<HttpURLConnection?>(null)
         continuation.invokeOnCancellation {
@@ -158,6 +167,8 @@ internal object SimulaHttp {
             try {
                 val started = System.nanoTime()
                 val boundedTimeoutMs = timeoutMs.coerceIn(1L, Int.MAX_VALUE.toLong())
+                validateCookieIsolation()
+                validateTarget(url)
                 conn = openConnection(url)
                 activeConnection.set(conn)
                 if (!continuation.isActive) {
@@ -165,6 +176,11 @@ internal object SimulaHttp {
                     return@Runnable
                 }
                 configureRedirectHeadConnection(conn, boundedTimeoutMs.toInt(), userAgent)
+                validateRedirectCookieIsolation()
+                if (!continuation.isActive) {
+                    runCatching { activeConnection.getAndSet(null)?.disconnect() }
+                    return@Runnable
+                }
                 conn.connect()
                 conn.readTimeout = remainingTimeoutMs(started, boundedTimeoutMs)
                 val code = conn.responseCode
@@ -206,6 +222,77 @@ internal object SimulaHttp {
         conn.useCaches = false
         conn.setRequestProperty("Accept", "*/*")
         userAgent?.takeIf { it.isNotBlank() }?.let { conn.setRequestProperty("User-Agent", it) }
+    }
+
+    internal fun validateRedirectCookieIsolation(cookieHandler: CookieHandler? = CookieHandler.getDefault()) {
+        if (cookieHandler != null) throw RedirectCookieIsolationException()
+    }
+
+    internal fun validatePublicRedirectTarget(
+        value: String,
+        resolve: (String) -> Array<InetAddress> = InetAddress::getAllByName,
+    ) {
+        val host = runCatching { URL(value).host.trimEnd('.').lowercase() }.getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: throw RedirectTargetRejectedException()
+        if (host == "localhost" || host.endsWith(".localhost") || host.endsWith(".local") ||
+            host.endsWith(".internal") || host.endsWith(".home.arpa")
+        ) throw RedirectTargetRejectedException()
+        val addresses = resolve(host)
+        if (addresses.isEmpty() || addresses.any { !it.isPublicRedirectAddress() }) {
+            throw RedirectTargetRejectedException()
+        }
+    }
+
+    private fun InetAddress.isPublicRedirectAddress(): Boolean {
+        if (isAnyLocalAddress || isLoopbackAddress || isLinkLocalAddress || isSiteLocalAddress || isMulticastAddress) {
+            return false
+        }
+        val bytes = address
+        return when (this) {
+            is Inet4Address -> {
+                bytes.isPublicIpv4Address()
+            }
+            is Inet6Address -> {
+                val first = bytes[0].toInt() and 0xff
+                val second = bytes[1].toInt() and 0xff
+                val third = bytes[2].toInt() and 0xff
+                val fourth = bytes[3].toInt() and 0xff
+                val globalUnicast = first in 0x20..0x3f
+                val wellKnownNat64 = first == 0x00 && second == 0x64 && third == 0xff && fourth == 0x9b &&
+                    bytes.copyOfRange(4, 12).all { it.toInt() == 0 } &&
+                    bytes.copyOfRange(12, 16).isPublicIpv4Address()
+                val special2001 = first == 0x20 && second == 0x01 && when {
+                    third == 0x00 && fourth == 0x02 -> true
+                    third == 0x00 && fourth in 0x10..0x2f -> true
+                    third == 0x0d && fourth == 0xb8 -> true
+                    else -> false
+                }
+                val documentation3fff = first == 0x3f && second == 0xff && (third and 0xf0) == 0
+                (globalUnicast || wellKnownNat64) && !special2001 &&
+                    !(first == 0x20 && second == 0x02) && !documentation3fff
+            }
+            else -> false
+        }
+    }
+
+    private fun ByteArray.isPublicIpv4Address(): Boolean {
+        if (size != 4) return false
+        val first = this[0].toInt() and 0xff
+        val second = this[1].toInt() and 0xff
+        val third = this[2].toInt() and 0xff
+        return when {
+            first == 0 || first == 10 || first == 127 || first >= 224 -> false
+            first == 100 && second in 64..127 -> false
+            first == 169 && second == 254 -> false
+            first == 172 && second in 16..31 -> false
+            first == 192 && second == 168 -> false
+            first == 192 && second == 0 && third in setOf(0, 2) -> false
+            first == 198 && second in 18..19 -> false
+            first == 198 && second == 51 && third == 100 -> false
+            first == 203 && second == 0 && third == 113 -> false
+            else -> true
+        }
     }
 
     /** Request path only (no scheme/host/query) so telemetry carries no PII-bearing query params. */

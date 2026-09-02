@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.ads.AutomaticNavigationGate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -382,11 +383,11 @@ class ClickTrackingTest {
 
         assertEquals(
             AutoRedirectResult.DEFERRED,
-            coordinator.requestAsync(scope, null) { _, routeCompletion -> completion = routeCompletion },
+            coordinator.requestAsync(scope, null) { _, routeCompletion, _ -> completion = routeCompletion },
         )
         assertEquals(
             AutoRedirectResult.DEFERRED,
-            coordinator.requestAsync(scope, null) { _, _ -> error("must not start twice") },
+            coordinator.requestAsync(scope, null) { _, _, _ -> error("must not start twice") },
         )
 
         completion?.invoke(true)
@@ -405,13 +406,13 @@ class ClickTrackingTest {
         val attempts = mutableListOf<String>()
         coordinator.activate(scope)
 
-        coordinator.requestAsync(scope, null) { _, completion ->
+        coordinator.requestAsync(scope, null) { _, completion, _ ->
             attempts += "first"
             completions += completion
         }
         assertEquals(
             AutoRedirectResult.DEFERRED,
-            coordinator.requestAsync(scope, null) { _, completion ->
+            coordinator.requestAsync(scope, null) { _, completion, _ ->
                 attempts += "second"
                 completions += completion
             },
@@ -432,7 +433,7 @@ class ClickTrackingTest {
         val second = Any()
         var staleCompletion: ((Boolean) -> Unit)? = null
         coordinator.activate(first)
-        coordinator.requestAsync(first, null) { _, routeCompletion -> staleCompletion = routeCompletion }
+        coordinator.requestAsync(first, null) { _, routeCompletion, _ -> staleCompletion = routeCompletion }
 
         coordinator.deactivate(first)
         coordinator.activate(second)
@@ -452,7 +453,7 @@ class ClickTrackingTest {
         val canOpen = mutableListOf<() -> Boolean>()
         val handoff = testHandoff("user")
         coordinator.activate(scope)
-        coordinator.requestAsync(scope, null) { routeCanOpen, routeCompletion ->
+        coordinator.requestAsync(scope, null) { routeCanOpen, routeCompletion, _ ->
             canOpen += routeCanOpen
             completions += routeCompletion
         }
@@ -469,6 +470,57 @@ class ClickTrackingTest {
         assertEquals(2, completions.size)
         assertTrue(canOpen.last().invoke())
         completions.last().invoke(true)
+        assertEquals(AutoRedirectResult.SUPPRESSED, coordinator.request(scope, null) { true })
+    }
+
+    @Test
+    fun `user handoff cancels in flight auto route work before retry`() {
+        val coordinator = AutoRedirectCoordinator()
+        val automaticGate = AutomaticNavigationGate().apply {
+            retain("https://tracker.example/click", trackerAlreadyRequested = false)
+        }
+        val scope = Any()
+        val handoff = testHandoff("user")
+        var cancellations = 0
+        var starts = 0
+        coordinator.activate(scope)
+        coordinator.requestAsync(scope, null) { _, _, registerCancellation ->
+            assertTrue(automaticGate.beginPending() != null)
+            starts++
+            registerCancellation {
+                cancellations++
+                automaticGate.abandonInFlight()
+            }
+        }
+
+        coordinator.observeUserHandoff(handoff)
+
+        assertEquals(1, cancellations)
+        assertEquals(1, starts)
+
+        handoff.cancel()
+
+        assertEquals(2, starts)
+        assertEquals(1, cancellations)
+    }
+
+    @Test
+    fun `failed async user route retries retained auto route`() {
+        val handoff = testHandoff("user")
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        var autoRoutes = 0
+        coordinator.activate(scope)
+        coordinator.request(scope, handoff) { autoRoutes++; true }
+        handoff.complete(ClickPersistencePart.TELEMETRY)
+        handoff.complete(ClickPersistencePart.BEACON)
+
+        assertTrue(handoff.handoffAsync { _, completion ->
+            completion(false)
+            ClickRouteStart.STARTED
+        })
+
+        assertEquals(1, autoRoutes)
         assertEquals(AutoRedirectResult.SUPPRESSED, coordinator.request(scope, null) { true })
     }
 

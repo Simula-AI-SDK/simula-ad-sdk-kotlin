@@ -916,7 +916,7 @@ class CreativeCtaRouterTest {
     }
 
     @Test
-    fun `prepared appstore route opens terminal 2xx hop instead of replaying tracker`() = runTest {
+    fun `prepared appstore route replays original tracker after terminal 2xx hop`() = runTest {
         val tracker = "https://tracker.example/click"
         val terminal = "https://tracker.example/landing?click=a%2Bb"
         val responses = ArrayDeque(
@@ -932,7 +932,7 @@ class CreativeCtaRouterTest {
 
         assertEquals(
             PreparedCtaOpen.Launch(
-                primary = PreparedCtaTarget(terminal, CtaTargetSource.MMP),
+                primary = PreparedCtaTarget(tracker, CtaTargetSource.MMP),
                 fallback = PreparedCtaTarget(
                     "https://play.google.com/store/apps/details?id=com.example.app",
                     CtaTargetSource.RAW_STORE,

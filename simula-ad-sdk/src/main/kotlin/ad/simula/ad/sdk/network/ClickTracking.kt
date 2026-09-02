@@ -259,7 +259,7 @@ internal class ClickPersistenceHandoff(
             true
         }
         if (shouldFinish) {
-            finish(if (opened) ClickHandoffResult.ROUTED else ClickHandoffResult.ACCOUNTED)
+            finish(if (opened) ClickHandoffResult.ROUTED else ClickHandoffResult.FAILED)
         }
     }
 
@@ -309,7 +309,11 @@ internal class ClickPersistenceHandoff(
 
 internal enum class AutoRedirectResult { DEFERRED, OPENED, FAILED, SUPPRESSED, STALE }
 
-private typealias AsyncAutoRoute = (canOpen: () -> Boolean, completion: (Boolean) -> Unit) -> Unit
+private typealias AsyncAutoRoute = (
+    canOpen: () -> Boolean,
+    completion: (Boolean) -> Unit,
+    registerCancellation: (() -> Unit) -> Unit,
+) -> Unit
 
 /**
  * Presentation-scoped auto-redirect policy. One route may wait on a user click handoff for the
@@ -331,6 +335,7 @@ internal class AutoRedirectCoordinator {
     private var waitingRoute: AsyncAutoRoute? = null
     private var activeRouteScope: Any? = null
     private var activeRoute: AsyncAutoRoute? = null
+    private var activeRouteCancellation: (() -> Unit)? = null
     private var queuedRouteScope: Any? = null
     private var queuedRoute: AsyncAutoRoute? = null
     private var observedHandoff: ClickPersistenceHandoff? = null
@@ -344,7 +349,7 @@ internal class AutoRedirectCoordinator {
             clearQueuedRouteLocked()
             routeInProgress = false
             routeGeneration++
-            clearActiveRouteLocked()
+            clearActiveRouteLocked(cancel = true)
             activeScope = scope
         }
     }
@@ -360,7 +365,7 @@ internal class AutoRedirectCoordinator {
             clearQueuedRouteLocked()
             routeInProgress = false
             routeGeneration++
-            clearActiveRouteLocked()
+            clearActiveRouteLocked(cancel = true)
             activeScope = null
         }
     }
@@ -374,7 +379,7 @@ internal class AutoRedirectCoordinator {
             clearObservedHandoffLocked()
             routeInProgress = false
             routeGeneration++
-            clearActiveRouteLocked()
+            clearActiveRouteLocked(cancel = true)
             activeScope = null
         }
     }
@@ -386,7 +391,7 @@ internal class AutoRedirectCoordinator {
             userRouteOpened = true
             routeInProgress = false
             routeGeneration++
-            clearActiveRouteLocked()
+            clearActiveRouteLocked(cancel = true)
             clearWaitingLocked()
             clearQueuedRouteLocked()
         }
@@ -403,7 +408,7 @@ internal class AutoRedirectCoordinator {
             if (routeInProgress && inFlightRoute != null && inFlightScope != null && activeScope === inFlightScope) {
                 routeInProgress = false
                 routeGeneration++
-                clearActiveRouteLocked()
+                clearActiveRouteLocked(cancel = true)
                 clearQueuedRouteLocked()
                 waitingScope = inFlightScope
                 waitingRoute = inFlightRoute
@@ -454,7 +459,7 @@ internal class AutoRedirectCoordinator {
         scope: Any,
         pendingHandoff: ClickPersistenceHandoff?,
         route: () -> Boolean,
-    ): AutoRedirectResult = requestAsync(scope, pendingHandoff) { _, completion ->
+    ): AutoRedirectResult = requestAsync(scope, pendingHandoff) { _, completion, _ ->
         completion(runCatching(route).getOrDefault(false))
     }
 
@@ -524,7 +529,20 @@ internal class AutoRedirectCoordinator {
                     !redirectOpened && !userRouteOpened && observedHandoff == null
             }
         }
-        runCatching { route(canOpen, completion) }.onFailure { completion(false) }
+        val registerCancellation: ((() -> Unit) -> Unit) = { cancellation ->
+            val cancelNow = synchronized(this) {
+                if (disposed || generation != routeGeneration || activeScope !== scope ||
+                    activeRoute !== route || !routeInProgress
+                ) {
+                    true
+                } else {
+                    activeRouteCancellation = cancellation
+                    false
+                }
+            }
+            if (cancelNow) runCatching(cancellation)
+        }
+        runCatching { route(canOpen, completion, registerCancellation) }.onFailure { completion(false) }
         starting = false
         return when (synchronousResult) {
             true -> AutoRedirectResult.OPENED
@@ -538,9 +556,12 @@ internal class AutoRedirectCoordinator {
         waitingRoute = null
     }
 
-    private fun clearActiveRouteLocked() {
+    private fun clearActiveRouteLocked(cancel: Boolean = false) {
+        val cancellation = activeRouteCancellation
+        activeRouteCancellation = null
         activeRouteScope = null
         activeRoute = null
+        if (cancel) runCatching { cancellation?.invoke() }
     }
 
     private fun clearQueuedRouteLocked() {

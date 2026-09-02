@@ -199,8 +199,8 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     pendingClickHandoff = p::pendingClickHandoff,
                     storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
-                    onAutoStoreRedirect = { canOpen, completion ->
-                        CreativeCtaRouter.prepareInBackground(
+                    onAutoStoreRedirect = { canOpen, completion, registerCancellation ->
+                        val job = CreativeCtaRouter.prepareInBackground(
                             prepare = {
                                 CreativeCtaRouter.prepare(
                                     p.ad.trackingUrl,
@@ -226,9 +226,10 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                                 )
                             },
                         )
+                        registerCancellation(job::cancel)
                     },
-                    openAutomaticNavigation = { targetUrl, trackerAlreadyRequested, canOpen, completion ->
-                        CreativeCtaRouter.prepareInBackground(
+                    openAutomaticNavigation = { targetUrl, trackerAlreadyRequested, canOpen, completion, registerCancellation ->
+                        val job = CreativeCtaRouter.prepareInBackground(
                             prepare = {
                                 CreativeCtaRouter.prepareAutomaticNavigation(
                                     targetUrl,
@@ -238,17 +239,24 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                                 )
                             },
                             onPrepared = { prepared ->
-                                val outcome = if (canOpen() && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                                    CreativeCtaRouter.launchPrepared(this@SimulaInterstitialActivity, prepared)
-                                } else {
-                                    AutomaticNavigationOutcome.FAILED
-                                }
-                                if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
-                                    storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
-                                }
-                                completion(outcome)
+                                runWhenLifecycleResumed(
+                                    lifecycle = lifecycle,
+                                    canRun = canOpen,
+                                    onResumed = {
+                                        val outcome = CreativeCtaRouter.launchPrepared(
+                                            this@SimulaInterstitialActivity,
+                                            prepared,
+                                        )
+                                        if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                                            storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
+                                        }
+                                        completion(outcome)
+                                    },
+                                    onUnavailable = { completion(AutomaticNavigationOutcome.FAILED) },
+                                )
                             },
                         )
+                        registerCancellation(job::cancel)
                     },
                     // End-screen CTA routing context (deterministic store fallback).
                     ctaTrackingUrl = p.ad.trackingUrl,
@@ -479,8 +487,8 @@ private fun CreativeInterstitial(
         presentation.autoRedirectCoordinator.requestAsync(
             scope = autoRedirectScope,
             pendingHandoff = presentation.pendingClickHandoff(),
-        ) { routeCanOpen, completion ->
-            CreativeCtaRouter.prepareInBackground(
+        ) { routeCanOpen, completion, registerCancellation ->
+            val job = CreativeCtaRouter.prepareInBackground(
                 prepare = {
                     CreativeCtaRouter.prepare(
                         ad.trackingUrl,
@@ -505,15 +513,17 @@ private fun CreativeInterstitial(
                     )
                 },
             )
+            registerCancellation(job::cancel)
         }
     }
     fun routeAutomaticCta() {
         val result = presentation.autoRedirectCoordinator.requestAsync(
             scope = autoRedirectScope,
             pendingHandoff = presentation.pendingClickHandoff(),
-        ) { routeCanOpen, completion ->
+        ) { routeCanOpen, completion, registerCancellation ->
             prepareAutomaticCtaRoute(
                 gate = presentation.automaticNavigationGate,
+                lifecycle = lifecycleOwner.lifecycle,
                 prepare = { route ->
                     CreativeCtaRouter.prepareAutomaticNavigation(
                         route.targetUrl,
@@ -523,8 +533,7 @@ private fun CreativeInterstitial(
                     )
                 },
                 canOpen = {
-                    routeCanOpen() && presentation.autoRedirectCoordinator.isActive(autoRedirectScope) &&
-                        lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+                    routeCanOpen() && presentation.autoRedirectCoordinator.isActive(autoRedirectScope)
                 },
                 open = { prepared ->
                     CreativeCtaRouter.launchPrepared(context, prepared).also { outcome ->
@@ -534,6 +543,7 @@ private fun CreativeInterstitial(
                     }
                 },
                 completion = completion,
+                registerCancellation = registerCancellation,
             )
         }
         if (result == AutoRedirectResult.SUPPRESSED) {

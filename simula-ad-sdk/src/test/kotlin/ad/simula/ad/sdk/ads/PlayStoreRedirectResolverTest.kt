@@ -105,7 +105,7 @@ class PlayStoreRedirectResolverTest {
     }
 
     @Test
-    fun `successful terminal response opens current hop instead of replaying original chain`() = runTest {
+    fun `successful terminal response falls back to exact original tracker`() = runTest {
         val calls = mutableListOf<Call>()
         val terminal = "https://tracker.example/landing?click=a%2Bb"
         val responses = ArrayDeque(
@@ -118,7 +118,7 @@ class PlayStoreRedirectResolverTest {
 
         assertEquals(
             PlayStoreRedirectResolution.BrowserFallback(
-                terminal,
+                "https://tracker.example/click",
                 RedirectFallbackReason.NON_REDIRECT,
                 1,
             ),
@@ -142,7 +142,7 @@ class PlayStoreRedirectResolverTest {
     }
 
     @Test
-    fun `ten non Play redirects stop at Unity parity hop limit`() = runTest {
+    fun `five non Play redirects stop at documented hop limit`() = runTest {
         val calls = mutableListOf<Call>()
         val resolver = resolver(calls) { url, _, _ ->
             val hop = url.substringAfterLast('/').toIntOrNull() ?: 0
@@ -155,11 +155,31 @@ class PlayStoreRedirectResolverTest {
             PlayStoreRedirectResolution.BrowserFallback(
                 "https://tracker.example/0",
                 RedirectFallbackReason.HOP_LIMIT,
-                10,
+                5,
             ),
             result,
         )
-        assertEquals(10, calls.size)
+        assertEquals(5, calls.size)
+    }
+
+    @Test
+    fun `transport policy failures use exact browser fallback`() = runTest {
+        val original = "https://tracker.example/click"
+        val privateTarget = resolver(mutableListOf()) { _, _, _ ->
+            throw SimulaHttp.RedirectTargetRejectedException()
+        }
+        val cookieIsolation = resolver(mutableListOf()) { _, _, _ ->
+            throw SimulaHttp.RedirectCookieIsolationException()
+        }
+
+        assertEquals(
+            PlayStoreRedirectResolution.BrowserFallback(original, RedirectFallbackReason.PRIVATE_NETWORK, 0),
+            privateTarget.resolve(original, "Browser UA", 0L),
+        )
+        assertEquals(
+            PlayStoreRedirectResolution.BrowserFallback(original, RedirectFallbackReason.COOKIE_ISOLATION, 0),
+            cookieIsolation.resolve(original, "Browser UA", 0L),
+        )
     }
 
     @Test

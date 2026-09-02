@@ -195,29 +195,41 @@ internal fun <T : Any> prepareDeferredCtaRoute(
 
 internal fun prepareAutomaticCtaRoute(
     gate: AutomaticNavigationGate,
+    lifecycle: Lifecycle,
     prepare: suspend (PendingAutomaticNavigation) -> PreparedCtaOpen,
     canOpen: () -> Boolean,
     open: (PreparedCtaOpen) -> AutomaticNavigationOutcome,
     completion: (Boolean) -> Unit,
+    registerCancellation: (() -> Unit) -> Unit,
 ) {
     val attempt = gate.beginPending()
     if (attempt == null) {
         completion(false)
         return
     }
-    CreativeCtaRouter.prepareInBackground(
+    val job = CreativeCtaRouter.prepareInBackground(
         prepare = { prepare(attempt.route) },
         onPrepared = { prepared ->
-            if (!gate.isActive(attempt) || !canOpen()) {
-                gate.complete(attempt, AutomaticNavigationOutcome.FAILED)
-                completion(false)
-                return@prepareInBackground
-            }
-            val outcome = runCatching { open(prepared) }.getOrDefault(AutomaticNavigationOutcome.FAILED)
-            gate.complete(attempt, outcome)
-            completion(outcome != AutomaticNavigationOutcome.FAILED)
+            runWhenLifecycleResumed(
+                lifecycle = lifecycle,
+                canRun = { gate.isActive(attempt) && canOpen() },
+                onResumed = {
+                    val outcome = runCatching { open(prepared) }
+                        .getOrDefault(AutomaticNavigationOutcome.FAILED)
+                    gate.complete(attempt, outcome)
+                    completion(outcome != AutomaticNavigationOutcome.FAILED)
+                },
+                onUnavailable = {
+                    gate.complete(attempt, AutomaticNavigationOutcome.FAILED)
+                    completion(false)
+                },
+            )
         },
     )
+    registerCancellation {
+        job.cancel()
+        gate.abandonInFlight()
+    }
 }
 
 internal fun runWhenLifecycleResumed(

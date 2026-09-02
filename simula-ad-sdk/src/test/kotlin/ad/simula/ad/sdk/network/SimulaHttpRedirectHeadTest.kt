@@ -1,6 +1,8 @@
 package ad.simula.ad.sdk.network
 
 import java.net.HttpURLConnection
+import java.net.CookieManager
+import java.net.InetAddress
 import java.net.URL
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
@@ -46,6 +48,7 @@ class SimulaHttpRedirectHeadTest {
                 timeoutMs = 10_000L,
                 userAgent = null,
                 openConnection = { connection },
+                validateTarget = {},
             )
         }
         assertTrue(connection.entered.await(2L, TimeUnit.SECONDS))
@@ -54,6 +57,46 @@ class SimulaHttpRedirectHeadTest {
         withTimeout(2_000L) { request.cancelAndJoin() }
 
         assertTrue(connection.disconnected.await(2L, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun `redirect probes reject a process global cookie handler`() {
+        val failure = runCatching {
+            SimulaHttp.validateRedirectCookieIsolation(CookieManager())
+        }.exceptionOrNull()
+
+        assertTrue(failure is SimulaHttp.RedirectCookieIsolationException)
+    }
+
+    @Test
+    fun `redirect probes admit only public resolved targets`() {
+        SimulaHttp.validatePublicRedirectTarget("https://tracker.example/click") {
+            arrayOf(
+                InetAddress.getByName("8.8.8.8"),
+                InetAddress.getByName("2606:4700:4700::1111"),
+            )
+        }
+
+        listOf(
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "fc00::1",
+            "100::1",
+            "64:ff9b:1::1",
+            "64:ff9b::a00:1",
+            "2001:2::1",
+            "2001:db8::1",
+            "3fff::1",
+        ).forEach { address ->
+            val failure = runCatching {
+                SimulaHttp.validatePublicRedirectTarget("https://tracker.example/click") {
+                    arrayOf(InetAddress.getByName(address))
+                }
+            }.exceptionOrNull()
+            assertTrue(address, failure is SimulaHttp.RedirectTargetRejectedException)
+        }
     }
 
     private class FakeHttpURLConnection : HttpURLConnection(URL("https://tracker.example/click")) {
