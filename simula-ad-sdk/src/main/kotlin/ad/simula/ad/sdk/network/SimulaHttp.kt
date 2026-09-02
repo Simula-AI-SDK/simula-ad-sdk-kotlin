@@ -153,7 +153,7 @@ internal object SimulaHttp {
                 ?: throw IOException("Expected an HttpURLConnection")
         },
         validateTarget: (String) -> Unit = ::validatePublicRedirectTarget,
-        validateCookieIsolation: () -> Unit = ::validateRedirectCookieIsolation,
+        validateCookieIsolation: (String) -> Unit = ::validateRedirectCookieIsolation,
     ): RedirectHeadResponse = suspendCancellableCoroutine { continuation ->
         val activeConnection = AtomicReference<HttpURLConnection?>(null)
         continuation.invokeOnCancellation {
@@ -167,7 +167,7 @@ internal object SimulaHttp {
             try {
                 val started = System.nanoTime()
                 val boundedTimeoutMs = timeoutMs.coerceIn(1L, Int.MAX_VALUE.toLong())
-                validateCookieIsolation()
+                validateCookieIsolation(url)
                 validateTarget(url)
                 conn = openConnection(url)
                 activeConnection.set(conn)
@@ -176,7 +176,7 @@ internal object SimulaHttp {
                     return@Runnable
                 }
                 configureRedirectHeadConnection(conn, boundedTimeoutMs.toInt(), userAgent)
-                validateRedirectCookieIsolation()
+                validateRedirectCookieIsolation(url)
                 if (!continuation.isActive) {
                     runCatching { activeConnection.getAndSet(null)?.disconnect() }
                     return@Runnable
@@ -224,8 +224,19 @@ internal object SimulaHttp {
         userAgent?.takeIf { it.isNotBlank() }?.let { conn.setRequestProperty("User-Agent", it) }
     }
 
-    internal fun validateRedirectCookieIsolation(cookieHandler: CookieHandler? = CookieHandler.getDefault()) {
-        if (cookieHandler != null) throw RedirectCookieIsolationException()
+    internal fun validateRedirectCookieIsolation(
+        value: String,
+        cookieHandler: CookieHandler? = CookieHandler.getDefault(),
+    ) {
+        cookieHandler ?: return
+        val uri = runCatching { URI(value) }.getOrElse { throw RedirectCookieIsolationException() }
+        val headers = runCatching { cookieHandler.get(uri, emptyMap()) }
+            .getOrElse { throw RedirectCookieIsolationException() }
+        val hasCookies = headers.entries.any { (name, values) ->
+            (name.equals("Cookie", ignoreCase = true) || name.equals("Cookie2", ignoreCase = true)) &&
+                values.orEmpty().any { it.isNotBlank() }
+        }
+        if (hasCookies) throw RedirectCookieIsolationException()
     }
 
     internal fun validatePublicRedirectTarget(

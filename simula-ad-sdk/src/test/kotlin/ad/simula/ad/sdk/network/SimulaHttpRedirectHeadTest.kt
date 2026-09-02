@@ -2,7 +2,9 @@ package ad.simula.ad.sdk.network
 
 import java.net.HttpURLConnection
 import java.net.CookieManager
+import java.net.HttpCookie
 import java.net.InetAddress
+import java.net.URI
 import java.net.URL
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
@@ -49,6 +51,7 @@ class SimulaHttpRedirectHeadTest {
                 userAgent = null,
                 openConnection = { connection },
                 validateTarget = {},
+                validateCookieIsolation = {},
             )
         }
         assertTrue(connection.entered.await(2L, TimeUnit.SECONDS))
@@ -60,9 +63,19 @@ class SimulaHttpRedirectHeadTest {
     }
 
     @Test
-    fun `redirect probes reject a process global cookie handler`() {
+    fun `redirect probes reject matching cookies but allow an empty host handler`() {
+        val cookieManager = CookieManager()
+        SimulaHttp.validateRedirectCookieIsolation("https://tracker.example/click", cookieManager)
+        cookieManager.cookieStore.add(
+            URI("https://tracker.example"),
+            HttpCookie("tracker_session", "private").apply {
+                domain = "tracker.example"
+                path = "/"
+                secure = true
+            },
+        )
         val failure = runCatching {
-            SimulaHttp.validateRedirectCookieIsolation(CookieManager())
+            SimulaHttp.validateRedirectCookieIsolation("https://tracker.example/click", cookieManager)
         }.exceptionOrNull()
 
         assertTrue(failure is SimulaHttp.RedirectCookieIsolationException)
