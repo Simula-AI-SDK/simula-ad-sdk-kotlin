@@ -23,6 +23,8 @@ private const val PAGE_READY_PREFIX = "__simulaSdkPageReady:"
 private const val PAGE_READY_MAX_CHARS = 256
 private const val AUDIO_CHANGE_COALESCE_MS = 250L
 private const val TRUSTED_CTA_OPEN = "SIMULA_CTA_OPEN"
+private const val TRUSTED_STORE_OPEN = "SIMULA_INTERNAL_STORE_OPEN"
+private const val TRUSTED_STORE_DISMISS = "SIMULA_INTERNAL_STORE_DISMISS"
 private const val MAX_CTA_URL_CHARS = 8 * 1024
 private val installerJson = Json { ignoreUnknownKeys = true }
 
@@ -182,22 +184,32 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
                 nativeReceiver.isCtaEnabled(activationNonce) === true;
         } catch (_) { return false; }
     }
-    function forwardTrustedCta(value) {
-        if (!nativeCtaEnabled()) { return false; }
-        var url = resolvedUrl(value);
-        if (!url || isInternalCta(url) || isSameOriginCta(url)) { return false; }
-        if (gestureSequence === 0) { return false; }
-        if (claimedGesture === gestureSequence) { return true; }
+    function claimActiveGesture() {
+        if (gestureSequence === 0 || claimedGesture === gestureSequence) { return false; }
         if (!hasActiveUserGesture()) { return false; }
         claimedGesture = gestureSequence;
+        return true;
+    }
+    function postClaimedGestureMessage(message) {
+        if (claimedGesture === gestureSequence && gestureSequence !== 0) { return true; }
+        if (!claimActiveGesture()) { return false; }
         try {
-            nativePost('{"type":"$TRUSTED_CTA_OPEN","url":' + nativeStringify(url) +
-                ',"activation_nonce":' + nativeStringify(activationNonce) + '}');
+            nativePost(message);
             return true;
         } catch (_) {
             if (claimedGesture === gestureSequence) { claimedGesture = -1; }
             return false;
         }
+    }
+    function forwardTrustedCta(value) {
+        if (!nativeCtaEnabled()) { return false; }
+        var url = resolvedUrl(value);
+        if (!url || isInternalCta(url) || isSameOriginCta(url)) { return false; }
+        if (claimedGesture === gestureSequence) { return true; }
+        return postClaimedGestureMessage(
+            '{"type":"$TRUSTED_CTA_OPEN","url":' + nativeStringify(url) +
+                ',"activation_nonce":' + nativeStringify(activationNonce) + '}'
+        );
     }
     window.open = function () {
         if (arguments.length > 0 && forwardTrustedCta(arguments[0])) { return routedWindow; }
@@ -209,6 +221,35 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
         if (!anchor || String(anchor.target).toLowerCase() !== '_blank') { return; }
         if (forwardTrustedCta(anchor.href)) { event.preventDefault(); }
     }, true);
+    function openStore() {
+        try {
+            if (!nativeCtaEnabled()) { return false; }
+            return postClaimedGestureMessage(
+                '{"type":"$TRUSTED_STORE_OPEN","activation_nonce":' +
+                    nativeStringify(activationNonce) + '}'
+            );
+        } catch (_) { return false; }
+    }
+    function dismissStore() {
+        try {
+            if (!nativeCtaEnabled()) { return false; }
+            nativePost('{"type":"$TRUSTED_STORE_DISMISS","activation_nonce":' +
+                nativeStringify(activationNonce) + '}');
+            return true;
+        } catch (_) { return false; }
+    }
+    try {
+        var simulaAd = {};
+        Object.defineProperty(simulaAd, 'openStore', {
+            value: openStore, writable: false, configurable: false, enumerable: true
+        });
+        Object.defineProperty(simulaAd, 'dismissStore', {
+            value: dismissStore, writable: false, configurable: false, enumerable: true
+        });
+        Object.defineProperty(window, 'SimulaAd', {
+            value: simulaAd, writable: false, configurable: false, enumerable: true
+        });
+    } catch (_) {}
 """.trimIndent()
 
 /**
@@ -341,6 +382,8 @@ ${trustedCtaRelaySource(activationNonce)}
         webView: WebView,
         bridge: CreativeBridge,
         onTrustedCtaOpen: ((String) -> Unit)? = null,
+        onTrustedStoreOpen: (() -> Unit)? = null,
+        onTrustedStoreDismiss: (() -> Unit)? = null,
         onPageReady: ((String) -> Unit)? = null,
     ): BridgeInjectionMode {
         SimulaUserAgent.captureBrowser(runCatching { webView.settings.userAgentString }.getOrNull())
@@ -352,8 +395,12 @@ ${trustedCtaRelaySource(activationNonce)}
             id = (++nextInstallationId).toString(),
             bridgeCapability = UUID.randomUUID().toString(),
             audioObserver = CreativeAudioStateObserver(webView),
-            activationNonce = onTrustedCtaOpen?.let { UUID.randomUUID().toString() },
+            activationNonce = if (
+                onTrustedCtaOpen != null || onTrustedStoreOpen != null || onTrustedStoreDismiss != null
+            ) UUID.randomUUID().toString() else null,
             onTrustedCtaOpen = onTrustedCtaOpen,
+            onTrustedStoreOpen = onTrustedStoreOpen,
+            onTrustedStoreDismiss = onTrustedStoreDismiss,
             onPageReady = onPageReady,
         )
         installations[webView] = installation
@@ -387,6 +434,25 @@ ${trustedCtaRelaySource(activationNonce)}
                     webView.post {
                         if (installations[webView] === installation) {
                             runCatching { installation.onTrustedCtaOpen?.invoke(url) }
+                        }
+                    }
+                    return
+                }
+                trustedStoreAction(
+                    json,
+                    installation.activationNonce,
+                    enabled = installation.active,
+                )?.let { action ->
+                    webView.post {
+                        if (installations[webView] === installation) {
+                            when (action) {
+                                TrustedStoreAction.OPEN -> runCatching {
+                                    installation.onTrustedStoreOpen?.invoke()
+                                }
+                                TrustedStoreAction.DISMISS -> runCatching {
+                                    installation.onTrustedStoreDismiss?.invoke()
+                                }
+                            }
                         }
                     }
                     return
@@ -552,6 +618,8 @@ private data class BridgeInstallation(
     val audioObserver: CreativeAudioStateObserver,
     val activationNonce: String?,
     val onTrustedCtaOpen: ((String) -> Unit)?,
+    val onTrustedStoreOpen: (() -> Unit)?,
+    val onTrustedStoreDismiss: (() -> Unit)?,
     val onPageReady: ((String) -> Unit)?,
 ) {
     var injectionMode: BridgeInjectionMode = BridgeInjectionMode.UNAVAILABLE
@@ -584,6 +652,31 @@ internal fun trustedCtaUrl(
         ?.takeIf { it.isString }
         ?.content
         ?.takeIf { it.isNotBlank() && it.length <= MAX_CTA_URL_CHARS }
+}
+
+internal enum class TrustedStoreAction { OPEN, DISMISS }
+
+/** Admits only payload-free store commands emitted by this installation's trusted shim. */
+internal fun trustedStoreAction(
+    message: String,
+    expectedNonce: String?,
+    enabled: Boolean = true,
+): TrustedStoreAction? {
+    if (!enabled) return null
+    val nonce = expectedNonce ?: return null
+    if (message.length > CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS) return null
+    val root = runCatching { installerJson.parseToJsonElement(message) as? JsonObject }.getOrNull()
+        ?: return null
+    if (root.keys != setOf("type", "activation_nonce")) return null
+    val suppliedNonce = (root["activation_nonce"] as? JsonPrimitive)
+        ?.takeIf { it.isString }
+        ?.content
+    if (suppliedNonce != nonce) return null
+    return when ((root["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content) {
+        TRUSTED_STORE_OPEN -> TrustedStoreAction.OPEN
+        TRUSTED_STORE_DISMISS -> TrustedStoreAction.DISMISS
+        else -> null
+    }
 }
 
 internal fun readyPageId(message: String, installationId: String): String? {
