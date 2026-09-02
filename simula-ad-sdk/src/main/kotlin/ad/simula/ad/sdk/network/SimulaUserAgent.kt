@@ -22,10 +22,22 @@ import java.util.Locale
  */
 internal object SimulaUserAgent {
 
+    private const val MAX_BROWSER_USER_AGENT_CHARS = 2 * 1024
+
     /** The composed UA string, or null until [build] has run. Read by [SimulaHttp.open]. */
     @Volatile
     var value: String? = null
         private set
+
+    /** Browser identity captured from a live SDK WebView for third-party redirect resolution. */
+    @Volatile
+    var browserValue: String? = null
+        private set
+
+    fun captureBrowser(value: String?) {
+        val candidate = value?.takeIf { it.isNotBlank() && it.length <= MAX_BROWSER_USER_AGENT_CHARS } ?: return
+        browserValue = candidate
+    }
 
     /** Build (idempotently) from the application context. The first call wins; later calls no-op. */
     fun build(context: Context): String {

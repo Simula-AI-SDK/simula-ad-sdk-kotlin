@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.ads.AutomaticNavigationGate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -371,6 +372,156 @@ class ClickTrackingTest {
             coordinator.request(scope, null) { attempts++; true },
         )
         assertEquals(2, attempts)
+    }
+
+    @Test
+    fun `async auto redirect waits for actual route completion`() {
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        var completion: ((Boolean) -> Unit)? = null
+        coordinator.activate(scope)
+
+        assertEquals(
+            AutoRedirectResult.DEFERRED,
+            coordinator.requestAsync(scope, null) { _, routeCompletion, _ -> completion = routeCompletion },
+        )
+        assertEquals(
+            AutoRedirectResult.DEFERRED,
+            coordinator.requestAsync(scope, null) { _, _, _ -> error("must not start twice") },
+        )
+
+        completion?.invoke(true)
+
+        assertEquals(
+            AutoRedirectResult.SUPPRESSED,
+            coordinator.request(scope, null) { true },
+        )
+    }
+
+    @Test
+    fun `overlapping one shot auto route runs after active route fails`() {
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        val completions = mutableListOf<(Boolean) -> Unit>()
+        val attempts = mutableListOf<String>()
+        coordinator.activate(scope)
+
+        coordinator.requestAsync(scope, null) { _, completion, _ ->
+            attempts += "first"
+            completions += completion
+        }
+        assertEquals(
+            AutoRedirectResult.DEFERRED,
+            coordinator.requestAsync(scope, null) { _, completion, _ ->
+                attempts += "second"
+                completions += completion
+            },
+        )
+        assertEquals(listOf("first"), attempts)
+
+        completions.first().invoke(false)
+
+        assertEquals(listOf("first", "second"), attempts)
+        completions.last().invoke(true)
+        assertEquals(AutoRedirectResult.SUPPRESSED, coordinator.request(scope, null) { true })
+    }
+
+    @Test
+    fun `stale async auto redirect cannot suppress replacement scope`() {
+        val coordinator = AutoRedirectCoordinator()
+        val first = Any()
+        val second = Any()
+        var staleCompletion: ((Boolean) -> Unit)? = null
+        coordinator.activate(first)
+        coordinator.requestAsync(first, null) { _, routeCompletion, _ -> staleCompletion = routeCompletion }
+
+        coordinator.deactivate(first)
+        coordinator.activate(second)
+        staleCompletion?.invoke(true)
+
+        assertEquals(
+            AutoRedirectResult.OPENED,
+            coordinator.request(second, null) { true },
+        )
+    }
+
+    @Test
+    fun `user handoff preempts in flight auto route and retries only after cancellation`() {
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        val completions = mutableListOf<(Boolean) -> Unit>()
+        val canOpen = mutableListOf<() -> Boolean>()
+        val handoff = testHandoff("user")
+        coordinator.activate(scope)
+        coordinator.requestAsync(scope, null) { routeCanOpen, routeCompletion, _ ->
+            canOpen += routeCanOpen
+            completions += routeCompletion
+        }
+
+        coordinator.observeUserHandoff(handoff)
+
+        assertFalse(coordinator.isActive(scope))
+        assertFalse(canOpen.single().invoke())
+        completions.single().invoke(true)
+        assertEquals(1, completions.size)
+
+        handoff.cancel()
+
+        assertEquals(2, completions.size)
+        assertTrue(canOpen.last().invoke())
+        completions.last().invoke(true)
+        assertEquals(AutoRedirectResult.SUPPRESSED, coordinator.request(scope, null) { true })
+    }
+
+    @Test
+    fun `user handoff cancels in flight auto route work before retry`() {
+        val coordinator = AutoRedirectCoordinator()
+        val automaticGate = AutomaticNavigationGate().apply {
+            retain("https://tracker.example/click", trackerAlreadyRequested = false)
+        }
+        val scope = Any()
+        val handoff = testHandoff("user")
+        var cancellations = 0
+        var starts = 0
+        coordinator.activate(scope)
+        coordinator.requestAsync(scope, null) { _, _, registerCancellation ->
+            assertTrue(automaticGate.beginPending() != null)
+            starts++
+            registerCancellation {
+                cancellations++
+                automaticGate.abandonInFlight()
+            }
+        }
+
+        coordinator.observeUserHandoff(handoff)
+
+        assertEquals(1, cancellations)
+        assertEquals(1, starts)
+
+        handoff.cancel()
+
+        assertEquals(2, starts)
+        assertEquals(1, cancellations)
+    }
+
+    @Test
+    fun `failed async user route retries retained auto route`() {
+        val handoff = testHandoff("user")
+        val coordinator = AutoRedirectCoordinator()
+        val scope = Any()
+        var autoRoutes = 0
+        coordinator.activate(scope)
+        coordinator.request(scope, handoff) { autoRoutes++; true }
+        handoff.complete(ClickPersistencePart.TELEMETRY)
+        handoff.complete(ClickPersistencePart.BEACON)
+
+        assertTrue(handoff.handoffAsync { _, completion ->
+            completion(false)
+            ClickRouteStart.STARTED
+        })
+
+        assertEquals(1, autoRoutes)
+        assertEquals(AutoRedirectResult.SUPPRESSED, coordinator.request(scope, null) { true })
     }
 
     @Test
