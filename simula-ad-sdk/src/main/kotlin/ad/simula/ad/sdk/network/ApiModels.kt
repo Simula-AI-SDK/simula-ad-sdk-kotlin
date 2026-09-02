@@ -477,7 +477,7 @@ internal data class NativeAdApiResponse(
     @SerialName("iframe_url") val iframeUrl: String? = null,
     @SerialName("rendered_html") val renderedHtml: String? = null,
     // Click-through routing (mirrors [AdLoadApiResponse]): `destination` is where a CTA tap goes
-    // ("appstore" | "web") and `tracking_url` is the MMP click tracker the SDK opens verbatim
+    // ("appstore" | "web") and `tracking_url` is the MMP click tracker the SDK routes
     // (attribution-preserving). `tracking_url` is null when the chosen campaign has no tracker.
     val destination: String = "appstore",
     @SerialName("tracking_url") val trackingUrl: String? = null,

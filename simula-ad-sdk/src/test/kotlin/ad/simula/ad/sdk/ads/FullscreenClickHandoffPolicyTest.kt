@@ -339,7 +339,7 @@ class FullscreenClickHandoffPolicyTest {
         assertTrue(handoff.isTerminal())
         assertEquals(1, routeAttempts)
         assertEquals(1, finished)
-        assertEquals(ClickHandoffResult.ACCOUNTED, terminalResult)
+        assertEquals(ClickHandoffResult.FAILED, terminalResult)
     }
 
     @Test

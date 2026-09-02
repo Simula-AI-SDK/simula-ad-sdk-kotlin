@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.nativead
 
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.ads.AutomaticNavigationGate
+import ad.simula.ad.sdk.ads.AutomaticNavigationOutcome
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebChromeClient
 import ad.simula.ad.sdk.bridge.CreativeTelemetryWebViewClient
 import ad.simula.ad.sdk.bridge.BRIDGE_CAPABILITY_KEY
@@ -16,10 +17,11 @@ import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.minigame.resolveWebViewRetentionCapacity
 import ad.simula.ad.sdk.minigame.webViewTrimAction
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.network.ClickInteraction
+import ad.simula.ad.sdk.network.ClickInteractionClaim
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickSources
-import ad.simula.ad.sdk.network.routeClaimedClick
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.ComponentCallbacks2
 import android.content.Context
@@ -63,6 +65,7 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
@@ -784,10 +787,17 @@ internal class NativeAdWiring(
     private var automaticNavigationEligible = false
     private val clickInteractionGate = ClickInteractionGate()
     private val automaticNavigationGate = AutomaticNavigationGate()
+    private var userCtaInFlight = false
+    private var userNavigationRevision = 0L
+    private var userNavigationJob: Job? = null
+    private var userNavigationClaim: ClickInteractionClaim? = null
+    private var automaticNavigationJob: Job? = null
     private val automaticNavigationVisibleRect = Rect()
     private var focusObservedView: WebView? = null
     private val windowFocusListener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
         if (!hasFocus) {
+            cancelUserNavigation()
+            cancelAutomaticNavigationPreparation()
             automaticNavigationEligible = false
         } else {
             dispatchOnAutomaticNavigationEligibilityEdge()
@@ -795,6 +805,7 @@ internal class NativeAdWiring(
     }
 
     fun adoptCallbacksFrom(other: NativeAdWiring) {
+        cancelUserNavigation()
         onHeightPx = other.onHeightPx
         onAdClick = other.onAdClick
         onLoadError = other.onLoadError
@@ -872,12 +883,11 @@ internal class NativeAdWiring(
         }
     }
 
-    /** Open a user-tapped creative CTA in the external system browser (PRD) and fire CLICKED. Prefers
-     * the server-provided [trackingUrl] (the MMP click tracker — opened verbatim to preserve install
-     * attribution, exactly as the imperative ads do) over [tappedUrl], the URL the creative itself
+    /** Open a user-tapped creative CTA externally and fire CLICKED. Prefers the server-provided
+     * [trackingUrl] over [tappedUrl], the URL the creative itself
      * navigated to; falls back to [tappedUrl] when the serve carries no tracker. The raw [storeUrl]
      * rides along so the router can deterministically land an appstore CTA on the store when the
-     * tracker can't be launched (parity with the interstitial/rewarded CTAs). */
+     * tracker cannot resolve or launch (parity with the interstitial/rewarded CTAs). */
     fun handleNavigation(tappedUrl: String, currentPageUrl: String?): Boolean {
         val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
             tappedUrl = tappedUrl,
@@ -889,19 +899,49 @@ internal class NativeAdWiring(
             CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
             is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
         }
-        routeClaimedClick(
-            claim = clickInteractionGate.claim(ClickSources.PRIMARY_CTA),
-            open = {
-                CreativeCtaRouter.openPrimaryCta(
-                    appContext,
+        val claim = clickInteractionGate.claim(ClickSources.PRIMARY_CTA) ?: return true
+        cancelUserNavigation()
+        val revision = ++userNavigationRevision
+        userCtaInFlight = true
+        userNavigationClaim = claim
+        automaticNavigationEligible = false
+        automaticNavigationJob?.cancel()
+        automaticNavigationJob = null
+        automaticNavigationGate.abandonInFlight()
+        val routeView = webView
+        val routeStartedAtNanos = System.nanoTime()
+        userNavigationJob = CreativeCtaRouter.prepareInBackground(
+            prepare = {
+                CreativeCtaRouter.preparePrimaryCta(
                     route,
                     destination,
-                    storeUrl = storeUrl,
+                    storeUrl,
+                    routeStartedAtNanos,
                 )
             },
-            onOpened = { interaction ->
-                automaticNavigationGate.suppressPending()
-                onAdClick(interaction)
+            onPrepared = { prepared ->
+                val routeContext = currentUserNavigationContext(revision, routeView)
+                if (routeContext == null) {
+                    cancelUserNavigation()
+                    return@prepareInBackground
+                }
+                userNavigationJob = null
+                val outcome = CreativeCtaRouter.launchPrepared(routeContext, prepared)
+                val opened = outcome != AutomaticNavigationOutcome.FAILED &&
+                    outcome != AutomaticNavigationOutcome.HANDLED
+                userNavigationClaim = null
+                if (!opened) {
+                    claim.release()
+                    userCtaInFlight = false
+                    dispatchOnAutomaticNavigationEligibilityEdge()
+                } else if (claim.commit()) {
+                    automaticNavigationGate.suppressPending()
+                    userCtaInFlight = false
+                    onAdClick(claim.interaction)
+                } else {
+                    userCtaInFlight = false
+                    dispatchOnAutomaticNavigationEligibilityEdge()
+                }
             },
         )
         return true
@@ -930,25 +970,39 @@ internal class NativeAdWiring(
 
     private fun dispatchPendingAutomaticNavigation() {
         if (!currentAutomaticNavigationEligible()) return
-        automaticNavigationGate.attemptPending { route ->
-            CreativeCtaRouter.openAutomaticNavigation(
-                appContext,
-                route.targetUrl,
-                destination,
-                trackingUrl,
-                route.trackerAlreadyRequested,
-            )
-        }
+        val attempt = automaticNavigationGate.beginPending() ?: return
+        automaticNavigationJob = CreativeCtaRouter.prepareInBackground(
+            prepare = {
+                CreativeCtaRouter.prepareAutomaticNavigation(
+                    attempt.route.targetUrl,
+                    destination,
+                    trackingUrl,
+                    attempt.route.trackerAlreadyRequested,
+                )
+            },
+            onPrepared = { prepared ->
+                automaticNavigationJob = null
+                val outcome = if (automaticNavigationGate.isActive(attempt) && currentAutomaticNavigationEligible()) {
+                    webView?.context?.let { CreativeCtaRouter.launchPrepared(it, prepared) }
+                        ?: AutomaticNavigationOutcome.FAILED
+                } else {
+                    AutomaticNavigationOutcome.FAILED
+                }
+                automaticNavigationGate.complete(attempt, outcome)
+            },
+        )
     }
 
     private fun dispatchOnAutomaticNavigationEligibilityEdge() {
         val eligible = currentAutomaticNavigationEligible()
+        if (!eligible) cancelAutomaticNavigationPreparation()
         val shouldDispatch = eligible && !automaticNavigationEligible
         automaticNavigationEligible = eligible
         if (shouldDispatch) dispatchPendingAutomaticNavigation()
     }
 
     private fun currentAutomaticNavigationEligible(): Boolean {
+        if (userCtaInFlight) return false
         val currentView = webView ?: return false
         automaticNavigationVisibleRect.setEmpty()
         val globallyVisibleFraction = runCatching {
@@ -975,12 +1029,17 @@ internal class NativeAdWiring(
     }
 
     fun updateAutomaticNavigationActive(active: Boolean) {
+        if (!active) {
+            cancelUserNavigation()
+            cancelAutomaticNavigationPreparation()
+        }
         automaticNavigationActive = active
         automaticVisibilityFraction = -1f
         automaticNavigationEligible = false
     }
 
     fun onAutomaticNavigationAttached() {
+        cancelUserNavigation()
         automaticNavigationAttached = true
         automaticVisibilityFraction = -1f
         automaticNavigationEligible = false
@@ -997,6 +1056,8 @@ internal class NativeAdWiring(
     }
 
     fun onAutomaticNavigationDetached() {
+        cancelUserNavigation()
+        cancelAutomaticNavigationPreparation()
         automaticNavigationAttached = false
         automaticVisibilityFraction = -1f
         automaticNavigationEligible = false
@@ -1004,6 +1065,38 @@ internal class NativeAdWiring(
             runCatching { observed.viewTreeObserver.removeOnWindowFocusChangeListener(windowFocusListener) }
         }
         focusObservedView = null
+    }
+
+    private fun currentUserNavigationContext(revision: Long, routeView: WebView?): Context? {
+        val currentView = webView
+        if (routeView == null || !nativeUserNavigationEligible(
+                revisionMatches = revision == userNavigationRevision,
+                userCtaInFlight = userCtaInFlight,
+                lifecycleActive = automaticNavigationActive,
+                currentOwner = currentView === routeView,
+                logicallyAttached = automaticNavigationAttached,
+                attachedToWindow = routeView.isAttachedToWindow,
+                shown = routeView.isShown,
+                windowFocused = routeView.hasWindowFocus(),
+            )
+        ) return null
+        val context = routeView.context
+        return (context as? MutableContextWrapper)?.baseContext ?: context
+    }
+
+    private fun cancelUserNavigation() {
+        userNavigationRevision++
+        userNavigationJob?.cancel()
+        userNavigationJob = null
+        userNavigationClaim?.release()
+        userNavigationClaim = null
+        userCtaInFlight = false
+    }
+
+    private fun cancelAutomaticNavigationPreparation() {
+        automaticNavigationJob?.cancel()
+        automaticNavigationJob = null
+        automaticNavigationGate.abandonInFlight()
     }
 
     fun observeNavigationStarted(url: String?) {
@@ -1200,6 +1293,18 @@ internal fun nativeAutomaticNavigationEligible(
     windowFocused && globallyVisibleFraction >= NATIVE_AUTOMATIC_NAVIGATION_MIN_VISIBLE &&
     visibleFraction >= NATIVE_AUTOMATIC_NAVIGATION_MIN_VISIBLE
 
+internal fun nativeUserNavigationEligible(
+    revisionMatches: Boolean,
+    userCtaInFlight: Boolean,
+    lifecycleActive: Boolean,
+    currentOwner: Boolean,
+    logicallyAttached: Boolean,
+    attachedToWindow: Boolean,
+    shown: Boolean,
+    windowFocused: Boolean,
+): Boolean = revisionMatches && userCtaInFlight && lifecycleActive && currentOwner && logicallyAttached &&
+    attachedToWindow && shown && windowFocused
+
 private const val NATIVE_AUTOMATIC_NAVIGATION_MIN_VISIBLE = 0.5f
 
 private const val NATIVE_BRIDGE_OBJECT = "SimulaNativeBridge"
@@ -1233,6 +1338,7 @@ private fun installBridge(
     documentStartSupported: Boolean,
     bridgeCapability: String,
 ): NativeBridgeInjectionMode {
+    SimulaUserAgent.captureBrowser(runCatching { webView.settings.userAgentString }.getOrNull())
     val cleanupConfirmed = uninstallBridge(webView)
     if (!cleanupConfirmed) return NativeBridgeInjectionMode.UNAVAILABLE
     val interfaceInstalled = runCatching {

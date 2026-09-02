@@ -151,7 +151,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                                 if (!canRouteFromCurrentFullscreenActivity(
                                         activity.isFinishing,
                                         activity.isDestroyed,
-                                    )) false else route(activity.applicationContext)
+                                    )) false else route(activity)
                             },
                             completion = completion,
                         )
@@ -167,31 +167,64 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     pendingClickHandoff = p::pendingClickHandoff,
                     storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
-                    onAutoStoreRedirect = {
-                        val opened = CreativeCtaRouter.open(
-                            applicationContext,
-                            p.trackingUrl,
-                            p.destination,
-                            p.adBehavior?.storeOpen,
-                            p.androidStoreUrl,
+                    onAutoStoreRedirect = { canOpen, completion, registerCancellation ->
+                        val job = CreativeCtaRouter.prepareInBackground(
+                            prepare = {
+                                CreativeCtaRouter.prepare(
+                                    p.trackingUrl,
+                                    p.destination,
+                                    p.androidStoreUrl,
+                                )
+                            },
+                            onPrepared = { prepared ->
+                                runWhenLifecycleResumed(
+                                    lifecycle = lifecycle,
+                                    canRun = canOpen,
+                                    onResumed = {
+                                        val outcome = CreativeCtaRouter.launchPrepared(
+                                            this@SimulaRewardedActivity,
+                                            prepared,
+                                        )
+                                        if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                                            storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
+                                        }
+                                        completion(outcome != AutomaticNavigationOutcome.FAILED)
+                                    },
+                                    onUnavailable = { completion(false) },
+                                )
+                            },
                         )
-                        if (opened) storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
-                        opened
+                        registerCancellation(job::cancel)
                     },
-                    openAutomaticNavigation = { targetUrl, trackerAlreadyRequested ->
-                        val outcome = if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                            CreativeCtaRouter.openAutomaticNavigation(
-                                applicationContext,
-                                targetUrl,
-                                p.destination,
-                                p.trackingUrl,
-                                trackerAlreadyRequested,
-                            )
-                        } else AutomaticNavigationOutcome.FAILED
-                        if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
-                            storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
-                        }
-                        outcome
+                    openAutomaticNavigation = { targetUrl, trackerAlreadyRequested, canOpen, completion, registerCancellation ->
+                        val job = CreativeCtaRouter.prepareInBackground(
+                            prepare = {
+                                CreativeCtaRouter.prepareAutomaticNavigation(
+                                    targetUrl,
+                                    p.destination,
+                                    p.trackingUrl,
+                                    trackerAlreadyRequested,
+                                )
+                            },
+                            onPrepared = { prepared ->
+                                runWhenLifecycleResumed(
+                                    lifecycle = lifecycle,
+                                    canRun = canOpen,
+                                    onResumed = {
+                                        val outcome = CreativeCtaRouter.launchPrepared(
+                                            this@SimulaRewardedActivity,
+                                            prepared,
+                                        )
+                                        if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                                            storeExit?.recordStoreOpen(ClickSources.AUTO_REDIRECT)
+                                        }
+                                        completion(outcome)
+                                    },
+                                    onUnavailable = { completion(AutomaticNavigationOutcome.FAILED) },
+                                )
+                            },
+                        )
+                        registerCancellation(job::cancel)
                     },
                     // End-screen CTA routing context (deterministic store fallback).
                     ctaTrackingUrl = p.trackingUrl,
@@ -442,28 +475,40 @@ private fun RewardedMinigame(
     val autoRedirectScope = remember(presentation) { Any() }
     DisposableEffect(presentation.autoRedirectCoordinator, autoRedirectScope) {
         presentation.autoRedirectCoordinator.activate(autoRedirectScope)
-        onDispose { presentation.autoRedirectCoordinator.deactivate(autoRedirectScope) }
+        onDispose {
+            presentation.automaticNavigationGate.abandonInFlight()
+            presentation.autoRedirectCoordinator.deactivate(autoRedirectScope)
+        }
     }
     fun routeAutomaticStoreNavigation() {
-        val result = presentation.autoRedirectCoordinator.request(
+        val result = presentation.autoRedirectCoordinator.requestAsync(
             scope = autoRedirectScope,
             pendingHandoff = presentation.pendingClickHandoff(),
-        ) {
-            val outcome = if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                presentation.automaticNavigationGate.attemptPending { route ->
-                    CreativeCtaRouter.openAutomaticNavigation(
-                        context.applicationContext,
+        ) { routeCanOpen, completion, registerCancellation ->
+            prepareAutomaticCtaRoute(
+                gate = presentation.automaticNavigationGate,
+                lifecycle = lifecycleOwner.lifecycle,
+                prepare = { route ->
+                    CreativeCtaRouter.prepareAutomaticNavigation(
                         route.targetUrl,
                         presentation.destination,
                         presentation.trackingUrl,
                         route.trackerAlreadyRequested,
                     )
-                }
-            } else AutomaticNavigationOutcome.FAILED
-            if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
-                recordStoreOpen(ClickSources.AUTO_REDIRECT)
-            }
-            outcome != AutomaticNavigationOutcome.FAILED
+                },
+                canOpen = {
+                    routeCanOpen() && presentation.autoRedirectCoordinator.isActive(autoRedirectScope)
+                },
+                open = { prepared ->
+                    CreativeCtaRouter.launchPrepared(context, prepared).also { outcome ->
+                        if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                            recordStoreOpen(ClickSources.AUTO_REDIRECT)
+                        }
+                    }
+                },
+                completion = completion,
+                registerCancellation = registerCancellation,
+            )
         }
         if (result == AutoRedirectResult.SUPPRESSED) {
             presentation.automaticNavigationGate.suppressPending()
@@ -576,19 +621,36 @@ private fun RewardedMinigame(
     val autoRedirect = presentation.adBehavior?.autoStoreRedirect
     // auto_store_redirect: open the advertiser store once (no user tap). A disabled/missing config no-ops.
     fun fireAutoStoreRedirect() {
-        presentation.autoRedirectCoordinator.request(
+        presentation.autoRedirectCoordinator.requestAsync(
             scope = autoRedirectScope,
             pendingHandoff = presentation.pendingClickHandoff(),
-        ) {
-            val opened = CreativeCtaRouter.open(
-                context.applicationContext,
-                presentation.trackingUrl,
-                presentation.destination,
-                presentation.adBehavior?.storeOpen,
-                presentation.androidStoreUrl,
+        ) { routeCanOpen, completion, registerCancellation ->
+            val job = CreativeCtaRouter.prepareInBackground(
+                prepare = {
+                    CreativeCtaRouter.prepare(
+                        presentation.trackingUrl,
+                        presentation.destination,
+                        presentation.androidStoreUrl,
+                    )
+                },
+                onPrepared = { prepared ->
+                    runWhenLifecycleResumed(
+                        lifecycle = lifecycleOwner.lifecycle,
+                        canRun = {
+                            routeCanOpen() && presentation.autoRedirectCoordinator.isActive(autoRedirectScope)
+                        },
+                        onResumed = {
+                            val outcome = CreativeCtaRouter.launchPrepared(context, prepared)
+                            if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                                recordStoreOpen(ClickSources.AUTO_REDIRECT)
+                            }
+                            completion(outcome != AutomaticNavigationOutcome.FAILED)
+                        },
+                        onUnavailable = { completion(false) },
+                    )
+                },
             )
-            if (opened) recordStoreOpen(ClickSources.AUTO_REDIRECT)
-            opened
+            registerCancellation(job::cancel)
         }
     }
     val bridge = remember {
@@ -742,6 +804,7 @@ private fun RewardedMinigame(
         val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
         notifyPublisherClick { presentation.callbacks.notifyClicked() }
         val interaction = claim.interaction
+        val routeStartedAtNanos = System.nanoTime()
         coordinateDeferredClickPersistence(
             mainHandler = clickHandoffHandler,
             claim = claim,
@@ -758,31 +821,41 @@ private fun RewardedMinigame(
             },
             recordTelemetry = { completion -> presentation.callbacks.persistClick(interaction, completion) },
             onHandoff = { committedInteraction, completion ->
-                val result = presentation.routeClick({ routeActivity ->
-                    if (!canRouteFromCurrentFullscreenActivity(
-                            routeActivity.isFinishing,
-                            routeActivity.isDestroyed,
-                        )) return@routeClick false
-                    val opened = CreativeCtaRouter.openPrimaryCta(
-                        routeActivity.applicationContext,
-                        route,
-                        presentation.destination,
-                        presentation.adBehavior?.storeOpen,
-                        presentation.androidStoreUrl,
-                    )
-                    if (opened) {
-                        presentation.primaryCtaNavigation.lockAfterExternalOpen()
-                        presentation.autoRedirectCoordinator.recordUserRouteOpened()
-                        routeActivity.recordClickStoreOpen(committedInteraction.source)
-                    } else {
-                        CreativeCtaRouter.admittedInWebViewFallback(
-                            route.tappedUrl,
-                            presentation.trackingUrl,
-                        )?.let { presentation.openPrimaryFallback(it, routeActivity) }
-                    }
-                    opened
-                }, completion)
-                if (result == PresentationRouteResult.REJECTED) ClickRouteStart.REJECTED else ClickRouteStart.STARTED
+                prepareDeferredCtaRoute(
+                    prepare = {
+                        CreativeCtaRouter.preparePrimaryCta(
+                            route,
+                            presentation.destination,
+                            presentation.androidStoreUrl,
+                            routeStartedAtNanos,
+                        )
+                    },
+                    requestRoute = presentation::routeClick,
+                    completion = completion,
+                    open = { routeActivity, prepared ->
+                        if (!canRouteFromCurrentFullscreenActivity(
+                                routeActivity.isFinishing,
+                                routeActivity.isDestroyed,
+                            )
+                        ) return@prepareDeferredCtaRoute false
+                        val outcome = CreativeCtaRouter.launchPrepared(routeActivity, prepared)
+                        val opened = outcome != AutomaticNavigationOutcome.FAILED &&
+                            outcome != AutomaticNavigationOutcome.HANDLED
+                        if (opened) {
+                            presentation.primaryCtaNavigation.lockAfterExternalOpen()
+                            presentation.autoRedirectCoordinator.recordUserRouteOpened()
+                            if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                                routeActivity.recordClickStoreOpen(committedInteraction.source)
+                            }
+                        } else {
+                            CreativeCtaRouter.admittedInWebViewFallback(
+                                route.tappedUrl,
+                                presentation.trackingUrl,
+                            )?.let { presentation.openPrimaryFallback(it, routeActivity) }
+                        }
+                        opened
+                    },
+                )
             },
             onCreated = { handoff ->
                 presentation.trackClickHandoff(handoff)
@@ -1125,6 +1198,7 @@ private fun RewardedMinigame(
                         { presentation.callbacks.notifyClicked() },
                     ) ?: return@StorePromptBadge
                     val interaction = claim.interaction
+                    val routeStartedAtNanos = System.nanoTime()
                     coordinateDeferredClickPersistence(
                         mainHandler = clickHandoffHandler,
                         claim = claim,
@@ -1143,25 +1217,30 @@ private fun RewardedMinigame(
                             presentation.callbacks.persistClick(interaction, completion)
                         },
                         onHandoff = { committedInteraction, completion ->
-                            val result = presentation.routeClick({ routeActivity ->
-                                if (!canRouteFromCurrentFullscreenActivity(
-                                        routeActivity.isFinishing,
-                                        routeActivity.isDestroyed,
+                            prepareDeferredCtaRoute(
+                                prepare = {
+                                    CreativeCtaRouter.prepare(
+                                        presentation.trackingUrl,
+                                        presentation.destination,
+                                        presentation.androidStoreUrl,
+                                        routeStartedAtNanos,
                                     )
-                                ) return@routeClick false
-                                val opened = CreativeCtaRouter.open(
-                                    routeActivity.applicationContext,
-                                    presentation.trackingUrl,
-                                    presentation.destination,
-                                    presentation.adBehavior?.storeOpen,
-                                    presentation.androidStoreUrl,
-                                )
-                                if (opened) {
-                                    routeActivity.recordClickStoreOpen(committedInteraction.source)
-                                }
-                                opened
-                            }, completion)
-                            if (result == PresentationRouteResult.REJECTED) ClickRouteStart.REJECTED else ClickRouteStart.STARTED
+                                },
+                                requestRoute = presentation::routeClick,
+                                completion = completion,
+                                open = { routeActivity, prepared ->
+                                    if (!canRouteFromCurrentFullscreenActivity(
+                                            routeActivity.isFinishing,
+                                            routeActivity.isDestroyed,
+                                        )
+                                    ) return@prepareDeferredCtaRoute false
+                                    val outcome = CreativeCtaRouter.launchPrepared(routeActivity, prepared)
+                                    if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                                        routeActivity.recordClickStoreOpen(committedInteraction.source)
+                                    }
+                                    outcome != AutomaticNavigationOutcome.FAILED
+                                },
+                            )
                         },
                         onCreated = { handoff ->
                             presentation.trackClickHandoff(handoff)
