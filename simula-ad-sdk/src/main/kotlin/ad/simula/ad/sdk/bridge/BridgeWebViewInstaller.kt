@@ -236,7 +236,17 @@ internal object BridgeWebViewInstaller {
     internal fun coreRelayScript(installationId: String, bridgeCapability: String): String = """
         (function () {
             'use strict';
-            if (window !== window.top) { return; }
+            var isTop = window === window.top;
+            var isDirectSrcdoc = false;
+            if (!isTop) {
+                try {
+                    isDirectSrcdoc = window.parent === window.top && window.frameElement &&
+                        window.frameElement.hasAttribute('srcdoc') &&
+                        window.frameElement === window.top.document.querySelector('iframe[srcdoc]') &&
+                        String(window.location.href) === 'about:srcdoc';
+                } catch (e) {}
+            }
+            if (!isTop && !isDirectSrcdoc) { return; }
             var bridgeCapability = ${JsonPrimitive(bridgeCapability)};
             var nativeReceiver = window.$NATIVE_OBJECT;
             var nativePost = nativeReceiver && typeof nativeReceiver.postMessage === 'function'
@@ -246,18 +256,28 @@ internal object BridgeWebViewInstaller {
             var nativeParse = JSON.parse.bind(JSON);
             var pageReadySent = false;
             var pageId = Date.now().toString(36) + Math.random().toString(36);
+            function isCreativeRootSource(source) {
+                if (source === window) { return true; }
+                if (!isTop) { return false; }
+                var frame;
+                try { frame = document.querySelector('iframe[srcdoc]'); }
+                catch (e) { return false; }
+                if (!frame || frame.contentWindow !== source) { return false; }
+                try { return String(source.location.href) === 'about:srcdoc'; }
+                catch (e) { return false; }
+            }
             function notifyPageReady() {
-                if (pageReadySent || window !== window.top || !nativePost) { return; }
+                if (pageReadySent || !isTop || !nativePost) { return; }
                 pageReadySent = true;
                 try { nativePost('$PAGE_READY_PREFIX$installationId:' + pageId); } catch (e) {}
             }
             window.addEventListener('message', function (event) {
-                if (!event || event.isTrusted !== true || event.source !== window) { return; }
+                if (!event || event.isTrusted !== true || !isCreativeRootSource(event.source)) { return; }
                 var d = event.data;
-                if (d && d.__simulaSdkResponse) { return; }
                 try {
                     var envelope = typeof d === 'string' ? nativeParse(d) : d;
-                    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) { return; }
+                    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
+                        envelope.__simulaSdkResponse) { return; }
                     var serialized = nativeStringify(envelope);
                     if (!serialized || serialized.charAt(0) !== '{') { return; }
                     nativePost('{"$BRIDGE_CAPABILITY_KEY":' + nativeStringify(bridgeCapability) +

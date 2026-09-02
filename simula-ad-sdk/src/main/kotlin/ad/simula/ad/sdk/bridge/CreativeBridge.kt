@@ -62,7 +62,7 @@ private val bridgeRejectionRecorder = BoundedBridgeRejectionRecorder { reason ->
 
 private fun recordBridgeMessageRejected(reason: String) = bridgeRejectionRecorder.record(reason)
 
-/** Admits only a relay-authenticated envelope from the current top creative document. */
+/** Admits only an envelope authenticated by the current presentation's trusted document relay. */
 internal fun authenticatedBridgeMessage(message: String, expectedCapability: String): String? {
     if (message.length > CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS) return null
     val root = runCatching { creativeBridgeJson.parseToJsonElement(message) as? JsonObject }.getOrNull()
@@ -202,6 +202,27 @@ internal fun buildCreativeBridgeMessage(
         put("payload", payload)
         put("__simulaSdkResponse", true)
     }
-    // JsonObject.toString() emits valid JSON, hence a valid JS object literal.
-    return "window.postMessage($obj, '*');"
+    // JsonObject.toString() emits valid JSON, hence a valid JS object literal. The server-rendered
+    // creative is normally a direct srcdoc child of a synthetic top document, so deliver to both
+    // supported document shapes without exposing bridge data to nested third-party frames.
+    return """
+        (function () {
+            'use strict';
+            if (window !== window.top) { return; }
+            var message = $obj;
+            function deliver(target) {
+                try { if (target) { target.postMessage(message, '*'); } } catch (e) {}
+            }
+            deliver(window);
+            var frame;
+            try { frame = document.querySelector('iframe[srcdoc]'); }
+            catch (e) { return; }
+            var target = null;
+            try {
+                target = frame && frame.contentWindow;
+                if (!target || String(target.location.href) !== 'about:srcdoc') { return; }
+            } catch (e) { return; }
+            deliver(target);
+        })();
+    """.trimIndent()
 }
