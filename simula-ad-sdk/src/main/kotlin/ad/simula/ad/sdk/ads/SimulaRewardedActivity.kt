@@ -790,17 +790,7 @@ private fun RewardedMinigame(
         }
     }
 
-    fun beginPrimaryCta(tappedUrl: String, currentPageUrl: String? = creativeWebView?.url): Boolean {
-        val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
-            tappedUrl = tappedUrl,
-            creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: initialPageUrl,
-            trackingUrl = presentation.trackingUrl,
-            destination = presentation.destination,
-        )) {
-            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> return false
-            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
-            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
-        }
+    fun beginPrimaryCtaRoute(route: PrimaryCtaRoute): Boolean {
         val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
         notifyPublisherClick { presentation.callbacks.notifyClicked() }
         val interaction = claim.interaction
@@ -867,6 +857,19 @@ private fun RewardedMinigame(
             },
         )
         return true
+    }
+
+    fun beginPrimaryCta(tappedUrl: String, currentPageUrl: String? = creativeWebView?.url): Boolean {
+        return when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+            tappedUrl = tappedUrl,
+            creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: initialPageUrl,
+            trackingUrl = presentation.trackingUrl,
+            destination = presentation.destination,
+        )) {
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> false
+            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> true
+            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> beginPrimaryCtaRoute(plan.route)
+        }
     }
 
     fun admitCreativeCommit(view: WebView?, qualified: Boolean) {
@@ -1072,6 +1075,15 @@ private fun RewardedMinigame(
                         webView = this,
                         bridge = bridge,
                         onTrustedCtaOpen = { url -> beginPrimaryCta(url) },
+                        onTrustedStoreOpen = {
+                            CreativeCtaRouter.trustedStoreRoute(
+                                destination = presentation.destination,
+                                trackingUrl = presentation.trackingUrl,
+                                storeUrl = presentation.androidStoreUrl,
+                            )?.let(::beginPrimaryCtaRoute)
+                        },
+                        // Rewarded currently owns no install banner; keep the authenticated API a no-op.
+                        onTrustedStoreDismiss = {},
                         onPageReady = {
                             requestHtmlVisualFence(
                                 view = target,

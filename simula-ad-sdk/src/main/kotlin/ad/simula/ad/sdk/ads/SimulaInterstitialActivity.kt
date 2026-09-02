@@ -1155,6 +1155,14 @@ private fun CreativeHtml(
                     webView = this,
                     bridge = bridge,
                     onTrustedCtaOpen = { url -> handlePrimaryCta(url, this) },
+                    onTrustedStoreOpen = {
+                        CreativeCtaRouter.trustedStoreRoute(
+                            destination = presentation.ad.destination,
+                            trackingUrl = presentation.ad.trackingUrl,
+                            storeUrl = presentation.ad.androidStoreUrl,
+                        )?.let(onPrimaryCta)
+                    },
+                    onTrustedStoreDismiss = { presentation.installBannerState.dismiss() },
                 )
                 if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
                     post { if (creativeWebView === this) onBridgeUnavailable() }
