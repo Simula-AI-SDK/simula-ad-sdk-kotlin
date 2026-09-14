@@ -1,5 +1,8 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.model.CloseAction
+import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.CloseTreatment
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -165,6 +168,61 @@ class ApiModelsSerializationTest {
         assertNull(partial.ads[0].iframeUrl)
         assertNull(partial.ads[0].html)
         assertNull(partial.ads[0].nativeClickBeaconV1Enabled)
+    }
+
+    @Test
+    fun `fallback close defaults survive missing null and malformed config`() {
+        val behaviorValues = listOf(
+            null,
+            "null",
+            "true",
+            "\"bad\"",
+            "{}",
+            "{\"close\":null}",
+            "{\"close\":\"bad\"}",
+            "{\"close\":{\"delay_seconds\":\"5\",\"treatment\":false,\"position\":1,\"action\":[]}}",
+        )
+        behaviorValues.forEachIndexed { index, behavior ->
+            val key = behavior?.let { ",\"ad_behavior\":$it" }.orEmpty()
+            val response = json.decodeFromString<FallbackAdsApiResponse>(
+                """{"ads":[{"ad_id":"a$index","html":"<html/>"$key}]}""",
+            )
+            val close = requireNotNull(SimulaApiClient.fallbackAdFromBody(response.ads.single(), false)).closeBehavior
+            assertEquals(5, close.delaySeconds)
+            assertEquals(CloseTreatment.COUNTDOWN_CIRCLE, close.treatment)
+            assertEquals(ClosePosition.TOP_RIGHT, close.position)
+            assertEquals(CloseAction.CLOSE_X, close.action)
+        }
+    }
+
+    @Test
+    fun `fallback close config is bounded restricted and independent per usable item`() {
+        val payload = """
+            {"ads":[
+              {"ad_id":"a1","html":"<html>1</html>","ad_behavior":{"close":{
+                "delay_seconds":-3,"treatment":"hidden","position":"bottom-left","action":"FoRwArD"}}},
+              {"ad_id":"a2","html":"<html>2</html>","ad_behavior":{"close":{
+                "delay_seconds":90,"treatment":"progress_bar","position":"top-left","action":"forward"}}},
+              {"ad_id":"a3","html":"<html>3</html>","ad_behavior":{"close":{
+                "delay_seconds":7,"treatment":"reward_or_close_label","position":"unknown","action":"close-x"}}},
+              {"ad_id":"a4","html":"<html>4</html>","ad_behavior":{"close":{"treatment":"unknown"}}},
+              {"ad_id":"a5","html":"<html>5</html>","ad_behavior":{"close":{"delay_seconds":0}}}
+            ]}
+        """.trimIndent()
+        val response = json.decodeFromString<FallbackAdsApiResponse>(payload)
+        val closes = response.ads.map { body ->
+            requireNotNull(SimulaApiClient.fallbackAdFromBody(body, false)).closeBehavior
+        }
+
+        assertEquals(listOf(0, 60, 7, 5, 0), closes.map { it.delaySeconds })
+        assertEquals(CloseTreatment.HIDDEN, closes[0].treatment)
+        assertTrue(closes.drop(1).all { it.treatment == CloseTreatment.COUNTDOWN_CIRCLE })
+        assertEquals(ClosePosition.BOTTOM_LEFT, closes[0].position)
+        assertEquals(ClosePosition.TOP_LEFT, closes[1].position)
+        assertEquals(ClosePosition.TOP_RIGHT, closes[2].position)
+        assertEquals(CloseAction.FORWARD, closes[0].action)
+        assertEquals(CloseAction.FORWARD, closes[1].action)
+        assertEquals(CloseAction.CLOSE_X, closes[2].action)
     }
 
     @Test

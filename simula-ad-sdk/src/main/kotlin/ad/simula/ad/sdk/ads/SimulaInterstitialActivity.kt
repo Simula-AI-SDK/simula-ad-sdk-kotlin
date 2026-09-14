@@ -11,6 +11,7 @@ import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
+import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
@@ -92,6 +93,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -824,6 +827,7 @@ private fun CreativeInterstitial(
         AdCloseButton(
             treatment = close.treatment,
             position = close.position,
+            action = close.action,
             progressBarColor = close.progressBarColor,
             isRewardCopy = isRewardCopy,
             enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending),
@@ -1212,6 +1216,7 @@ internal fun closeBarAtBottom(treatment: CloseTreatment, position: ClosePosition
 internal fun BoxScope.AdCloseButton(
     treatment: CloseTreatment,
     position: ClosePosition,
+    action: CloseAction,
     progressBarColor: String,
     isRewardCopy: Boolean,
     enabled: Boolean,
@@ -1288,7 +1293,7 @@ internal fun BoxScope.AdCloseButton(
         ) {
             when {
                 // Unlocked: the compact ✕ for every treatment (matches all other close buttons).
-                enabled -> CloseCircle(onClick = onClose) { CloseGlyph() }
+                enabled -> CloseCircle(action = action, onClick = onClose) { CloseActionGlyph(action) }
                 // Nothing in the corner during the delay (the bar shows progress separately).
                 treatment == CloseTreatment.HIDDEN || treatment == CloseTreatment.PROGRESS_BAR -> Unit
                 treatment == CloseTreatment.REWARD_OR_CLOSE_LABEL ->
@@ -1299,7 +1304,7 @@ internal fun BoxScope.AdCloseButton(
                         modifier = Modifier.size(maxOf(MIN_TOUCH_TARGET_DP, CLOSE_BOX_DP).dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        CloseCircle(alpha = 0.5f) { CloseGlyph() }
+                        CloseCircle(alpha = 0.5f) { CloseActionGlyph(action) }
                         Canvas(modifier = Modifier.size(CLOSE_BOX_DP.dp)) {
                             // Stroke in dp (not raw px, which was ~1dp on a 3x screen), inset by half
                             // its width so the ring isn't drawn half-outside the canvas bounds.
@@ -1327,6 +1332,7 @@ internal fun BoxScope.AdCloseButton(
 @Composable
 private fun CloseCircle(
     alpha: Float = 1f,
+    action: CloseAction = CloseAction.CLOSE_X,
     onClick: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
@@ -1339,6 +1345,9 @@ private fun CloseCircle(
         Box(
             modifier = Modifier
                 .size(maxOf(MIN_TOUCH_TARGET_DP, CLOSE_BOX_DP).dp)
+                .semantics {
+                    contentDescription = if (action == CloseAction.FORWARD) "Next ad" else "Close ad"
+                }
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
@@ -1353,15 +1362,38 @@ private fun CloseCircle(
     }
 }
 
-/** The "✕" glyph at the standard point size — white, to sit on the dark/translucent circle. */
+/** Compact close/next glyph. FORWARD is visual-only; callers keep one dismissal callback. */
 @Composable
-private fun CloseGlyph() {
-    Text(
-        text = "✕",
-        color = Color.White,
-        fontSize = CLOSE_GLYPH_SP.sp,
-        fontWeight = FontWeight.Bold,
-    )
+internal fun CloseActionGlyph(
+    action: CloseAction,
+    color: Color = Color.White,
+) {
+    if (action == CloseAction.CLOSE_X) {
+        Text(
+            text = "✕",
+            color = color,
+            fontSize = CLOSE_GLYPH_SP.sp,
+            fontWeight = FontWeight.Bold,
+        )
+    } else {
+        Canvas(Modifier.size(8.dp)) {
+            val stroke = 1.5.dp.toPx()
+            drawLine(
+                color = color,
+                start = Offset(size.width * 0.3f, size.height * 0.15f),
+                end = Offset(size.width * 0.7f, size.height * 0.5f),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+            drawLine(
+                color = color,
+                start = Offset(size.width * 0.7f, size.height * 0.5f),
+                end = Offset(size.width * 0.3f, size.height * 0.85f),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
 }
 
 /**
