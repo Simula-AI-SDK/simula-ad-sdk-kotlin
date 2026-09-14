@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.provider
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Application
 import android.os.Bundle
 import android.os.Handler
@@ -37,7 +38,12 @@ internal class ActivityVisibilityState {
     /** Returns a generation to settle after the Android activity-transition ordering window. */
     @Synchronized
     fun onActivityStopped(activity: Any, changingConfigurations: Boolean): Long? {
-        if (!startedActivities.remove(activity)) return null
+        val wasTracked = startedActivities.remove(activity)
+        // Activity callbacks are not replayed. When registration happens after the current
+        // Activity's onStart (commonly through a late Application-context initialize), its first
+        // onStop is necessarily untracked. If no other Activity is known to be started, treat that
+        // stop as the missing foreground boundary so the next start can refresh the session.
+        if (!wasTracked && startedActivities.isNotEmpty()) return null
         generation++
         if (startedActivities.isNotEmpty() || changingConfigurations) return null
         return generation
@@ -45,8 +51,11 @@ internal class ActivityVisibilityState {
 
     /** Commits background only if no Activity started during the debounce window. */
     @Synchronized
-    fun settleBackground(candidateGeneration: Long): Boolean {
-        if (candidateGeneration != generation || startedActivities.isNotEmpty()) return false
+    fun settleBackground(
+        candidateGeneration: Long,
+        processHasVisibleUi: Boolean = false,
+    ): Boolean {
+        if (candidateGeneration != generation || startedActivities.isNotEmpty() || processHasVisibleUi) return false
         enteredBackground = true
         return true
     }
@@ -82,7 +91,7 @@ internal object ProcessActivityVisibilityTracker {
                     val candidate = state.onActivityStopped(activity, changingConfigurations) ?: return
                     runCatching {
                         mainHandler.postDelayed(
-                            { state.settleBackground(candidate) },
+                            { state.settleBackground(candidate, processHasVisibleUi()) },
                             ACTIVITY_TRANSITION_DEBOUNCE_MS,
                         )
                     }
@@ -109,5 +118,14 @@ internal object ProcessActivityVisibilityTracker {
     private fun notifyForegroundReturn() {
         val callbacks = synchronized(lock) { listeners.values.toList() }
         callbacks.forEach { callback -> runCatching { callback() } }
+    }
+
+    private fun processHasVisibleUi(): Boolean {
+        val info = ActivityManager.RunningAppProcessInfo()
+        return runCatching {
+            ActivityManager.getMyMemoryState(info)
+            info.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND ||
+                info.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
+        }.getOrDefault(false)
     }
 }

@@ -81,4 +81,42 @@ class ActivityVisibilityStateTest {
         assertTrue(state.settleBackground(generation ?: error("missing generation")))
         assertTrue(state.onActivityStarted(alreadyStarted))
     }
+
+    @Test
+    fun `late registration without activity context observes first stop as background`() {
+        val state = ActivityVisibilityState()
+        val alreadyStarted = Any()
+
+        val generation = state.onActivityStopped(alreadyStarted, changingConfigurations = false)
+
+        assertNotNull(generation)
+        assertTrue(state.settleBackground(generation ?: error("missing generation")))
+        assertTrue(state.onActivityStarted(alreadyStarted))
+    }
+
+    @Test
+    fun `untracked stop cannot background while another activity is started`() {
+        val state = ActivityVisibilityState()
+        val tracked = Any()
+
+        state.onActivityStarted(tracked)
+
+        assertNull(state.onActivityStopped(Any(), changingConfigurations = false))
+        assertEquals(1, state.startedActivityCount)
+    }
+
+    @Test
+    fun `late untracked stop cannot background while process UI remains visible`() {
+        val state = ActivityVisibilityState()
+        val generation = state.onActivityStopped(Any(), changingConfigurations = false)
+
+        assertNotNull(generation)
+        assertFalse(
+            state.settleBackground(
+                generation ?: error("missing generation"),
+                processHasVisibleUi = true,
+            ),
+        )
+        assertFalse(state.onActivityStarted(Any()))
+    }
 }
