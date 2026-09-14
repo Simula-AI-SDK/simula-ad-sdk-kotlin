@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.core.ImperativeInitializationAttempt
 import ad.simula.ad.sdk.core.ImperativeInitializationGate
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.findActivity
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
@@ -20,6 +21,7 @@ import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.privacy.ProcessPrivacyOwner
 import ad.simula.ad.sdk.provider.SimulaSessionStore
+import ad.simula.ad.sdk.provider.ProcessActivityVisibilityTracker
 import ad.simula.ad.sdk.provider.awaitInitialAdvertisingIdRefresh
 import ad.simula.ad.sdk.telemetry.EffectiveTelemetryConfig
 import ad.simula.ad.sdk.telemetry.FirstWinsProcessTaskClaim
@@ -214,6 +216,18 @@ object SimulaAds {
                 store.startupGate = { gate }
                 this.startupGate = gate
 
+                (appContext as? Application)?.let { application ->
+                    ProcessActivityVisibilityTracker.addForegroundListener(store) {
+                        store.requestForcedRefresh {
+                            SimulaPrivacy.refreshAdvertisingId()
+                        }
+                    }
+                    val foregroundActivity = findActivity(context)?.takeIf {
+                        runCatching { it.hasWindowFocus() && !it.isFinishing && !it.isDestroyed }
+                            .getOrDefault(false)
+                    }
+                    ProcessActivityVisibilityTracker.register(application, foregroundActivity)
+                }
                 registerActivityTracking()
                 seedWebViewRetentionState(context)
 

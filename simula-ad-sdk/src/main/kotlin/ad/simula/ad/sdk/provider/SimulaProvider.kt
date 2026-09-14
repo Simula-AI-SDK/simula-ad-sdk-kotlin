@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.provider
 
+import android.app.Application
 import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -26,6 +27,7 @@ import ad.simula.ad.sdk.model.AdData
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.model.SimulaContextValue
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.findActivity
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
@@ -350,6 +352,24 @@ fun SimulaProvider(
             // Mixed hosts still wait for an imperative startup published before the request. This is
             // resolved live because a provider can compose before SimulaAds.initialize is called.
             startupGate = { SimulaAds.startupGate }
+        }
+    }
+    DisposableEffect(applicationContext, lifecycleOwner, sessionStore) {
+        val application = applicationContext as? Application
+        if (application != null) {
+            ProcessActivityVisibilityTracker.addForegroundListener(sessionStore) {
+                sessionStore.requestForcedRefresh {
+                    privacySessionCoordinator.awaitPrivacyReady()
+                    SimulaPrivacy.refreshAdvertisingId()
+                }
+            }
+            val foregroundActivity = findActivity(context)?.takeIf {
+                lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+            }
+            ProcessActivityVisibilityTracker.register(application, foregroundActivity)
+        }
+        onDispose {
+            ProcessActivityVisibilityTracker.removeForegroundListener(sessionStore)
         }
     }
     val telemetryIdentityToken = remember { ProcessTelemetryIdentityRouter.createProviderToken() }
