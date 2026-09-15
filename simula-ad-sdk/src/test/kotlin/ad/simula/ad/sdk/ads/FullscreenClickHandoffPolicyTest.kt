@@ -20,6 +20,43 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FullscreenClickHandoffPolicyTest {
+    @Test
+    fun `video telemetry stages match cross-platform contract`() {
+        assertEquals(listOf("video_start", "video_complete", "video_fail"), listOf(
+            VIDEO_STAGE_START,
+            VIDEO_STAGE_COMPLETE,
+            VIDEO_STAGE_FAIL,
+        ))
+    }
+
+    @Test
+    fun `fallback video click persists even without a route and blocks while pending`() {
+        assertEquals(
+            FallbackVideoClickDisposition.PERSIST_ONLY,
+            fallbackVideoClickDisposition(clickPending = false, hasRoute = false),
+        )
+        assertEquals(
+            FallbackVideoClickDisposition.PERSIST_AND_ROUTE,
+            fallbackVideoClickDisposition(clickPending = false, hasRoute = true),
+        )
+        assertEquals(
+            FallbackVideoClickDisposition.BLOCK,
+            fallbackVideoClickDisposition(clickPending = true, hasRoute = true),
+        )
+    }
+
+    @Test
+    fun `upcoming fallback video selection supports consecutive videos with one next owner`() {
+        val ads = listOf(
+            SimulaApiClient.FallbackAd("one", type = ad.simula.ad.sdk.model.CreativeType.VIDEO, url = "https://cdn/1"),
+            SimulaApiClient.FallbackAd("two", type = ad.simula.ad.sdk.model.CreativeType.VIDEO, url = "https://cdn/2"),
+            SimulaApiClient.FallbackAd("html", renderedHtml = "<html/>"),
+        )
+
+        assertEquals("https://cdn/1", nextFallbackVideoUrl(ads, -1))
+        assertEquals("https://cdn/2", nextFallbackVideoUrl(ads, 0))
+        assertNull(nextFallbackVideoUrl(ads, 1))
+    }
     private class TestScheduler : ClickHandoffScheduler {
         private val ready = ArrayDeque<Runnable>()
         private val delayed = LinkedHashSet<Runnable>()
@@ -640,7 +677,7 @@ class FullscreenClickHandoffPolicyTest {
     @Test
     fun `fallback presentation retains fetched ads and accepted click through refetch failure`() {
         val state = FallbackPresentationState()
-        val ads = listOf(SimulaApiClient.FallbackAd("ad-1", html = "<html/>"))
+        val ads = listOf(SimulaApiClient.FallbackAd("ad-1", renderedHtml = "<html/>"))
         state.retainFetchedAds(ads)
         state.showing(0)
         state.setClickPending(true)
@@ -664,7 +701,7 @@ class FullscreenClickHandoffPolicyTest {
     @Test
     fun `fetch exhaustion never overwrites retained fallback content`() {
         val state = FallbackPresentationState()
-        val retained = listOf(SimulaApiClient.FallbackAd("retained", html = "<html/>"))
+        val retained = listOf(SimulaApiClient.FallbackAd("retained", renderedHtml = "<html/>"))
         state.retainFetchedAds(retained)
 
         assertEquals(retained, state.terminalizeInitialFetchFailure())
@@ -980,7 +1017,7 @@ class FullscreenClickHandoffPolicyTest {
         assertFalse(
             state.resolvePostCloseFetchWait(
                 generation,
-                listOf(SimulaApiClient.FallbackAd("late", html = "<html/>")),
+                listOf(SimulaApiClient.FallbackAd("late", renderedHtml = "<html/>")),
             ),
         )
         assertEquals(FallbackStage.DONE, state.stage)
@@ -991,7 +1028,7 @@ class FullscreenClickHandoffPolicyTest {
         var now = 5_000L
         val state = FallbackPresentationState(clockMs = { now })
         val generation = state.startPostCloseFetchWait()
-        val ads = listOf(SimulaApiClient.FallbackAd("fallback", html = "<html/>"))
+        val ads = listOf(SimulaApiClient.FallbackAd("fallback", renderedHtml = "<html/>"))
 
         now += FALLBACK_POST_CLOSE_WAIT_MS - 1L
         assertTrue(state.resolvePostCloseFetchWait(generation, ads))

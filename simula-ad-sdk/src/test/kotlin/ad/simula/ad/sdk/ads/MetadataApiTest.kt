@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.AdValue
+import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.network.SimulaApiClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -87,7 +88,8 @@ class MetadataApiTest {
             metadata = snapshot,
         )
         val rewarded = RewardedPresentation(
-            iframeUrl = "https://example.test/creative",
+            renderedHtml = "<html></html>",
+            creative = Creative(),
             impressionId = "rewarded-impression",
             apiKey = "test-key",
             callbacks = object : RewardedCallbacks {

@@ -4,6 +4,7 @@ import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
+import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.MAX_SK_OVERLAY_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayPosition
@@ -276,6 +277,7 @@ class AdLoadParsingTest {
 
         val creative = r.creative.toDomain()!!
         assertEquals(AdUnitType.REWARDED, creative.adUnitType)
+        assertEquals(CreativeType.PLAYABLE, creative.type)
         assertEquals("https://b", creative.bundleUrl)
         val experiment = r.experiment.toDomain()!!
         assertEquals("playable_close_q3", experiment.experimentId)
@@ -490,6 +492,25 @@ class AdLoadParsingTest {
             ).adBehavior.toDomain()!!
             assertEquals(d, b.close.delaySeconds)
         }
+    }
+
+    @Test
+    fun `close delay clamps values above sixty seconds`() {
+        assertEquals(60, MAX_CLOSE_DELAY_SECONDS)
+        val behavior = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"close":{"delay_seconds":61}}}""",
+        ).adBehavior.toDomain()
+        assertEquals(60, behavior?.close?.delaySeconds)
+    }
+
+    @Test
+    fun `video creative decodes typed asset and poster URLs`() {
+        val creative = json.decodeFromString<AdLoadApiResponse>(
+            """{"creative":{"type":"video","url":"https://cdn.example/v.mp4","poster_url":"https://cdn.example/p.jpg"}}""",
+        ).creative.toDomain()
+        assertEquals(CreativeType.VIDEO, creative?.type)
+        assertEquals("https://cdn.example/v.mp4", creative?.url)
+        assertEquals("https://cdn.example/p.jpg", creative?.posterUrl)
     }
 
     // ── Response: ad_behavior.auto_store_redirect ───────────────────────────────

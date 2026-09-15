@@ -81,7 +81,7 @@ import java.util.UUID
  * **detaches and pauses** that view (preserving its
  * rendered DOM) and scrolling back **reattaches the same view with no reload** — eliminating the
  * blank-then-pop re-render a recycled feed row otherwise shows. The creative is mounted from
- * `rendered_html` (the inline `<iframe srcdoc>`, preferred) and falls back to `iframe_url`. The container
+ * `rendered_html`. The container
  * grows to the height the creative reports over the JS bridge, with a stable shimmer while waiting.
  *
  * Bridge (reuses the relay pattern of [ad.simula.ad.sdk.bridge.BridgeWebViewInstaller], scoped to the
@@ -96,7 +96,6 @@ import java.util.UUID
  */
 @Composable
 internal fun NativeAdWebView(
-    iframeUrl: String?,
     renderedHtml: String?,
     apiKey: String,
     devMode: Boolean,
@@ -131,7 +130,7 @@ internal fun NativeAdWebView(
         wiring.onLoadError = onLoadError
         wiring.onRenderGone = { generation++ }
         wiring.onPageReady = { visibilityRelay?.flush() }
-        wiring.creativeBaseUrl = nativeCreativeInitialPageUrl(iframeUrl, renderedHtml)
+        wiring.creativeBaseUrl = null
         wiring.trackingUrl = trackingUrl
         wiring.destination = destination
         wiring.storeUrl = storeUrl
@@ -200,11 +199,10 @@ internal fun NativeAdWebView(
     key(generation) {
         val attachment = remember(owner, generation) { NativeAdWebViewStore.createAttachment(owner) }
         var mountAdmitted by remember(owner, generation) { mutableStateOf(false) }
-        val prioritizeRetained = remember(owner, generation, iframeUrl, renderedHtml) {
+        val prioritizeRetained = remember(owner, generation, renderedHtml) {
             NativeAdWebViewStore.hasReusableIdleSession(
                 impressionId = impressionId,
                 apiKey = apiKey,
-                iframeUrl = iframeUrl,
                 renderedHtml = renderedHtml,
             )
         }
@@ -222,7 +220,7 @@ internal fun NativeAdWebView(
             AndroidView(
                 modifier = mountModifier,
                 // Reattaches a retained view or creates/acquires a fresh one, always on main.
-                factory = { NativeAdWebViewStore.attach(attachment, context, iframeUrl, renderedHtml, devMode) },
+                factory = { NativeAdWebViewStore.attach(attachment, context, renderedHtml, devMode) },
                 // Scroll-out: detach + pause + keep the loaded DOM (retained ids); recycle ephemerals/orphans.
                 onRelease = { released -> NativeAdWebViewStore.release(attachment, released) },
             )
@@ -313,7 +311,6 @@ internal object NativeAdWebViewStore {
     fun hasReusableIdleSession(
         impressionId: String,
         apiKey: String,
-        iframeUrl: String?,
         renderedHtml: String?,
     ): Boolean {
         if (impressionId.isBlank()) return false
@@ -321,7 +318,7 @@ internal object NativeAdWebViewStore {
         return !session.attached &&
             session.apiKey == apiKey &&
             session.webView != null &&
-            session.loadedKey == creativeKey(iframeUrl, renderedHtml) &&
+            session.loadedKey == creativeKey(renderedHtml) &&
             !session.wiring.renderGone &&
             !session.wiring.loadFailed
     }
@@ -331,7 +328,6 @@ internal object NativeAdWebViewStore {
     fun attach(
         attachment: Attachment,
         hostContext: Context,
-        iframeUrl: String?,
         renderedHtml: String?,
         devMode: Boolean,
     ): WebView {
@@ -341,7 +337,7 @@ internal object NativeAdWebViewStore {
         // A keyed AndroidView replacement can attach before the old holder releases. The same owner
         // takes over its own session; the old attachment's later release is ignored by identity.
         if (requested.attachment != null) {
-            return mount(requested, attachment, hostContext, iframeUrl, renderedHtml, devMode)
+            return mount(requested, attachment, hostContext, renderedHtml, devMode)
         }
 
         val retainable = requested.impressionId.isNotBlank()
@@ -357,13 +353,13 @@ internal object NativeAdWebViewStore {
             val session = existing ?: requested
             if (session !== requested) session.wiring.adoptCallbacksFrom(requested.wiring)
             attachment.owner.session = session
-            return mount(session, attachment, hostContext, iframeUrl, renderedHtml, devMode)
+            return mount(session, attachment, hostContext, renderedHtml, devMode)
         }
 
         requested.wiring.loadFailed = false
-        val fresh = buildWebView(requested.wiring, hostContext, iframeUrl, renderedHtml, devMode)
+        val fresh = buildWebView(requested.wiring, hostContext, renderedHtml, devMode)
         requested.webView = fresh
-        requested.loadedKey = creativeKey(iframeUrl, renderedHtml)
+        requested.loadedKey = creativeKey(renderedHtml)
         requested.attachment = attachment
         requested.wiring.webView = fresh
         requested.wiring.onAutomaticNavigationAttached()
@@ -389,11 +385,10 @@ internal object NativeAdWebViewStore {
         session: Session,
         attachment: Attachment,
         hostContext: Context,
-        iframeUrl: String?,
         renderedHtml: String?,
         devMode: Boolean,
     ): WebView {
-        val creativeKey = creativeKey(iframeUrl, renderedHtml)
+        val creativeKey = creativeKey(renderedHtml)
         val retained = session.webView
         // Reuse the retained view only if it is alive (render process intact), actually holds this
         // creative (its load completed — not the about:blank a failed load left behind). A newer
@@ -428,7 +423,7 @@ internal object NativeAdWebViewStore {
         }
         // Clear the discarded view's verdict before building; build failures re-arm it.
         session.wiring.loadFailed = false
-        val fresh = buildWebView(session.wiring, hostContext, iframeUrl, renderedHtml, devMode)
+        val fresh = buildWebView(session.wiring, hostContext, renderedHtml, devMode)
         // Adopt as the retained instance only if the slot isn't already showing one (don't orphan it).
         session.webView?.takeIf { it !== fresh }?.let(::releaseNativeBridgeWebView)
         session.webView = fresh
@@ -548,7 +543,6 @@ internal object NativeAdWebViewStore {
     private fun buildWebView(
         wiring: NativeAdWiring,
         hostContext: Context,
-        iframeUrl: String?,
         renderedHtml: String?,
         devMode: Boolean,
     ): WebView {
@@ -580,10 +574,8 @@ internal object NativeAdWebViewStore {
             runCatching { wiring.onLoadError() }
             return webView
         }
-        when {
-            // Prefer rendered_html (the inline <iframe srcdoc> creative); fall back to iframe_url.
-            !renderedHtml.isNullOrBlank() -> webView.loadDataWithBaseURL(null, renderedHtml, "text/html", "utf-8", null)
-            !iframeUrl.isNullOrBlank() -> webView.loadUrl(iframeUrl)
+        if (!renderedHtml.isNullOrBlank()) {
+            webView.loadDataWithBaseURL(null, renderedHtml, "text/html", "utf-8", null)
         }
         return webView
     }
@@ -669,9 +661,7 @@ internal object NativeAdWebViewStore {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
     }
 
-    /** Iframe URL identifies a creative directly; a rendered-HTML creative is keyed by its content. */
-    private fun creativeKey(iframeUrl: String?, renderedHtml: String?): String =
-        iframeUrl?.takeIf { it.isNotBlank() } ?: "html:${renderedHtml?.hashCode() ?: 0}"
+    private fun creativeKey(renderedHtml: String?): String = "html:${renderedHtml?.hashCode() ?: 0}"
 }
 
 /**
@@ -1317,9 +1307,6 @@ private const val MAX_RENDER_RECOVERIES = 2
 private val scriptHandlers = WeakHashMap<WebView, ScriptHandler>()
 
 internal enum class NativeBridgeInjectionMode { DOCUMENT_START, PAGE_START_FALLBACK, UNAVAILABLE }
-
-internal fun nativeCreativeInitialPageUrl(iframeUrl: String?, renderedHtml: String?): String? =
-    iframeUrl.takeIf { renderedHtml.isNullOrBlank() }
 
 internal fun nativeBridgeInjectionMode(
     cleanupConfirmed: Boolean,

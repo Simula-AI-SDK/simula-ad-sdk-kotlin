@@ -13,6 +13,11 @@ import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
+import ad.simula.ad.sdk.model.CreativeType
+import ad.simula.ad.sdk.model.closeGateSecondsLeft
+import ad.simula.ad.sdk.model.videoCloseGateMs
+import ad.simula.ad.sdk.model.retainVideoMaxPosition
+import ad.simula.ad.sdk.model.videoReachedMidpoint
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.ClickRouteStart
@@ -60,6 +65,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -84,9 +90,8 @@ import kotlinx.coroutines.launch
 
 /**
  * Transparent, full-screen host for the imperative rewarded minigame. Reads its
- * [RewardedPresentation] from [RewardedHandoff] by token and renders the playable
- * iframe in a pooled WebView with a play-to-earn status pill and an always-available
- * close button. Mirrors [SimulaInterstitialActivity].
+ * [RewardedPresentation] from [RewardedHandoff] by token and renders playable HTML or native video
+ * with the play-to-earn chrome. Mirrors [SimulaInterstitialActivity].
  */
 internal class SimulaRewardedActivity : ComponentActivity() {
 
@@ -418,13 +423,9 @@ private fun RewardedMinigame(
     recordStoreOpen: (String) -> Unit,
     onFinish: (earned: Boolean) -> Unit,
 ) {
-    val creativeSource = remember(presentation) {
-        rewardedCreativeSource(presentation.renderedHtml, presentation.iframeUrl)
-    }
-    // Only a loaded iframe has an HTTP origin. Rendered HTML stays opaque and must not inherit the
-    // unused iframe metadata's origin for CTA classification.
-    val initialPageUrl = (creativeSource as? RewardedCreativeSource.Iframe)?.url
-        ?.let(CreativeCtaRouter::admittedHttpUrl)
+    val isVideo = presentation.creative.type == CreativeType.VIDEO
+    val creativeSource = remember(presentation) { rewardedCreativeSource(presentation.renderedHtml) }
+    val initialPageUrl: String? = null
     // Play-to-earn gate length, in seconds — sourced from `ad_behavior.close.delay_seconds` (the
     // same value that ungates the close button). No `ad_behavior` → 0 → instantly earned.
     val gateSeconds = presentation.adBehavior?.close?.delaySeconds ?: 0
@@ -445,6 +446,7 @@ private fun RewardedMinigame(
     val closeProgress = remember {
         Animatable(rewardCloseProgress(presentation.accumulatedPlayTimeMs, gateSeconds))
     }
+    val uiScope = rememberCoroutineScope()
     val showsCloseBar = presentation.adBehavior?.close?.treatment.let {
         it == CloseTreatment.COUNTDOWN_CIRCLE || it == CloseTreatment.PROGRESS_BAR
     }
@@ -455,8 +457,11 @@ private fun RewardedMinigame(
     var storePromptVisible by remember {
         mutableStateOf(
             storePrompt != null && storePrompt.enabled &&
-                gateSeconds > 0 &&
-                presentation.accumulatedPlayTimeMs >= gateSeconds * 1000L / 2,
+                if (isVideo) {
+                    videoReachedMidpoint(presentation.videoPositionMs, presentation.videoDurationMs)
+                } else {
+                    gateSeconds > 0 && presentation.accumulatedPlayTimeMs >= gateSeconds * 1000L / 2
+                },
         )
     }
 
@@ -728,7 +733,13 @@ private fun RewardedMinigame(
     // a config change (rotation) resumes the remaining time instead of restarting it.
     LaunchedEffect(bridgeReady) {
         if (!bridgeReady) return@LaunchedEffect
-        if (gateSeconds <= 0) {
+        if (isVideo) return@LaunchedEffect
+        val requiredMs = if (isVideo) {
+            videoCloseGateMs(gateSeconds, presentation.videoDurationMs)
+        } else {
+            gateSeconds.coerceAtLeast(0) * 1_000L
+        }
+        if (requiredMs <= 0L) {
             presentation.rewardEarned = true
             rewardEarned = true
             return@LaunchedEffect
@@ -747,8 +758,10 @@ private fun RewardedMinigame(
             // the fill freezes, and the next resume re-anchors + re-launches. Frame-clock driven so it
             // stays smooth when ticks land late under main-thread load.
             if (showsCloseBar) {
-                closeProgress.snapTo(rewardCloseProgress(presentation.accumulatedPlayTimeMs, gateSeconds))
-                val remainingMs = (gateSeconds * 1000L - presentation.accumulatedPlayTimeMs).coerceAtLeast(0L)
+                closeProgress.snapTo(
+                    (presentation.accumulatedPlayTimeMs.toFloat() / requiredMs.coerceAtLeast(1L)).coerceIn(0f, 1f),
+                )
+                val remainingMs = (requiredMs - presentation.accumulatedPlayTimeMs).coerceAtLeast(0L)
                 launch {
                     closeProgress.animateTo(1f, tween(durationMillis = remainingMs.toInt(), easing = LinearEasing))
                 }
@@ -762,12 +775,12 @@ private fun RewardedMinigame(
                 val now = SystemClock.elapsedRealtime()
                 presentation.accumulatedPlayTimeMs += now - lastTickMs
                 lastTickMs = now
-                secondsLeft = RewardGate.secondsLeft(presentation.accumulatedPlayTimeMs, gateSeconds)
+                secondsLeft = closeGateSecondsLeft(presentation.accumulatedPlayTimeMs, requiredMs)
                 // Reveal the store prompt at the halfway point to the reward (mid play-to-earn).
-                if (presentation.accumulatedPlayTimeMs >= gateSeconds * 1000L / 2) {
+                if (!isVideo && presentation.accumulatedPlayTimeMs >= requiredMs / 2L) {
                     storePromptVisible = true
                 }
-                if (RewardGate.isEarned(presentation.accumulatedPlayTimeMs, gateSeconds)) {
+                if (presentation.accumulatedPlayTimeMs >= requiredMs) {
                     presentation.rewardEarned = true
                     rewardEarned = true
                     break
@@ -869,6 +882,45 @@ private fun RewardedMinigame(
         return true
     }
 
+    fun beginVideoCta() {
+        val target = presentation.trackingUrl ?: presentation.androidStoreUrl
+        if (target != null) {
+            beginPrimaryCta(target, null)
+            return
+        }
+        val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return
+        notifyPublisherClick { presentation.callbacks.notifyClicked() }
+        val interaction = claim.interaction
+        coordinateDeferredClickPersistence(
+            mainHandler = clickHandoffHandler,
+            claim = claim,
+            enqueueBeacon = { completion ->
+                AdBeaconManager.enqueue(
+                    presentation.impressionId,
+                    "click",
+                    adFormat = "rewarded",
+                    telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
+                    interactionId = interaction.id,
+                    clickSource = interaction.source,
+                    onPersistenceComplete = completion,
+                )
+            },
+            recordTelemetry = { completion -> presentation.callbacks.persistClick(interaction, completion) },
+            onHandoff = { _, completion ->
+                completion(false)
+                ClickRouteStart.REJECTED
+            },
+            onCreated = { handoff ->
+                presentation.trackClickHandoff(handoff)
+                clickHandoffPending = true
+            },
+            onFinished = { handoff ->
+                presentation.clearClickHandoff(handoff)
+                clickHandoffPending = presentation.pendingClickHandoff() != null
+            },
+        )
+    }
+
     fun admitCreativeCommit(view: WebView?, qualified: Boolean) {
         if (!qualified || view == null || view !== creativeWebView || rendererGone || bridgeUnavailable) return
         creativeCommitTimeout?.let(clickHandoffHandler::removeCallbacks)
@@ -921,7 +973,68 @@ private fun RewardedMinigame(
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        if (!bridgeUnavailable) AndroidView(
+        if (isVideo && !bridgeUnavailable) {
+            presentation.creative.url?.let { videoUrl ->
+                FullscreenVideo(
+                    url = videoUrl,
+                    posterUrl = presentation.creative.posterUrl,
+                    adFormat = "rewarded",
+                    adId = presentation.impressionId.takeIf { it.isNotBlank() },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
+                    onReady = { durationMs ->
+                        presentation.videoDurationMs = durationMs
+                        presentation.everCreativeReady = true
+                        displayAdmitted = admitFullscreenDisplay(
+                            alreadyReported = presentation.displayedReported,
+                            markReported = { presentation.displayedReported = true },
+                            notifyDisplayed = presentation.callbacks::onDisplayed,
+                            enqueueShown = {
+                                AdBeaconManager.enqueue(
+                                    presentation.impressionId,
+                                    "shown",
+                                    adFormat = "rewarded",
+                                    telemetryServeId = presentation.impressionId.takeIf { it.isNotBlank() },
+                                )
+                            },
+                        )
+                        bridgeReady = true
+                    },
+                    onProgress = { positionMs, durationMs, advancedMs ->
+                        presentation.videoPositionMs = retainVideoMaxPosition(
+                            presentation.videoPositionMs,
+                            positionMs,
+                        )
+                        presentation.videoDurationMs = durationMs
+                        presentation.accumulatedPlayTimeMs += advancedMs
+                        val requiredMs = videoCloseGateMs(gateSeconds, durationMs)
+                        secondsLeft = closeGateSecondsLeft(presentation.accumulatedPlayTimeMs, requiredMs)
+                        if (requiredMs > 0L) {
+                            uiScope.launch {
+                                closeProgress.snapTo(
+                                    (presentation.accumulatedPlayTimeMs.toFloat() / requiredMs).coerceIn(0f, 1f),
+                                )
+                            }
+                        }
+                        if (videoReachedMidpoint(presentation.videoPositionMs, durationMs)) {
+                            storePromptVisible = true
+                        }
+                        if (presentation.accumulatedPlayTimeMs >= requiredMs) {
+                            presentation.rewardEarned = true
+                            rewardEarned = true
+                        }
+                    },
+                    onCompleted = {
+                        presentation.rewardEarned = true
+                        rewardEarned = true
+                        secondsLeft = 0
+                    },
+                    onError = ::markBridgeUnavailable,
+                    onCta = ::beginVideoCta,
+                )
+            }
+        } else if (!bridgeUnavailable) AndroidView(
             factory = { ctx ->
                 var realLoadArmed = false
                 var mainFrameLoadFailed = false
@@ -1112,14 +1225,12 @@ private fun RewardedMinigame(
                         }
                         when (val source = creativeSource) {
                             is RewardedCreativeSource.Html -> {
-                                // Primary HTML stays opaque and never inherits iframe origin state.
+                                // Primary HTML stays opaque and has no remote base-origin state.
                                 htmlReadiness.arm()
                                 runCatching {
                                     loadDataWithBaseURL(null, source.value, "text/html", "UTF-8", null)
                                 }.onFailure { markBridgeUnavailable() }
                             }
-                            is RewardedCreativeSource.Iframe -> runCatching { loadUrl(source.url) }
-                                .onFailure { markBridgeUnavailable() }
                             null -> markBridgeUnavailable()
                         }
                     }

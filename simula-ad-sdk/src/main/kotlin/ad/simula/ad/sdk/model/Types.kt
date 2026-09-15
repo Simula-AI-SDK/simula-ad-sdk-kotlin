@@ -4,6 +4,8 @@ import ad.simula.ad.sdk.privacy.ConsentSnapshot
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import java.net.URI
+import kotlin.math.ceil
 
 // ── Core Types ──────────────────────────────────────────────────────────────
 
@@ -15,7 +17,6 @@ data class Message(
 internal data class AdData(
     val id: String,
     val format: String,
-    val iframeUrl: String? = null,
     val html: String? = null,
 )
 
@@ -172,10 +173,9 @@ private fun normalizeBehaviorToken(raw: String?): String =
 
 /** Hard cap on the server-driven close delay. The close button — and the system Back button,
  * which is blocked while the gate is active — stays locked until the delay elapses, so an
- * out-of-range value would otherwise trap the user. The `close_chrome` experiment arms are
- * 20/30/45s (default 30), so the cap is 45 to honor the largest authored value while still
- * bounding a malformed/oversized one. */
-internal const val MAX_CLOSE_DELAY_SECONDS = 45
+ * out-of-range value would otherwise trap the user. One minute preserves authored treatments while
+ * still bounding malformed/oversized values. */
+internal const val MAX_CLOSE_DELAY_SECONDS = 60
 
 /** Independent safety cap for the delayed install overlay. Kept separate from close-gate policy. */
 internal const val MAX_SK_OVERLAY_DELAY_SECONDS = 300
@@ -314,12 +314,48 @@ internal data class CloseBehavior(
     val progressBarColor: String = "#FFFFFF",
 )
 
+/** Canonical creative kind. Missing and future wire values remain playable for forward compatibility. */
+internal enum class CreativeType {
+    PLAYABLE, VIDEO;
+
+    companion object {
+        fun from(raw: String?): CreativeType = when (normalizeBehaviorToken(raw)) {
+            "video" -> VIDEO
+            else -> PLAYABLE
+        }
+    }
+}
+
 /** The creative descriptor (`creative` node). `adUnitType` drives format-aware close copy. */
 internal data class Creative(
-    val type: String = "",
+    val type: CreativeType = CreativeType.PLAYABLE,
     val bundleUrl: String? = null,
+    val url: String? = null,
+    val posterUrl: String? = null,
     val adUnitType: AdUnitType = AdUnitType.INTERSTITIAL,
 )
+
+/** Accept only network video assets. Invalid or opaque values are rejected before MediaPlayer sees them. */
+internal fun admittedVideoUrl(raw: String?): String? {
+    val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val uri = runCatching { URI(value) }.getOrNull() ?: return null
+    val networkScheme = uri.scheme.equals("http", true) || uri.scheme.equals("https", true)
+    return value.takeIf { networkScheme && !uri.host.isNullOrBlank() }
+}
+
+internal fun Creative.isRenderable(renderedHtml: String?): Boolean = when (type) {
+    CreativeType.PLAYABLE -> !renderedHtml.isNullOrBlank()
+    CreativeType.VIDEO -> admittedVideoUrl(url) != null
+}
+
+/** Video close gates cannot outlive the asset. Unknown duration keeps the configured bounded delay. */
+internal fun videoCloseGateMs(delaySeconds: Int, durationMs: Long): Long {
+    val configured = delaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS) * 1_000L
+    return if (durationMs > 0L) minOf(configured, durationMs) else configured
+}
+
+internal fun closeGateSecondsLeft(elapsedMs: Long, requiredMs: Long): Int =
+    ceil((requiredMs - elapsedMs).coerceAtLeast(0L) / 1000.0).toInt()
 
 /** Experiment-assignment metadata (`experiment` node), carried for telemetry only. */
 internal data class Experiment(

@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.model.CreativeType
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -47,6 +48,7 @@ class RewardedParsingTest {
         val body = RewardedInitRequestBody(adUnitId = "unit_1")
         val decoded = json.decodeFromString<RewardedInitRequestBody>(json.encodeToString(body))
         assertEquals("", decoded.sessionId)
+        assertFalse(decoded.capabilities.videoV1)
     }
 
     @Test
@@ -84,8 +86,8 @@ class RewardedParsingTest {
         val payload = """
             {
               "impression_id": "imp_1",
-              "iframe_url": "https://cdn/play",
               "rendered_html": "<html>primary</html>",
+              "creative": {"type":"video","url":"https://cdn/video.mp4","poster_url":"https://cdn/poster.jpg"},
               "prewarm_sk_product": true,
               "ad_behavior": { "close": { "delay_seconds": 30 } }
             }
@@ -93,8 +95,10 @@ class RewardedParsingTest {
 
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
         assertEquals("imp_1", r.impressionId)
-        assertEquals("https://cdn/play", r.iframeUrl)
         assertEquals("<html>primary</html>", r.renderedHtml)
+        assertEquals(CreativeType.VIDEO, r.creative.toDomain()?.type)
+        assertEquals("https://cdn/video.mp4", r.creative.toDomain()?.url)
+        assertEquals("https://cdn/poster.jpg", r.creative.toDomain()?.posterUrl)
         assertTrue(r.prewarmSkProduct)
         // The play-to-earn gate now rides on `ad_behavior.close.delay_seconds` (no top-level field).
         assertEquals(30, r.adBehavior?.close?.delaySeconds)
@@ -104,7 +108,6 @@ class RewardedParsingTest {
     fun `init response empty object decodes to safe defaults`() {
         val r = json.decodeFromString<RewardedInitApiResponse>("{}")
         assertEquals("", r.impressionId)
-        assertEquals("", r.iframeUrl)
         assertEquals("", r.renderedHtml)
         // Absent `ad_behavior` → null → no gate (instantly earned) and no store prompt.
         assertNull(r.adBehavior)
@@ -114,10 +117,10 @@ class RewardedParsingTest {
     @Test
     fun `init response ignores unknown keys`() {
         // Legacy `serve_id`/`ad_id` keys are unknown now and must be ignored, not remapped.
-        val payload = """{"impression_id":"i","iframe_url":"u","serve_id":"s","ad_id":"a","future_field":42}"""
+        val payload = """{"impression_id":"i","iframe_url":"ignored","serve_id":"s","ad_id":"a","future_field":42}"""
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
         assertEquals("i", r.impressionId)
-        assertEquals("u", r.iframeUrl)
+        assertEquals("", r.renderedHtml)
     }
 
     // ── Verify request / response ────────────────────────────────────────────────

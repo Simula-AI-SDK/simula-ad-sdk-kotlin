@@ -3,6 +3,7 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdValue
+import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
@@ -60,9 +61,8 @@ internal interface RewardedCallbacks {
 
 /** Everything [SimulaRewardedActivity] needs to render one rewarded presentation. */
 internal class RewardedPresentation(
-    val iframeUrl: String,
-    // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty.
     val renderedHtml: String = "",
+    val creative: Creative,
     // The impression id from /load/rewarded — the handle for tracking, reporting and fallbacks.
     val impressionId: String,
     val apiKey: String,
@@ -197,6 +197,8 @@ internal class RewardedPresentation(
      * `verify-reward`.
      */
     var accumulatedPlayTimeMs = 0L
+    var videoDurationMs = 0L
+    var videoPositionMs = 0L
 }
 
 /**

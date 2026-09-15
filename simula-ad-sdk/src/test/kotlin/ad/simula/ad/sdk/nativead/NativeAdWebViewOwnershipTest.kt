@@ -52,21 +52,6 @@ class NativeAdWebViewOwnershipTest {
     }
 
     @Test
-    fun `rendered native HTML does not inherit unused iframe origin`() {
-        assertEquals(
-            "https://creative.example/game",
-            nativeCreativeInitialPageUrl("https://creative.example/game", null),
-        )
-        assertEquals(
-            null,
-            nativeCreativeInitialPageUrl(
-                "https://creative.example/game",
-                "<html><body>rendered</body></html>",
-            ),
-        )
-    }
-
-    @Test
     fun `claim reuses idle creative and never steals an attached matching session`() {
         assertEquals(
             NativeSessionClaim.REUSE,

@@ -10,6 +10,7 @@ import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.ExtraParametersStore
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayTiming
@@ -17,6 +18,7 @@ import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
+import ad.simula.ad.sdk.model.isRenderable
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.network.AdUnitNotFoundException
 import ad.simula.ad.sdk.network.SimulaApiClient
@@ -197,8 +199,8 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
-                val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
-                if (!ad.adInserted || html == null) {
+                val creative = ad.creative ?: Creative()
+                if (!ad.adInserted || !creative.isRenderable(ad.renderedHtml)) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
@@ -215,6 +217,9 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
+                    if (ad.creative?.type == CreativeType.VIDEO) {
+                        FullscreenVideoPreparer.prepare(ad.creative.url)
+                    }
                     runCatching { listener?.onAdLoaded(this@SimulaInterstitialAd) }
                 }
                 scheduleWebViewPrewarm(generation, ad)
@@ -237,6 +242,9 @@ class SimulaInterstitialAd(val adUnitId: String) {
     }
 
     private fun scheduleWebViewPrewarm(generation: Int, ad: SimulaApiClient.AdLoadResult) {
+        if (ad.creative?.type == CreativeType.VIDEO) {
+            return
+        }
         val context = SimulaAds.appContext
         SimulaScope.launch {
             runCatching {
@@ -358,7 +366,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
             trackingUrl = PREVIEW_TRACKING_URL,  // lets a store-prompt / install-banner tap route
             renderedHtml = PREVIEW_CREATIVE_HTML,
             adBehavior = behavior,
-            creative = Creative(type = "preview", adUnitType = AdUnitType.from(adUnitType)),
+            creative = Creative(type = CreativeType.PLAYABLE, adUnitType = AdUnitType.from(adUnitType)),
         )
 
         val token = UUID.randomUUID().toString()
