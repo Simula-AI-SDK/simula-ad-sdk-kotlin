@@ -17,4 +17,19 @@ internal object RewardGate {
      */
     fun isEarned(accumulatedMs: Long, durationSeconds: Int): Boolean =
         durationSeconds > 0 && accumulatedMs >= durationSeconds.toLong() * 1000L
+
+    /**
+     * Backend verification requires evidence at least as large as the authored gate. Legitimate
+     * alternate earn paths may complete with less measured playback, but UI/telemetry keep that
+     * measured value; only the durable verification evidence is normalized here.
+     */
+    fun verificationElapsedSeconds(
+        earned: Boolean,
+        actualElapsedSeconds: Double,
+        configuredGateSeconds: Int,
+    ): Double? {
+        if (!earned) return null
+        val actual = actualElapsedSeconds.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
+        return maxOf(actual, configuredGateSeconds.coerceAtLeast(0).toDouble())
+    }
 }

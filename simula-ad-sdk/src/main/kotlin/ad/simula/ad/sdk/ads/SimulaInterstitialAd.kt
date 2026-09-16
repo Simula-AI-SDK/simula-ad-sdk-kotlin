@@ -169,6 +169,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
         currentKeyAtMs = now
         loadStartNanos = System.nanoTime()
         state = State.Loading
+        clearLoadExperimentAssignment(Telemetry::setExperiment)
         SimulaScope.launch {
             try {
                 val sessionId = SimulaAds.store.ensureSession()
@@ -204,18 +205,18 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
-                Telemetry.setExperiment(ad.experiment?.experimentId, ad.experiment?.variantId)
-                Telemetry.recordLifecycle(
-                    stage = "load_success",
-                    adFormat = AD_FORMAT,
-                    adUnitId = adUnitId,
-                    adId = ad.impressionId,
-                    serveId = ad.impressionId,
-                    durationMs = elapsedSinceLoad(),
-                    errorCode = null,
-                )
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
+                    applyLoadExperimentAssignment(ad.experiment, Telemetry::setExperiment)
+                    Telemetry.recordLifecycle(
+                        stage = "load_success",
+                        adFormat = AD_FORMAT,
+                        adUnitId = adUnitId,
+                        adId = ad.impressionId,
+                        serveId = ad.impressionId,
+                        durationMs = elapsedSinceLoad(),
+                        errorCode = null,
+                    )
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
                     if (ad.creative?.type == CreativeType.VIDEO) {
                         FullscreenVideoPreparer.prepare(ad.creative.url)
@@ -224,19 +225,23 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 }
                 scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
+                if (generation != loadGeneration) return@launch
                 // Genuine exception (network/decoding) — always-sent, deduped handled error,
                 // in addition to the sampled `load_fail` lifecycle event from failLoad().
                 // ad_unit_not_found is a distinct, non-retryable misconfiguration — surface it as
                 // its own case rather than burying it in the generic Network bucket.
                 val error =
                     if (e is AdUnitNotFoundException) SimulaAdError.AdUnitNotFound else SimulaAdError.Network(e)
-                Telemetry.recordError(
-                    signature = "interstitial:load",
-                    errorCode = error.telemetryCode(),
-                    message = e.message,
-                    breadcrumb = "SimulaInterstitialAd.load",
-                )
-                failLoadOnMain(generation, error)
+                withContext(Dispatchers.Main) {
+                    if (generation != loadGeneration) return@withContext
+                    Telemetry.recordError(
+                        signature = "interstitial:load",
+                        errorCode = error.telemetryCode(),
+                        message = e.message,
+                        breadcrumb = "SimulaInterstitialAd.load",
+                    )
+                    failLoad(error)
+                }
             }
         }
     }

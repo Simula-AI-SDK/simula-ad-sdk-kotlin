@@ -88,17 +88,29 @@ class RewardedParsingTest {
               "impression_id": "imp_1",
               "rendered_html": "<html>primary</html>",
               "creative": {"type":"video","url":"https://cdn/video.mp4","poster_url":"https://cdn/poster.jpg"},
+              "experiment": {
+                "experiment_id": "rewarded_video_q3",
+                "variant_id": "video_b",
+                "layer": "creative_media"
+              },
               "prewarm_sk_product": true,
               "ad_behavior": { "close": { "delay_seconds": 30 } }
             }
         """.trimIndent()
 
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
+        val result = SimulaApiClient.rewardedResultFromResponse(r)
         assertEquals("imp_1", r.impressionId)
         assertEquals("<html>primary</html>", r.renderedHtml)
         assertEquals(CreativeType.VIDEO, r.creative.toDomain()?.type)
         assertEquals("https://cdn/video.mp4", r.creative.toDomain()?.url)
         assertEquals("https://cdn/poster.jpg", r.creative.toDomain()?.posterUrl)
+        assertEquals("rewarded_video_q3", r.experiment?.experimentId)
+        assertEquals("video_b", r.experiment?.variantId)
+        assertEquals("creative_media", r.experiment?.layer)
+        assertEquals("rewarded_video_q3", result.experiment?.experimentId)
+        assertEquals("video_b", result.experiment?.variantId)
+        assertEquals("creative_media", result.experiment?.layer)
         assertTrue(r.prewarmSkProduct)
         // The play-to-earn gate now rides on `ad_behavior.close.delay_seconds` (no top-level field).
         assertEquals(30, r.adBehavior?.close?.delaySeconds)
@@ -107,8 +119,8 @@ class RewardedParsingTest {
     @Test
     fun `init response empty object decodes to safe defaults`() {
         val r = json.decodeFromString<RewardedInitApiResponse>("{}")
-        assertEquals("", r.impressionId)
-        assertEquals("", r.renderedHtml)
+        assertNull(r.impressionId)
+        assertNull(r.renderedHtml)
         // Absent `ad_behavior` → null → no gate (instantly earned) and no store prompt.
         assertNull(r.adBehavior)
         assertFalse(r.prewarmSkProduct)
@@ -120,7 +132,33 @@ class RewardedParsingTest {
         val payload = """{"impression_id":"i","iframe_url":"ignored","serve_id":"s","ad_id":"a","future_field":42}"""
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
         assertEquals("i", r.impressionId)
-        assertEquals("", r.renderedHtml)
+        assertNull(r.renderedHtml)
+    }
+
+    @Test
+    fun `explicit null no-fill fields decode and normalize safely`() {
+        val response = json.decodeFromString<RewardedInitApiResponse>(
+            """{"impression_id":null,"rendered_html":null,"creative":null,"experiment":null}""",
+        )
+        val result = SimulaApiClient.rewardedResultFromResponse(response)
+
+        assertNull(response.impressionId)
+        assertNull(response.renderedHtml)
+        assertEquals("", result.impressionId)
+        assertEquals("", result.renderedHtml)
+        assertNull(result.experiment)
+    }
+
+    @Test
+    fun `malformed experiment is ignored without rejecting rewarded creative`() {
+        val response = json.decodeFromString<RewardedInitApiResponse>(
+            """{"impression_id":"i","rendered_html":"<html/>","experiment":"invalid"}""",
+        )
+        val result = SimulaApiClient.rewardedResultFromResponse(response)
+
+        assertNull(response.experiment)
+        assertNull(result.experiment)
+        assertEquals("<html/>", result.renderedHtml)
     }
 
     // ── Verify request / response ────────────────────────────────────────────────

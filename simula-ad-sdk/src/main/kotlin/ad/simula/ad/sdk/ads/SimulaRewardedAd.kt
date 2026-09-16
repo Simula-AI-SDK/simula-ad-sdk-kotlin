@@ -170,6 +170,7 @@ class SimulaRewardedAd(val adUnitId: String) {
         currentKeyAtMs = now
         loadStartNanos = System.nanoTime()
         state = State.Loading
+        clearLoadExperimentAssignment(Telemetry::setExperiment)
         SimulaScope.launch {
             try {
                 val session = SimulaAds.store.ensureSession()
@@ -204,17 +205,18 @@ class SimulaRewardedAd(val adUnitId: String) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
-                Telemetry.recordLifecycle(
-                    stage = "load_success",
-                    adFormat = AD_FORMAT,
-                    adUnitId = adUnitId,
-                    adId = ad.impressionId,
-                    serveId = ad.impressionId,
-                    durationMs = elapsedSinceLoad(),
-                    errorCode = null,
-                )
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
+                    applyLoadExperimentAssignment(ad.experiment, Telemetry::setExperiment)
+                    Telemetry.recordLifecycle(
+                        stage = "load_success",
+                        adFormat = AD_FORMAT,
+                        adUnitId = adUnitId,
+                        adId = ad.impressionId,
+                        serveId = ad.impressionId,
+                        durationMs = elapsedSinceLoad(),
+                        errorCode = null,
+                    )
                     sessionId = session
                     impressionId = ad.impressionId
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
@@ -225,17 +227,21 @@ class SimulaRewardedAd(val adUnitId: String) {
                 }
                 scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
+                if (generation != loadGeneration) return@launch
                 // ad_unit_not_found is a distinct, non-retryable misconfiguration — surface it as
                 // its own case rather than burying it in the generic Network bucket.
                 val error =
                     if (e is AdUnitNotFoundException) SimulaAdError.AdUnitNotFound else SimulaAdError.Network(e)
-                Telemetry.recordError(
-                    signature = "rewarded:load",
-                    errorCode = error.telemetryCode(),
-                    message = e.message,
-                    breadcrumb = "SimulaRewardedAd.load",
-                )
-                failLoadOnMain(generation, error)
+                withContext(Dispatchers.Main) {
+                    if (generation != loadGeneration) return@withContext
+                    Telemetry.recordError(
+                        signature = "rewarded:load",
+                        errorCode = error.telemetryCode(),
+                        message = e.message,
+                        breadcrumb = "SimulaRewardedAd.load",
+                    )
+                    failLoad(error)
+                }
             }
         }
     }
@@ -424,7 +430,10 @@ class SimulaRewardedAd(val adUnitId: String) {
                 creative = ad.creative,
                 impressionId = ad.impressionId,
                 apiKey = SimulaAds.apiKey,
-                callbacks = bridge(ad.impressionId),
+                callbacks = bridge(
+                    adId = ad.impressionId,
+                    configuredGateSeconds = ad.adBehavior?.close?.delaySeconds ?: 0,
+                ),
                 adBehavior = ad.adBehavior,
                 trackingUrl = ad.trackingUrl,
                 destination = ad.destination,
@@ -442,7 +451,7 @@ class SimulaRewardedAd(val adUnitId: String) {
         state = State.Showing
     }
 
-    private fun bridge(adId: String): RewardedCallbacks = object : RewardedCallbacks {
+    private fun bridge(adId: String, configuredGateSeconds: Int): RewardedCallbacks = object : RewardedCallbacks {
         override fun onDisplayed() {
             Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, adId, elapsedSinceShow(), null)
             runCatching { listener?.onAdDisplayed(this@SimulaRewardedAd) }
@@ -512,7 +521,11 @@ class SimulaRewardedAd(val adUnitId: String) {
         override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
             // Fired once the user has completed the whole unit (playable + every fallback ad screen).
             // A non-earned completion grants nothing.
-            if (!earned) return
+            val verificationElapsedPlayTime = RewardGate.verificationElapsedSeconds(
+                earned = earned,
+                actualElapsedSeconds = elapsedPlayTimeSeconds,
+                configuredGateSeconds = configuredGateSeconds,
+            ) ?: return
             Telemetry.recordLifecycle("reward_earned", AD_FORMAT, adUnitId, adId, adId, null, null)
             runCatching { listener?.onAdEarnedReward(this@SimulaRewardedAd) }
             val sid = impressionId
@@ -535,7 +548,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     context = SimulaAds.appContext,
                     serveId = sid,
                     sessionId = sess,
-                    elapsedPlayTime = elapsedPlayTimeSeconds,
+                    elapsedPlayTime = verificationElapsedPlayTime,
                     adUnitId = verificationAdUnitId,
                 ) { result ->
                     val verifyMs = (System.nanoTime() - verifyStartNanos) / 1_000_000
@@ -658,6 +671,17 @@ class SimulaRewardedAd(val adUnitId: String) {
         /** Re-loads of the same dedup key are blocked for this long. */
         const val DEDUP_WINDOW_MS = 5 * 60 * 1000L // 5 minutes
     }
+}
+
+internal fun clearLoadExperimentAssignment(apply: (String?, String?) -> Unit) {
+    runCatching { apply(null, null) }
+}
+
+internal fun applyLoadExperimentAssignment(
+    experiment: ad.simula.ad.sdk.model.Experiment?,
+    apply: (String?, String?) -> Unit,
+) {
+    runCatching { apply(experiment?.experimentId, experiment?.variantId) }
 }
 
 /** Ad-format tag on this class's telemetry events. */

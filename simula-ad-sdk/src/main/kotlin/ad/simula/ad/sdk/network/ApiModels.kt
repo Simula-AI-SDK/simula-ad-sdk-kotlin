@@ -57,6 +57,26 @@ internal object LenientNullableBooleanSerializer : KSerializer<Boolean?> {
     }
 }
 
+internal object LenientNullableExperimentSerializer : KSerializer<ApiExperiment?> {
+    override val descriptor: SerialDescriptor = ApiExperiment.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): ApiExperiment? {
+        val jsonDecoder = decoder as? JsonDecoder
+            ?: return runCatching { decoder.decodeSerializableValue(ApiExperiment.serializer()) }.getOrNull()
+        val element = jsonDecoder.decodeJsonElement()
+        if (element !is JsonObject) return null
+        return runCatching {
+            jsonDecoder.json.decodeFromJsonElement(ApiExperiment.serializer(), element)
+        }.getOrNull()
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    override fun serialize(encoder: Encoder, value: ApiExperiment?) {
+        if (value == null) encoder.encodeNull()
+        else encoder.encodeSerializableValue(ApiExperiment.serializer(), value)
+    }
+}
+
 @Serializable
 internal data class SessionResponse(
     @SerialName("sessionId") val sessionId: String? = null,
@@ -456,10 +476,12 @@ internal data class RewardedInitRequestBody(
 internal data class RewardedInitApiResponse(
     // The impression (minigame serve) id — replaces the old `serve_id`/`ad_id` pair as the
     // single handle for verify-reward, fallbacks, tracking and reporting.
-    @SerialName("impression_id") val impressionId: String = "",
+    @SerialName("impression_id") val impressionId: String? = null,
     // Playables are rendered from server HTML; video assets are described by creative.url.
-    @SerialName("rendered_html") val renderedHtml: String = "",
+    @SerialName("rendered_html") val renderedHtml: String? = null,
     val creative: ApiCreative? = null,
+    @Serializable(with = LenientNullableExperimentSerializer::class)
+    val experiment: ApiExperiment? = null,
     val destination: String = "appstore",
     @SerialName("tracking_url") val trackingUrl: String? = null,
     // Raw, unwrapped Play Store link — see [AdLoadApiResponse.androidStoreUrl].

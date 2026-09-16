@@ -657,10 +657,25 @@ internal object SimulaApiClient {
         val androidStoreUrl: String? = null,
         val prewarmSkProduct: Boolean = false,
         val adBehavior: AdBehavior? = null,
+        val experiment: Experiment? = null,
         // Estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
         // paid event when the impression fires. Defaults to a $0 estimate (preview path).
         val adValue: AdValue = AdValue.fromBidCpm(0.0),
     )
+
+    internal fun rewardedResultFromResponse(data: RewardedInitApiResponse): RewardedInitResult =
+        RewardedInitResult(
+            impressionId = data.impressionId.orEmpty(),
+            renderedHtml = data.renderedHtml.orEmpty(),
+            creative = (data.creative.toDomain() ?: Creative()).copy(adUnitType = AdUnitType.REWARDED),
+            destination = data.destination,
+            trackingUrl = data.trackingUrl,
+            androidStoreUrl = data.androidStoreUrl,
+            prewarmSkProduct = data.prewarmSkProduct,
+            adBehavior = data.adBehavior.toDomain(),
+            experiment = data.experiment.toDomain(),
+            adValue = AdValue.fromBidCpm(data.bidAmt),
+        )
 
     /**
      * Initialize a rewarded creative via `POST /load/rewarded`. Returns playable HTML or a typed
@@ -699,17 +714,7 @@ internal object SimulaApiClient {
             throw Exception("Empty response body")
         }
         val data = json.decodeFromString<RewardedInitApiResponse>(response.body)
-        RewardedInitResult(
-            impressionId = data.impressionId,
-            renderedHtml = data.renderedHtml,
-            creative = (data.creative.toDomain() ?: Creative()).copy(adUnitType = AdUnitType.REWARDED),
-            destination = data.destination,
-            trackingUrl = data.trackingUrl,
-            androidStoreUrl = data.androidStoreUrl,
-            prewarmSkProduct = data.prewarmSkProduct,
-            adBehavior = data.adBehavior.toDomain(),
-            adValue = AdValue.fromBidCpm(data.bidAmt),
-        )
+        rewardedResultFromResponse(data)
     }
 
     /**

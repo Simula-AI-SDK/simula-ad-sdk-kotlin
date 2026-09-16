@@ -3,6 +3,7 @@ package ad.simula.ad.sdk.ads
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -36,5 +37,68 @@ class RewardGateTest {
         assertFalse(RewardGate.isEarned(accumulatedMs = 0L, durationSeconds = 0))
         assertFalse(RewardGate.isEarned(accumulatedMs = 5_000L, durationSeconds = 0))
         assertFalse(RewardGate.isEarned(accumulatedMs = 5_000L, durationSeconds = -3))
+    }
+
+    @Test
+    fun `short video completion normalizes verification evidence to configured gate`() {
+        assertEquals(
+            30.0,
+            RewardGate.verificationElapsedSeconds(
+                earned = true,
+                actualElapsedSeconds = 4.0,
+                configuredGateSeconds = 30,
+            ) ?: -1.0,
+            0.0,
+        )
+    }
+
+    @Test
+    fun `early complete normalizes verification evidence to configured gate`() {
+        assertEquals(
+            30.0,
+            RewardGate.verificationElapsedSeconds(
+                earned = true,
+                actualElapsedSeconds = 1.25,
+                configuredGateSeconds = 30,
+            ) ?: -1.0,
+            0.0,
+        )
+    }
+
+    @Test
+    fun `post-first-frame fail-open normalizes verification evidence to configured gate`() {
+        assertEquals(
+            30.0,
+            RewardGate.verificationElapsedSeconds(
+                earned = true,
+                actualElapsedSeconds = 8.5,
+                configuredGateSeconds = 30,
+            ) ?: -1.0,
+            0.0,
+        )
+    }
+
+    @Test
+    fun `normal full duration preserves actual verification evidence`() {
+        assertEquals(
+            31.75,
+            RewardGate.verificationElapsedSeconds(
+                earned = true,
+                actualElapsedSeconds = 31.75,
+                configuredGateSeconds = 30,
+            ) ?: -1.0,
+            0.0,
+        )
+    }
+
+    @Test
+    fun `reward cannot verify before it is earned`() {
+        assertNull(
+            RewardGate.verificationElapsedSeconds(
+                earned = false,
+                actualElapsedSeconds = 120.0,
+                configuredGateSeconds = 30,
+            ),
+        )
     }
 }
