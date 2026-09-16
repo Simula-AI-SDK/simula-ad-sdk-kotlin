@@ -281,6 +281,21 @@ class Ipv4BeaconTest {
     }
 
     @Test
+    fun `staging skips the production IPv4 beacon`() = runTest {
+        Ipv4Beacon.scope = this
+        Ipv4Beacon.environmentProvider = { ApiEnvironment.Staging }
+        var skipReports = 0
+        Ipv4Beacon.recordStagingSkip = { skipReports++ }
+
+        Ipv4Beacon.fire("k", "staging-session", "user", Ipv4Beacon.REASON_INIT)
+        Ipv4Beacon.fire("k", "another-staging-session", "user", Ipv4Beacon.REASON_INIT)
+        advanceUntilIdle()
+
+        assertTrue(sent.isEmpty())
+        assertEquals(1, skipReports)
+    }
+
+    @Test
     fun `a blank apiKey never fires`() = runTest {
         Ipv4Beacon.scope = this
         Ipv4Beacon.fire("  ", "sess", "u", Ipv4Beacon.REASON_INIT)

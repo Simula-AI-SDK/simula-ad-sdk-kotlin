@@ -7,6 +7,7 @@ import ad.simula.ad.sdk.core.installSimulaScopeFailureReporter
 import ad.simula.ad.sdk.image.ImageCache
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaConnectionType
+import ad.simula.ad.sdk.network.ProcessApiEnvironment
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.ConsentSnapshot
 import android.app.ActivityManager
@@ -26,7 +27,7 @@ import kotlinx.serialization.json.Json
  * SDK version stamped on every telemetry batch. Keep in sync with the `coordinates(...)`
  * version in `simula-ad-sdk/build.gradle.kts`.
  */
-internal const val SIMULA_SDK_VERSION = "1.2.0"
+internal const val SIMULA_SDK_VERSION = "1.2.1-dev.3"
 
 /** logcat tag for the dev-mode telemetry mirror. */
 private const val LOG_TAG = "SimulaTelemetry"
@@ -117,7 +118,7 @@ internal object Telemetry {
             )
             TelemetryManager(
                 ctx = ctx,
-                store = SqliteTelemetryStore(appCtx, json),
+                store = SqliteTelemetryStore(appCtx, json, environment = ProcessApiEnvironment.current.environment),
                 sender = ApiTelemetrySender(apiKey),
                 envelopeIdentityProvider = {
                     resolveTelemetryEnvelopeIdentity(

@@ -31,6 +31,7 @@ import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
+import ad.simula.ad.sdk.network.ProcessApiEnvironment
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.privacy.ProcessPrivacyOwner
@@ -232,6 +233,7 @@ fun SimulaProvider(
                 privacy = currentPrivacy,
                 explicitPrivacy = currentExplicitPrivacy,
             ) {
+                ProcessApiEnvironment.freeze(devMode)
                 Telemetry.claimInitialization(
                     context = applicationContext,
                     apiKey = apiKey,

@@ -11,6 +11,7 @@ import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.nativead.NativeAdPreloadCache
 import ad.simula.ad.sdk.network.Ipv4Beacon
+import ad.simula.ad.sdk.network.ProcessApiEnvironment
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
@@ -169,6 +170,7 @@ object SimulaAds {
                     privacy = resolvedPrivacy,
                     explicitPrivacy = privacy != null,
                 ) {
+                    ProcessApiEnvironment.freeze(devMode)
                     Telemetry.claimInitialization(
                         context = applicationContext,
                         apiKey = apiKey,
@@ -313,7 +315,8 @@ object SimulaAds {
                 breadcrumb = configSummary,
             )
             runCatching {
-                val vPrefs = appContext.getSharedPreferences("simula_ad_sdk_version_prefs", Context.MODE_PRIVATE)
+                val prefsName = ProcessApiEnvironment.current.storageName("simula_ad_sdk_version_prefs")
+                val vPrefs = appContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
                 val last = vPrefs.getString("last_seen_sdk_version", null)
                 val current = ad.simula.ad.sdk.telemetry.SIMULA_SDK_VERSION
                 if (last != null && last != current) {
