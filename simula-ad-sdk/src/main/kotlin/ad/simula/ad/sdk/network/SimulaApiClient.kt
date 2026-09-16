@@ -772,6 +772,12 @@ internal object SimulaApiClient {
         val trackingUrl: String? = null,
         val androidStoreUrl: String? = null,
         val iosStoreUrl: String? = null,
+        val routingFieldsPresent: Boolean = listOf(
+            destination,
+            trackingUrl,
+            androidStoreUrl,
+            iosStoreUrl,
+        ).any { !it.isNullOrBlank() },
         val adBehavior: AdBehavior = fallbackAdBehavior(null),
         val nativeClickBeaconV1Enabled: Boolean = false,
     )
@@ -793,10 +799,11 @@ internal object SimulaApiClient {
             renderedHtml = html,
             url = url,
             posterUrl = ad.posterUrl?.takeIf { it.isNotBlank() },
-            destination = ad.destination,
-            trackingUrl = ad.trackingUrl,
-            androidStoreUrl = ad.androidStoreUrl,
-            iosStoreUrl = ad.iosStoreUrl,
+            destination = ad.destination?.trim()?.takeIf { it.isNotEmpty() },
+            trackingUrl = ad.trackingUrl?.trim()?.takeIf { it.isNotEmpty() },
+            androidStoreUrl = ad.androidStoreUrl?.trim()?.takeIf { it.isNotEmpty() },
+            iosStoreUrl = ad.iosStoreUrl?.trim()?.takeIf { it.isNotEmpty() },
+            routingFieldsPresent = ad.routingFieldsPresent,
             adBehavior = fallbackAdBehavior(ad.adBehavior),
             nativeClickBeaconV1Enabled =
                 ad.nativeClickBeaconV1Enabled ?: responseNativeClickBeaconV1Enabled,

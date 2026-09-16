@@ -53,7 +53,6 @@ class FullscreenClickHandoffPolicyTest {
             adId = "item",
             trackingUrl = "https://item.example/click",
             destination = "web",
-            androidStoreUrl = "https://play.google.com/store/apps/details?id=item",
         )
         val itemRoute = resolveFallbackVideoRouting(
             item,
@@ -98,6 +97,125 @@ class FullscreenClickHandoffPolicyTest {
                 ),
             )
         }
+    }
+
+    @Test
+    fun `blank item routing inherits parent but malformed-present item fails closed`() {
+        val blank = SimulaApiClient.FallbackAd(
+            adId = "blank",
+            destination = "  ",
+            trackingUrl = "\n",
+        )
+        val inherited = resolveFallbackVideoRouting(
+            blank,
+            parentTrackingUrl = "https://parent.example/click",
+            parentDestination = "appstore",
+            parentStoreUrl = null,
+            allowParentFallback = true,
+        )
+        assertTrue(inherited?.inheritedFromPrimary == true)
+
+        val malformedPresent = SimulaApiClient.FallbackAd(
+            adId = "malformed",
+            routingFieldsPresent = true,
+        )
+        assertNull(
+            resolveFallbackVideoRouting(
+                malformedPresent,
+                parentTrackingUrl = "https://parent.example/click",
+                parentDestination = "appstore",
+                parentStoreUrl = null,
+                allowParentFallback = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `fallback item routing enforces field semantics`() {
+        val webWithStore = SimulaApiClient.FallbackAd(
+            adId = "web-store",
+            destination = "web",
+            androidStoreUrl = "https://play.google.com/store/apps/details?id=com.example",
+        )
+        val invalidStoreHost = SimulaApiClient.FallbackAd(
+            adId = "store-host",
+            destination = "appstore",
+            androidStoreUrl = "https://example.com/store/apps/details?id=com.example",
+        )
+        val customTracker = SimulaApiClient.FallbackAd(
+            adId = "custom-tracker",
+            destination = "web",
+            trackingUrl = "partner-app://offer",
+        )
+
+        for (ad in listOf(webWithStore, invalidStoreHost, customTracker)) {
+            assertNull(
+                resolveFallbackVideoRouting(
+                    ad,
+                    parentTrackingUrl = "https://parent.example/click",
+                    parentDestination = "appstore",
+                    parentStoreUrl = "https://play.google.com/store/apps/details?id=parent",
+                    allowParentFallback = true,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `valid item tracker wins even when secondary store is invalid or irrelevant`() {
+        val invalidStore = "https://example.com/store/apps/details?id=com.example"
+        for (destination in listOf("web", "appstore")) {
+            val routing = resolveFallbackVideoRouting(
+                SimulaApiClient.FallbackAd(
+                    adId = destination,
+                    destination = destination,
+                    trackingUrl = "https://tracker.example/click",
+                    androidStoreUrl = invalidStore,
+                ),
+                parentTrackingUrl = "https://parent.example/click",
+                parentDestination = "appstore",
+                parentStoreUrl = "https://play.google.com/store/apps/details?id=parent",
+                allowParentFallback = true,
+            )
+
+            assertEquals("https://tracker.example/click", routing?.route?.externalTarget)
+            assertNull(routing?.storeUrl)
+            assertFalse(routing?.inheritedFromPrimary ?: true)
+        }
+    }
+
+    @Test
+    fun `appstore uses valid Play store only when tracker is absent or invalid`() {
+        val playStore = "https://play.google.com/store/apps/details?id=com.example"
+        val trackerWins = resolveFallbackVideoRouting(
+            SimulaApiClient.FallbackAd(
+                adId = "tracker",
+                destination = "appstore",
+                trackingUrl = "https://tracker.example/click",
+                androidStoreUrl = playStore,
+            ),
+            null,
+            "appstore",
+            null,
+            allowParentFallback = false,
+        )
+        assertEquals("https://tracker.example/click", trackerWins?.route?.externalTarget)
+        assertEquals(playStore, trackerWins?.storeUrl)
+
+        val storeFallback = resolveFallbackVideoRouting(
+            SimulaApiClient.FallbackAd(
+                adId = "store",
+                destination = "appstore",
+                trackingUrl = "partner-app://invalid-tracker",
+                androidStoreUrl = playStore,
+            ),
+            null,
+            "appstore",
+            null,
+            allowParentFallback = false,
+        )
+        assertEquals(playStore, storeFallback?.route?.externalTarget)
+        assertEquals(playStore, storeFallback?.storeUrl)
     }
 
     @Test

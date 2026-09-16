@@ -300,6 +300,50 @@ class ApiModelsSerializationTest {
     }
 
     @Test
+    fun `malformed optional fallback routing fields become null without dropping item`() {
+        val response = json.decodeFromString<FallbackAdsApiResponse>(
+            """{"ads":[{
+                "ad_id":"video",
+                "type":"video",
+                "url":"https://cdn.example/video.mp4",
+                "destination":{"bad":true},
+                "tracking_url":42,
+                "android_store_url":["bad"],
+                "ios_store_url":false
+            }]}""",
+        )
+        val ad = SimulaApiClient.fallbackAdsFromResponse(response).single()
+
+        assertNull(ad.destination)
+        assertNull(ad.trackingUrl)
+        assertNull(ad.androidStoreUrl)
+        assertNull(ad.iosStoreUrl)
+        assertTrue(ad.routingFieldsPresent)
+    }
+
+    @Test
+    fun `blank optional fallback routing fields normalize as absent`() {
+        val response = json.decodeFromString<FallbackAdsApiResponse>(
+            """{"ads":[{
+                "ad_id":"video",
+                "type":"video",
+                "url":"https://cdn.example/video.mp4",
+                "destination":"  ",
+                "tracking_url":"\n",
+                "android_store_url":" ",
+                "ios_store_url":"\t"
+            }]}""",
+        )
+        val ad = SimulaApiClient.fallbackAdsFromResponse(response).single()
+
+        assertNull(ad.destination)
+        assertNull(ad.trackingUrl)
+        assertNull(ad.androidStoreUrl)
+        assertNull(ad.iosStoreUrl)
+        assertFalse(ad.routingFieldsPresent)
+    }
+
+    @Test
     fun `fallback close treatment trims whitespace before normalization`() {
         val hidden = fallbackAdBehavior(
             ApiAdBehavior(close = ApiCloseBehavior(treatment = "  hidden \n")),

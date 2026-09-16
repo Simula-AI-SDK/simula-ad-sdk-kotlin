@@ -96,6 +96,9 @@ import ad.simula.ad.sdk.ads.smoothVideoProgress
 import ad.simula.ad.sdk.ads.FallbackHtmlFailureAction
 import ad.simula.ad.sdk.ads.fallbackHtmlFailureAction
 import ad.simula.ad.sdk.ads.resolveFallbackVideoRouting
+import ad.simula.ad.sdk.ads.prepareDeferredCtaRoute
+import ad.simula.ad.sdk.ads.AutomaticNavigationOutcome
+import ad.simula.ad.sdk.ads.canRouteFromCurrentFullscreenActivity
 import ad.simula.ad.sdk.ads.coordinateDeferredClickPersistence
 import ad.simula.ad.sdk.ads.enqueueOwnedFallbackClickBeacon
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -144,6 +147,8 @@ internal fun <T : Any> unwrapNestedHost(
     }
     return null
 }
+
+internal fun fallbackRouteRequiresDeferredPreparation(isVideo: Boolean): Boolean = isVideo
 
 internal fun findActivity(context: Context?): Activity? = unwrapNestedHost(
     start = context,
@@ -879,10 +884,12 @@ private fun MiniGameFallbackOverlay(
         destination: String = "web",
         storeUrl: String? = null,
         retainWebViewFallback: Boolean = true,
+        deferredPreparation: Boolean = false,
     ): Boolean {
         if (clickHandoffPending) return true
         val claim = clickGate.claim(ClickSources.FALLBACK_CTA) ?: return true
         val interaction = claim.interaction
+        val routeStartedAtNanos = System.nanoTime()
         coordinateDeferredClickPersistence(
             mainHandler = clickHandler,
             claim = claim,
@@ -916,29 +923,60 @@ private fun MiniGameFallbackOverlay(
                 )
             },
             onHandoff = { _, completion ->
-                val result = routeCoordinator.request(
-                    route = { activity ->
-                        val opened = CreativeCtaRouter.openPrimaryCta(
-                            activity.applicationContext,
-                            routePlan,
-                            destination = destination,
-                            storeUrl = storeUrl,
-                        )
-                        if (!opened && retainWebViewFallback) {
-                            routePlan.tappedUrl?.let { fallbackUrl ->
-                                adWebView?.post {
-                                    if (adWebView != null) runCatching { adWebView?.loadUrl(fallbackUrl) }
+                if (deferredPreparation) {
+                    prepareDeferredCtaRoute(
+                        prepare = {
+                            CreativeCtaRouter.preparePrimaryCta(
+                                routePlan,
+                                destination,
+                                storeUrl,
+                                routeStartedAtNanos,
+                            )
+                        },
+                        requestRoute = { route, routeCompletion ->
+                            routeCoordinator.request(
+                                route = { activity ->
+                                    if (!canRouteFromCurrentFullscreenActivity(
+                                            activity.isFinishing,
+                                            activity.isDestroyed,
+                                        )
+                                    ) false else route(activity)
+                                },
+                                completion = routeCompletion,
+                            )
+                        },
+                        completion = completion,
+                        open = { activity, prepared ->
+                            val outcome = CreativeCtaRouter.launchPrepared(activity, prepared)
+                            outcome != AutomaticNavigationOutcome.FAILED &&
+                                outcome != AutomaticNavigationOutcome.HANDLED
+                        },
+                    )
+                } else {
+                    val result = routeCoordinator.request(
+                        route = { activity ->
+                            val opened = CreativeCtaRouter.openPrimaryCta(
+                                activity.applicationContext,
+                                routePlan,
+                                destination = destination,
+                                storeUrl = storeUrl,
+                            )
+                            if (!opened && retainWebViewFallback) {
+                                routePlan.tappedUrl?.let { fallbackUrl ->
+                                    adWebView?.post {
+                                        if (adWebView != null) runCatching { adWebView?.loadUrl(fallbackUrl) }
+                                    }
                                 }
                             }
-                        }
-                        opened
-                    },
-                    completion = completion,
-                )
-                if (result == PresentationRouteResult.REJECTED) {
-                    ClickRouteStart.REJECTED
-                } else {
-                    ClickRouteStart.STARTED
+                            opened
+                        },
+                        completion = completion,
+                    )
+                    if (result == PresentationRouteResult.REJECTED) {
+                        ClickRouteStart.REJECTED
+                    } else {
+                        ClickRouteStart.STARTED
+                    }
                 }
             },
             onCreated = { handoff ->
@@ -1078,6 +1116,7 @@ private fun MiniGameFallbackOverlay(
                                     destination = routing.destination,
                                     storeUrl = routing.storeUrl,
                                     retainWebViewFallback = false,
+                                    deferredPreparation = fallbackRouteRequiresDeferredPreparation(isVideo = true),
                                 )
                             },
                         )

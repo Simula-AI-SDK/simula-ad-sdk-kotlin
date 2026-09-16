@@ -39,6 +39,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 
 internal object LenientNullableBooleanSerializer : KSerializer<Boolean?> {
@@ -54,6 +55,22 @@ internal object LenientNullableBooleanSerializer : KSerializer<Boolean?> {
     @OptIn(ExperimentalSerializationApi::class)
     override fun serialize(encoder: Encoder, value: Boolean?) {
         if (value == null) encoder.encodeNull() else encoder.encodeBoolean(value)
+    }
+}
+
+internal object LenientNullableStringSerializer : KSerializer<String?> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("LenientNullableString", PrimitiveKind.STRING)
+
+    override fun deserialize(decoder: Decoder): String? {
+        val jsonDecoder = decoder as? JsonDecoder ?: return runCatching { decoder.decodeString() }.getOrNull()
+        val primitive = jsonDecoder.decodeJsonElement() as? JsonPrimitive ?: return null
+        return primitive.takeIf(JsonPrimitive::isString)?.contentOrNull
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    override fun serialize(encoder: Encoder, value: String?) {
+        if (value == null) encoder.encodeNull() else encoder.encodeString(value)
     }
 }
 
@@ -174,12 +191,25 @@ internal data class FallbackAdBody(
     val html: String? = null,
     val url: String? = null,
     @SerialName("poster_url") val posterUrl: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
     val destination: String? = null,
-    @SerialName("tracking_url") val trackingUrl: String? = null,
-    @SerialName("android_store_url") val androidStoreUrl: String? = null,
-    @SerialName("ios_store_url") val iosStoreUrl: String? = null,
+    @SerialName("tracking_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val trackingUrl: String? = null,
+    @SerialName("android_store_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val androidStoreUrl: String? = null,
+    @SerialName("ios_store_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val iosStoreUrl: String? = null,
     @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
     @Transient val sourceIndex: Int = -1,
+    @Transient val routingFieldsPresent: Boolean = listOf(
+        destination,
+        trackingUrl,
+        androidStoreUrl,
+        iosStoreUrl,
+    ).any { !it.isNullOrBlank() },
 )
 
 internal object LossyFallbackAdBodiesSerializer : KSerializer<List<FallbackAdBody>> {
@@ -196,8 +226,11 @@ internal object LossyFallbackAdBodiesSerializer : KSerializer<List<FallbackAdBod
         val array = jsonDecoder.decodeJsonElement() as? JsonArray ?: return emptyList()
         return array.mapIndexedNotNull { index, element ->
             runCatching {
-                jsonDecoder.json.decodeFromJsonElement(FallbackAdBody.serializer(), element)
-                    .copy(sourceIndex = index)
+                val body = jsonDecoder.json.decodeFromJsonElement(FallbackAdBody.serializer(), element)
+                body.copy(
+                    sourceIndex = index,
+                    routingFieldsPresent = (element as? JsonObject)?.hasPresentRoutingField() == true,
+                )
             }.getOrNull()
         }
     }
@@ -211,6 +244,19 @@ internal object LossyFallbackAdBodiesSerializer : KSerializer<List<FallbackAdBod
         jsonEncoder.encodeJsonElement(
             JsonArray(value.map { jsonEncoder.json.encodeToJsonElement(FallbackAdBody.serializer(), it) }),
         )
+    }
+}
+
+private fun JsonObject.hasPresentRoutingField(): Boolean = listOf(
+    "destination",
+    "tracking_url",
+    "android_store_url",
+    "ios_store_url",
+).any { key ->
+    when (val value = this[key]) {
+        null, JsonNull -> false
+        is JsonPrimitive -> !value.isString || !value.content.isBlank()
+        else -> true
     }
 }
 

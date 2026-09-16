@@ -113,12 +113,19 @@ internal fun resolveFallbackVideoRouting(
     parentStoreUrl: String?,
     allowParentFallback: Boolean,
 ): FallbackVideoRouting? {
-    val hasItemRouting = ad.destination != null || ad.trackingUrl != null ||
-        ad.androidStoreUrl != null || ad.iosStoreUrl != null
+    val hasItemRouting = ad.routingFieldsPresent
     val inherited = !hasItemRouting && allowParentFallback
+    if (!hasItemRouting && !inherited) return null
     val destination = if (hasItemRouting) ad.destination ?: "appstore" else parentDestination
-    val trackingUrl = if (hasItemRouting) ad.trackingUrl else parentTrackingUrl.takeIf { inherited }
-    val storeUrl = if (hasItemRouting) ad.androidStoreUrl else parentStoreUrl.takeIf { inherited }
+    if (hasItemRouting && destination !in setOf("appstore", "web")) return null
+    val trackingUrl = if (hasItemRouting) {
+        ad.trackingUrl?.let(CreativeCtaRouter::admittedHttpUrl)
+    } else parentTrackingUrl
+    val storeUrl = if (hasItemRouting) {
+        ad.androidStoreUrl
+            ?.takeIf { destination == "appstore" }
+            ?.let(CreativeCtaRouter::admittedDirectPlayStoreUrl)
+    } else parentStoreUrl
     val route = videoCtaRoute(trackingUrl, storeUrl, destination) ?: return null
     return FallbackVideoRouting(route, destination, storeUrl, inherited)
 }
