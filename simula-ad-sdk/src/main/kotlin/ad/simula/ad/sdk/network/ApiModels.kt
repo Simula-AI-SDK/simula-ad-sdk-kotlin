@@ -502,6 +502,7 @@ internal data class VerifyRewardRequestBody(
     // Sent alongside serve_id so the SSV reward callback can resolve/validate the ad unit off the
     // body. Default "" keeps existing callers + already-persisted queue entries decoding cleanly.
     @SerialName("ad_unit_id") val adUnitId: String = "",
+    @SerialName("completion_reason") val completionReason: String? = null,
 )
 
 @Serializable

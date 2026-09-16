@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.model.RewardCompletionReason
+import ad.simula.ad.sdk.model.monotonicRewardCompletionReason
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -40,39 +42,26 @@ class RewardGateTest {
     }
 
     @Test
-    fun `short video completion normalizes verification evidence to configured gate`() {
+    fun `short video completion sends actual duration`() {
         assertEquals(
-            30.0,
+            4.0,
             RewardGate.verificationElapsedSeconds(
                 earned = true,
                 actualElapsedSeconds = 4.0,
-                configuredGateSeconds = 30,
+                completionReason = RewardCompletionReason.VIDEO_COMPLETED,
             ) ?: -1.0,
             0.0,
         )
     }
 
     @Test
-    fun `early complete normalizes verification evidence to configured gate`() {
+    fun `early complete sends actual measured playback`() {
         assertEquals(
-            30.0,
+            1.25,
             RewardGate.verificationElapsedSeconds(
                 earned = true,
                 actualElapsedSeconds = 1.25,
-                configuredGateSeconds = 30,
-            ) ?: -1.0,
-            0.0,
-        )
-    }
-
-    @Test
-    fun `post-first-frame fail-open normalizes verification evidence to configured gate`() {
-        assertEquals(
-            30.0,
-            RewardGate.verificationElapsedSeconds(
-                earned = true,
-                actualElapsedSeconds = 8.5,
-                configuredGateSeconds = 30,
+                completionReason = RewardCompletionReason.CREATIVE_COMPLETED,
             ) ?: -1.0,
             0.0,
         )
@@ -85,7 +74,7 @@ class RewardGateTest {
             RewardGate.verificationElapsedSeconds(
                 earned = true,
                 actualElapsedSeconds = 31.75,
-                configuredGateSeconds = 30,
+                completionReason = RewardCompletionReason.DURATION_ELAPSED,
             ) ?: -1.0,
             0.0,
         )
@@ -97,7 +86,58 @@ class RewardGateTest {
             RewardGate.verificationElapsedSeconds(
                 earned = false,
                 actualElapsedSeconds = 120.0,
-                configuredGateSeconds = 30,
+                completionReason = RewardCompletionReason.DURATION_ELAPSED,
+            ),
+        )
+    }
+
+    @Test
+    fun `verification evidence is always finite and nonnegative`() {
+        assertEquals(
+            0.0,
+            RewardGate.verificationElapsedSeconds(
+                earned = true,
+                actualElapsedSeconds = Double.NaN,
+                completionReason = RewardCompletionReason.CREATIVE_COMPLETED,
+            ) ?: -1.0,
+            0.0,
+        )
+        assertEquals(
+            0.0,
+            RewardGate.verificationElapsedSeconds(
+                earned = true,
+                actualElapsedSeconds = -2.0,
+                completionReason = RewardCompletionReason.CREATIVE_COMPLETED,
+            ) ?: -1.0,
+            0.0,
+        )
+    }
+
+    @Test
+    fun `completion reason uses exact wire values and first earning cause wins`() {
+        assertEquals("duration_elapsed", RewardCompletionReason.DURATION_ELAPSED.wire)
+        assertEquals("video_completed", RewardCompletionReason.VIDEO_COMPLETED.wire)
+        assertEquals("creative_completed", RewardCompletionReason.CREATIVE_COMPLETED.wire)
+
+        val gateFirst = monotonicRewardCompletionReason(null, RewardCompletionReason.DURATION_ELAPSED)
+        assertEquals(
+            RewardCompletionReason.DURATION_ELAPSED,
+            monotonicRewardCompletionReason(gateFirst, RewardCompletionReason.VIDEO_COMPLETED),
+        )
+        val videoFirst = monotonicRewardCompletionReason(null, RewardCompletionReason.VIDEO_COMPLETED)
+        assertEquals(
+            RewardCompletionReason.VIDEO_COMPLETED,
+            monotonicRewardCompletionReason(videoFirst, RewardCompletionReason.DURATION_ELAPSED),
+        )
+    }
+
+    @Test
+    fun `earned flag without completion reason cannot verify`() {
+        assertNull(
+            RewardGate.verificationElapsedSeconds(
+                earned = true,
+                actualElapsedSeconds = 30.0,
+                completionReason = null,
             ),
         )
     }

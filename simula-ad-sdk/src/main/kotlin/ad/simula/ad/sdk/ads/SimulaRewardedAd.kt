@@ -12,6 +12,7 @@ import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.ExtraParametersStore
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.RewardCompletionReason
 import ad.simula.ad.sdk.model.isRenderable
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.network.AdUnitNotFoundException
@@ -375,7 +376,11 @@ class SimulaRewardedAd(val adUnitId: String) {
 
                     // Preview is local-only: no verification — just signal the earned reward once the
                     // whole (screen-less) unit completes, mirroring the live onRewardCompleted timing.
-                    override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+                    override fun onRewardCompleted(
+                        earned: Boolean,
+                        elapsedPlayTimeSeconds: Double,
+                        completionReason: RewardCompletionReason?,
+                    ) {
                         if (earned) runCatching { listener?.onAdEarnedReward(this@SimulaRewardedAd) }
                     }
                 },
@@ -430,10 +435,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                 creative = ad.creative,
                 impressionId = ad.impressionId,
                 apiKey = SimulaAds.apiKey,
-                callbacks = bridge(
-                    adId = ad.impressionId,
-                    configuredGateSeconds = ad.adBehavior?.close?.delaySeconds ?: 0,
-                ),
+                callbacks = bridge(ad.impressionId),
                 adBehavior = ad.adBehavior,
                 trackingUrl = ad.trackingUrl,
                 destination = ad.destination,
@@ -451,7 +453,7 @@ class SimulaRewardedAd(val adUnitId: String) {
         state = State.Showing
     }
 
-    private fun bridge(adId: String, configuredGateSeconds: Int): RewardedCallbacks = object : RewardedCallbacks {
+    private fun bridge(adId: String): RewardedCallbacks = object : RewardedCallbacks {
         override fun onDisplayed() {
             Telemetry.recordLifecycle("displayed", AD_FORMAT, adUnitId, adId, adId, elapsedSinceShow(), null)
             runCatching { listener?.onAdDisplayed(this@SimulaRewardedAd) }
@@ -518,13 +520,18 @@ class SimulaRewardedAd(val adUnitId: String) {
             load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
         }
 
-        override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+        override fun onRewardCompleted(
+            earned: Boolean,
+            elapsedPlayTimeSeconds: Double,
+            completionReason: RewardCompletionReason?,
+        ) {
             // Fired once the user has completed the whole unit (playable + every fallback ad screen).
             // A non-earned completion grants nothing.
+            val reason = completionReason ?: return
             val verificationElapsedPlayTime = RewardGate.verificationElapsedSeconds(
                 earned = earned,
                 actualElapsedSeconds = elapsedPlayTimeSeconds,
-                configuredGateSeconds = configuredGateSeconds,
+                completionReason = reason,
             ) ?: return
             Telemetry.recordLifecycle("reward_earned", AD_FORMAT, adUnitId, adId, adId, null, null)
             runCatching { listener?.onAdEarnedReward(this@SimulaRewardedAd) }
@@ -550,6 +557,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                     sessionId = sess,
                     elapsedPlayTime = verificationElapsedPlayTime,
                     adUnitId = verificationAdUnitId,
+                    completionReason = reason.wire,
                 ) { result ->
                     val verifyMs = (System.nanoTime() - verifyStartNanos) / 1_000_000
                     Telemetry.recordOperation("reward_verification", verifyMs, success = result.isSuccess)

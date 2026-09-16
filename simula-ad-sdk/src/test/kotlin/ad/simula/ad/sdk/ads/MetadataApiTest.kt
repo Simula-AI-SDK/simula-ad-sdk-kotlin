@@ -102,7 +102,11 @@ class MetadataApiTest {
                 ) = Unit
                 override fun notifyClicked() = Unit
                 override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
-                override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
+                override fun onRewardCompleted(
+                    earned: Boolean,
+                    elapsedPlayTimeSeconds: Double,
+                    completionReason: ad.simula.ad.sdk.model.RewardCompletionReason?,
+                ) = Unit
             },
             metadata = snapshot,
         )

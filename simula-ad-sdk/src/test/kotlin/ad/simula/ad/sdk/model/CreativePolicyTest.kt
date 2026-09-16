@@ -8,12 +8,92 @@ import org.junit.Test
 
 class CreativePolicyTest {
     @Test
+    fun `prepared dimensions seed aspect policy and later valid listener dimensions replace them`() {
+        val seeded = resolveVideoDimensions(VideoDimensions(), 1920, 1080)
+        assertEquals(VideoDimensions(1920, 1080), seeded)
+        assertEquals(seeded, resolveVideoDimensions(seeded, 0, 0))
+        assertEquals(seeded, resolveVideoDimensions(seeded, -1, 720))
+
+        val replaced = resolveVideoDimensions(seeded, 1080, 1920)
+        assertEquals(VideoDimensions(1080, 1920), replaced)
+        val transform = videoAspectFitTransform(
+            replaced.width,
+            replaced.height,
+            surfaceWidth = 1920,
+            surfaceHeight = 1080,
+        )
+        assertEquals(0.3164f, transform.scaleX, 0.0001f)
+        assertEquals(1f, transform.scaleY, 0.0001f)
+    }
+
+    @Test
+    fun `aspect fit letterboxes landscape and pillarboxes portrait without stretching`() {
+        val landscape = videoAspectFitTransform(1920, 1080, 1000, 1000)
+        assertEquals(1f, landscape.scaleX, 0.0001f)
+        assertEquals(0.5625f, landscape.scaleY, 0.0001f)
+
+        val portrait = videoAspectFitTransform(1080, 1920, 1920, 1080)
+        assertEquals(0.3164f, portrait.scaleX, 0.0001f)
+        assertEquals(1f, portrait.scaleY, 0.0001f)
+
+        assertEquals(VideoAspectFitTransform(1f, 1f), videoAspectFitTransform(0, 1080, 1000, 1000))
+        assertEquals(VideoAspectFitTransform(1f, 1f), videoAspectFitTransform(1920, 1080, 0, 1000))
+    }
+
+    @Test
+    fun `preparing claim transfers shared deadline while prepared claim receives first-frame budget`() {
+        assertEquals(
+            VideoPreparationClaimPolicy(VideoPreparationPhase.PREPARING, 10_000L),
+            videoPreparationClaimPolicy(VideoPreparationPhase.PREPARING, 10_000L, 7_000L, 10_000L),
+        )
+        assertEquals(
+            VideoPreparationClaimPolicy(VideoPreparationPhase.PREPARED, 17_000L),
+            videoPreparationClaimPolicy(VideoPreparationPhase.PREPARED, 10_000L, 7_000L, 10_000L),
+        )
+    }
+
+    @Test
+    fun `readiness deadline pauses foreground budget and resumes remaining time`() {
+        val deadline = VideoReadinessDeadline(deadlineMs = 10_000L)
+        assertEquals(7_000L, deadline.remainingMs(3_000L))
+        deadline.pause(3_000L)
+        assertEquals(7_000L, deadline.remainingMs(50_000L))
+        assertEquals(7_000L, deadline.resume(100_000L))
+        assertEquals(5_000L, deadline.remainingMs(102_000L))
+    }
+
+    @Test
+    fun `video UI progress coalesces samples and flushes boundaries`() {
+        val coalescer = VideoUiProgressCoalescer(intervalMs = 250L)
+        assertTrue(coalescer.shouldEmit(0L))
+        assertFalse(coalescer.shouldEmit(100L))
+        assertTrue(coalescer.shouldEmit(120L, midpointCrossed = true))
+        assertFalse(coalescer.shouldEmit(200L))
+        assertTrue(coalescer.shouldEmit(210L, gateCrossed = true))
+        assertTrue(coalescer.shouldEmit(211L, force = true))
+    }
+
+    @Test
+    fun `video failure codes exactly match Swift wire contract`() {
+        assertEquals(
+            listOf("prepare_timeout", "playback_timeout", "prepare_failed", "playback_error", "first_frame_timeout"),
+            VideoFailureCode.entries.map { it.wire },
+        )
+        assertEquals(VideoFailureCode.PREPARE_TIMEOUT, videoReadinessTimeoutCode(prepared = false))
+        assertEquals(VideoFailureCode.FIRST_FRAME_TIMEOUT, videoReadinessTimeoutCode(prepared = true))
+        assertEquals(VideoFailureCode.PREPARE_FAILED, videoMediaErrorCode(prepared = false))
+        assertEquals(VideoFailureCode.PLAYBACK_ERROR, videoMediaErrorCode(prepared = true))
+    }
+
+    @Test
     fun `video interactions stay consumed until first frame`() {
         assertFalse(videoCtaInteractionAllowed(firstFrameRendered = false))
         assertFalse(videoMuteInteractionAllowed(firstFrameRendered = false, playerActive = true))
         assertTrue(videoCtaInteractionAllowed(firstFrameRendered = true))
         assertTrue(videoMuteInteractionAllowed(firstFrameRendered = true, playerActive = true))
         assertFalse(videoMuteInteractionAllowed(firstFrameRendered = true, playerActive = false))
+        assertEquals("Unmute video", videoMuteActionLabel(muted = true))
+        assertEquals("Mute video", videoMuteActionLabel(muted = false))
     }
 
     @Test
@@ -23,6 +103,15 @@ class CreativePolicyTest {
         assertTrue(videoReachedMidpoint(retained, durationMs = 10_000L))
         assertFalse(videoReachedMidpoint(maxPositionMs = 4_999L, durationMs = 10_000L))
         assertFalse(videoReachedMidpoint(maxPositionMs = 10_000L, durationMs = 0L))
+    }
+
+    @Test
+    fun `store prompt midpoint remains asset midpoint independent of shorter close gate`() {
+        val assetDurationMs = 20_000L
+        val closeGateMs = 5_000L
+        assertTrue(closeGateMs < assetDurationMs / 2L)
+        assertFalse(videoReachedMidpoint(maxPositionMs = closeGateMs, durationMs = assetDurationMs))
+        assertTrue(videoReachedMidpoint(maxPositionMs = 10_000L, durationMs = assetDurationMs))
     }
 
     @Test
@@ -64,6 +153,11 @@ class CreativePolicyTest {
         assertEquals(450L, accumulator.totalPlayedMs)
         assertEquals(550L, accumulator.complete(1_000L).advancedMs)
         assertEquals(1_000L, accumulator.totalPlayedMs)
+
+        val resumed = VideoPositionAccumulator(initialPlayedMs = 5_000L)
+        assertEquals(1_000L, resumed.sample(1_000L).advancedMs)
+        assertEquals(2_000L, resumed.complete(3_000L).advancedMs)
+        assertEquals(8_000L, resumed.totalPlayedMs)
     }
 
     @Test

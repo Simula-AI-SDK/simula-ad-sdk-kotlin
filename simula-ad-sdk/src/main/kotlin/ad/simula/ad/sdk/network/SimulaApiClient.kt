@@ -729,12 +729,14 @@ internal object SimulaApiClient {
         sessionId: String,
         elapsedPlayTime: Double,
         adUnitId: String = "",
+        completionReason: String? = null,
     ): VerifyRewardApiResponse = withContext(Dispatchers.IO) {
         val requestBody = VerifyRewardRequestBody(
             serveId = serveId,
             sessionId = sessionId,
             elapsedPlayTime = elapsedPlayTime,
             adUnitId = adUnitId,
+            completionReason = completionReason,
         )
         val response = SimulaHttp.request(
             url = "$API_BASE_URL/minigames/verify-reward",

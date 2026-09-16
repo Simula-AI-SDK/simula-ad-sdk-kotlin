@@ -20,23 +20,30 @@ class RewardedNavigationPolicyTest {
     }
 
     @Test
-    fun `terminal creative failure fails open only after rewarded creative becomes visible`() {
+    fun `terminal creative failure never earns reward after first frame`() {
         assertEquals(
             false,
-            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = false, retained = false),
+            rewardEarnedAfterCreativeFailure(candidate = false, retained = false),
+        )
+        assertEquals(
+            false,
+            rewardEarnedAfterCreativeFailure(candidate = false, retained = false),
         )
         assertEquals(
             true,
-            rewardEarnedAfterCreativeFailure(everCreativeReady = true, candidate = false, retained = false),
+            rewardEarnedAfterCreativeFailure(candidate = true, retained = false),
         )
         assertEquals(
             true,
-            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = true, retained = false),
+            rewardEarnedAfterCreativeFailure(candidate = false, retained = true),
         )
-        assertEquals(
-            true,
-            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = false, retained = true),
-        )
+    }
+
+    @Test
+    fun `stall preserves only rewards already earned by gate completion or early complete`() {
+        assertEquals(false, rewardEarnedAfterCreativeFailure(candidate = false, retained = false))
+        assertEquals(true, rewardEarnedAfterCreativeFailure(candidate = true, retained = false))
+        assertEquals(true, rewardEarnedAfterCreativeFailure(candidate = false, retained = true))
     }
 
     @Test

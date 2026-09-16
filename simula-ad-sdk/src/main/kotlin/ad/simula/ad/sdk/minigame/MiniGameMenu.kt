@@ -50,6 +50,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -90,9 +91,8 @@ import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.ads.FullscreenVideo
 import ad.simula.ad.sdk.ads.FullscreenVideoPreparer
 import ad.simula.ad.sdk.ads.FALLBACK_RENDER_TIMEOUT_MS
-import ad.simula.ad.sdk.ads.FallbackVideoClickDisposition
-import ad.simula.ad.sdk.ads.fallbackVideoClickDisposition
 import ad.simula.ad.sdk.ads.nextFallbackVideoUrl
+import ad.simula.ad.sdk.ads.smoothVideoProgress
 import ad.simula.ad.sdk.ads.coordinateDeferredClickPersistence
 import ad.simula.ad.sdk.ads.enqueueOwnedFallbackClickBeacon
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -796,7 +796,8 @@ private fun MiniGameFallbackOverlay(
     var adCountdown by remember(adId) { mutableStateOf(closeGateSecondsLeft(0L, gateMs)) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ringProgress = remember { Animatable(0f) }
-    val uiScope = rememberCoroutineScope()
+    var videoRingProgress by remember(ad.sourceIndex) { mutableFloatStateOf(0f) }
+    val smoothVideoRingProgress = smoothVideoProgress(videoRingProgress)
     var adPageLoaded by remember { mutableStateOf(false) }
     var adPageFailed by remember { mutableStateOf(false) }
     var renderToken by remember(ad.sourceIndex) { mutableStateOf(0L) }
@@ -863,12 +864,8 @@ private fun MiniGameFallbackOverlay(
         }
     }
 
-    fun beginFallbackClick(routePlan: PrimaryCtaRoute?): Boolean {
-        if (fallbackVideoClickDisposition(
-                clickPending = clickHandoffPending,
-                hasRoute = routePlan != null,
-            ) == FallbackVideoClickDisposition.BLOCK
-        ) return true
+    fun beginFallbackClick(routePlan: PrimaryCtaRoute): Boolean {
+        if (clickHandoffPending) return true
         val claim = clickGate.claim(ClickSources.FALLBACK_CTA) ?: return true
         val interaction = claim.interaction
         coordinateDeferredClickPersistence(
@@ -904,33 +901,28 @@ private fun MiniGameFallbackOverlay(
                 )
             },
             onHandoff = { _, completion ->
-                if (routePlan == null) {
-                    completion(false)
-                    ClickRouteStart.REJECTED
-                } else {
-                    val result = routeCoordinator.request(
-                        route = { activity ->
-                            val opened = CreativeCtaRouter.openPrimaryCta(
-                                activity.applicationContext,
-                                routePlan,
-                                destination = "web",
-                            )
-                            if (!opened) {
-                                routePlan.tappedUrl?.let { fallbackUrl ->
-                                    adWebView?.post {
-                                        if (adWebView != null) runCatching { adWebView?.loadUrl(fallbackUrl) }
-                                    }
+                val result = routeCoordinator.request(
+                    route = { activity ->
+                        val opened = CreativeCtaRouter.openPrimaryCta(
+                            activity.applicationContext,
+                            routePlan,
+                            destination = "web",
+                        )
+                        if (!opened) {
+                            routePlan.tappedUrl?.let { fallbackUrl ->
+                                adWebView?.post {
+                                    if (adWebView != null) runCatching { adWebView?.loadUrl(fallbackUrl) }
                                 }
                             }
-                            opened
-                        },
-                        completion = completion,
-                    )
-                    if (result == PresentationRouteResult.REJECTED) {
-                        ClickRouteStart.REJECTED
-                    } else {
-                        ClickRouteStart.STARTED
-                    }
+                        }
+                        opened
+                    },
+                    completion = completion,
+                )
+                if (result == PresentationRouteResult.REJECTED) {
+                    ClickRouteStart.REJECTED
+                } else {
+                    ClickRouteStart.STARTED
                 }
             },
             onCreated = { handoff ->
@@ -1042,6 +1034,9 @@ private fun MiniGameFallbackOverlay(
                             adId = adId.takeIf { it.isNotBlank() },
                             serveId = parentServeId?.takeIf { it.isNotBlank() },
                             prewarmNextUrl = nextVideoUrl,
+                            configuredGateSeconds = closeBehavior.delaySeconds,
+                            initialPlayedMs = elapsedGateMs,
+                            ctaEnabled = false,
                             modifier = Modifier.fillMaxSize(),
                             onReady = { durationMs ->
                                 gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
@@ -1052,18 +1047,15 @@ private fun MiniGameFallbackOverlay(
                                 gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
                                 elapsedGateMs = (elapsedGateMs + advancedMs).coerceAtMost(gateMs)
                                 adCountdown = closeGateSecondsLeft(elapsedGateMs, gateMs)
-                                uiScope.launch {
-                                    ringProgress.snapTo(
-                                        (elapsedGateMs.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f),
-                                    )
-                                }
+                                videoRingProgress =
+                                    (elapsedGateMs.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f)
                             },
                             onCompleted = {
                                 elapsedGateMs = gateMs
                                 adCountdown = 0
                             },
                             onError = ::applyPageFailure,
-                            onCta = { beginFallbackClick(null) },
+                            onCta = {},
                         )
                     }
                 } else AndroidView(
@@ -1231,7 +1223,7 @@ private fun MiniGameFallbackOverlay(
                             drawArc(
                                 color = Color.White,
                                 startAngle = -90f,
-                                sweepAngle = 360f * ringProgress.value,
+                                sweepAngle = 360f * (if (isVideo) smoothVideoRingProgress else ringProgress.value),
                                 useCenter = false,
                                 topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f),
                                 size = Size(arcSize, arcSize),

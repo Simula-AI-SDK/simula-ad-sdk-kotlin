@@ -326,6 +326,21 @@ internal enum class CreativeType {
     }
 }
 
+internal enum class RewardCompletionReason(val wire: String) {
+    DURATION_ELAPSED("duration_elapsed"),
+    VIDEO_COMPLETED("video_completed"),
+    CREATIVE_COMPLETED("creative_completed");
+
+    companion object {
+        fun fromWire(value: String?): RewardCompletionReason? = entries.firstOrNull { it.wire == value }
+    }
+}
+
+internal fun monotonicRewardCompletionReason(
+    current: RewardCompletionReason?,
+    candidate: RewardCompletionReason,
+): RewardCompletionReason = current ?: candidate
+
 /** The creative descriptor (`creative` node). `adUnitType` drives format-aware close copy. */
 internal data class Creative(
     val type: CreativeType = CreativeType.PLAYABLE,

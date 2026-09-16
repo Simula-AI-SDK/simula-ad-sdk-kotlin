@@ -58,8 +58,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -80,7 +80,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
 import java.lang.ref.WeakReference
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 internal enum class FallbackStage { CONTENT, FETCHING, SHOWING, DONE }
 private const val FALLBACK_FETCH_ATTEMPTS = 2
@@ -88,17 +87,6 @@ private const val FALLBACK_FETCH_RETRY_MS = 250L
 internal const val FALLBACK_POST_CLOSE_WAIT_MS = 2_000L
 internal const val FALLBACK_CLOSE_GATE_MS = 5_000L
 internal const val FALLBACK_RENDER_TIMEOUT_MS = 10_000L
-
-internal enum class FallbackVideoClickDisposition { BLOCK, PERSIST_ONLY, PERSIST_AND_ROUTE }
-
-internal fun fallbackVideoClickDisposition(
-    clickPending: Boolean,
-    hasRoute: Boolean,
-): FallbackVideoClickDisposition = when {
-    clickPending -> FallbackVideoClickDisposition.BLOCK
-    hasRoute -> FallbackVideoClickDisposition.PERSIST_AND_ROUTE
-    else -> FallbackVideoClickDisposition.PERSIST_ONLY
-}
 
 internal fun nextFallbackVideoUrl(
     ads: List<SimulaApiClient.FallbackAd>,
@@ -831,7 +819,13 @@ private fun FallbackAdOverlay(
     val ring = remember(presentationState, fallbackIndex) {
         Animatable((retainedGateMs.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f))
     }
-    val uiScope = rememberCoroutineScope()
+    var videoRingProgress by remember(presentationState, fallbackIndex) {
+        mutableFloatStateOf((retainedGateMs.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f))
+    }
+    val smoothVideoRingProgress = smoothVideoProgress(videoRingProgress)
+    val videoRoute = remember(ctaTrackingUrl, ctaStoreUrl, ctaDestination) {
+        videoCtaRoute(ctaTrackingUrl, ctaStoreUrl, ctaDestination)
+    }
     // Foreground-only 5s gate: time accrues only while the Activity is RESUMED, so leaving the app
     // pauses the countdown (parity with the interstitial / rewarded close gates). repeatOnLifecycle
     // cancels the loop when backgrounded and resumes it from the accrued time on return.
@@ -882,6 +876,9 @@ private fun FallbackAdOverlay(
                     adId = adId.takeIf { it.isNotBlank() },
                     serveId = impressionId.takeIf { it.isNotBlank() },
                     prewarmNextUrl = nextVideoUrl,
+                    configuredGateSeconds = closeBehavior.delaySeconds,
+                    initialPlayedMs = presentationState.closeGateElapsedMs(fallbackIndex),
+                    ctaEnabled = videoRoute != null,
                     modifier = Modifier
                         .fillMaxSize()
                         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
@@ -904,9 +901,8 @@ private fun FallbackAdOverlay(
                             gateMs,
                         )
                         countdown = closeGateSecondsLeft(accumulated, gateMs)
-                        uiScope.launch {
-                            ring.snapTo((accumulated.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f))
-                        }
+                        videoRingProgress =
+                            (accumulated.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f)
                     },
                     onCompleted = {
                         presentationState.addCloseGateElapsedMs(fallbackIndex, gateMs, gateMs)
@@ -916,23 +912,8 @@ private fun FallbackAdOverlay(
                         applyRendererUnavailable()
                     },
                     onCta = {
-                        val target = ctaTrackingUrl ?: ctaStoreUrl
-                        val routePlan = target?.let {
-                            when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
-                                tappedUrl = it,
-                                creativeBaseUrl = null,
-                                trackingUrl = ctaTrackingUrl,
-                                destination = ctaDestination,
-                            )) {
-                                is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
-                                else -> null
-                            }
-                        }
-                        if (fallbackVideoClickDisposition(
-                                clickPending = presentationState.clickHandoffPending,
-                                hasRoute = routePlan != null,
-                            ) == FallbackVideoClickDisposition.BLOCK
-                        ) return@FullscreenVideo
+                        val routePlan = videoRoute ?: return@FullscreenVideo
+                        if (presentationState.clickHandoffPending) return@FullscreenVideo
                         val claim = claimClick(ClickSources.FALLBACK_CTA) ?: return@FullscreenVideo
                         notifyPublisherClick { onAdClick(claim.interaction) }
                         val interaction = claim.interaction
@@ -959,10 +940,7 @@ private fun FallbackAdOverlay(
                             },
                             recordTelemetry = { completion -> persistClick(adId, interaction, completion) },
                             onHandoff = { committedInteraction, completion ->
-                                if (routePlan == null) {
-                                    completion(false)
-                                    ClickRouteStart.REJECTED
-                                } else prepareDeferredCtaRoute(
+                                prepareDeferredCtaRoute(
                                     prepare = {
                                         CreativeCtaRouter.preparePrimaryCta(
                                             routePlan,
@@ -1282,7 +1260,7 @@ private fun FallbackAdOverlay(
                         drawArc(
                             color = Color.White,
                             startAngle = -90f,
-                            sweepAngle = 360f * ring.value,
+                            sweepAngle = 360f * (if (isVideo) smoothVideoRingProgress else ring.value),
                             useCenter = false,
                             style = Stroke(width = stroke, cap = StrokeCap.Round),
                         )

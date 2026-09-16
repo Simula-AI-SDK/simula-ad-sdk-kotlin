@@ -1,14 +1,28 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.image.CachedAsyncImage
-import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.RenderAttemptGate
+import ad.simula.ad.sdk.model.VideoAspectFitTransform
+import ad.simula.ad.sdk.model.VideoFailureCode
+import ad.simula.ad.sdk.model.VideoDimensions
 import ad.simula.ad.sdk.model.VideoPositionAccumulator
 import ad.simula.ad.sdk.model.VideoPositionSample
+import ad.simula.ad.sdk.model.VideoPreparationPhase
+import ad.simula.ad.sdk.model.VideoReadinessDeadline
+import ad.simula.ad.sdk.model.VideoUiProgressCoalescer
+import ad.simula.ad.sdk.model.admittedVideoUrl
+import ad.simula.ad.sdk.model.videoAspectFitTransform
 import ad.simula.ad.sdk.model.videoCtaInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteInteractionAllowed
+import ad.simula.ad.sdk.model.videoMuteActionLabel
+import ad.simula.ad.sdk.model.videoPreparationClaimPolicy
+import ad.simula.ad.sdk.model.videoReadinessTimeoutCode
+import ad.simula.ad.sdk.model.videoMediaErrorCode
+import ad.simula.ad.sdk.model.resolveVideoDimensions
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
+import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
@@ -17,15 +31,19 @@ import android.media.MediaPlayer
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Surface
 import android.view.TextureView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.size
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -35,24 +53,70 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.launch
 
-internal const val VIDEO_PREPARE_TIMEOUT_MS = 10_000L
+internal fun videoCtaRoute(
+    trackingUrl: String?,
+    storeUrl: String?,
+    destination: String,
+): ad.simula.ad.sdk.network.PrimaryCtaRoute? {
+    for (target in listOfNotNull(trackingUrl, storeUrl).distinct()) {
+        when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+            tappedUrl = target,
+            creativeBaseUrl = null,
+            trackingUrl = trackingUrl,
+            destination = destination,
+        )) {
+            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> return plan.route
+            else -> Unit
+        }
+    }
+    return null
+}
+
+internal const val VIDEO_READINESS_TIMEOUT_MS = 10_000L
+internal const val VIDEO_PLAYBACK_TIMEOUT_MS = 10_000L
 internal const val VIDEO_STAGE_START = "video_start"
 internal const val VIDEO_STAGE_COMPLETE = "video_complete"
 internal const val VIDEO_STAGE_FAIL = "video_fail"
 private const val VIDEO_PREPARED_RETENTION_MS = 5 * 60_000L
+private const val VIDEO_POSITION_POLL_MS = 100L
+private const val VIDEO_UI_PROGRESS_INTERVAL_MS = 250L
 
-/** Process-wide one-entry prewarm. A Ready ad can prepare without retaining one player per ad object. */
+@Composable
+internal fun smoothVideoProgress(target: Float): Float {
+    val progress by animateFloatAsState(
+        targetValue = target.coerceIn(0f, 1f),
+        animationSpec = tween(VIDEO_UI_PROGRESS_INTERVAL_MS.toInt(), easing = LinearEasing),
+        label = "video_progress",
+    )
+    return progress
+}
+
+internal data class PreparedVideoLease(
+    val player: MediaPlayer,
+    val phase: VideoPreparationPhase,
+    val readinessDeadlineMs: Long,
+)
+
+/** One process-wide idle preparation. The active player is owned exclusively by its controller. */
 internal object FullscreenVideoPreparer {
     private val main = Handler(Looper.getMainLooper())
     private var entry: Entry? = null
@@ -62,54 +126,63 @@ internal object FullscreenVideoPreparer {
         onMain {
             if (entry?.url == url) return@onMain
             releaseEntry()
+            val startedAtMs = SystemClock.elapsedRealtime()
             runCatching {
                 val player = MediaPlayer()
-                val timeout = Runnable {
-                    if (entry?.player === player) releaseEntry()
-                }
-                val candidate = Entry(url, player, timeout)
+                val candidate = Entry(
+                    url = url,
+                    player = player,
+                    readinessDeadlineMs = startedAtMs + VIDEO_READINESS_TIMEOUT_MS,
+                )
                 entry = candidate
                 player.setAudioAttributes(videoAudioAttributes())
                 player.setVolume(0f, 0f)
+                player.isLooping = false
                 player.setOnPreparedListener {
                     if (entry !== candidate) return@setOnPreparedListener
-                    candidate.ready = true
-                    main.removeCallbacks(timeout)
-                    main.postDelayed(timeout, VIDEO_PREPARED_RETENTION_MS)
+                    candidate.phase = VideoPreparationPhase.PREPARED
+                    main.removeCallbacks(candidate.timeout)
+                    candidate.timeout = Runnable {
+                        if (entry === candidate) releaseEntry()
+                    }
+                    main.postDelayed(candidate.timeout, VIDEO_PREPARED_RETENTION_MS)
                 }
                 player.setOnErrorListener { _, _, _ ->
                     if (entry === candidate) releaseEntry()
                     true
                 }
+                candidate.timeout = Runnable {
+                    if (entry === candidate) releaseEntry()
+                }
                 player.setDataSource(url)
-                main.postDelayed(timeout, VIDEO_PREPARE_TIMEOUT_MS)
+                main.postDelayed(candidate.timeout, VIDEO_READINESS_TIMEOUT_MS)
                 player.prepareAsync()
             }.onFailure { releaseEntry() }
         }
     }
 
-    fun claim(url: String): MediaPlayer? {
+    /** Matching claims transfer listener ownership even while prepareAsync is still in flight. */
+    fun claim(url: String, claimedAtMs: Long): PreparedVideoLease? {
         if (Looper.myLooper() != Looper.getMainLooper()) return null
-        val current = entry ?: return null
-        if (current.url != url || !current.ready) {
-            if (current.url == url) releaseEntry()
-            return null
-        }
+        val current = entry?.takeIf { it.url == url } ?: return null
         entry = null
         main.removeCallbacks(current.timeout)
-        runCatching { current.player.setOnPreparedListener(null) }
-        runCatching { current.player.setOnErrorListener(null) }
-        return current.player
+        detachPlayerListeners(current.player)
+        val policy = videoPreparationClaimPolicy(
+            phase = current.phase,
+            originalDeadlineMs = current.readinessDeadlineMs,
+            claimedAtMs = claimedAtMs,
+            totalReadinessMs = VIDEO_READINESS_TIMEOUT_MS,
+        )
+        return PreparedVideoLease(current.player, policy.phase, policy.readinessDeadlineMs)
     }
 
     private fun releaseEntry() {
         val current = entry ?: return
         entry = null
         main.removeCallbacks(current.timeout)
-        runCatching { current.player.setOnPreparedListener(null) }
-        runCatching { current.player.setOnErrorListener(null) }
-        runCatching { current.player.reset() }
-        runCatching { current.player.release() }
+        detachPlayerListeners(current.player)
+        releasePlayerOffMain(current.player)
     }
 
     private fun onMain(block: () -> Unit) {
@@ -119,8 +192,9 @@ internal object FullscreenVideoPreparer {
     private data class Entry(
         val url: String,
         val player: MediaPlayer,
-        val timeout: Runnable,
-        var ready: Boolean = false,
+        val readinessDeadlineMs: Long,
+        var phase: VideoPreparationPhase = VideoPreparationPhase.PREPARING,
+        var timeout: Runnable = Runnable {},
     )
 }
 
@@ -129,7 +203,18 @@ private fun videoAudioAttributes(): AudioAttributes = AudioAttributes.Builder()
     .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
     .build()
 
-/** One bounded MediaPlayer/TextureView presentation. All framework calls stay on the main thread. */
+private fun detachPlayerListeners(player: MediaPlayer) {
+    runCatching { player.setOnPreparedListener(null) }
+    runCatching { player.setOnCompletionListener(null) }
+    runCatching { player.setOnErrorListener(null) }
+    runCatching { player.setOnInfoListener(null) }
+    runCatching { player.setOnVideoSizeChangedListener(null) }
+}
+
+private fun releasePlayerOffMain(player: MediaPlayer) {
+    SimulaScope.launch { runCatching { player.release() } }
+}
+
 @Composable
 internal fun FullscreenVideo(
     url: String,
@@ -139,6 +224,9 @@ internal fun FullscreenVideo(
     adId: String? = null,
     serveId: String? = null,
     prewarmNextUrl: String? = null,
+    configuredGateSeconds: Int = 0,
+    initialPlayedMs: Long = 0L,
+    ctaEnabled: Boolean = true,
     modifier: Modifier = Modifier,
     onReady: (Long) -> Unit,
     onProgress: (Long, Long, Long) -> Unit,
@@ -159,6 +247,8 @@ internal fun FullscreenVideo(
         NativeVideoController(
             context = context,
             telemetry = VideoTelemetryContext(adFormat, adUnitId, adId, serveId),
+            configuredGateSeconds = configuredGateSeconds,
+            initialPlayedMs = initialPlayedMs,
         )
     }
 
@@ -194,60 +284,136 @@ internal fun FullscreenVideo(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
+
     Box(modifier = modifier.background(Color.Black)) {
         AndroidView(
             factory = { ctx ->
                 TextureView(ctx).also { texture ->
                     texture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                         override fun onSurfaceTextureAvailable(value: SurfaceTexture, width: Int, height: Int) {
-                            controller.attachSurface(value)
+                            controller.attachSurface(texture, value, width, height)
                         }
 
-                        override fun onSurfaceTextureSizeChanged(value: SurfaceTexture, width: Int, height: Int) = Unit
+                        override fun onSurfaceTextureSizeChanged(value: SurfaceTexture, width: Int, height: Int) {
+                            controller.updateSurfaceSize(texture, width, height)
+                        }
 
                         override fun onSurfaceTextureDestroyed(value: SurfaceTexture): Boolean {
-                            controller.detachSurface()
+                            controller.detachSurface(texture)
                             return true
                         }
 
                         override fun onSurfaceTextureUpdated(value: SurfaceTexture) = Unit
                     }
-                    texture.surfaceTexture?.takeIf { texture.isAvailable }?.let(controller::attachSurface)
+                    texture.surfaceTexture?.takeIf { texture.isAvailable }?.let {
+                        controller.attachSurface(texture, it, texture.width, texture.height)
+                    }
                 }
             },
             modifier = Modifier.fillMaxSize(),
-            onRelease = { controller.detachSurface() },
+            onRelease = { texture ->
+                texture.surfaceTextureListener = null
+                controller.detachSurface(texture)
+            },
         )
         if ((!firstFrameRendered || completed) && !posterUrl.isNullOrBlank()) {
             CachedAsyncImage(
                 model = posterUrl,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
             )
         }
-        Box(
-            Modifier
-                .fillMaxSize()
-                .clickable {
-                    if (videoCtaInteractionAllowed(firstFrameRendered)) onCta()
-                },
-        )
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(16.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color.Black.copy(alpha = 0.65f))
-                .clickable {
-                    if (videoMuteInteractionAllowed(firstFrameRendered, playerActive = !completed)) {
-                        controller.toggleMuted()
-                    }
-                }
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-            Text(if (muted) "Muted" else "Sound", color = Color.White, fontSize = 12.sp)
+        val ctaModifier = if (ctaEnabled && videoCtaInteractionAllowed(firstFrameRendered)) {
+            Modifier.clickable(onClick = onCta)
+        } else {
+            Modifier.consumeVideoTouches()
         }
+        Box(Modifier.fillMaxSize().then(ctaModifier))
+        VideoMuteControl(
+            muted = muted,
+            enabled = videoMuteInteractionAllowed(firstFrameRendered, playerActive = !completed),
+            onClick = controller::toggleMuted,
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+        )
+    }
+}
+
+@Composable
+private fun VideoMuteControl(
+    muted: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val label = videoMuteActionLabel(muted)
+    val interaction = if (enabled) Modifier.clickable(onClick = onClick) else Modifier.consumeVideoTouches()
+    Canvas(
+        modifier = modifier
+            .size(48.dp)
+            .semantics {
+                contentDescription = label
+                role = Role.Button
+            }
+            .then(interaction),
+    ) {
+        drawCircle(Color.Black.copy(alpha = 0.65f), radius = size.minDimension / 2f)
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val icon = 24.dp.toPx()
+        val left = center.x - icon / 2f
+        val top = center.y - icon / 2f
+        val speaker = Path().apply {
+            moveTo(left + icon * 0.1f, top + icon * 0.38f)
+            lineTo(left + icon * 0.34f, top + icon * 0.38f)
+            lineTo(left + icon * 0.58f, top + icon * 0.16f)
+            lineTo(left + icon * 0.58f, top + icon * 0.84f)
+            lineTo(left + icon * 0.34f, top + icon * 0.62f)
+            lineTo(left + icon * 0.1f, top + icon * 0.62f)
+            close()
+        }
+        drawPath(speaker, Color.White)
+        val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+        if (muted) {
+            drawLine(
+                Color.White,
+                Offset(left + icon * 0.68f, top + icon * 0.34f),
+                Offset(left + icon * 0.94f, top + icon * 0.66f),
+                strokeWidth = stroke.width,
+                cap = StrokeCap.Round,
+            )
+            drawLine(
+                Color.White,
+                Offset(left + icon * 0.94f, top + icon * 0.34f),
+                Offset(left + icon * 0.68f, top + icon * 0.66f),
+                strokeWidth = stroke.width,
+                cap = StrokeCap.Round,
+            )
+        } else {
+            drawArc(
+                Color.White,
+                startAngle = -55f,
+                sweepAngle = 110f,
+                useCenter = false,
+                topLeft = Offset(left + icon * 0.48f, top + icon * 0.25f),
+                size = androidx.compose.ui.geometry.Size(icon * 0.34f, icon * 0.5f),
+                style = stroke,
+            )
+            drawArc(
+                Color.White,
+                startAngle = -55f,
+                sweepAngle = 110f,
+                useCenter = false,
+                topLeft = Offset(left + icon * 0.42f, top + icon * 0.12f),
+                size = androidx.compose.ui.geometry.Size(icon * 0.54f, icon * 0.76f),
+                style = stroke,
+            )
+        }
+    }
+}
+
+private fun Modifier.consumeVideoTouches(): Modifier = pointerInput(Unit) {
+    awaitPointerEventScope {
+        while (true) awaitPointerEvent().changes.forEach { it.consume() }
     }
 }
 
@@ -261,6 +427,8 @@ internal data class VideoTelemetryContext(
 private class NativeVideoController(
     context: Context,
     private val telemetry: VideoTelemetryContext,
+    configuredGateSeconds: Int,
+    initialPlayedMs: Long,
 ) {
     var onReady: (Long) -> Unit = {}
     var onProgress: (VideoPositionSample, Long) -> Unit = { _, _ -> }
@@ -271,29 +439,39 @@ private class NativeVideoController(
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private val handler = Handler(Looper.getMainLooper())
     private val renderGate = RenderAttemptGate()
-    private val position = VideoPositionAccumulator()
+    private val position = VideoPositionAccumulator(initialPlayedMs)
+    private val progressCoalescer = VideoUiProgressCoalescer(VIDEO_UI_PROGRESS_INTERVAL_MS)
+    private val configuredGateMs = configuredGateSeconds.coerceAtLeast(0) * 1_000L
     private var renderToken = 0L
     private var player: MediaPlayer? = null
+    private var textureView: TextureView? = null
     private var surface: Surface? = null
+    private var readinessDeadline: VideoReadinessDeadline? = null
     private var lifecycleActive = false
     private var prepared = false
     private var firstFrameRendered = false
+    private var completed = false
     private var muted = true
     private var released = false
     private var failed = false
+    private var videoDimensions = VideoDimensions()
+    private var surfaceWidth = 0
+    private var surfaceHeight = 0
+    private var pendingAdvancedMs = 0L
+    private var lastDeliveredTotalMs = initialPlayedMs.coerceAtLeast(0L)
+    private var lastDeliveredPositionMs = 0L
     private var focusRequest: AudioFocusRequest? = null
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         if (change <= 0) setMuted(true)
     }
-    private val preparationTimeout = Runnable { fail("preparation_timeout") }
-    private val firstFrameTimeout = Runnable {
-        if (renderGate.isPending(renderToken)) fail("playback_timeout")
+    private val readinessTimeout = Runnable {
+        fail(videoReadinessTimeoutCode(prepared))
     }
-    private val playbackTimeout = Runnable { fail("playback_timeout") }
+    private val playbackTimeout = Runnable { fail(VideoFailureCode.PLAYBACK_TIMEOUT) }
     private val positionPoll = object : Runnable {
         override fun run() {
             if (!lifecycleActive || released || failed || !firstFrameRendered) return
-            emitProgress()
+            emitProgress(force = false)
             handler.postDelayed(this, VIDEO_POSITION_POLL_MS)
         }
     }
@@ -302,90 +480,122 @@ private class NativeVideoController(
         if (released || player != null) return
         val url = admittedVideoUrl(rawUrl)
         if (url == null) {
-            fail("playback_failed")
+            fail(VideoFailureCode.PREPARE_FAILED)
             return
         }
         renderToken = renderGate.begin()
         val token = renderToken
-        val warmed = FullscreenVideoPreparer.claim(url)
+        val nowMs = SystemClock.elapsedRealtime()
+        val warmed = FullscreenVideoPreparer.claim(url, nowMs)
+        val deadlineMs = warmed?.readinessDeadlineMs ?: nowMs + VIDEO_READINESS_TIMEOUT_MS
+        readinessDeadline = VideoReadinessDeadline(deadlineMs)
+        if (!lifecycleActive) readinessDeadline?.pause(nowMs)
         runCatching {
-            (warmed ?: MediaPlayer()).also { mediaPlayer ->
-                player = mediaPlayer
-                configurePlayer(mediaPlayer, token)
-                if (warmed != null) {
-                    prepared = true
-                    startIfPossible()
-                    return@also
-                }
+            val mediaPlayer = warmed?.player ?: MediaPlayer()
+            player = mediaPlayer
+            prepared = warmed?.phase == VideoPreparationPhase.PREPARED
+            if (prepared) seedVideoDimensions(mediaPlayer)
+            configurePlayer(mediaPlayer, token)
+            if (warmed == null) {
                 mediaPlayer.setAudioAttributes(videoAudioAttributes())
                 mediaPlayer.setVolume(0f, 0f)
                 mediaPlayer.isLooping = false
                 mediaPlayer.setDataSource(url)
-                handler.postDelayed(preparationTimeout, VIDEO_PREPARE_TIMEOUT_MS)
                 mediaPlayer.prepareAsync()
             }
-        }.onFailure { fail("playback_failed") }
+            scheduleReadinessTimeout(nowMs)
+            if (prepared) startIfPossible()
+        }.onFailure { fail(VideoFailureCode.PREPARE_FAILED) }
     }
 
     private fun configurePlayer(mediaPlayer: MediaPlayer, token: Long) {
         mediaPlayer.setOnPreparedListener {
-            if (released || failed || token != renderToken) return@setOnPreparedListener
-            handler.removeCallbacks(preparationTimeout)
+            if (!ownsCallback(token)) return@setOnPreparedListener
             prepared = true
+            seedVideoDimensions(it)
+            scheduleReadinessTimeout(SystemClock.elapsedRealtime())
             startIfPossible()
         }
         mediaPlayer.setOnCompletionListener {
-            if (released || failed || token != renderToken) return@setOnCompletionListener
+            if (!ownsCallback(token)) return@setOnCompletionListener
             if (!firstFrameRendered) {
-                fail("playback_failed")
+                fail(VideoFailureCode.FIRST_FRAME_TIMEOUT)
                 return@setOnCompletionListener
             }
-            emitCompletedProgress()
+            emitProgress(force = true, completed = true)
+            completed = true
             cancelPlaybackCallbacks()
             recordLifecycle(VIDEO_STAGE_COMPLETE)
             runCatching(onCompleted)
             release()
         }
         mediaPlayer.setOnErrorListener { _, _, _ ->
-            if (token == renderToken) fail("playback_failed")
+            if (ownsCallback(token)) {
+                fail(videoMediaErrorCode(prepared))
+            }
             true
         }
         mediaPlayer.setOnInfoListener { _, what, _ ->
-            if (token != renderToken || released || failed) return@setOnInfoListener false
+            if (!ownsCallback(token)) return@setOnInfoListener false
             when (what) {
                 MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START -> admitFirstFrame(token)
-                MediaPlayer.MEDIA_INFO_BUFFERING_START -> resetPlaybackTimeout()
-                MediaPlayer.MEDIA_INFO_BUFFERING_END -> resetPlaybackTimeout()
+                MediaPlayer.MEDIA_INFO_BUFFERING_START, MediaPlayer.MEDIA_INFO_BUFFERING_END -> resetPlaybackTimeout()
             }
             false
+        }
+        mediaPlayer.setOnVideoSizeChangedListener { _, width, height ->
+            if (!ownsCallback(token)) return@setOnVideoSizeChangedListener
+            videoDimensions = resolveVideoDimensions(videoDimensions, width, height)
+            applyTextureTransform()
         }
         surface?.let(mediaPlayer::setSurface)
     }
 
-    fun attachSurface(texture: SurfaceTexture) {
+    fun attachSurface(texture: TextureView, surfaceTexture: SurfaceTexture, width: Int, height: Int) {
         if (released) return
         runCatching {
+            textureView = texture
+            surfaceWidth = width.coerceAtLeast(0)
+            surfaceHeight = height.coerceAtLeast(0)
             surface?.release()
-            surface = Surface(texture)
+            surface = Surface(surfaceTexture)
             player?.setSurface(surface)
+            applyTextureTransform()
             startIfPossible()
-        }.onFailure { fail("playback_failed") }
+        }.onFailure {
+            fail(videoMediaErrorCode(prepared))
+        }
     }
 
-    fun detachSurface() {
-        if (released) return
+    fun updateSurfaceSize(texture: TextureView, width: Int, height: Int) {
+        if (textureView !== texture || released) return
+        surfaceWidth = width.coerceAtLeast(0)
+        surfaceHeight = height.coerceAtLeast(0)
+        applyTextureTransform()
+    }
+
+    fun detachSurface(texture: TextureView) {
+        if (textureView !== texture) return
         pause()
         runCatching { player?.setSurface(null) }
         runCatching { surface?.release() }
         surface = null
+        textureView = null
+        surfaceWidth = 0
+        surfaceHeight = 0
     }
 
     fun setLifecycleActive(active: Boolean) {
-        if (released) return
+        if (released || lifecycleActive == active) return
         lifecycleActive = active
+        val nowMs = SystemClock.elapsedRealtime()
         if (active) {
+            readinessDeadline?.resume(nowMs)
+            scheduleReadinessTimeout(nowMs)
             startIfPossible()
         } else {
+            readinessDeadline?.pause(nowMs)
+            handler.removeCallbacks(readinessTimeout)
             pause()
             if (!muted) setMuted(true)
         }
@@ -398,22 +608,36 @@ private class NativeVideoController(
 
     fun release() {
         if (released) return
+        if (!failed && !completed && firstFrameRendered) emitProgress(force = true)
         released = true
+        failed = true
         renderGate.fail(renderToken)
-        handler.removeCallbacks(preparationTimeout)
-        handler.removeCallbacks(firstFrameTimeout)
+        handler.removeCallbacks(readinessTimeout)
         cancelPlaybackCallbacks()
         abandonAudioFocus()
-        runCatching { player?.setOnPreparedListener(null) }
-        runCatching { player?.setOnCompletionListener(null) }
-        runCatching { player?.setOnErrorListener(null) }
-        runCatching { player?.setOnInfoListener(null) }
-        runCatching { player?.setSurface(null) }
-        runCatching { player?.reset() }
-        runCatching { player?.release() }
+        val detachedPlayer = player
         player = null
+        val detachedTexture = textureView
+        textureView = null
+        runCatching { detachedTexture?.surfaceTextureListener = null }
+        if (detachedPlayer != null) {
+            detachPlayerListeners(detachedPlayer)
+            runCatching { detachedPlayer.pause() }
+            runCatching { detachedPlayer.setSurface(null) }
+        }
         runCatching { surface?.release() }
         surface = null
+        readinessDeadline = null
+        if (detachedPlayer != null) releasePlayerOffMain(detachedPlayer)
+    }
+
+    private fun ownsCallback(token: Long): Boolean = token == renderToken && !released && !failed
+
+    private fun scheduleReadinessTimeout(nowMs: Long) {
+        if (!lifecycleActive || firstFrameRendered || released || failed) return
+        handler.removeCallbacks(readinessTimeout)
+        val remainingMs = readinessDeadline?.remainingMs(nowMs) ?: 0L
+        if (remainingMs <= 0L) readinessTimeout.run() else handler.postDelayed(readinessTimeout, remainingMs)
     }
 
     private fun startIfPossible() {
@@ -421,20 +645,19 @@ private class NativeVideoController(
         runCatching {
             val mediaPlayer = player ?: return
             mediaPlayer.start()
-            if (!firstFrameRendered && renderGate.isPending(renderToken)) {
-                handler.removeCallbacks(firstFrameTimeout)
-                handler.postDelayed(firstFrameTimeout, VIDEO_PREPARE_TIMEOUT_MS)
-            } else if (firstFrameRendered) {
+            scheduleReadinessTimeout(SystemClock.elapsedRealtime())
+            if (firstFrameRendered) {
                 schedulePositionPolling()
                 resetPlaybackTimeout()
             }
-        }.onFailure { fail("playback_failed") }
+        }.onFailure { fail(VideoFailureCode.PLAYBACK_ERROR) }
     }
 
     private fun admitFirstFrame(token: Long) {
         if (!renderGate.ready(token)) return
         firstFrameRendered = true
-        handler.removeCallbacks(firstFrameTimeout)
+        handler.removeCallbacks(readinessTimeout)
+        emitProgress(force = true)
         runCatching { onReady(durationMs()) }
         recordLifecycle(VIDEO_STAGE_START)
         schedulePositionPolling()
@@ -443,32 +666,66 @@ private class NativeVideoController(
 
     private fun schedulePositionPolling() {
         handler.removeCallbacks(positionPoll)
-        if (lifecycleActive && firstFrameRendered && !released && !failed) {
-            handler.post(positionPoll)
-        }
+        if (lifecycleActive && firstFrameRendered && !released && !failed) handler.post(positionPoll)
     }
 
-    private fun emitProgress() {
+    private fun emitProgress(force: Boolean, completed: Boolean = false) {
         val mediaPlayer = player ?: return
-        val current = runCatching { mediaPlayer.currentPosition.toLong() }.getOrNull() ?: return
-        val sample = position.sample(current)
-        if (sample.advancedMs > 0L) resetPlaybackTimeout()
-        runCatching { onProgress(sample, durationMs()) }
-    }
-
-    private fun emitCompletedProgress() {
         val durationMs = durationMs()
-        val sample = position.complete(durationMs)
-        runCatching { onProgress(sample, durationMs) }
+        val sample = if (completed) {
+            val current = runCatching { mediaPlayer.currentPosition.toLong() }.getOrDefault(0L)
+            val currentSample = position.sample(current)
+            val completedSample = position.complete(durationMs)
+            completedSample.copy(advancedMs = currentSample.advancedMs + completedSample.advancedMs)
+        } else {
+            val current = runCatching { mediaPlayer.currentPosition.toLong() }.getOrNull() ?: return
+            position.sample(current)
+        }
+        pendingAdvancedMs += sample.advancedMs
+        if (sample.advancedMs > 0L) resetPlaybackTimeout()
+        val gateDurationMs = if (durationMs > 0L) minOf(configuredGateMs, durationMs) else configuredGateMs
+        val gateCrossed = lastDeliveredTotalMs < gateDurationMs && sample.totalPlayedMs >= gateDurationMs
+        val midpointMs = durationMs / 2L
+        val midpointCrossed = durationMs > 0L && lastDeliveredPositionMs < midpointMs && sample.positionMs >= midpointMs
+        if (!progressCoalescer.shouldEmit(
+                nowMs = SystemClock.elapsedRealtime(),
+                force = force,
+                gateCrossed = gateCrossed,
+                midpointCrossed = midpointCrossed,
+            )
+        ) return
+        val delivered = sample.copy(advancedMs = pendingAdvancedMs)
+        pendingAdvancedMs = 0L
+        lastDeliveredTotalMs = sample.totalPlayedMs
+        lastDeliveredPositionMs = sample.positionMs
+        runCatching { onProgress(delivered, durationMs) }
     }
 
     private fun durationMs(): Long = runCatching { player?.duration?.toLong() ?: 0L }
         .getOrDefault(0L)
         .coerceAtLeast(0L)
 
+    private fun applyTextureTransform() {
+        val texture = textureView ?: return
+        val transform = videoAspectFitTransform(
+            videoDimensions.width,
+            videoDimensions.height,
+            surfaceWidth,
+            surfaceHeight,
+        )
+        runCatching { texture.setTransform(centeredTextureMatrix(transform, surfaceWidth, surfaceHeight)) }
+    }
+
+    /** Prepared leases may have emitted their size before listener ownership transferred. */
+    private fun seedVideoDimensions(mediaPlayer: MediaPlayer) {
+        val width = runCatching { mediaPlayer.videoWidth }.getOrDefault(0)
+        val height = runCatching { mediaPlayer.videoHeight }.getOrDefault(0)
+        videoDimensions = resolveVideoDimensions(videoDimensions, width, height)
+        applyTextureTransform()
+    }
+
     private fun pause() {
         cancelPlaybackCallbacks()
-        handler.removeCallbacks(firstFrameTimeout)
         val mediaPlayer = player ?: return
         runCatching { if (mediaPlayer.isPlaying) mediaPlayer.pause() }
     }
@@ -481,7 +738,7 @@ private class NativeVideoController(
     private fun resetPlaybackTimeout() {
         if (!lifecycleActive || !firstFrameRendered || released || failed) return
         handler.removeCallbacks(playbackTimeout)
-        handler.postDelayed(playbackTimeout, VIDEO_PREPARE_TIMEOUT_MS)
+        handler.postDelayed(playbackTimeout, VIDEO_PLAYBACK_TIMEOUT_MS)
     }
 
     private fun setMuted(value: Boolean) {
@@ -536,24 +793,30 @@ private class NativeVideoController(
         )
     }
 
-    private fun fail(reason: String) {
+    private fun fail(code: VideoFailureCode) {
         if (failed || released) return
+        if (firstFrameRendered) emitProgress(force = true)
         failed = true
         renderGate.fail(renderToken)
-        handler.removeCallbacks(preparationTimeout)
-        handler.removeCallbacks(firstFrameTimeout)
+        handler.removeCallbacks(readinessTimeout)
         cancelPlaybackCallbacks()
-        recordLifecycle(VIDEO_STAGE_FAIL, reason)
+        recordLifecycle(VIDEO_STAGE_FAIL, code.wire)
         Telemetry.recordError(
             signature = "video:playback_failed",
-            errorCode = reason,
+            errorCode = code.wire,
             breadcrumb = "surface=${telemetry.adFormat}",
         )
         runCatching(onError)
         release()
     }
+}
 
-    private companion object {
-        const val VIDEO_POSITION_POLL_MS = 100L
-    }
+private fun centeredTextureMatrix(
+    transform: VideoAspectFitTransform,
+    width: Int,
+    height: Int,
+): Matrix = Matrix().apply {
+    val pivotX = width.coerceAtLeast(0) / 2f
+    val pivotY = height.coerceAtLeast(0) / 2f
+    setScale(transform.scaleX, transform.scaleY, pivotX, pivotY)
 }

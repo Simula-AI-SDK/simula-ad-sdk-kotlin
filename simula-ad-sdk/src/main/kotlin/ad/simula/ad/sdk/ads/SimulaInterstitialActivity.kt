@@ -82,8 +82,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -428,7 +428,13 @@ private fun CreativeInterstitial(
         mutableStateOf(ceil(gateTotal.toDouble(DurationUnit.SECONDS)).toInt().coerceAtLeast(0))
     }
     val closeProgress = remember { Animatable(0f) }
-    val uiScope = rememberCoroutineScope()
+    var videoCloseProgress by remember(presentation) {
+        val totalMs = videoCloseGateMs(behavior?.close?.delaySeconds ?: 0, presentation.videoDurationMs)
+        mutableFloatStateOf(
+            if (totalMs > 0L) (presentation.accumulatedGateTimeMs.toFloat() / totalMs).coerceIn(0f, 1f) else 1f,
+        )
+    }
+    val smoothVideoCloseProgress = smoothVideoProgress(videoCloseProgress)
 
     // Mid-ad store prompt (`store_prompt`) — an early install affordance revealed at the halfway
     // point to the close button and removed the instant the real close button appears (see
@@ -785,18 +791,7 @@ private fun CreativeInterstitial(
     }
 
     fun beginVideoCta() {
-        val target = ad.trackingUrl ?: ad.androidStoreUrl
-        val route = target?.let {
-            when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
-                tappedUrl = it,
-                creativeBaseUrl = null,
-                trackingUrl = ad.trackingUrl,
-                destination = ad.destination,
-            )) {
-                is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
-                else -> null
-            }
-        } ?: PrimaryCtaRoute(tappedUrl = null, externalTarget = null)
+        val route = videoCtaRoute(ad.trackingUrl, ad.androidStoreUrl, ad.destination) ?: return
         beginPrimaryCta(route)
     }
 
@@ -814,6 +809,9 @@ private fun CreativeInterstitial(
                     adUnitId = ad.adUnitId,
                     adId = ad.impressionId.takeIf { it.isNotBlank() },
                     serveId = ad.impressionId.takeIf { it.isNotBlank() },
+                    configuredGateSeconds = behavior?.close?.delaySeconds ?: 0,
+                    initialPlayedMs = presentation.accumulatedGateTimeMs,
+                    ctaEnabled = videoCtaRoute(ad.trackingUrl, ad.androidStoreUrl, ad.destination) != null,
                     modifier = Modifier
                         .fillMaxSize()
                         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
@@ -849,11 +847,9 @@ private fun CreativeInterstitial(
                             (presentation.accumulatedGateTimeMs + advancedMs).coerceAtMost(totalMs)
                         val accumulated = presentation.accumulatedGateTimeMs
                         closeRemaining = ceil((totalMs - accumulated).coerceAtLeast(0L) / 1000.0).toInt()
-                        if (totalMs > 0L) {
-                            uiScope.launch {
-                                closeProgress.snapTo((accumulated.toFloat() / totalMs).coerceIn(0f, 1f))
-                            }
-                        }
+                        videoCloseProgress = if (totalMs > 0L) {
+                            (accumulated.toFloat() / totalMs).coerceIn(0f, 1f)
+                        } else 1f
                         if (accumulated >= totalMs) closeEnabled = true
                         if (videoReachedMidpoint(presentation.videoPositionMs, durationMs)) {
                             storePromptVisible = true
@@ -919,7 +915,7 @@ private fun CreativeInterstitial(
             isRewardCopy = isRewardCopy,
             enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending),
             remaining = closeRemaining,
-            progress = closeProgress.value,
+            progress = if (isVideo) smoothVideoCloseProgress else closeProgress.value,
             onClose = {
                 if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending)) {
                     presentation.automaticNavigationGate.clear()

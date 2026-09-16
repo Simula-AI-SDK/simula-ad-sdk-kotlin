@@ -165,17 +165,33 @@ class RewardedParsingTest {
 
     @Test
     fun `verify request encodes snake_case keys`() {
-        val body = VerifyRewardRequestBody(serveId = "srv_1", sessionId = "sess_9", elapsedPlayTime = 31.5)
+        val body = VerifyRewardRequestBody(
+            serveId = "srv_1",
+            sessionId = "sess_9",
+            elapsedPlayTime = 31.5,
+            completionReason = "duration_elapsed",
+        )
         val encoded = json.encodeToString(body)
 
         assertTrue(encoded.contains("\"serve_id\""))
         assertTrue(encoded.contains("\"session_id\""))
         assertTrue(encoded.contains("\"elapsed_play_time\""))
+        assertTrue(encoded.contains("\"completion_reason\":\"duration_elapsed\""))
 
         val decoded = json.decodeFromString<VerifyRewardRequestBody>(encoded)
         assertEquals("srv_1", decoded.serveId)
         assertEquals("sess_9", decoded.sessionId)
         assertEquals(31.5, decoded.elapsedPlayTime, 0.0001)
+        assertEquals("duration_elapsed", decoded.completionReason)
+    }
+
+    @Test
+    fun `legacy verify request without completion reason decodes with null`() {
+        val decoded = json.decodeFromString<VerifyRewardRequestBody>(
+            """{"serve_id":"srv","session_id":"sess","elapsed_play_time":4.0}""",
+        )
+
+        assertNull(decoded.completionReason)
     }
 
     @Test

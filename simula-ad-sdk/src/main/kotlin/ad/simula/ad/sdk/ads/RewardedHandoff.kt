@@ -4,6 +4,8 @@ import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.RewardCompletionReason
+import ad.simula.ad.sdk.model.monotonicRewardCompletionReason
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
@@ -54,9 +56,13 @@ internal interface RewardedCallbacks {
      * The whole rewarded unit has been completed — the user dismissed the playable AND every
      * post-game fallback ad screen (fires immediately on close when there are none). The reward is
      * contingent on reaching this point, so the earned-reward signal and server-side verification
-     * happen here rather than at [onClose].
+     * happen here rather than at [onClose]. [completionReason] is the first legitimate earning cause.
      */
-    fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double)
+    fun onRewardCompleted(
+        earned: Boolean,
+        elapsedPlayTimeSeconds: Double,
+        completionReason: RewardCompletionReason?,
+    )
 }
 
 /** Everything [SimulaRewardedActivity] needs to render one rewarded presentation. */
@@ -184,9 +190,12 @@ internal class RewardedPresentation(
 
     /** Set true once the required play duration elapses; gates the reward. */
     var rewardEarned = false
+    var completionReason: RewardCompletionReason? = null
+        private set
 
-    /** Sticky evidence that this serve committed its intended creative at least once. */
-    var everCreativeReady = false
+    fun recordCompletionReason(reason: RewardCompletionReason) {
+        completionReason = monotonicRewardCompletionReason(completionReason, reason)
+    }
 
     /**
      * Foreground-only accumulated play time, in milliseconds. Time accrues only while

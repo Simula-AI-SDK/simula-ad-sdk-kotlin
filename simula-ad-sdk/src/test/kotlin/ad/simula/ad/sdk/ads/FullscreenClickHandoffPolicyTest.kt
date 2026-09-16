@@ -30,18 +30,28 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
-    fun `fallback video click persists even without a route and blocks while pending`() {
+    fun `video CTA is available only with an admitted destination`() {
+        assertNull(videoCtaRoute(null, null, "appstore"))
+        assertNull(videoCtaRoute("javascript:alert(1)", null, "appstore"))
         assertEquals(
-            FallbackVideoClickDisposition.PERSIST_ONLY,
-            fallbackVideoClickDisposition(clickPending = false, hasRoute = false),
+            "https://tracker.example/click",
+            videoCtaRoute("https://tracker.example/click", null, "appstore")?.externalTarget,
         )
         assertEquals(
-            FallbackVideoClickDisposition.PERSIST_AND_ROUTE,
-            fallbackVideoClickDisposition(clickPending = false, hasRoute = true),
+            "https://play.google.com/store/apps/details?id=com.example",
+            videoCtaRoute(
+                null,
+                "https://play.google.com/store/apps/details?id=com.example",
+                "appstore",
+            )?.externalTarget,
         )
         assertEquals(
-            FallbackVideoClickDisposition.BLOCK,
-            fallbackVideoClickDisposition(clickPending = true, hasRoute = true),
+            "https://play.google.com/store/apps/details?id=com.example",
+            videoCtaRoute(
+                "javascript:alert(1)",
+                "https://play.google.com/store/apps/details?id=com.example",
+                "appstore",
+            )?.externalTarget,
         )
     }
 
