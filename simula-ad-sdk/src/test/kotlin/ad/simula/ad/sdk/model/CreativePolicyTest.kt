@@ -8,6 +8,82 @@ import org.junit.Test
 
 class CreativePolicyTest {
     @Test
+    fun `normal crossing into final tolerance while still playing never completes`() {
+        val detector = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+
+        assertFalse(detector.observe(10_000L, 9_849L, true, true, isPlaying = true))
+        assertFalse(detector.observe(10_000L, 9_850L, true, true, isPlaying = true))
+        assertFalse(detector.observe(10_000L, 10_000L, true, true, isPlaying = true))
+    }
+
+    @Test
+    fun `small seek or timeline correction while playing never completes`() {
+        val detector = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        assertFalse(detector.observe(10_000L, 9_700L, true, true, isPlaying = true))
+        assertFalse(detector.observe(10_000L, 9_900L, true, true, isPlaying = true))
+        assertFalse(detector.observe(10_000L, 9_875L, true, true, isPlaying = true))
+        assertFalse(detector.observe(10_000L, 9_950L, true, true, isPlaying = true))
+    }
+
+    @Test
+    fun `stable near-end non-playing grace confirms completion`() {
+        val detector = VideoNearEndCompletionDetector(maxToleranceMs = 150L, requiredNotPlayingConfirmations = 2)
+        assertFalse(detector.observe(10_000L, 9_700L, true, true, isPlaying = true))
+        assertFalse(detector.observe(10_000L, 9_900L, true, true, isPlaying = true))
+        assertFalse(detector.observe(10_000L, 9_900L, true, true, isPlaying = false))
+        assertTrue(detector.observe(10_000L, 9_900L, true, true, isPlaying = false))
+    }
+
+    @Test
+    fun `near-end playback timeout confirms completion and unknown duration never does`() {
+        val detector = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        assertFalse(detector.observe(10_000L, 9_700L, true, true, isPlaying = true))
+        assertFalse(detector.observe(10_000L, 9_900L, true, true, isPlaying = true))
+        assertTrue(detector.onPlaybackTimeout(10_000L, 9_900L, true, true))
+
+        val unknown = VideoNearEndCompletionDetector()
+        assertFalse(unknown.observe(0L, 0L, true, true, isPlaying = false))
+        assertFalse(unknown.observe(-1L, 0L, true, true, isPlaying = false))
+        assertFalse(unknown.onPlaybackTimeout(0L, 0L, true, true))
+    }
+
+    @Test
+    fun `duration change backward position and lifecycle pause reject terminal inference`() {
+        val durationMismatch = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        assertFalse(durationMismatch.observe(10_000L, 9_700L, true, true, isPlaying = true))
+        assertFalse(durationMismatch.observe(10_000L, 9_900L, true, true, isPlaying = true))
+        assertFalse(durationMismatch.observe(9_900L, 9_850L, true, true, isPlaying = false))
+        assertFalse(durationMismatch.onPlaybackTimeout(9_900L, 9_850L, true, true))
+
+        val backward = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        assertFalse(backward.observe(10_000L, 9_700L, true, true, isPlaying = true))
+        assertFalse(backward.observe(10_000L, 9_900L, true, true, isPlaying = true))
+        assertFalse(backward.observe(10_000L, 9_800L, true, true, isPlaying = false))
+        assertFalse(backward.onPlaybackTimeout(10_000L, 9_800L, true, true))
+
+        val paused = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        assertFalse(paused.observe(10_000L, 9_700L, true, true, isPlaying = true))
+        assertFalse(paused.observe(10_000L, 9_900L, true, true, isPlaying = true))
+        assertFalse(paused.observe(10_000L, 9_900L, true, false, isPlaying = false))
+    }
+
+    @Test
+    fun `inferred and platform completion race is one-shot and cancels stall timeout`() {
+        val gate = VideoCompletionGate()
+        val inferred = gate.complete()
+        val platformCallback = gate.complete()
+
+        assertTrue(inferred.accepted)
+        assertTrue(inferred.cancelPlaybackTimeout)
+        assertFalse(platformCallback.accepted)
+        assertFalse(platformCallback.cancelPlaybackTimeout)
+        assertEquals(
+            RewardCompletionReason.VIDEO_COMPLETED,
+            monotonicRewardCompletionReason(null, RewardCompletionReason.VIDEO_COMPLETED),
+        )
+    }
+
+    @Test
     fun `prepared dimensions seed aspect policy and later valid listener dimensions replace them`() {
         val seeded = resolveVideoDimensions(VideoDimensions(), 1920, 1080)
         assertEquals(VideoDimensions(1920, 1080), seeded)

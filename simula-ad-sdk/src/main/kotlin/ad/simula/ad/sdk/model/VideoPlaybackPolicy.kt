@@ -122,6 +122,118 @@ internal fun videoMuteActionLabel(muted: Boolean): String = if (muted) "Unmute v
 
 internal fun videoMuteControlVisible(completed: Boolean): Boolean = !completed
 
+internal const val VIDEO_NEAR_END_MAX_TOLERANCE_MS = 150L
+
+/**
+ * Conservative completion inference for devices that stop at the final frame without dispatching
+ * MediaPlayer.OnCompletionListener. Playing samples only arm stable near-end evidence; inference
+ * requires repeated non-playing confirmation or the playback timeout observing the same final state.
+ * Unknown duration, lifecycle pause, backward movement, and one-off duration changes never infer.
+ */
+internal class VideoNearEndCompletionDetector(
+    private val maxToleranceMs: Long = VIDEO_NEAR_END_MAX_TOLERANCE_MS,
+    private val requiredNotPlayingConfirmations: Int = 2,
+) {
+    private var lastDurationMs: Long? = null
+    private var lastPositionMs: Long? = null
+    private var nearEndObserved = false
+    private var notPlayingConfirmations = 0
+    private var notPlayingPositionMs: Long? = null
+    private var inferred = false
+
+    fun observe(
+        durationMs: Long,
+        positionMs: Long,
+        firstFrameRendered: Boolean,
+        playerActive: Boolean,
+        isPlaying: Boolean,
+    ): Boolean {
+        if (inferred || !firstFrameRendered || durationMs <= 0L || positionMs < 0L) return false
+        if (!playerActive) {
+            notPlayingConfirmations = 0
+            notPlayingPositionMs = null
+            return false
+        }
+        val previousDuration = lastDurationMs
+        val previousPosition = lastPositionMs
+        if (previousDuration != durationMs || previousPosition == null) {
+            lastDurationMs = durationMs
+            lastPositionMs = positionMs
+            nearEndObserved = false
+            notPlayingConfirmations = 0
+            notPlayingPositionMs = null
+            return false
+        }
+        if (positionMs < previousPosition) {
+            lastPositionMs = positionMs
+            nearEndObserved = false
+            notPlayingConfirmations = 0
+            notPlayingPositionMs = null
+            return false
+        }
+        lastPositionMs = positionMs
+        val toleranceMs = minOf(maxToleranceMs.coerceAtLeast(1L), maxOf(1L, durationMs / 10L))
+        val thresholdMs = (durationMs - toleranceMs).coerceAtLeast(0L)
+        val nearEnd = positionMs in thresholdMs..durationMs
+        if (!nearEnd) {
+            nearEndObserved = false
+            notPlayingConfirmations = 0
+            notPlayingPositionMs = null
+            return false
+        }
+        if (isPlaying) {
+            nearEndObserved = true
+            notPlayingConfirmations = 0
+            notPlayingPositionMs = null
+            return false
+        }
+        if (!nearEndObserved) {
+            nearEndObserved = true
+            notPlayingConfirmations = 1
+            notPlayingPositionMs = positionMs
+            return false
+        }
+        if (notPlayingPositionMs != positionMs) {
+            notPlayingPositionMs = positionMs
+            notPlayingConfirmations = 1
+        } else {
+            notPlayingConfirmations++
+        }
+        if (notPlayingConfirmations < requiredNotPlayingConfirmations.coerceAtLeast(1)) return false
+        inferred = true
+        return true
+    }
+
+    fun onPlaybackTimeout(
+        durationMs: Long,
+        positionMs: Long,
+        firstFrameRendered: Boolean,
+        playerActive: Boolean,
+    ): Boolean {
+        if (inferred || !firstFrameRendered || !playerActive || durationMs <= 0L) return false
+        if (lastDurationMs != durationMs || !nearEndObserved || lastPositionMs != positionMs) return false
+        val toleranceMs = minOf(maxToleranceMs.coerceAtLeast(1L), maxOf(1L, durationMs / 10L))
+        if (positionMs !in (durationMs - toleranceMs).coerceAtLeast(0L)..durationMs) return false
+        inferred = true
+        return true
+    }
+}
+
+internal data class VideoCompletionTransition(
+    val accepted: Boolean,
+    val cancelPlaybackTimeout: Boolean,
+)
+
+internal class VideoCompletionGate {
+    private var completed = false
+
+    fun complete(): VideoCompletionTransition {
+        if (completed) return VideoCompletionTransition(accepted = false, cancelPlaybackTimeout = false)
+        completed = true
+        return VideoCompletionTransition(accepted = true, cancelPlaybackTimeout = true)
+    }
+}
+
 internal fun retainVideoMaxPosition(previousMs: Long, currentMs: Long): Long =
     maxOf(previousMs.coerceAtLeast(0L), currentMs.coerceAtLeast(0L))
 

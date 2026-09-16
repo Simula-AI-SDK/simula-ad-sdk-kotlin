@@ -5,6 +5,8 @@ import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.model.RenderAttemptGate
 import ad.simula.ad.sdk.model.VideoAspectFitTransform
 import ad.simula.ad.sdk.model.VideoFailureCode
+import ad.simula.ad.sdk.model.VideoCompletionGate
+import ad.simula.ad.sdk.model.VideoNearEndCompletionDetector
 import ad.simula.ad.sdk.model.VideoDimensions
 import ad.simula.ad.sdk.model.VideoPositionAccumulator
 import ad.simula.ad.sdk.model.VideoPositionSample
@@ -444,6 +446,8 @@ private class NativeVideoController(
     private val renderGate = RenderAttemptGate()
     private val position = VideoPositionAccumulator(initialPlayedMs)
     private val progressCoalescer = VideoUiProgressCoalescer(VIDEO_UI_PROGRESS_INTERVAL_MS)
+    private val nearEndCompletion = VideoNearEndCompletionDetector()
+    private val completionGate = VideoCompletionGate()
     private val configuredGateMs = configuredGateSeconds.coerceAtLeast(0) * 1_000L
     private var renderToken = 0L
     private var player: MediaPlayer? = null
@@ -470,11 +474,27 @@ private class NativeVideoController(
     private val readinessTimeout = Runnable {
         fail(videoReadinessTimeoutCode(prepared))
     }
-    private val playbackTimeout = Runnable { fail(VideoFailureCode.PLAYBACK_TIMEOUT) }
+    private val playbackTimeout = Runnable { handlePlaybackTimeout() }
     private val positionPoll = object : Runnable {
         override fun run() {
             if (!lifecycleActive || released || failed || !firstFrameRendered) return
-            emitProgress(force = false)
+            val progress = emitProgress(force = false) ?: return
+            val isPlaying = runCatching { player?.isPlaying == true }.getOrElse {
+                fail(VideoFailureCode.PLAYBACK_ERROR)
+                return
+            }
+            if (nearEndCompletion.observe(
+                    durationMs = progress.durationMs,
+                    positionMs = progress.sample.positionMs,
+                    firstFrameRendered = firstFrameRendered,
+                    playerActive = player != null && lifecycleActive && !released && !failed,
+                    isPlaying = isPlaying,
+                )
+            ) {
+                completePlayback(renderToken)
+                return
+            }
+            if (completed || released || failed) return
             handler.postDelayed(this, VIDEO_POSITION_POLL_MS)
         }
     }
@@ -520,17 +540,7 @@ private class NativeVideoController(
             startIfPossible()
         }
         mediaPlayer.setOnCompletionListener {
-            if (!ownsCallback(token)) return@setOnCompletionListener
-            if (!firstFrameRendered) {
-                fail(VideoFailureCode.FIRST_FRAME_TIMEOUT)
-                return@setOnCompletionListener
-            }
-            emitProgress(force = true, completed = true)
-            completed = true
-            cancelPlaybackCallbacks()
-            recordLifecycle(VIDEO_STAGE_COMPLETE)
-            runCatching(onCompleted)
-            release()
+            completePlayback(token)
         }
         mediaPlayer.setOnErrorListener { _, _, _ ->
             if (ownsCallback(token)) {
@@ -672,8 +682,45 @@ private class NativeVideoController(
         if (lifecycleActive && firstFrameRendered && !released && !failed) handler.post(positionPoll)
     }
 
-    private fun emitProgress(force: Boolean, completed: Boolean = false) {
-        val mediaPlayer = player ?: return
+    private fun completePlayback(token: Long) {
+        if (!ownsCallback(token)) return
+        if (!firstFrameRendered) {
+            fail(VideoFailureCode.FIRST_FRAME_TIMEOUT)
+            return
+        }
+        val transition = completionGate.complete()
+        if (!transition.accepted) return
+        emitProgress(force = true, completed = true)
+        completed = true
+        if (transition.cancelPlaybackTimeout) cancelPlaybackCallbacks()
+        recordLifecycle(VIDEO_STAGE_COMPLETE)
+        runCatching(onCompleted)
+        release()
+    }
+
+    private fun handlePlaybackTimeout() {
+        if (!lifecycleActive || released || failed || !firstFrameRendered || player == null) return
+        val progress = emitProgress(force = false)
+        if (progress == null) {
+            fail(VideoFailureCode.PLAYBACK_ERROR)
+            return
+        }
+        if (progress.sample.advancedMs > 0L) return
+        if (nearEndCompletion.onPlaybackTimeout(
+                durationMs = progress.durationMs,
+                positionMs = progress.sample.positionMs,
+                firstFrameRendered = firstFrameRendered,
+                playerActive = true,
+            )
+        ) {
+            completePlayback(renderToken)
+        } else {
+            fail(VideoFailureCode.PLAYBACK_TIMEOUT)
+        }
+    }
+
+    private fun emitProgress(force: Boolean, completed: Boolean = false): PlayerProgress? {
+        val mediaPlayer = player ?: return null
         val durationMs = durationMs()
         val sample = if (completed) {
             val current = runCatching { mediaPlayer.currentPosition.toLong() }.getOrDefault(0L)
@@ -681,7 +728,7 @@ private class NativeVideoController(
             val completedSample = position.complete(durationMs)
             completedSample.copy(advancedMs = currentSample.advancedMs + completedSample.advancedMs)
         } else {
-            val current = runCatching { mediaPlayer.currentPosition.toLong() }.getOrNull() ?: return
+            val current = runCatching { mediaPlayer.currentPosition.toLong() }.getOrNull() ?: return null
             position.sample(current)
         }
         pendingAdvancedMs += sample.advancedMs
@@ -690,18 +737,20 @@ private class NativeVideoController(
         val gateCrossed = lastDeliveredTotalMs < gateDurationMs && sample.totalPlayedMs >= gateDurationMs
         val midpointMs = durationMs / 2L
         val midpointCrossed = durationMs > 0L && lastDeliveredPositionMs < midpointMs && sample.positionMs >= midpointMs
+        val progress = PlayerProgress(sample, durationMs)
         if (!progressCoalescer.shouldEmit(
                 nowMs = SystemClock.elapsedRealtime(),
                 force = force,
                 gateCrossed = gateCrossed,
                 midpointCrossed = midpointCrossed,
             )
-        ) return
+        ) return progress
         val delivered = sample.copy(advancedMs = pendingAdvancedMs)
         pendingAdvancedMs = 0L
         lastDeliveredTotalMs = sample.totalPlayedMs
         lastDeliveredPositionMs = sample.positionMs
         runCatching { onProgress(delivered, durationMs) }
+        return progress
     }
 
     private fun durationMs(): Long = runCatching { player?.duration?.toLong() ?: 0L }
@@ -812,6 +861,11 @@ private class NativeVideoController(
         runCatching(onError)
         release()
     }
+
+    private data class PlayerProgress(
+        val sample: VideoPositionSample,
+        val durationMs: Long,
+    )
 }
 
 private fun centeredTextureMatrix(
