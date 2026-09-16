@@ -100,6 +100,7 @@ internal class RewardedPresentation(
         )
     }
     val autoRedirectCoordinator = AutoRedirectCoordinator()
+    val earlyCompleteState = RewardedEarlyCompleteState()
     var primaryCreativeUnavailable by mutableStateOf(false)
 
     @Synchronized

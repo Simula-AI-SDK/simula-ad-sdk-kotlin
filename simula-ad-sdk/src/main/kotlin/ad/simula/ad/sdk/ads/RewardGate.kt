@@ -30,3 +30,39 @@ internal object RewardGate {
         return actualElapsedSeconds.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
     }
 }
+
+internal enum class RewardedEarlyCompleteStatus { OPEN, PENDING, CONSUMED, DISCARDED }
+
+internal fun rewardedEarlyCompleteApplicable(isVideo: Boolean): Boolean = !isVideo
+
+/** Presentation-owned bridge signal state. Only visual readiness may consume a pending signal. */
+internal class RewardedEarlyCompleteState {
+    var status: RewardedEarlyCompleteStatus = RewardedEarlyCompleteStatus.OPEN
+        private set
+
+    @Synchronized
+    fun signal(creativeReady: Boolean): Boolean = when (status) {
+        RewardedEarlyCompleteStatus.OPEN -> {
+            status = if (creativeReady) RewardedEarlyCompleteStatus.CONSUMED else RewardedEarlyCompleteStatus.PENDING
+            creativeReady
+        }
+        RewardedEarlyCompleteStatus.PENDING,
+        RewardedEarlyCompleteStatus.CONSUMED,
+        RewardedEarlyCompleteStatus.DISCARDED,
+        -> false
+    }
+
+    @Synchronized
+    fun consumePending(creativeReady: Boolean): Boolean {
+        if (!creativeReady || status != RewardedEarlyCompleteStatus.PENDING) return false
+        status = RewardedEarlyCompleteStatus.CONSUMED
+        return true
+    }
+
+    @Synchronized
+    fun discard() {
+        if (status == RewardedEarlyCompleteStatus.OPEN || status == RewardedEarlyCompleteStatus.PENDING) {
+            status = RewardedEarlyCompleteStatus.DISCARDED
+        }
+    }
+}

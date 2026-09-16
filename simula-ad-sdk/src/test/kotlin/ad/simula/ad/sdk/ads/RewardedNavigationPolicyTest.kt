@@ -3,12 +3,67 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.PrimaryCtaRoute
+import ad.simula.ad.sdk.model.RewardCompletionReason
+import ad.simula.ad.sdk.model.monotonicRewardCompletionReason
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RewardedNavigationPolicyTest {
+    @Test
+    fun `early complete before readiness latches across recreation and consumes once`() {
+        val retained = RewardedEarlyCompleteState()
+
+        assertFalse(retained.signal(creativeReady = false))
+        assertEquals(RewardedEarlyCompleteStatus.PENDING, retained.status)
+
+        // The presentation-owned instance is retained while the Activity is recreated.
+        val recreated = retained
+        assertTrue(recreated.consumePending(creativeReady = true))
+        assertEquals(RewardedEarlyCompleteStatus.CONSUMED, recreated.status)
+        assertFalse(recreated.consumePending(creativeReady = true))
+        assertFalse(recreated.signal(creativeReady = true))
+    }
+
+    @Test
+    fun `early complete after readiness earns immediately and duplicate events no-op`() {
+        val state = RewardedEarlyCompleteState()
+
+        assertTrue(state.signal(creativeReady = true))
+        assertEquals(RewardedEarlyCompleteStatus.CONSUMED, state.status)
+        assertFalse(state.signal(creativeReady = true))
+    }
+
+    @Test
+    fun `creative failure discards pending early complete permanently`() {
+        val state = RewardedEarlyCompleteState()
+        assertFalse(state.signal(creativeReady = false))
+
+        state.discard()
+
+        assertEquals(RewardedEarlyCompleteStatus.DISCARDED, state.status)
+        assertFalse(state.consumePending(creativeReady = true))
+        assertFalse(state.signal(creativeReady = true))
+    }
+
+    @Test
+    fun `pending early complete wins zero-gate ordering and video bridge is inapplicable`() {
+        val state = RewardedEarlyCompleteState()
+        assertFalse(state.signal(creativeReady = false))
+        var reason: RewardCompletionReason? = null
+        if (state.consumePending(creativeReady = true)) {
+            reason = monotonicRewardCompletionReason(reason, RewardCompletionReason.CREATIVE_COMPLETED)
+        }
+        reason = monotonicRewardCompletionReason(reason, RewardCompletionReason.DURATION_ELAPSED)
+
+        assertEquals(RewardCompletionReason.CREATIVE_COMPLETED, reason)
+        assertTrue(rewardedEarlyCompleteApplicable(isVideo = false))
+        assertFalse(rewardedEarlyCompleteApplicable(isVideo = true))
+    }
+
     @Test
     fun `rewarded video executes admitted route without reclassification and click admission stays once`() {
         val admitted = PrimaryCtaRoute(

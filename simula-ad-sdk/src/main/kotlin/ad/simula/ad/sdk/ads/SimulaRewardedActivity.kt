@@ -559,7 +559,13 @@ private fun RewardedMinigame(
     var bridgeUnavailable by remember(presentation) {
         mutableStateOf(presentation.primaryCreativeUnavailable)
     }
+    fun earnCreativeCompletion() {
+        presentation.recordCompletionReason(RewardCompletionReason.CREATIVE_COMPLETED)
+        presentation.rewardEarned = true
+        rewardEarned = true
+    }
     fun markBridgeUnavailable() {
+        presentation.earlyCompleteState.discard()
         val earned = rewardEarnedAfterCreativeFailure(
             candidate = rewardEarned,
             retained = presentation.rewardEarned,
@@ -683,9 +689,11 @@ private fun RewardedMinigame(
             appContext = context.applicationContext,
             activityProvider = { context as? Activity },
             onEarlyComplete = {
-                presentation.recordCompletionReason(RewardCompletionReason.CREATIVE_COMPLETED)
-                presentation.rewardEarned = true
-                rewardEarned = true
+                if (rewardedEarlyCompleteApplicable(isVideo) &&
+                    presentation.earlyCompleteState.signal(bridgeReady && displayAdmitted)
+                ) {
+                    earnCreativeCompletion()
+                }
             },
         )
     }
@@ -752,17 +760,17 @@ private fun RewardedMinigame(
     // restarts it on return, so the gate can't be satisfied by simply backgrounding the
     // app for the required duration. The accumulated time lives on the presentation, so
     // a config change (rotation) resumes the remaining time instead of restarting it.
-    LaunchedEffect(bridgeReady) {
+    LaunchedEffect(bridgeReady, rewardEarned) {
         if (!bridgeReady) return@LaunchedEffect
         if (isVideo) return@LaunchedEffect
         val requiredMs = gateSeconds.coerceAtLeast(0) * 1_000L
-        if (requiredMs <= 0L) {
-            presentation.recordCompletionReason(RewardCompletionReason.DURATION_ELAPSED)
-            presentation.rewardEarned = true
+        if (presentation.rewardEarned) {
             rewardEarned = true
             return@LaunchedEffect
         }
-        if (presentation.rewardEarned) {
+        if (requiredMs <= 0L) {
+            presentation.recordCompletionReason(RewardCompletionReason.DURATION_ELAPSED)
+            presentation.rewardEarned = true
             rewardEarned = true
             return@LaunchedEffect
         }
@@ -936,6 +944,9 @@ private fun RewardedMinigame(
                 },
             )
             bridgeReady = true
+            if (presentation.earlyCompleteState.consumePending(displayAdmitted)) {
+                earnCreativeCompletion()
+            }
         }
     }
 
