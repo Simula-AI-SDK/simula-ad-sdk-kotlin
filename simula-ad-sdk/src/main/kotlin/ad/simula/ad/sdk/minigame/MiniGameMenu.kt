@@ -93,6 +93,9 @@ import ad.simula.ad.sdk.ads.FullscreenVideoPreparer
 import ad.simula.ad.sdk.ads.FALLBACK_RENDER_TIMEOUT_MS
 import ad.simula.ad.sdk.ads.nextFallbackVideoUrl
 import ad.simula.ad.sdk.ads.smoothVideoProgress
+import ad.simula.ad.sdk.ads.FallbackHtmlFailureAction
+import ad.simula.ad.sdk.ads.fallbackHtmlFailureAction
+import ad.simula.ad.sdk.ads.resolveFallbackVideoRouting
 import ad.simula.ad.sdk.ads.coordinateDeferredClickPersistence
 import ad.simula.ad.sdk.ads.enqueueOwnedFallbackClickBeacon
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -810,6 +813,15 @@ private fun MiniGameFallbackOverlay(
     val hostActivity = remember(context) { findActivity(context) }
     val clickOwner = remember(adId, hostActivity) { DeclarativeClickRouteOwner(hostActivity) }
     val routeCoordinator = clickOwner.routes
+    val videoRouting = remember(ad) {
+        resolveFallbackVideoRouting(
+            ad = ad,
+            parentTrackingUrl = null,
+            parentDestination = "appstore",
+            parentStoreUrl = null,
+            allowParentFallback = false,
+        )
+    }
 
     DisposableEffect(lifecycleOwner, hostActivity, clickOwner) {
         val activity = hostActivity
@@ -858,13 +870,16 @@ private fun MiniGameFallbackOverlay(
         adPageFailed = true
     }
 
-    fun failPage(token: Long, includeReady: Boolean = false) {
-        if (renderGate.fail(token) || (includeReady && token == renderToken && !adPageFailed)) {
-            applyPageFailure()
-        }
+    fun failInitialPage(token: Long) {
+        if (renderGate.fail(token)) applyPageFailure()
     }
 
-    fun beginFallbackClick(routePlan: PrimaryCtaRoute): Boolean {
+    fun beginFallbackClick(
+        routePlan: PrimaryCtaRoute,
+        destination: String = "web",
+        storeUrl: String? = null,
+        retainWebViewFallback: Boolean = true,
+    ): Boolean {
         if (clickHandoffPending) return true
         val claim = clickGate.claim(ClickSources.FALLBACK_CTA) ?: return true
         val interaction = claim.interaction
@@ -906,9 +921,10 @@ private fun MiniGameFallbackOverlay(
                         val opened = CreativeCtaRouter.openPrimaryCta(
                             activity.applicationContext,
                             routePlan,
-                            destination = "web",
+                            destination = destination,
+                            storeUrl = storeUrl,
                         )
-                        if (!opened) {
+                        if (!opened && retainWebViewFallback) {
                             routePlan.tappedUrl?.let { fallbackUrl ->
                                 adWebView?.post {
                                     if (adWebView != null) runCatching { adWebView?.loadUrl(fallbackUrl) }
@@ -1036,7 +1052,7 @@ private fun MiniGameFallbackOverlay(
                             prewarmNextUrl = nextVideoUrl,
                             configuredGateSeconds = closeBehavior.delaySeconds,
                             initialPlayedMs = elapsedGateMs,
-                            ctaEnabled = false,
+                            ctaEnabled = videoRouting != null,
                             modifier = Modifier.fillMaxSize(),
                             onReady = { durationMs ->
                                 gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
@@ -1055,7 +1071,15 @@ private fun MiniGameFallbackOverlay(
                                 adCountdown = 0
                             },
                             onError = ::applyPageFailure,
-                            onCta = {},
+                            onCta = {
+                                val routing = videoRouting ?: return@FullscreenVideo
+                                beginFallbackClick(
+                                    routePlan = routing.route,
+                                    destination = routing.destination,
+                                    storeUrl = routing.storeUrl,
+                                    retainWebViewFallback = false,
+                                )
+                            },
                         )
                     }
                 } else AndroidView(
@@ -1067,11 +1091,13 @@ private fun MiniGameFallbackOverlay(
                             client = object : WebViewClient() {
                                 override fun onPageStarted(view: WebView?, startedUrl: String?, favicon: Bitmap?) {
                                     if (!realLoadStarted) return
-                                    if (renderGate.isPending(token)) adPageLoaded = false
-                                    if (!startedUrl.isNullOrBlank() &&
-                                        (startedUrl != "about:blank" || inlineHtml != null)
-                                    ) {
-                                        adPageFailed = false
+                                    if (renderGate.isPending(token)) {
+                                        adPageLoaded = false
+                                        if (!startedUrl.isNullOrBlank() &&
+                                            (startedUrl != "about:blank" || inlineHtml != null)
+                                        ) {
+                                            adPageFailed = false
+                                        }
                                     }
                                 }
                                 override fun onPageCommitVisible(view: WebView?, committedUrl: String?) {
@@ -1089,8 +1115,10 @@ private fun MiniGameFallbackOverlay(
                                     error: WebResourceError?,
                                 ) {
                                     if (!realLoadStarted) return
-                                    if (request?.isForMainFrame == true) {
-                                        failPage(token, includeReady = true)
+                            if (request?.isForMainFrame == true) {
+                                if (fallbackHtmlFailureAction(adPageLoaded, isMainFrame = true) ==
+                                    FallbackHtmlFailureAction.SKIP_INITIAL
+                                ) failInitialPage(token)
                                     }
                                 }
                                 override fun onReceivedHttpError(
@@ -1099,8 +1127,10 @@ private fun MiniGameFallbackOverlay(
                                     errorResponse: WebResourceResponse?,
                                 ) {
                                     if (!realLoadStarted) return
-                                    if (request?.isForMainFrame == true) {
-                                        failPage(token, includeReady = true)
+                            if (request?.isForMainFrame == true) {
+                                if (fallbackHtmlFailureAction(adPageLoaded, isMainFrame = true) ==
+                                    FallbackHtmlFailureAction.SKIP_INITIAL
+                                ) failInitialPage(token)
                                     }
                                 }
                                 override fun shouldOverrideUrlLoading(
@@ -1133,7 +1163,7 @@ private fun MiniGameFallbackOverlay(
                                 ): Boolean {
                                     runCatching { recordRenderProcessGone("minigame_ad", detail) }
                                     renderProcessGone = true
-                                    failPage(token, includeReady = true)
+                                    applyPageFailure()
                                     runCatching { view?.visibility = android.view.View.INVISIBLE }
                                     return true
                                 }

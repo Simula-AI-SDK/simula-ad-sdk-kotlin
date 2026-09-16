@@ -21,6 +21,86 @@ import org.junit.Test
 
 class FullscreenClickHandoffPolicyTest {
     @Test
+    fun `fallback HTML failures skip only initial main-frame load`() {
+        assertEquals(
+            FallbackHtmlFailureAction.SKIP_INITIAL,
+            fallbackHtmlFailureAction(pageCommitted = false, isMainFrame = true),
+        )
+        assertEquals(
+            FallbackHtmlFailureAction.IGNORE,
+            fallbackHtmlFailureAction(pageCommitted = true, isMainFrame = true),
+        )
+        assertEquals(
+            FallbackHtmlFailureAction.IGNORE,
+            fallbackHtmlFailureAction(pageCommitted = false, isMainFrame = false),
+        )
+    }
+
+    @Test
+    fun `post-commit navigation and tracker errors keep visible fallback`() {
+        for (error in listOf("navigation", "tracker", "http")) {
+            assertEquals(
+                error,
+                FallbackHtmlFailureAction.IGNORE,
+                fallbackHtmlFailureAction(pageCommitted = true, isMainFrame = true),
+            )
+        }
+    }
+
+    @Test
+    fun `fallback video item route wins and parent route is inherited only when item fields are absent`() {
+        val item = SimulaApiClient.FallbackAd(
+            adId = "item",
+            trackingUrl = "https://item.example/click",
+            destination = "web",
+            androidStoreUrl = "https://play.google.com/store/apps/details?id=item",
+        )
+        val itemRoute = resolveFallbackVideoRouting(
+            item,
+            parentTrackingUrl = "https://parent.example/click",
+            parentDestination = "appstore",
+            parentStoreUrl = "https://play.google.com/store/apps/details?id=parent",
+            allowParentFallback = true,
+        )
+        assertEquals("https://item.example/click", itemRoute?.route?.externalTarget)
+        assertFalse(itemRoute?.inheritedFromPrimary ?: true)
+
+        val absent = SimulaApiClient.FallbackAd(adId = "absent")
+        val inherited = resolveFallbackVideoRouting(
+            absent,
+            parentTrackingUrl = "https://parent.example/click",
+            parentDestination = "appstore",
+            parentStoreUrl = null,
+            allowParentFallback = true,
+        )
+        assertEquals("https://parent.example/click", inherited?.route?.externalTarget)
+        assertTrue(inherited?.inheritedFromPrimary == true)
+        assertNull(
+            resolveFallbackVideoRouting(absent, null, "appstore", null, allowParentFallback = false),
+        )
+    }
+
+    @Test
+    fun `present but invalid or ios-only item route never falls back to parent on Android`() {
+        val invalid = SimulaApiClient.FallbackAd(adId = "invalid", destination = "appstore")
+        val iosOnly = SimulaApiClient.FallbackAd(
+            adId = "ios",
+            iosStoreUrl = "https://apps.apple.com/app/id123",
+        )
+        for (ad in listOf(invalid, iosOnly)) {
+            assertNull(
+                resolveFallbackVideoRouting(
+                    ad,
+                    parentTrackingUrl = "https://parent.example/click",
+                    parentDestination = "appstore",
+                    parentStoreUrl = "https://play.google.com/store/apps/details?id=parent",
+                    allowParentFallback = true,
+                ),
+            )
+        }
+    }
+
+    @Test
     fun `video telemetry stages match cross-platform contract`() {
         assertEquals(listOf("video_start", "video_complete", "video_fail"), listOf(
             VIDEO_STAGE_START,

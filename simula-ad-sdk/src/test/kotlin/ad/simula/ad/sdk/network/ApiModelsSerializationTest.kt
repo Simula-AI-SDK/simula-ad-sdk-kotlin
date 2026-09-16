@@ -250,6 +250,10 @@ class ApiModelsSerializationTest {
                 type = "video",
                 url = "https://cdn.example/video.mp4",
                 posterUrl = "https://cdn.example/poster.jpg",
+                destination = "web",
+                trackingUrl = "https://tracker.example/click",
+                androidStoreUrl = "https://play.google.com/store/apps/details?id=android.app",
+                iosStoreUrl = "https://apps.apple.com/app/id123",
                 adBehavior = ApiAdBehavior(
                     close = ApiCloseBehavior(delaySeconds = 99, treatment = "progress_bar", position = "top_left"),
                 ),
@@ -262,12 +266,37 @@ class ApiModelsSerializationTest {
         )
 
         assertEquals(ad.simula.ad.sdk.model.CreativeType.VIDEO, video?.type)
+        assertEquals("web", video?.destination)
+        assertEquals("https://tracker.example/click", video?.trackingUrl)
+        assertEquals("https://play.google.com/store/apps/details?id=android.app", video?.androidStoreUrl)
+        assertEquals("https://apps.apple.com/app/id123", video?.iosStoreUrl)
         assertEquals(60, video?.adBehavior?.close?.delaySeconds)
         assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, video?.adBehavior?.close?.treatment)
         assertEquals(ad.simula.ad.sdk.model.ClosePosition.TOP_LEFT, video?.adBehavior?.close?.position)
         assertEquals(ad.simula.ad.sdk.model.CreativeType.PLAYABLE, unknown?.type)
         assertEquals(5, unknown?.adBehavior?.close?.delaySeconds)
         assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, unknown?.adBehavior?.close?.treatment)
+    }
+
+    @Test
+    fun `fallback routing fields decode exact backend keys`() {
+        val body = json.decodeFromString<FallbackAdBody>(
+            """{
+                "ad_id":"video",
+                "type":"video",
+                "url":"https://cdn.example/video.mp4",
+                "destination":"appstore",
+                "tracking_url":"https://tracker.example/click",
+                "android_store_url":"https://play.google.com/store/apps/details?id=android.app",
+                "ios_store_url":"https://apps.apple.com/app/id123"
+            }""",
+        )
+        val ad = requireNotNull(SimulaApiClient.fallbackAdFromBody(body, false))
+
+        assertEquals("appstore", ad.destination)
+        assertEquals("https://tracker.example/click", ad.trackingUrl)
+        assertEquals("https://play.google.com/store/apps/details?id=android.app", ad.androidStoreUrl)
+        assertEquals("https://apps.apple.com/app/id123", ad.iosStoreUrl)
     }
 
     @Test

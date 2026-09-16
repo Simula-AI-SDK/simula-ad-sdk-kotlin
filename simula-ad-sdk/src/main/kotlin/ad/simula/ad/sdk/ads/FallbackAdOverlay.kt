@@ -88,6 +88,41 @@ internal const val FALLBACK_POST_CLOSE_WAIT_MS = 2_000L
 internal const val FALLBACK_CLOSE_GATE_MS = 5_000L
 internal const val FALLBACK_RENDER_TIMEOUT_MS = 10_000L
 
+internal enum class FallbackHtmlFailureAction { SKIP_INITIAL, IGNORE }
+
+internal fun fallbackHtmlFailureAction(
+    pageCommitted: Boolean,
+    isMainFrame: Boolean,
+): FallbackHtmlFailureAction = if (isMainFrame && !pageCommitted) {
+    FallbackHtmlFailureAction.SKIP_INITIAL
+} else {
+    FallbackHtmlFailureAction.IGNORE
+}
+
+internal data class FallbackVideoRouting(
+    val route: ad.simula.ad.sdk.network.PrimaryCtaRoute,
+    val destination: String,
+    val storeUrl: String?,
+    val inheritedFromPrimary: Boolean,
+)
+
+internal fun resolveFallbackVideoRouting(
+    ad: SimulaApiClient.FallbackAd,
+    parentTrackingUrl: String?,
+    parentDestination: String,
+    parentStoreUrl: String?,
+    allowParentFallback: Boolean,
+): FallbackVideoRouting? {
+    val hasItemRouting = ad.destination != null || ad.trackingUrl != null ||
+        ad.androidStoreUrl != null || ad.iosStoreUrl != null
+    val inherited = !hasItemRouting && allowParentFallback
+    val destination = if (hasItemRouting) ad.destination ?: "appstore" else parentDestination
+    val trackingUrl = if (hasItemRouting) ad.trackingUrl else parentTrackingUrl.takeIf { inherited }
+    val storeUrl = if (hasItemRouting) ad.androidStoreUrl else parentStoreUrl.takeIf { inherited }
+    val route = videoCtaRoute(trackingUrl, storeUrl, destination) ?: return null
+    return FallbackVideoRouting(route, destination, storeUrl, inherited)
+}
+
 internal fun nextFallbackVideoUrl(
     ads: List<SimulaApiClient.FallbackAd>,
     afterDisplayIndex: Int,
@@ -779,13 +814,13 @@ private fun FallbackAdOverlay(
         mutableStateOf(retainedRendererAbandonment)
     }
     fun applyRendererUnavailable() {
+        if (rendererGone) return
         rendererGone = true
         rendererOwnsPhase = presentationState.abandonRenderer(fallbackIndex, navigationOwner)
         runCatching(onRendererUnavailable)
     }
-    fun failRenderer(token: Long, includeReady: Boolean = false) {
-        val accepted = renderGate.fail(token) || (includeReady && token == renderToken && !rendererGone)
-        if (accepted) applyRendererUnavailable()
+    fun failInitialRenderer(token: Long) {
+        if (renderGate.fail(token)) applyRendererUnavailable()
     }
     var unavailableExitIssued by remember { mutableStateOf(false) }
     fun closeOnce() {
@@ -823,8 +858,14 @@ private fun FallbackAdOverlay(
         mutableFloatStateOf((retainedGateMs.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f))
     }
     val smoothVideoRingProgress = smoothVideoProgress(videoRingProgress)
-    val videoRoute = remember(ctaTrackingUrl, ctaStoreUrl, ctaDestination) {
-        videoCtaRoute(ctaTrackingUrl, ctaStoreUrl, ctaDestination)
+    val videoRouting = remember(ad, ctaTrackingUrl, ctaStoreUrl, ctaDestination) {
+        resolveFallbackVideoRouting(
+            ad = ad,
+            parentTrackingUrl = ctaTrackingUrl,
+            parentDestination = ctaDestination,
+            parentStoreUrl = ctaStoreUrl,
+            allowParentFallback = true,
+        )
     }
     // Foreground-only 5s gate: time accrues only while the Activity is RESUMED, so leaving the app
     // pauses the countdown (parity with the interstitial / rewarded close gates). repeatOnLifecycle
@@ -878,7 +919,7 @@ private fun FallbackAdOverlay(
                     prewarmNextUrl = nextVideoUrl,
                     configuredGateSeconds = closeBehavior.delaySeconds,
                     initialPlayedMs = presentationState.closeGateElapsedMs(fallbackIndex),
-                    ctaEnabled = videoRoute != null,
+                    ctaEnabled = videoRouting != null,
                     modifier = Modifier
                         .fillMaxSize()
                         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
@@ -912,7 +953,8 @@ private fun FallbackAdOverlay(
                         applyRendererUnavailable()
                     },
                     onCta = {
-                        val routePlan = videoRoute ?: return@FullscreenVideo
+                        val routing = videoRouting ?: return@FullscreenVideo
+                        val routePlan = routing.route
                         if (presentationState.clickHandoffPending) return@FullscreenVideo
                         val claim = claimClick(ClickSources.FALLBACK_CTA) ?: return@FullscreenVideo
                         notifyPublisherClick { onAdClick(claim.interaction) }
@@ -944,8 +986,8 @@ private fun FallbackAdOverlay(
                                     prepare = {
                                         CreativeCtaRouter.preparePrimaryCta(
                                             routePlan,
-                                            ctaDestination,
-                                            ctaStoreUrl,
+                                            routing.destination,
+                                            routing.storeUrl,
                                             routeStartedAtNanos,
                                         )
                                     },
@@ -990,9 +1032,11 @@ private fun FallbackAdOverlay(
                             if (CreativeCtaRouter.matchesKnownTrackingUrl(url, ctaTrackingUrl)) {
                                 presentationState.markAutomaticTrackerRequested(fallbackIndex)
                             }
-                            if (renderGate.isPending(token)) pageCommitted = false
-                            if (!url.isNullOrBlank() && (url != "about:blank" || inlineHtml != null)) {
-                                pageLoadFailed = false
+                            if (renderGate.isPending(token)) {
+                                pageCommitted = false
+                                if (!url.isNullOrBlank() && (url != "about:blank" || inlineHtml != null)) {
+                                    pageLoadFailed = false
+                                }
                             }
                         }
                         override fun onPageCommitVisible(view: WebView?, url: String?) {
@@ -1011,9 +1055,12 @@ private fun FallbackAdOverlay(
                         ) {
                             if (!realLoadStarted) return
                             if (request?.isForMainFrame == true) {
-                                pageLoadFailed = true
-                                pageCommitted = false
-                                failRenderer(token, includeReady = true)
+                                if (fallbackHtmlFailureAction(pageCommitted, isMainFrame = true) ==
+                                    FallbackHtmlFailureAction.SKIP_INITIAL
+                                ) {
+                                    pageLoadFailed = true
+                                    failInitialRenderer(token)
+                                }
                             }
                         }
                         override fun onReceivedHttpError(
@@ -1023,9 +1070,12 @@ private fun FallbackAdOverlay(
                         ) {
                             if (!realLoadStarted) return
                             if (request?.isForMainFrame == true) {
-                                pageLoadFailed = true
-                                pageCommitted = false
-                                failRenderer(token, includeReady = true)
+                                if (fallbackHtmlFailureAction(pageCommitted, isMainFrame = true) ==
+                                    FallbackHtmlFailureAction.SKIP_INITIAL
+                                ) {
+                                    pageLoadFailed = true
+                                    failInitialRenderer(token)
+                                }
                             }
                         }
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -1154,7 +1204,7 @@ private fun FallbackAdOverlay(
                             runCatching { recordRenderProcessGone("fallback_ad", detail) }
                             if (view != null && view === fallbackWebView) {
                                 renderProcessGone = true
-                                failRenderer(token, includeReady = true)
+                                applyRendererUnavailable()
                                 runCatching { view.visibility = View.INVISIBLE }
                                 fallbackWebView = null
                             }

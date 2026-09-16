@@ -174,6 +174,10 @@ internal data class FallbackAdBody(
     val html: String? = null,
     val url: String? = null,
     @SerialName("poster_url") val posterUrl: String? = null,
+    val destination: String? = null,
+    @SerialName("tracking_url") val trackingUrl: String? = null,
+    @SerialName("android_store_url") val androidStoreUrl: String? = null,
+    @SerialName("ios_store_url") val iosStoreUrl: String? = null,
     @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
     @Transient val sourceIndex: Int = -1,
 )

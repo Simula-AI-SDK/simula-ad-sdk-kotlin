@@ -768,6 +768,10 @@ internal object SimulaApiClient {
         val renderedHtml: String? = null,
         val url: String? = null,
         val posterUrl: String? = null,
+        val destination: String? = null,
+        val trackingUrl: String? = null,
+        val androidStoreUrl: String? = null,
+        val iosStoreUrl: String? = null,
         val adBehavior: AdBehavior = fallbackAdBehavior(null),
         val nativeClickBeaconV1Enabled: Boolean = false,
     )
@@ -789,6 +793,10 @@ internal object SimulaApiClient {
             renderedHtml = html,
             url = url,
             posterUrl = ad.posterUrl?.takeIf { it.isNotBlank() },
+            destination = ad.destination,
+            trackingUrl = ad.trackingUrl,
+            androidStoreUrl = ad.androidStoreUrl,
+            iosStoreUrl = ad.iosStoreUrl,
             adBehavior = fallbackAdBehavior(ad.adBehavior),
             nativeClickBeaconV1Enabled =
                 ad.nativeClickBeaconV1Enabled ?: responseNativeClickBeaconV1Enabled,
