@@ -10,6 +10,7 @@ import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.closeGateSecondsLeft
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.model.videoCloseGateMs
+import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.RenderAttemptGate
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.AutoRedirectResult
@@ -98,6 +99,12 @@ internal fun fallbackHtmlFailureAction(
 } else {
     FallbackHtmlFailureAction.IGNORE
 }
+
+internal fun shouldEnterFallbackVideoUnavailable(
+    type: CreativeType,
+    url: String?,
+    alreadyUnavailable: Boolean,
+): Boolean = type == CreativeType.VIDEO && admittedVideoUrl(url) == null && !alreadyUnavailable
 
 internal data class FallbackVideoRouting(
     val route: ad.simula.ad.sdk.network.PrimaryCtaRoute,
@@ -768,6 +775,7 @@ private fun FallbackAdOverlay(
     val inlineHtml = ad.renderedHtml?.takeIf { it.isNotBlank() }
     val closeBehavior = ad.adBehavior.close
     val isVideo = ad.type == CreativeType.VIDEO
+    val videoUrl = remember(ad.url) { admittedVideoUrl(ad.url) }
     var videoDurationMs by remember(presentationState, fallbackIndex) {
         mutableStateOf(presentationState.videoDurationMs(fallbackIndex))
     }
@@ -834,6 +842,11 @@ private fun FallbackAdOverlay(
         if (unavailableExitIssued) return
         unavailableExitIssued = true
         runCatching(onClose)
+    }
+    LaunchedEffect(isVideo, videoUrl, rendererGone) {
+        if (shouldEnterFallbackVideoUnavailable(ad.type, videoUrl, rendererGone)) {
+            applyRendererUnavailable()
+        }
     }
     LaunchedEffect(rendererGone, rendererOwnsPhase, presentationState.clickHandoffPending, storeVisitPending) {
         if (!rendererGone || !rendererOwnsPhase || presentationState.clickHandoffPending) return@LaunchedEffect
@@ -915,7 +928,7 @@ private fun FallbackAdOverlay(
             .background(Color.Black),
     ) {
         if (isVideo && !rendererGone) {
-            ad.url?.let { videoUrl ->
+            videoUrl?.let { videoUrl ->
                 FullscreenVideo(
                     url = videoUrl,
                     posterUrl = ad.posterUrl,

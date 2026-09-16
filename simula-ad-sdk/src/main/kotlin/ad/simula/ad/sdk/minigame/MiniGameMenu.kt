@@ -99,6 +99,7 @@ import ad.simula.ad.sdk.ads.resolveFallbackVideoRouting
 import ad.simula.ad.sdk.ads.prepareDeferredCtaRoute
 import ad.simula.ad.sdk.ads.AutomaticNavigationOutcome
 import ad.simula.ad.sdk.ads.canRouteFromCurrentFullscreenActivity
+import ad.simula.ad.sdk.ads.shouldEnterFallbackVideoUnavailable
 import ad.simula.ad.sdk.ads.coordinateDeferredClickPersistence
 import ad.simula.ad.sdk.ads.enqueueOwnedFallbackClickBeacon
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -114,6 +115,7 @@ import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.model.closeGateSecondsLeft
 import ad.simula.ad.sdk.model.videoCloseGateMs
 import ad.simula.ad.sdk.model.RenderAttemptGate
+import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.ClickInteractionGate
@@ -797,6 +799,7 @@ private fun MiniGameFallbackOverlay(
     val nativeClickBeaconV1Enabled = ad.nativeClickBeaconV1Enabled
     val inlineHtml = ad.renderedHtml?.takeIf { it.isNotBlank() }
     val isVideo = ad.type == CreativeType.VIDEO
+    val videoUrl = remember(ad.url) { admittedVideoUrl(ad.url) }
     val closeBehavior = ad.adBehavior.close
     var gateMs by remember(adId) { mutableStateOf(closeBehavior.delaySeconds * 1_000L) }
     var elapsedGateMs by remember(adId) { mutableStateOf(0L) }
@@ -812,6 +815,7 @@ private fun MiniGameFallbackOverlay(
     var renderProcessGone by remember(ad.sourceIndex) { mutableStateOf(false) }
     val renderGate = remember(ad.sourceIndex) { RenderAttemptGate() }
     var clickHandoffPending by remember { mutableStateOf(false) }
+    var closeIssued by remember(ad.sourceIndex) { mutableStateOf(false) }
     var adWebView by remember { mutableStateOf<WebView?>(null) }
     val clickGate = remember(adId) { ClickInteractionGate() }
     val clickHandler = remember { Handler(Looper.getMainLooper()) }
@@ -866,17 +870,26 @@ private fun MiniGameFallbackOverlay(
     }
 
     fun closeOverlay() {
+        if (closeIssued) return
+        closeIssued = true
         clickOwner.cancel()
         onClose()
     }
 
     fun applyPageFailure() {
+        if (adPageFailed) return
         adPageLoaded = false
         adPageFailed = true
     }
 
     fun failInitialPage(token: Long) {
         if (renderGate.fail(token)) applyPageFailure()
+    }
+
+    LaunchedEffect(isVideo, videoUrl, adPageFailed) {
+        if (shouldEnterFallbackVideoUnavailable(ad.type, videoUrl, adPageFailed)) {
+            applyPageFailure()
+        }
     }
 
     fun beginFallbackClick(
@@ -1080,7 +1093,7 @@ private fun MiniGameFallbackOverlay(
 
             Box(modifier = Modifier.fillMaxSize().weight(1f)) {
                 if (isVideo) {
-                    ad.url?.let { videoUrl ->
+                    videoUrl?.let { videoUrl ->
                         FullscreenVideo(
                             url = videoUrl,
                             posterUrl = ad.posterUrl,

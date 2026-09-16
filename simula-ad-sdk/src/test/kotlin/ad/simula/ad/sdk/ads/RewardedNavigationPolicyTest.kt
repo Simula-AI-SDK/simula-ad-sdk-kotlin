@@ -1,9 +1,38 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.network.ClickInteractionGate
+import ad.simula.ad.sdk.network.ClickSources
+import ad.simula.ad.sdk.network.PrimaryCtaRoute
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 class RewardedNavigationPolicyTest {
+    @Test
+    fun `rewarded video executes admitted route without reclassification and click admission stays once`() {
+        val admitted = PrimaryCtaRoute(
+            tappedUrl = "https://advertiser.example/original",
+            externalTarget = "resolved-route://opaque",
+            externalTargetIsTracker = false,
+        )
+        assertSame(admitted, rewardedVideoCtaExecutionRoute(admitted))
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick,
+            CreativeCtaRouter.primaryCtaTapPlan(
+                tappedUrl = admitted.externalTarget,
+                creativeBaseUrl = null,
+                trackingUrl = null,
+                destination = "appstore",
+            ),
+        )
+
+        val gate = ClickInteractionGate(clockMs = { 1L }, idFactory = { "video-click" })
+        val claim = gate.claim(ClickSources.PRIMARY_CTA)
+        assertNull(gate.claim(ClickSources.PRIMARY_CTA))
+        assertEquals("video-click", claim?.interaction?.id)
+    }
+
     @Test
     fun `zero gate reward waits for usable creative bridge`() {
         assertEquals(false, initialRewardEarned(false, accumulatedPlayTimeMs = 0L, gateSeconds = 0))

@@ -387,6 +387,8 @@ internal fun rewardedDismissalDisplayAdmitted(
     previouslyDisplayed: Boolean,
 ): Boolean = currentDisplayAdmitted || previouslyDisplayed
 
+internal fun rewardedVideoCtaExecutionRoute(route: PrimaryCtaRoute): PrimaryCtaRoute = route
+
 private const val REWARDED_CREATIVE_COMMIT_TIMEOUT_MS = 10_000L
 
 internal fun rewardedNavigationAction(
@@ -820,17 +822,7 @@ private fun RewardedMinigame(
         }
     }
 
-    fun beginPrimaryCta(tappedUrl: String, currentPageUrl: String? = creativeWebView?.url): Boolean {
-        val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
-            tappedUrl = tappedUrl,
-            creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: initialPageUrl,
-            trackingUrl = presentation.trackingUrl,
-            destination = presentation.destination,
-        )) {
-            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> return false
-            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
-            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
-        }
+    fun beginPrimaryCta(route: PrimaryCtaRoute): Boolean {
         val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return true
         notifyPublisherClick { presentation.callbacks.notifyClicked() }
         val interaction = claim.interaction
@@ -899,14 +891,27 @@ private fun RewardedMinigame(
         return true
     }
 
+    fun beginPrimaryCta(tappedUrl: String, currentPageUrl: String? = creativeWebView?.url): Boolean {
+        val route = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
+            tappedUrl = tappedUrl,
+            creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(currentPageUrl) ?: initialPageUrl,
+            trackingUrl = presentation.trackingUrl,
+            destination = presentation.destination,
+        )) {
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> return false
+            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
+            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
+        }
+        return beginPrimaryCta(route)
+    }
+
     fun beginVideoCta() {
         val route = videoCtaRoute(
             presentation.trackingUrl,
             presentation.androidStoreUrl,
             presentation.destination,
         ) ?: return
-        val target = route.externalTarget ?: route.tappedUrl ?: return
-        beginPrimaryCta(target, null)
+        beginPrimaryCta(rewardedVideoCtaExecutionRoute(route))
     }
 
     fun admitCreativeCommit(view: WebView?, qualified: Boolean) {

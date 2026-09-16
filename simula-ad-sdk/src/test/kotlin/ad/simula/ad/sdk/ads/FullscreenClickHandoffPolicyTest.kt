@@ -21,6 +21,45 @@ import org.junit.Test
 
 class FullscreenClickHandoffPolicyTest {
     @Test
+    fun `invalid internal fallback video enters unavailable path once`() {
+        assertTrue(
+            shouldEnterFallbackVideoUnavailable(
+                ad.simula.ad.sdk.model.CreativeType.VIDEO,
+                url = null,
+                alreadyUnavailable = false,
+            ),
+        )
+        assertTrue(
+            shouldEnterFallbackVideoUnavailable(
+                ad.simula.ad.sdk.model.CreativeType.VIDEO,
+                url = "javascript:invalid",
+                alreadyUnavailable = false,
+            ),
+        )
+        assertFalse(
+            shouldEnterFallbackVideoUnavailable(
+                ad.simula.ad.sdk.model.CreativeType.VIDEO,
+                url = null,
+                alreadyUnavailable = true,
+            ),
+        )
+        assertFalse(
+            shouldEnterFallbackVideoUnavailable(
+                ad.simula.ad.sdk.model.CreativeType.VIDEO,
+                url = "https://cdn.example/video.mp4",
+                alreadyUnavailable = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `invalid video unavailable advance defers for blockers`() {
+        assertFalse(shouldExitUnavailableCreative(true, clickHandoffPending = true, storeVisitPending = false))
+        assertFalse(shouldExitUnavailableCreative(true, clickHandoffPending = false, storeVisitPending = true))
+        assertTrue(shouldExitUnavailableCreative(true, clickHandoffPending = false, storeVisitPending = false))
+    }
+
+    @Test
     fun `fallback HTML failures skip only initial main-frame load`() {
         assertEquals(
             FallbackHtmlFailureAction.SKIP_INITIAL,
