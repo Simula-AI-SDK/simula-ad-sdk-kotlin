@@ -120,6 +120,8 @@ internal fun videoMuteInteractionAllowed(
 
 internal fun videoMuteActionLabel(muted: Boolean): String = if (muted) "Unmute video" else "Mute video"
 
+internal fun videoMuteControlVisible(completed: Boolean): Boolean = !completed
+
 internal fun retainVideoMaxPosition(previousMs: Long, currentMs: Long): Long =
     maxOf(previousMs.coerceAtLeast(0L), currentMs.coerceAtLeast(0L))
 

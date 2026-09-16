@@ -369,6 +369,21 @@ internal fun videoCloseGateMs(delaySeconds: Int, durationMs: Long): Long {
     return if (durationMs > 0L) minOf(configured, durationMs) else configured
 }
 
+/**
+ * Duration evidence is unavailable on some MediaPlayer implementations. Unknown duration earns at
+ * the configured gate; known short media remains completion-earned unless actual accumulated play
+ * independently reaches the configured duration (for example across Activity recreation).
+ */
+internal fun rewardedVideoDurationGateReached(
+    accumulatedPlayTimeMs: Long,
+    configuredDelaySeconds: Int,
+    durationMs: Long,
+): Boolean {
+    val configuredMs = configuredDelaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS) * 1_000L
+    val thresholdMs = if (durationMs > 0L) configuredMs else videoCloseGateMs(configuredDelaySeconds, durationMs)
+    return accumulatedPlayTimeMs.coerceAtLeast(0L) >= thresholdMs
+}
+
 internal fun closeGateSecondsLeft(elapsedMs: Long, requiredMs: Long): Int =
     ceil((requiredMs - elapsedMs).coerceAtLeast(0L) / 1000.0).toInt()
 

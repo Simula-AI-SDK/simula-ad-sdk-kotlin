@@ -19,6 +19,7 @@ import ad.simula.ad.sdk.model.closeGateSecondsLeft
 import ad.simula.ad.sdk.model.videoCloseGateMs
 import ad.simula.ad.sdk.model.retainVideoMaxPosition
 import ad.simula.ad.sdk.model.videoReachedMidpoint
+import ad.simula.ad.sdk.model.rewardedVideoDurationGateReached
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.ClickRouteStart
@@ -1008,9 +1009,11 @@ private fun RewardedMinigame(
                         if (videoReachedMidpoint(presentation.videoPositionMs, durationMs)) {
                             storePromptVisible = true
                         }
-                        val configuredGateMs = gateSeconds.coerceAtLeast(0) * 1_000L
-                        if (configuredGateMs <= durationMs &&
-                            presentation.accumulatedPlayTimeMs >= configuredGateMs
+                        if (rewardedVideoDurationGateReached(
+                                accumulatedPlayTimeMs = presentation.accumulatedPlayTimeMs,
+                                configuredDelaySeconds = gateSeconds,
+                                durationMs = durationMs,
+                            )
                         ) {
                             presentation.recordCompletionReason(RewardCompletionReason.DURATION_ELAPSED)
                             presentation.rewardEarned = true

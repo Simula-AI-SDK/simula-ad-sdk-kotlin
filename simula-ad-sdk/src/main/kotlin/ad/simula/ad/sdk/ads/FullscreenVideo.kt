@@ -16,6 +16,7 @@ import ad.simula.ad.sdk.model.videoAspectFitTransform
 import ad.simula.ad.sdk.model.videoCtaInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteActionLabel
+import ad.simula.ad.sdk.model.videoMuteControlVisible
 import ad.simula.ad.sdk.model.videoPreparationClaimPolicy
 import ad.simula.ad.sdk.model.videoReadinessTimeoutCode
 import ad.simula.ad.sdk.model.videoMediaErrorCode
@@ -330,12 +331,14 @@ internal fun FullscreenVideo(
             Modifier.consumeVideoTouches()
         }
         Box(Modifier.fillMaxSize().then(ctaModifier))
-        VideoMuteControl(
-            muted = muted,
-            enabled = videoMuteInteractionAllowed(firstFrameRendered, playerActive = !completed),
-            onClick = controller::toggleMuted,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-        )
+        if (videoMuteControlVisible(completed)) {
+            VideoMuteControl(
+                muted = muted,
+                enabled = videoMuteInteractionAllowed(firstFrameRendered, playerActive = true),
+                onClick = controller::toggleMuted,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            )
+        }
     }
 }
 
