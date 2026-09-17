@@ -1,6 +1,9 @@
 package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.BuildConfig
+import ad.simula.ad.sdk.ads.SimulaApiEnvironment
+import android.content.Context
+import android.content.pm.PackageManager
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -24,6 +27,29 @@ internal data class ApiEnvironmentFreezeResult(
     val conflictsWithFrozenEnvironment: Boolean,
 )
 
+internal data class ApiEnvironmentResolverInputs(
+    val requestedEnvironment: SimulaApiEnvironment,
+    val stagingCapable: Boolean,
+    val stagingBaseUrl: String,
+    val stagingManifestValue: Any?,
+)
+
+internal fun resolveApiEnvironment(
+    inputs: ApiEnvironmentResolverInputs,
+    productionBaseUrl: String = ApiEnvironmentPolicy.PRODUCTION_BASE_URL,
+): ApiEndpointConfiguration {
+    val stagingEnabled =
+        inputs.requestedEnvironment == SimulaApiEnvironment.Staging &&
+            inputs.stagingCapable &&
+            inputs.stagingBaseUrl.isNotBlank() &&
+            (inputs.stagingManifestValue as? Boolean) == true
+    return if (stagingEnabled) {
+        ApiEndpointConfiguration(ApiEnvironment.Staging, inputs.stagingBaseUrl.trimEnd('/'))
+    } else {
+        ApiEndpointConfiguration(ApiEnvironment.Production, productionBaseUrl.trimEnd('/'))
+    }
+}
+
 /** First request wins for the life of the process, preventing mixed production/staging traffic. */
 internal class ApiEnvironmentPolicy(
     private val stagingCapable: Boolean,
@@ -32,8 +58,11 @@ internal class ApiEnvironmentPolicy(
 ) {
     private val frozen = AtomicReference<ApiEndpointConfiguration?>(null)
 
-    fun freeze(devMode: Boolean): ApiEnvironmentFreezeResult {
-        val requested = requestedConfiguration(devMode)
+    fun configure(
+        requestedEnvironment: SimulaApiEnvironment,
+        stagingManifestValue: Any?,
+    ): ApiEnvironmentFreezeResult {
+        val requested = requestedConfiguration(requestedEnvironment, stagingManifestValue)
         while (true) {
             val existing = frozen.get()
             if (existing != null) {
@@ -45,15 +74,29 @@ internal class ApiEnvironmentPolicy(
         }
     }
 
-    fun currentOrProduction(): ApiEndpointConfiguration =
-        frozen.get() ?: freeze(devMode = false).configuration
-
-    internal fun requestedConfiguration(devMode: Boolean): ApiEndpointConfiguration =
-        if (devMode && stagingCapable && stagingBaseUrl.isNotBlank()) {
-            ApiEndpointConfiguration(ApiEnvironment.Staging, stagingBaseUrl.trimEnd('/'))
-        } else {
-            ApiEndpointConfiguration(ApiEnvironment.Production, productionBaseUrl.trimEnd('/'))
+    /** Initialization defaults to production only when no explicit request has already won. */
+    fun ensureProductionDefault(): ApiEndpointConfiguration {
+        while (true) {
+            frozen.get()?.let { return it }
+            val production = requestedConfiguration(SimulaApiEnvironment.Production, null)
+            if (frozen.compareAndSet(null, production)) return production
         }
+    }
+
+    fun currentOrProduction(): ApiEndpointConfiguration = frozen.get() ?: ensureProductionDefault()
+
+    internal fun requestedConfiguration(
+        requestedEnvironment: SimulaApiEnvironment,
+        stagingManifestValue: Any?,
+    ): ApiEndpointConfiguration = resolveApiEnvironment(
+        inputs = ApiEnvironmentResolverInputs(
+            requestedEnvironment = requestedEnvironment,
+            stagingCapable = stagingCapable,
+            stagingBaseUrl = stagingBaseUrl,
+            stagingManifestValue = stagingManifestValue,
+        ),
+        productionBaseUrl = productionBaseUrl,
+    )
 
     internal companion object {
         const val PRODUCTION_BASE_URL = "https://simula-api-701226639755.us-central1.run.app"
@@ -67,21 +110,49 @@ internal object ProcessApiEnvironment {
     )
     private val conflictWarned = AtomicBoolean(false)
 
-    fun freeze(devMode: Boolean): ApiEndpointConfiguration {
-        val result = policy.freeze(devMode)
+    fun configure(
+        requestedEnvironment: SimulaApiEnvironment,
+        stagingManifestValue: Any?,
+    ): Boolean {
+        val result = policy.configure(requestedEnvironment, stagingManifestValue)
         if (result.conflictsWithFrozenEnvironment && conflictWarned.compareAndSet(false, true)) {
             runCatching {
                 Log.w(
                     "SimulaAdSDK",
-                    "Ignoring a conflicting devMode API environment; the first process environment remains active.",
+                    "Ignoring a conflicting API environment request; the first process environment remains active.",
                 )
             }
         }
-        return result.configuration
+        return result.configuration.environment == requestedEnvironment.toInternalEnvironment()
     }
+
+    fun ensureProductionDefault(): ApiEndpointConfiguration = policy.ensureProductionDefault()
 
     /** A pre-initialization caller safely freezes production rather than allowing later traffic to split. */
     val current: ApiEndpointConfiguration get() = policy.currentOrProduction()
+}
+
+internal const val STAGING_ENVIRONMENT_METADATA = "SimulaStagingEnvironmentEnabled"
+
+/** Performs the single bounded PackageManager metadata lookup allowed by pre-initialization config. */
+internal fun readStagingEnvironmentManifestValue(context: Context): Any? {
+    if (!BuildConfig.SIMULA_STAGING_CAPABLE) return null
+    return runCatching {
+        val appContext = context.applicationContext ?: context
+        val metadata = appContext.packageManager
+            .getApplicationInfo(appContext.packageName, PackageManager.GET_META_DATA)
+            .metaData
+        if (metadata?.containsKey(STAGING_ENVIRONMENT_METADATA) == true) {
+            metadata.getBoolean(STAGING_ENVIRONMENT_METADATA, false)
+        } else {
+            null
+        }
+    }.getOrNull()
+}
+
+private fun SimulaApiEnvironment.toInternalEnvironment(): ApiEnvironment = when (this) {
+    SimulaApiEnvironment.Production -> ApiEnvironment.Production
+    SimulaApiEnvironment.Staging -> ApiEnvironment.Staging
 }
 
 internal fun apiUrl(baseUrl: String, path: String): String =

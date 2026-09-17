@@ -66,6 +66,32 @@ start with `$`, and must not contain `.`. Values are limited to 256 Unicode code
 over-limit entries are ignored safely and reported in Logcat and SDK telemetry. Do not include PII,
 credentials, tokens, or other secrets.
 
+## Staging Environment
+
+Staging is restricted to exact `X.Y.Z-dev.N` SDK artifacts and requires an explicit host manifest
+opt-in:
+
+```xml
+<application>
+    <meta-data
+        android:name="SimulaStagingEnvironmentEnabled"
+        android:value="true" />
+</application>
+```
+
+Request staging before `SimulaAds.initialize(...)` or before composing `SimulaProvider`:
+
+```kotlin
+val stagingEnabled = SimulaAds.configureApiEnvironment(
+    context = applicationContext,
+    environment = SimulaApiEnvironment.Staging,
+)
+```
+
+The first process environment wins. Missing or non-Boolean metadata, metadata lookup failure, and
+stable SDK artifacts fail closed to production. `devMode` remains available on existing APIs for
+its non-endpoint development behavior, but it does not select the API environment.
+
 Initial advertising-ID collection is best effort. Session startup waits at most 2.5 seconds for the
 first lookup, then proceeds without the ID; a late lookup can still enrich later requests.
 
