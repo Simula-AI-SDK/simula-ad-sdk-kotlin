@@ -42,6 +42,7 @@ internal class SimulaSessionStore(
         Telemetry.recordOperation(name, durationMs, success, failureClass = failureClass)
     },
     private val fireIpv4: (String, String?, String?, String) -> Unit = Ipv4Beacon::fire,
+    private val patchPpid: suspend (String, String, String) -> Boolean = SimulaApiClient::updatePpid,
     private val sessionGeneration: () -> Long = { 0L },
     private val beforeExpiredSessionCreate: suspend () -> Unit = {},
 ) {
@@ -94,7 +95,7 @@ internal class SimulaSessionStore(
                         }
                         break
                     }
-                    val ok = runCatching { SimulaApiClient.updatePpid(apiKey, sid, target) }.getOrDefault(false)
+                    val ok = runCatching { patchPpid(apiKey, sid, target) }.getOrDefault(false)
                     if (!ok) break
                     // This records server truth even if the desired identity changed during PATCH;
                     // the loop then converges to the latest value in submission order. A foreground
@@ -102,7 +103,10 @@ internal class SimulaSessionStore(
                     // pair when the PATCH still describes the published session.
                     withContext(publicationDispatcher) {
                         synchronized(sessionLock) {
-                            if (publishedSession.id == sid) {
+                            if (
+                                publishedSession.id == sid &&
+                                publishedSession.generation == snapshot.generation
+                            ) {
                                 publishedSession = publishedSession.copy(userID = target)
                             }
                         }

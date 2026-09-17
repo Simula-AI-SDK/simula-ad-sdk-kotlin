@@ -134,7 +134,13 @@ class ActivityVisibilityStateTest {
 
         state.seedUntrackedStartedActivity()
         state.onActivityStarted(overlay)
-        assertFalse(state.onActivityStopped(overlay, changingConfigurations = false))
+        assertFalse(
+            state.onActivityStopped(
+                overlay,
+                changingConfigurations = false,
+                processHasVisibleUi = true,
+            ),
+        )
         nowMs += SESSION_BACKGROUND_EXPIRATION_MS
 
         assertFalse(state.onActivityStarted(Any()))
@@ -148,7 +154,13 @@ class ActivityVisibilityStateTest {
         val host = Any()
 
         state.seedUntrackedStartedActivity()
-        assertFalse(state.onActivityStopped(host, changingConfigurations = false))
+        assertFalse(
+            state.onActivityStopped(
+                host,
+                changingConfigurations = false,
+                processHasVisibleUi = true,
+            ),
+        )
         assertTrue(state.onUiHidden())
         nowMs += SESSION_BACKGROUND_EXPIRATION_MS
 
@@ -164,7 +176,13 @@ class ActivityVisibilityStateTest {
 
         state.seedUntrackedStartedActivity()
         state.seedStartedActivity(host)
-        assertFalse(state.onActivityStopped(host, changingConfigurations = false))
+        assertFalse(
+            state.onActivityStopped(
+                host,
+                changingConfigurations = false,
+                processHasVisibleUi = true,
+            ),
+        )
         assertTrue(state.onUiHidden())
         nowMs += SESSION_BACKGROUND_EXPIRATION_MS
 
@@ -173,16 +191,38 @@ class ActivityVisibilityStateTest {
     }
 
     @Test
-    fun `ui hidden waits for every tracked activity`() {
-        val state = ActivityVisibilityState(clock = { 0L })
+    fun `ui hidden overrides stale tracked activity ordering`() {
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
         val host = Any()
 
         state.seedUntrackedStartedActivity()
         state.onActivityStarted(host)
 
-        assertFalse(state.onUiHidden())
-        assertFalse(state.onActivityStopped(host, changingConfigurations = false))
         assertTrue(state.onUiHidden())
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+        assertTrue(state.onActivityStarted(host))
+    }
+
+    @Test
+    fun `phantom launch seed clears when last activity stops without visible ui`() {
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
+        val host = Any()
+
+        state.seedUntrackedStartedActivity()
+        state.onActivityStarted(host)
+        assertTrue(
+            state.onActivityStopped(
+                host,
+                changingConfigurations = false,
+                processHasVisibleUi = false,
+            ),
+        )
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+
+        assertTrue(state.onActivityStarted(host))
+        assertEquals(1L, state.sessionGeneration)
     }
 
     @Test

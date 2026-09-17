@@ -100,6 +100,41 @@ class SimulaSessionStoreTest {
     }
 
     @Test
+    fun `patch completion cannot rewind same id refreshed session user`() = runTest {
+        var generation = 0L
+        val patchEntered = CompletableDeferred<Unit>()
+        val releasePatch = CompletableDeferred<Unit>()
+        val patchedUsers = mutableListOf<String>()
+        val store = testStore(
+            initialUserID = "user-a",
+            sessionGeneration = { generation },
+            patchPpid = { _, _, userID ->
+                patchedUsers += userID
+                if (patchedUsers.size == 1) {
+                    patchEntered.complete(Unit)
+                    releasePatch.await()
+                    true
+                } else {
+                    false
+                }
+            },
+        ) { _, _, _ -> "same-session" }
+        assertEquals("same-session", store.ensureSession())
+
+        store.updatePpid("user-b")
+        store.reconcileServerPpid()
+        patchEntered.await()
+        store.updatePpid("user-c")
+        generation++
+        assertEquals("same-session", store.ensureSession())
+        releasePatch.complete(Unit)
+        runCurrent()
+
+        assertEquals("user-c", store.sessionUserID)
+        assertEquals(listOf("user-b"), patchedUsers)
+    }
+
+    @Test
     fun `expired refresh coalesces concurrent ensure callers`() = runTest {
         var generation = 0L
         var calls = 0
@@ -266,6 +301,7 @@ class SimulaSessionStoreTest {
         initialUserID: String? = null,
         sessionGeneration: () -> Long = { 0L },
         beforeExpiredSessionCreate: suspend () -> Unit = {},
+        patchPpid: suspend (String, String, String) -> Boolean = { _, _, _ -> true },
         createSession: suspend (String, Boolean, String?) -> String?,
     ) = SimulaSessionStore(
         apiKey = "api-key",
@@ -276,6 +312,7 @@ class SimulaSessionStoreTest {
         createSession = createSession,
         recordSessionOperation = { _, _, _, _ -> },
         fireIpv4 = { _, _, _, _ -> },
+        patchPpid = patchPpid,
         sessionGeneration = sessionGeneration,
         beforeExpiredSessionCreate = beforeExpiredSessionCreate,
     )

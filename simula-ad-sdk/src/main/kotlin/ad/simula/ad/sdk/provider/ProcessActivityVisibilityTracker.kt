@@ -62,7 +62,11 @@ internal class ActivityVisibilityState(
 
     /** Records the start of a real process background as soon as the last Activity stops. */
     @Synchronized
-    fun onActivityStopped(activity: Any, changingConfigurations: Boolean): Boolean {
+    fun onActivityStopped(
+        activity: Any,
+        changingConfigurations: Boolean,
+        processHasVisibleUi: Boolean = false,
+    ): Boolean {
         val wasTracked = startedActivities.remove(activity)
         // Activity callbacks are not replayed. When registration happens after the current
         // Activity's onStart (commonly through a late Application-context initialize), its first
@@ -70,6 +74,8 @@ internal class ActivityVisibilityState(
         // stop as the missing foreground boundary. Android starts the destination Activity before
         // stopping the source Activity, so started-activity counting needs no delayed settle race.
         if (!wasTracked && startedActivities.isNotEmpty()) return false
+        if (hasUntrackedStartedActivity && processHasVisibleUi) return false
+        if (!processHasVisibleUi) hasUntrackedStartedActivity = false
         if (startedActivities.isNotEmpty() || hasUntrackedStartedActivity || changingConfigurations) return false
         if (backgroundStartedAtMs != null) return false
         backgroundStartedAtMs = clock()
@@ -79,7 +85,7 @@ internal class ActivityVisibilityState(
     /** Resolves pre-registration Activity uncertainty only at Android's aggregate UI-hidden signal. */
     @Synchronized
     fun onUiHidden(): Boolean {
-        if (startedActivities.isNotEmpty()) return false
+        startedActivities.clear()
         hasUntrackedStartedActivity = false
         if (backgroundStartedAtMs != null) return false
         backgroundStartedAtMs = clock()
@@ -154,7 +160,13 @@ internal object ProcessActivityVisibilityTracker {
 
                         override fun onActivityStopped(activity: Activity) {
                             val changingConfigurations = runCatching { activity.isChangingConfigurations }.getOrDefault(false)
-                            runCatching { state.onActivityStopped(activity, changingConfigurations) }
+                            runCatching {
+                                state.onActivityStopped(
+                                    activity = activity,
+                                    changingConfigurations = changingConfigurations,
+                                    processHasVisibleUi = processHasVisibleUi(),
+                                )
+                            }
                             runCatching { Telemetry.flush() }
                         }
 
