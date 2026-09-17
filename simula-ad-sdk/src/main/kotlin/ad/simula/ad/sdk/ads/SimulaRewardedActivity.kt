@@ -1156,6 +1156,7 @@ private fun RewardedMinigame(
         AdCloseButton(
             treatment = close.treatment,
             position = close.position,
+            action = close.action,
             progressBarColor = close.progressBarColor,
             isRewardCopy = true,
             enabled = canDismissFullscreen(
