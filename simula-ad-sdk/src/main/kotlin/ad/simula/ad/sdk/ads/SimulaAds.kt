@@ -11,6 +11,8 @@ import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.nativead.NativeAdPreloadCache
 import ad.simula.ad.sdk.network.Ipv4Beacon
+import ad.simula.ad.sdk.network.ProcessApiEnvironment
+import ad.simula.ad.sdk.network.readStagingEnvironmentManifestValue
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
@@ -110,11 +112,47 @@ object SimulaAds {
     val deviceId: String? get() = SimulaDeviceId.value
 
     /**
+     * Requests the API environment for this application process.
+     *
+     * Call this before [initialize] or before composing `SimulaProvider`. The first effective
+     * process environment wins. [SimulaApiEnvironment.Staging] is effective only for an exact
+     * `X.Y.Z-dev.N` SDK artifact when the host application's manifest contains an actual Boolean:
+     *
+     * ```xml
+     * <meta-data
+     *     android:name="SimulaStagingEnvironmentEnabled"
+     *     android:value="true" />
+     * ```
+     *
+     * Missing or malformed metadata, lookup failure, and stable SDK artifacts fail closed to
+     * production. This method performs no network or disk work beyond one bounded PackageManager
+     * metadata lookup for a staging request.
+     *
+     * @return true when [environment] is the effective process environment; false when the request
+     * is gated to production or conflicts with the environment that already won.
+     */
+    fun configureApiEnvironment(
+        context: Context,
+        environment: SimulaApiEnvironment,
+    ): Boolean = runCatching {
+        val stagingManifestValue = if (environment == SimulaApiEnvironment.Staging) {
+            readStagingEnvironmentManifestValue(context)
+        } else {
+            null
+        }
+        ProcessApiEnvironment.configure(environment, stagingManifestValue)
+    }.getOrElse {
+        ProcessApiEnvironment.configure(environment, null)
+    }
+
+    /**
      * Initialize the SDK. Idempotent — the first valid call wins; later calls are
      * ignored.
      *
      * @param context any Context (its application context is retained).
      * @param apiKey  your Simula API key (must be non-blank).
+     * @param devMode enables development diagnostics and creative behavior. It does not select the
+     *                API environment; use [configureApiEnvironment] before initialization instead.
      * @param hasPrivacyConsent Legacy coarse consent flag. When false, suppresses PII. Default true.
      * @param privacy Granular privacy / consent configuration (GDPR/TCF/CCPA/GPP/COPPA + IDFA
      *                opt-in). When provided it takes precedence over [hasPrivacyConsent]; when null
@@ -169,6 +207,7 @@ object SimulaAds {
                     privacy = resolvedPrivacy,
                     explicitPrivacy = privacy != null,
                 ) {
+                    ProcessApiEnvironment.ensureProductionDefault()
                     Telemetry.claimInitialization(
                         context = applicationContext,
                         apiKey = apiKey,
@@ -313,7 +352,8 @@ object SimulaAds {
                 breadcrumb = configSummary,
             )
             runCatching {
-                val vPrefs = appContext.getSharedPreferences("simula_ad_sdk_version_prefs", Context.MODE_PRIVATE)
+                val prefsName = ProcessApiEnvironment.current.storageName("simula_ad_sdk_version_prefs")
+                val vPrefs = appContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
                 val last = vPrefs.getString("last_seen_sdk_version", null)
                 val current = ad.simula.ad.sdk.telemetry.SIMULA_SDK_VERSION
                 if (last != null && last != current) {

@@ -3,7 +3,9 @@ package ad.simula.ad.sdk.network
 import ad.simula.ad.sdk.core.LaunchSettledGate
 import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.SimulaScope
+import ad.simula.ad.sdk.telemetry.Telemetry
 import java.net.URLEncoder
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -20,7 +22,8 @@ import kotlinx.coroutines.launch
  * resolves the capture by `sid` first and falls back to `ppid` only when `sid` is absent.
  *
  * SAFETY: fire-and-forget. Never throws, never blocks init or session creation, and no-ops when
- * no beacon URL is configured. It is intentionally NOT consent-gated — parity with the prior RN
+ * no beacon URL is configured. Staging skips this production-only endpoint so a staging session id
+ * cannot cross environments. It is intentionally NOT consent-gated — parity with the prior RN
  * implementation (ensure this is covered by privacy policy / publisher agreements).
  *
  * BACKEND CONTRACT: a GET to [DEFAULT_URL] with query params:
@@ -62,8 +65,13 @@ internal object Ipv4Beacon {
     internal var deviceIdProvider: () -> String? = { SimulaDeviceId.value }
     internal var clock: () -> Long = System::currentTimeMillis
     internal var launchSettledGate: LaunchSettledGate = ProcessLaunchSettledGate
+    internal var environmentProvider: () -> ApiEnvironment = { ProcessApiEnvironment.current.environment }
+    internal var recordStagingSkip: () -> Unit = {
+        Telemetry.recordError(signature = "ipv4:staging_skipped")
+    }
 
     private val lock = Any()
+    private val stagingSkipReported = AtomicBoolean(false)
 
     /** Identities whose beacon has SUCCESSFULLY fired this process (failures stay retryable). */
     private val captured = mutableSetOf<String>()
@@ -83,6 +91,13 @@ internal object Ipv4Beacon {
      * see the class doc. Never throws.
      */
     fun fire(apiKey: String, sessionId: String?, ppid: String?, reason: String) {
+        val isStaging = runCatching { environmentProvider() == ApiEnvironment.Staging }.getOrDefault(true)
+        if (isStaging) {
+            if (stagingSkipReported.compareAndSet(false, true)) {
+                runCatching { recordStagingSkip() }
+            }
+            return
+        }
         val base = url.trim()
         if (base.isEmpty() || apiKey.isBlank()) return
 
@@ -159,11 +174,14 @@ internal object Ipv4Beacon {
             captured.clear()
             inFlight.clear()
         }
+        stagingSkipReported.set(false)
         url = DEFAULT_URL
         scope = SimulaScope
         send = { u -> SimulaHttp.request(u, instrument = false).isSuccessful }
         deviceIdProvider = { SimulaDeviceId.value }
         clock = System::currentTimeMillis
         launchSettledGate = ProcessLaunchSettledGate
+        environmentProvider = { ProcessApiEnvironment.current.environment }
+        recordStagingSkip = { Telemetry.recordError(signature = "ipv4:staging_skipped") }
     }
 }

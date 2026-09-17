@@ -31,6 +31,7 @@ import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
+import ad.simula.ad.sdk.network.ProcessApiEnvironment
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.privacy.ProcessPrivacyOwner
@@ -185,7 +186,8 @@ private fun getCacheKey(slot: String, position: Int): String = "$slot:$position"
  * Equivalent to React's <SimulaProvider apiKey={...} devMode={...} ...>{children}</SimulaProvider>
  *
  * @param apiKey        Your Simula API key (required, non-blank).
- * @param devMode       Enable dev mode for testing. Default false.
+ * @param devMode       Enable development diagnostics and creative behavior. This does not select
+ *                      the API environment; configure that through `SimulaAds` before composition.
  * @param primaryUserID Optional user identifier for targeting.
  * @param hasPrivacyConsent Legacy coarse consent flag. When false, suppresses PII. Default true.
  * @param privacy       Granular privacy / consent configuration (GDPR/CCPA/GPP/COPPA + IDFA
@@ -232,6 +234,7 @@ fun SimulaProvider(
                 privacy = currentPrivacy,
                 explicitPrivacy = currentExplicitPrivacy,
             ) {
+                ProcessApiEnvironment.ensureProductionDefault()
                 Telemetry.claimInitialization(
                     context = applicationContext,
                     apiKey = apiKey,

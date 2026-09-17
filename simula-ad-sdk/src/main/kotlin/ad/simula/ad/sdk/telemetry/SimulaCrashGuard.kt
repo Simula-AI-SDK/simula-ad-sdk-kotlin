@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.telemetry
 
+import ad.simula.ad.sdk.network.ProcessApiEnvironment
 import ad.simula.ad.sdk.core.LaunchSettledGate
 import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.SimulaScope
@@ -304,7 +305,7 @@ internal object SimulaCrashGuard {
 
     /** Write one crash record, synchronously, on the crashing thread (the process is about to die). */
     private fun persistSync(app: Context, thread: Thread, t: Throwable) {
-        val dir = File(app.filesDir, DIR)
+        val dir = File(app.filesDir, ProcessApiEnvironment.current.storageName(DIR))
         if (!dir.exists()) dir.mkdirs()
         val file = File(dir, PENDING_FILE)
         if (file.length() >= MAX_FILE_BYTES) return // crash-loop guard
@@ -330,7 +331,10 @@ internal object SimulaCrashGuard {
     }
 
     private fun replayPending(app: Context) {
-        val file = File(File(app.filesDir, DIR), PENDING_FILE)
+        val file = File(
+            File(app.filesDir, ProcessApiEnvironment.current.storageName(DIR)),
+            PENDING_FILE,
+        )
         if (!file.exists()) return
         // Most-recent records only: a crash-loop can fill the pending file, and replaying every line
         // would launch one recordError (→ store.save + flush) each at launch. The cap bounds that
@@ -386,6 +390,8 @@ internal object SimulaCrashGuard {
         val am = app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
         val infos = runCatching { am.getHistoricalProcessExitReasons(app.packageName, 0, 0) }.getOrNull()
         if (infos.isNullOrEmpty()) return
+        // Android's historical exit list is process-wide and has no SDK-environment marker. Keep
+        // one shared cursor so switching environments cannot replay the same OS incident twice.
         val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val lastTs = prefs.getLong(KEY_LAST_EXIT_TS, 0L)
         var newestTs = lastTs

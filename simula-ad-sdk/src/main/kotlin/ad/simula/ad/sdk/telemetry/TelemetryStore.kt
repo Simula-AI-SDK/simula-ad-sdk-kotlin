@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.telemetry
 
+import ad.simula.ad.sdk.network.ApiEnvironment
+import ad.simula.ad.sdk.network.storageName
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
@@ -23,7 +25,7 @@ internal interface TelemetryStore {
 internal class SharedPrefsTelemetryStore(
     private val context: Context,
     private val json: Json,
-    private val prefsName: String = PREFS_NAME,
+    private val prefsName: String = ApiEnvironment.Production.storageName(PREFS_NAME),
     private val key: String = KEY_BUFFER,
 ) : TelemetryStore {
 
@@ -65,11 +67,14 @@ internal class SharedPrefsTelemetryStore(
 internal class SqliteTelemetryStore(
     context: Context,
     private val json: Json,
+    environment: ApiEnvironment = ApiEnvironment.Production,
     private val maxAgeMs: Long = TimeUnit.HOURS.toMillis(24),
     private val clock: () -> Long = System::currentTimeMillis,
 ) : TelemetryStore {
 
-    private val helper = Helper(context.applicationContext)
+    private val databaseName = environment.storageName(DB_NAME)
+    private val legacyPrefsName = environment.storageName(LEGACY_PREFS)
+    private val helper = Helper(context.applicationContext, databaseName)
 
     init {
         // One-time drain of the legacy SharedPrefs buffer into SQLite (no-op once cleared).
@@ -125,7 +130,7 @@ internal class SqliteTelemetryStore(
     }.getOrDefault(false)
 
     private fun migrateFromSharedPrefs(context: Context) {
-        val prefs = context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
+        val prefs = context.getSharedPreferences(legacyPrefsName, Context.MODE_PRIVATE)
         val jsonStr = prefs.getString(LEGACY_KEY, null) ?: return
         val migrated = runCatching {
             val legacy = json.decodeFromString<List<TelemetryEvent>>(jsonStr)
@@ -171,7 +176,8 @@ internal class SqliteTelemetryStore(
         if (migrated) prefs.edit().remove(LEGACY_KEY).commit()
     }
 
-    private class Helper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
+    private class Helper(context: Context, databaseName: String) :
+        SQLiteOpenHelper(context, databaseName, null, DB_VERSION) {
         init {
             setWriteAheadLoggingEnabled(true)
         }
