@@ -50,6 +50,32 @@ class ActivityVisibilityStateTest {
     }
 
     @Test
+    fun `background process initialization expires on first foreground after thirty minutes`() {
+        var nowMs = 2_000L
+        val state = ActivityVisibilityState(clock = { nowMs })
+
+        assertTrue(state.seedBackgroundedProcess())
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+
+        assertTrue(state.onActivityStarted(Any()))
+        assertEquals(1L, state.sessionGeneration)
+    }
+
+    @Test
+    fun `repeated background initialization keeps the original interval`() {
+        var nowMs = 2_000L
+        val state = ActivityVisibilityState(clock = { nowMs })
+
+        assertTrue(state.seedBackgroundedProcess())
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS - 1L
+        assertFalse(state.seedBackgroundedProcess())
+        nowMs++
+
+        assertTrue(state.onActivityStarted(Any()))
+        assertEquals(1L, state.sessionGeneration)
+    }
+
+    @Test
     fun `ordinary and sdk fullscreen activity transitions never establish background`() {
         var nowMs = 0L
         val state = ActivityVisibilityState(clock = { nowMs })

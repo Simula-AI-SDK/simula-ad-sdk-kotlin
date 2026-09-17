@@ -91,6 +91,10 @@ internal class ActivityVisibilityState(
         backgroundStartedAtMs = clock()
         return true
     }
+
+    /** Seeds a process initialized after it was already backgrounded (for example, FCM startup). */
+    @Synchronized
+    fun seedBackgroundedProcess(): Boolean = onUiHidden()
 }
 
 /** Weak current-Activity ownership isolated for deterministic transition tests. */
@@ -148,7 +152,7 @@ internal object ProcessActivityVisibilityTracker {
         }
         synchronized(lock) {
             val observesUiHidden = registerUiHiddenCallbackLocked(application)
-            val processHasVisibleUi = processHasVisibleUi()
+            val processHasVisibleUi = seedStartedActivity != null || processHasVisibleUi()
             if (processHasVisibleUi && !observesUiHidden) return
 
             if (!registeredApplications.contains(application)) {
@@ -194,6 +198,8 @@ internal object ProcessActivityVisibilityTracker {
             seedStartedActivity?.let(::seedKnownActivity)
             if (processHasVisibleUi) {
                 state.seedUntrackedStartedActivity()
+            } else {
+                state.seedBackgroundedProcess()
             }
         }
     }
