@@ -125,23 +125,36 @@ internal class SimulaSessionStore(
         startupGate()?.await()
 
         while (true) {
-            val requestedGeneration = currentSessionGeneration()
-            val flight = synchronized(sessionLock) {
+            var cachedSession: PublishedSession? = null
+            val flight: SessionFlight? = synchronized(sessionLock) {
                 sessionFlight?.let { return@synchronized it }
+                val requestedGeneration = currentSessionGeneration()
                 val snapshot = publishedSession
                 snapshot.id?.takeIf { it.isNotBlank() && snapshot.generation >= requestedGeneration }
-                    ?.let { return it }
-                startAttemptLocked(
+                    ?.let {
+                        cachedSession = snapshot
+                        return@synchronized null
+                    }
+                return@synchronized startAttemptLocked(
                     generation = requestedGeneration,
                     refreshExpiredSession = snapshot.generation < requestedGeneration,
                 )
             }
-            val result = flight.deferred.await()
+            cachedSession?.let { cached ->
+                // The process generation is independent of sessionLock. Revalidate after selecting
+                // the cache so a foreground expiration racing that selection cannot reuse the id.
+                if (currentSessionGeneration() <= cached.generation) return cached.id
+                return@let
+            }
+            if (cachedSession != null) continue
+
+            val activeFlight = flight ?: continue
+            val result = activeFlight.deferred.await()
             // Every waiter revalidates after the flight. If lifecycle expiration advanced while
             // it was suspended, all callers coalesce onto the current generation rather than one
             // returning an id that became stale mid-flight. A failure at the current generation
             // still fails open here; only a later external ensure retries that same generation.
-            if (currentSessionGeneration() <= flight.generation) return result
+            if (currentSessionGeneration() <= activeFlight.generation) return result
         }
     }
 

@@ -34,6 +34,30 @@ class SimulaSessionStoreTest {
     }
 
     @Test
+    fun `generation bump after cached sample cannot return expired session`() = runTest {
+        var generation = 0L
+        var generationReads = 0
+        var calls = 0
+        val store = testStore(
+            sessionGeneration = {
+                generationReads++
+                val sampled = generation
+                if (generationReads == 4) generation++
+                sampled
+            },
+        ) { _, _, _ ->
+            calls++
+            "session-$calls"
+        }
+        assertEquals("session-1", store.ensureSession())
+
+        assertEquals("session-2", store.ensureSession())
+
+        assertEquals(2, calls)
+        assertEquals(1L, generation)
+    }
+
+    @Test
     fun `expired refresh replaces the cached id and session user together`() = runTest {
         var generation = 0L
         val seenUsers = mutableListOf<String?>()
