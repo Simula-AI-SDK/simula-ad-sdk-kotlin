@@ -1,8 +1,12 @@
 package ad.simula.ad.sdk.provider
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Application
+import android.content.ComponentCallbacks2
+import android.content.res.Configuration
 import android.os.Bundle
+import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import ad.simula.ad.sdk.core.SimulaScope
@@ -22,6 +26,7 @@ internal class ActivityVisibilityState(
     private val expirationMs: Long = SESSION_BACKGROUND_EXPIRATION_MS,
 ) {
     private val startedActivities = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
+    private var hasUntrackedStartedActivity = false
     private var backgroundStartedAtMs: Long? = null
     private var expiredSessionGeneration = 0L
 
@@ -43,11 +48,16 @@ internal class ActivityVisibilityState(
         return true
     }
 
-    /** Seeds callbacks registered after an Activity's onStart without creating a transition. */
+    /** Seeds callbacks registered after onStart, honoring any background interval already observed. */
     @Synchronized
-    fun seedStartedActivity(activity: Any) {
-        startedActivities.add(activity)
-        backgroundStartedAtMs = null
+    fun seedStartedActivity(activity: Any): Boolean = onActivityStarted(activity)
+
+    /** Records a visible host whose onStart happened before callback registration. */
+    @Synchronized
+    fun seedUntrackedStartedActivity() {
+        if (backgroundStartedAtMs == null) {
+            hasUntrackedStartedActivity = true
+        }
     }
 
     /** Records the start of a real process background as soon as the last Activity stops. */
@@ -60,7 +70,17 @@ internal class ActivityVisibilityState(
         // stop as the missing foreground boundary. Android starts the destination Activity before
         // stopping the source Activity, so started-activity counting needs no delayed settle race.
         if (!wasTracked && startedActivities.isNotEmpty()) return false
-        if (startedActivities.isNotEmpty() || changingConfigurations) return false
+        if (startedActivities.isNotEmpty() || hasUntrackedStartedActivity || changingConfigurations) return false
+        if (backgroundStartedAtMs != null) return false
+        backgroundStartedAtMs = clock()
+        return true
+    }
+
+    /** Resolves pre-registration Activity uncertainty only at Android's aggregate UI-hidden signal. */
+    @Synchronized
+    fun onUiHidden(): Boolean {
+        if (startedActivities.isNotEmpty()) return false
+        hasUntrackedStartedActivity = false
         if (backgroundStartedAtMs != null) return false
         backgroundStartedAtMs = clock()
         return true
@@ -105,57 +125,97 @@ internal object ProcessActivityVisibilityTracker {
     private val lock = Any()
     private val state = ActivityVisibilityState(SystemClock::elapsedRealtime)
     private val registeredApplications = Collections.newSetFromMap(IdentityHashMap<Application, Boolean>())
+    private val registeredUiHiddenCallbacks = Collections.newSetFromMap(IdentityHashMap<Application, Boolean>())
     private val currentActivityState = CurrentActivityState<Activity>()
 
     val sessionGeneration: Long get() = state.sessionGeneration
     val currentActivity: Activity? get() = currentActivityState.current
 
     fun register(application: Application, seedStartedActivity: Activity? = null) {
-        seedStartedActivity?.let { activity ->
-            state.seedStartedActivity(activity)
-            val safeToPresent = runCatching {
-                isSafeCurrentActivitySeed(
-                    hasWindowFocus = activity.hasWindowFocus(),
-                    isFinishing = activity.isFinishing,
-                    isDestroyed = activity.isDestroyed,
-                )
-            }.getOrDefault(false)
-            currentActivityState.seed(activity, safeToPresent)
-            markApplicationActive(activity)
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runCatching {
+                Handler(Looper.getMainLooper()).post {
+                    register(application, seedStartedActivity)
+                }
+            }
+            return
         }
-        val shouldRegister = synchronized(lock) { registeredApplications.add(application) }
-        if (!shouldRegister) return
+        synchronized(lock) {
+            val observesUiHidden = registerUiHiddenCallbackLocked(application)
+            val processHasVisibleUi = processHasVisibleUi()
+            if (processHasVisibleUi && !observesUiHidden) return
 
+            if (!registeredApplications.contains(application)) {
+                val registered = runCatching {
+                    application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+                        override fun onActivityStarted(activity: Activity) {
+                            runCatching { state.onActivityStarted(activity) }
+                        }
+
+                        override fun onActivityStopped(activity: Activity) {
+                            val changingConfigurations = runCatching { activity.isChangingConfigurations }.getOrDefault(false)
+                            runCatching { state.onActivityStopped(activity, changingConfigurations) }
+                            runCatching { Telemetry.flush() }
+                        }
+
+                        override fun onActivityResumed(activity: Activity) {
+                            currentActivityState.onResumed(activity)
+                            markApplicationActive(activity)
+                            runCatching {
+                                SimulaScope.launch { runCatching { SimulaPrivacy.refreshAdvertisingId() } }
+                            }
+                        }
+
+                        override fun onActivityDestroyed(activity: Activity) {
+                            currentActivityState.onDestroyed(activity)
+                        }
+
+                        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+                        override fun onActivityPaused(activity: Activity) {}
+                        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+                    })
+                }.isSuccess
+                if (!registered) return
+                registeredApplications.add(application)
+            }
+
+            seedStartedActivity?.let(::seedKnownActivity)
+            if (processHasVisibleUi) {
+                state.seedUntrackedStartedActivity()
+            }
+        }
+    }
+
+    /** Caller holds [lock], serializing registration success with all competing entry points. */
+    private fun registerUiHiddenCallbackLocked(application: Application): Boolean {
+        if (registeredUiHiddenCallbacks.contains(application)) return true
         val registered = runCatching {
-            application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
-                override fun onActivityStarted(activity: Activity) {
-                    runCatching { state.onActivityStarted(activity) }
-                }
-
-                override fun onActivityStopped(activity: Activity) {
-                    val changingConfigurations = runCatching { activity.isChangingConfigurations }.getOrDefault(false)
-                    runCatching { state.onActivityStopped(activity, changingConfigurations) }
-                    runCatching { Telemetry.flush() }
-                }
-
-                override fun onActivityResumed(activity: Activity) {
-                    currentActivityState.onResumed(activity)
-                    markApplicationActive(activity)
-                    runCatching {
-                        SimulaScope.launch { runCatching { SimulaPrivacy.refreshAdvertisingId() } }
+            application.registerComponentCallbacks(object : ComponentCallbacks2 {
+                override fun onTrimMemory(level: Int) {
+                    if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+                        runCatching { state.onUiHidden() }
                     }
                 }
 
-                override fun onActivityDestroyed(activity: Activity) {
-                    currentActivityState.onDestroyed(activity)
-                }
-
-                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
-                override fun onActivityPaused(activity: Activity) {}
-                override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+                override fun onConfigurationChanged(newConfig: Configuration) {}
+                override fun onLowMemory() {}
             })
         }.isSuccess
-        if (!registered) synchronized(lock) { registeredApplications.remove(application) }
+        if (registered) registeredUiHiddenCallbacks.add(application)
+        return registered
+    }
+
+    private fun seedKnownActivity(activity: Activity) {
+        state.seedStartedActivity(activity)
+        val safeToPresent = runCatching {
+            isSafeCurrentActivitySeed(
+                hasWindowFocus = activity.hasWindowFocus(),
+                isFinishing = activity.isFinishing,
+                isDestroyed = activity.isDestroyed,
+            )
+        }.getOrDefault(false)
+        currentActivityState.seed(activity, safeToPresent)
+        markApplicationActive(activity)
     }
 
     private fun markApplicationActive(activity: Activity) {
@@ -166,5 +226,14 @@ internal object ProcessActivityVisibilityTracker {
                 activity.runOnUiThread { runCatching { WebViewPool.markApplicationActive(activity) } }
             }
         }
+    }
+
+    private fun processHasVisibleUi(): Boolean {
+        val info = ActivityManager.RunningAppProcessInfo()
+        return runCatching {
+            ActivityManager.getMyMemoryState(info)
+            info.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND ||
+                info.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
+        }.getOrDefault(false)
     }
 }

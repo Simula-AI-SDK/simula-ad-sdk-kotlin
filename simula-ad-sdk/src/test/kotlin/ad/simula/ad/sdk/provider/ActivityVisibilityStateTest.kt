@@ -127,6 +127,94 @@ class ActivityVisibilityStateTest {
     }
 
     @Test
+    fun `untracked visible host prevents overlay stop from starting background`() {
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
+        val overlay = Any()
+
+        state.seedUntrackedStartedActivity()
+        state.onActivityStarted(overlay)
+        assertFalse(state.onActivityStopped(overlay, changingConfigurations = false))
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+
+        assertFalse(state.onActivityStarted(Any()))
+        assertEquals(0L, state.sessionGeneration)
+    }
+
+    @Test
+    fun `ui hidden begins late registration background interval`() {
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
+        val host = Any()
+
+        state.seedUntrackedStartedActivity()
+        assertFalse(state.onActivityStopped(host, changingConfigurations = false))
+        assertTrue(state.onUiHidden())
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+
+        assertTrue(state.onActivityStarted(host))
+        assertEquals(1L, state.sessionGeneration)
+    }
+
+    @Test
+    fun `concrete activity seed retains uncertainty until aggregate ui hidden`() {
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
+        val host = Any()
+
+        state.seedUntrackedStartedActivity()
+        state.seedStartedActivity(host)
+        assertFalse(state.onActivityStopped(host, changingConfigurations = false))
+        assertTrue(state.onUiHidden())
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+
+        assertTrue(state.onActivityStarted(host))
+        assertEquals(1L, state.sessionGeneration)
+    }
+
+    @Test
+    fun `ui hidden waits for every tracked activity`() {
+        val state = ActivityVisibilityState(clock = { 0L })
+        val host = Any()
+
+        state.seedUntrackedStartedActivity()
+        state.onActivityStarted(host)
+
+        assertFalse(state.onUiHidden())
+        assertFalse(state.onActivityStopped(host, changingConfigurations = false))
+        assertTrue(state.onUiHidden())
+    }
+
+    @Test
+    fun `late uncertainty seed cannot erase recorded background`() {
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
+        val host = Any()
+
+        state.onActivityStarted(host)
+        assertTrue(state.onActivityStopped(host, changingConfigurations = false))
+        state.seedUntrackedStartedActivity()
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+
+        assertTrue(state.onActivityStarted(host))
+        assertEquals(1L, state.sessionGeneration)
+    }
+
+    @Test
+    fun `concrete seed consumes an expired recorded background`() {
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
+        val host = Any()
+
+        state.onActivityStarted(host)
+        state.onActivityStopped(host, changingConfigurations = false)
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+
+        assertTrue(state.seedStartedActivity(host))
+        assertEquals(1L, state.sessionGeneration)
+    }
+
+    @Test
     fun `untracked stop cannot background while another activity is started`() {
         val state = ActivityVisibilityState(clock = { 0L })
         val tracked = Any()
