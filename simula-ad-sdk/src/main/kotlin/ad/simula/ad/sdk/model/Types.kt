@@ -172,10 +172,10 @@ private fun normalizeBehaviorToken(raw: String?): String =
 
 /** Hard cap on the server-driven close delay. The close button — and the system Back button,
  * which is blocked while the gate is active — stays locked until the delay elapses, so an
- * out-of-range value would otherwise trap the user. The `close_chrome` experiment arms are
- * 20/30/45s (default 30), so the cap is 45 to honor the largest authored value while still
- * bounding a malformed/oversized one. */
-internal const val MAX_CLOSE_DELAY_SECONDS = 45
+ * out-of-range value would otherwise trap the user. Kept at the cross-platform spec maximum. */
+internal const val MAX_CLOSE_DELAY_SECONDS = 60
+
+internal const val DEFAULT_FALLBACK_CLOSE_DELAY_SECONDS = 5
 
 /** Independent safety cap for the delayed install overlay. Kept separate from close-gate policy. */
 internal const val MAX_SK_OVERLAY_DELAY_SECONDS = 300
@@ -221,6 +221,31 @@ internal enum class ClosePosition {
         }
     }
 }
+
+/** Glyph shown by the close/navigation control. Both actions invoke the same dismissal callback;
+ * FORWARD only changes the visual and accessibility label. */
+internal enum class CloseAction {
+    CLOSE_X, FORWARD;
+
+    companion object {
+        fun from(raw: String?): CloseAction = when (normalizeBehaviorToken(raw)) {
+            "forward" -> FORWARD
+            else -> CLOSE_X
+        }
+    }
+}
+
+/** Fallback screens intentionally support only the legacy hidden and numeric-circle treatments. */
+internal fun fallbackCloseTreatment(raw: String?): CloseTreatment =
+    if (normalizeBehaviorToken(raw) == "hidden") CloseTreatment.HIDDEN else CloseTreatment.COUNTDOWN_CIRCLE
+
+/** Only the first usable fallback may present the configured forward action, and only when another
+ * usable fallback follows it. Every later/final screen remains an ordinary close. */
+internal fun resolveFallbackCloseAction(
+    configured: CloseAction,
+    usableIndex: Int,
+    usableCount: Int,
+): CloseAction = if (usableIndex == 0 && usableCount > 1) configured else CloseAction.CLOSE_X
 
 /** How a CTA tap opens the store. Missing/unknown → SKSTOREPRODUCT (the platform's native
  * in-app store surface — the documented default; the v2 payload omits `store_open` entirely), so
@@ -310,6 +335,7 @@ internal data class CloseBehavior(
     val delaySeconds: Int = 0,
     val treatment: CloseTreatment = CloseTreatment.HIDDEN,
     val position: ClosePosition = ClosePosition.TOP_RIGHT,
+    val action: CloseAction = CloseAction.CLOSE_X,
     /** Validated 6-digit hex (with leading `#`); tints the countdown_circle / progress_bar fill. */
     val progressBarColor: String = "#FFFFFF",
 )

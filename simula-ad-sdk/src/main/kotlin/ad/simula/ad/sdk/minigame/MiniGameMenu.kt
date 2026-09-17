@@ -9,6 +9,7 @@ import android.os.Build
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.WindowManager
 import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import android.webkit.RenderProcessGoneDetail
@@ -19,8 +20,6 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,6 +29,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -40,7 +40,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -89,6 +91,9 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.ads.AdInfoReportOverlay
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
+import ad.simula.ad.sdk.ads.FallbackCloseGateState
+import ad.simula.ad.sdk.ads.closeGateProgress
+import ad.simula.ad.sdk.ads.closeGateSecondsRemaining
 import ad.simula.ad.sdk.ads.coordinateDeferredClickPersistence
 import ad.simula.ad.sdk.ads.enqueueOwnedFallbackClickBeacon
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -96,9 +101,13 @@ import ad.simula.ad.sdk.image.BundledResourceImage
 import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.R
 import ad.simula.ad.sdk.model.GameData
+import ad.simula.ad.sdk.model.CloseBehavior
+import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.model.resolve
+import ad.simula.ad.sdk.model.resolveFallbackCloseAction
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.ClickInteractionGate
@@ -114,6 +123,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
 import java.util.Collections
 import java.util.IdentityHashMap
 
@@ -185,6 +195,7 @@ fun MiniGameMenu(
     var currentServeId by remember { mutableStateOf<String?>(null) }
     var lastGameHeightDp by remember { mutableStateOf<Float?>(null) }
     var lastGameWasBottomSheet by remember { mutableStateOf(false) }
+    val fallbackCloseGates = remember(currentServeId) { FallbackCloseGateState() }
 
     // The fallback screen currently on display; null when the overlay is closed.
     val currentFallbackAd = fallbackAds.getOrNull(fallbackAdIndex)
@@ -671,6 +682,13 @@ fun MiniGameMenu(
                 FullscreenDialogWindowConfig(opaqueBackground = fallbackPlayableHeightDp == null)
                 // key() so each revealed screen gets fresh overlay state (countdown, WebView).
                 key(fallbackAdIndex) {
+                    val closeBehavior = currentFallbackAd.closeBehavior.copy(
+                        action = resolveFallbackCloseAction(
+                            currentFallbackAd.closeBehavior.action,
+                            fallbackAdIndex,
+                            fallbackAds.size,
+                        ),
+                    )
                     AdIframeOverlay(
                         url = currentFallbackAd.iframeUrl ?: "",
                         html = currentFallbackAd.html,
@@ -680,6 +698,9 @@ fun MiniGameMenu(
                         adId = currentFallbackAd.adId,
                         parentServeId = currentServeId,
                         nativeClickBeaconV1Enabled = currentFallbackAd.nativeClickBeaconV1Enabled,
+                        closeBehavior = closeBehavior,
+                        fallbackIndex = fallbackAdIndex,
+                        closeGateState = fallbackCloseGates,
                     )
                 }
             }
@@ -770,15 +791,24 @@ private fun AdIframeOverlay(
     adId: String = "",
     parentServeId: String? = null,
     nativeClickBeaconV1Enabled: Boolean = false,
+    closeBehavior: CloseBehavior,
+    fallbackIndex: Int,
+    closeGateState: FallbackCloseGateState,
 ) {
     val context = LocalContext.current
     val view = LocalView.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val inlineHtml = html?.takeIf { it.isNotBlank() }
 
-    var adCountdown by remember { mutableStateOf(5) }
+    val closeGateMs = closeBehavior.delaySeconds * 1_000L
+    val retainedGateMs = closeGateState.elapsedMs(fallbackIndex).coerceAtMost(closeGateMs)
+    var adCountdown by remember(closeBehavior, fallbackIndex) {
+        mutableStateOf(closeGateSecondsRemaining(retainedGateMs, closeGateMs))
+    }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
-    val ringProgress = remember { Animatable(0f) }
+    val ringProgress = remember(closeBehavior, fallbackIndex) {
+        Animatable(closeGateProgress(retainedGateMs, closeGateMs))
+    }
     var adPageLoaded by remember { mutableStateOf(false) }
     var adPageFailed by remember { mutableStateOf(false) }
     var clickHandoffPending by remember { mutableStateOf(false) }
@@ -812,8 +842,27 @@ private fun AdIframeOverlay(
     }
 
     LaunchedEffect(Unit) {
-        launch { ringProgress.animateTo(1f, tween(5000, easing = LinearEasing)) }
-        repeat(5) { delay(1000); adCountdown-- }
+        if (closeGateMs <= 0L) {
+            adCountdown = 0
+            ringProgress.snapTo(1f)
+            return@LaunchedEffect
+        }
+        var accumulatedMs = closeGateState.elapsedMs(fallbackIndex)
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            var lastTickMs = SystemClock.elapsedRealtime()
+            while (accumulatedMs < closeGateMs) {
+                delay(50L)
+                val now = SystemClock.elapsedRealtime()
+                accumulatedMs = closeGateState.addElapsedMs(
+                    fallbackIndex,
+                    now - lastTickMs,
+                    closeGateMs,
+                )
+                lastTickMs = now
+                ringProgress.snapTo(closeGateProgress(accumulatedMs, closeGateMs))
+                adCountdown = closeGateSecondsRemaining(accumulatedMs, closeGateMs)
+            }
+        }
     }
 
     fun closeOverlay() {
@@ -1107,19 +1156,30 @@ private fun AdIframeOverlay(
                     )
                 }
 
-                if (adCountdown <= 0 && !clickHandoffPending) {
+                val closeReady = adCountdown <= 0 && !clickHandoffPending
+                val closeAlignment = when (closeBehavior.position) {
+                    ClosePosition.TOP_RIGHT -> Alignment.TopEnd
+                    ClosePosition.TOP_LEFT -> Alignment.TopStart
+                    ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
+                }
+                if (closeReady) {
                     CloseButton(
                         onClick = ::closeOverlay,
+                        action = closeBehavior.action,
                         modifier = Modifier
-                            .align(Alignment.TopEnd)
+                            .align(closeAlignment)
+                            .windowInsetsPadding(WindowInsets.safeDrawing)
+                            .padding(start = if (closeBehavior.position == ClosePosition.BOTTOM_LEFT) 18.dp else 0.dp)
                             .padding(8.dp),
                     )
-                } else {
+                } else if (closeBehavior.treatment == CloseTreatment.COUNTDOWN_CIRCLE) {
                     // Countdown ring: a 16dp circle centered in the same 48dp footprint as the close
                     // button so nothing jumps when it unlocks.
                     Box(
                         modifier = Modifier
-                            .align(Alignment.TopEnd)
+                            .align(closeAlignment)
+                            .windowInsetsPadding(WindowInsets.safeDrawing)
+                            .padding(start = if (closeBehavior.position == ClosePosition.BOTTOM_LEFT) 18.dp else 0.dp)
                             .padding(8.dp)
                             .size(48.dp),
                         contentAlignment = Alignment.Center,
@@ -1159,7 +1219,10 @@ private fun AdIframeOverlay(
 
         // Persistent ad-info "i" + report sheet (required disclosure on the post-game ad).
         if (adId.isNotEmpty()) {
-            AdInfoReportOverlay(adId = adId)
+            AdInfoReportOverlay(
+                adId = adId,
+                closeAtBottomLeft = closeBehavior.position == ClosePosition.BOTTOM_LEFT,
+            )
         }
     }
 }

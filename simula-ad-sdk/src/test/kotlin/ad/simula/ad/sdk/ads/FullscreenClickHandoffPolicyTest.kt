@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.model.CloseAction
+import ad.simula.ad.sdk.model.resolveFallbackCloseAction
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickPersistencePart
@@ -817,6 +819,29 @@ class FullscreenClickHandoffPolicyTest {
         assertEquals(FALLBACK_CLOSE_GATE_MS, state.addCloseGateElapsedMs(0, 1_000L))
         assertEquals(FALLBACK_CLOSE_GATE_MS, state.closeGateElapsedMs(0))
         assertEquals(0L, state.closeGateElapsedMs(1))
+    }
+
+    @Test
+    fun `fallback action is consumed only by first usable screen with a successor`() {
+        assertEquals(CloseAction.FORWARD, resolveFallbackCloseAction(CloseAction.FORWARD, 0, 2))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.CLOSE_X, 0, 2))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 0, 1))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 1, 3))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 2, 3))
+    }
+
+    @Test
+    fun `fallback gate state applies duration independently per index and handles zero`() {
+        val state = FallbackCloseGateState()
+
+        assertEquals(1_500L, state.addElapsedMs(index = 0, elapsedMs = 1_500L, durationMs = 2_000L))
+        assertEquals(2_000L, state.addElapsedMs(index = 0, elapsedMs = 1_000L, durationMs = 2_000L))
+        assertEquals(0L, state.elapsedMs(1))
+        assertEquals(4_000L, state.addElapsedMs(index = 1, elapsedMs = 4_000L, durationMs = 9_000L))
+        assertEquals(0L, state.addElapsedMs(index = 2, elapsedMs = 500L, durationMs = 0L))
+        assertEquals(1f, closeGateProgress(elapsedMs = 0L, durationMs = 0L), 0f)
+        assertEquals(0, closeGateSecondsRemaining(elapsedMs = 0L, durationMs = 0L))
+        assertEquals(5, closeGateSecondsRemaining(elapsedMs = 4_001L, durationMs = 9_000L))
     }
 
     @Test

@@ -758,6 +758,7 @@ internal object SimulaApiClient {
         val iframeUrl: String? = null,
         val html: String? = null,
         val nativeClickBeaconV1Enabled: Boolean = false,
+        val closeBehavior: ad.simula.ad.sdk.model.CloseBehavior = fallbackCloseBehavior(null),
     )
 
     internal fun fallbackAdFromBody(
@@ -773,6 +774,7 @@ internal object SimulaApiClient {
             html = html,
             nativeClickBeaconV1Enabled =
                 ad.nativeClickBeaconV1Enabled ?: responseNativeClickBeaconV1Enabled,
+            closeBehavior = fallbackCloseBehavior(ad.adBehavior),
         )
     }
 

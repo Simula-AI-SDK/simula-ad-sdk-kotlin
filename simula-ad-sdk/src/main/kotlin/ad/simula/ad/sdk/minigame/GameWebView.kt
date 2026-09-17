@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.minigame
 
+import ad.simula.ad.sdk.ads.CloseActionGlyph
+import ad.simula.ad.sdk.model.CloseAction
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
@@ -53,6 +55,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -460,6 +464,7 @@ private fun GameWebViewContent(url: String, onPageFinished: () -> Unit = {}) {
 internal fun CloseButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    action: CloseAction = CloseAction.CLOSE_X,
     // Compact default (~16dp dark-translucent circle), matching the interstitial /
     // rewarded / fallback-ad close across the SDK.
     size: Int = 16,
@@ -471,6 +476,9 @@ internal fun CloseButton(
     Box(
         modifier = modifier
             .size(48.dp)
+            .semantics {
+                contentDescription = if (action == CloseAction.FORWARD) "Next ad" else "Close ad"
+            }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -485,12 +493,7 @@ internal fun CloseButton(
                 .background(backgroundColor),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                text = "✕",
-                color = contentColor,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-            )
+            CloseActionGlyph(action = action, color = contentColor)
         }
     }
 }
