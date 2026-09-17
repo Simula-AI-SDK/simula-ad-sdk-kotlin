@@ -340,17 +340,35 @@ class AdLoadParsingTest {
     }
 
     @Test
-    fun `malformed close action defaults without rejecting primary or rewarded responses`() {
-        for (malformed in listOf("true", "1", "[]", "{}")) {
+    fun `malformed close fields default independently without rejecting primary or rewarded responses`() {
+        val malformedFields = listOf(
+            "\"delay_seconds\":\"5\"",
+            "\"delay_seconds\":[]",
+            "\"treatment\":false",
+            "\"treatment\":{}",
+            "\"position\":1",
+            "\"position\":[]",
+            "\"action\":true",
+            "\"action\":{}",
+            "\"progress_bar_color\":1",
+            "\"progress_bar_color\":[]",
+        )
+        for (malformedField in malformedFields) {
             val primary = json.decodeFromString<AdLoadApiResponse>(
-                """{"ad_behavior":{"close":{"action":$malformed}}}""",
+                """{"ad_behavior":{"close":{$malformedField}}}""",
             )
             val rewarded = json.decodeFromString<RewardedInitApiResponse>(
-                """{"ad_behavior":{"close":{"action":$malformed}}}""",
+                """{"ad_behavior":{"close":{$malformedField}}}""",
             )
 
-            assertEquals(CloseAction.CLOSE_X, primary.adBehavior.toDomain()?.close?.action)
-            assertEquals(CloseAction.CLOSE_X, rewarded.adBehavior.toDomain()?.close?.action)
+            for (response in listOf(primary.adBehavior, rewarded.adBehavior)) {
+                val close = response.toDomain()?.close
+                assertEquals(0, close?.delaySeconds)
+                assertEquals(CloseTreatment.HIDDEN, close?.treatment)
+                assertEquals(ClosePosition.TOP_RIGHT, close?.position)
+                assertEquals(CloseAction.CLOSE_X, close?.action)
+                assertEquals("#FFFFFF", close?.progressBarColor)
+            }
         }
     }
 

@@ -38,6 +38,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 
 internal object LenientNullableBooleanSerializer : KSerializer<Boolean?> {
@@ -70,6 +71,19 @@ internal object LenientNullableStringSerializer : KSerializer<String?> {
     override fun serialize(encoder: Encoder, value: String?) {
         if (value == null) encoder.encodeNull() else encoder.encodeString(value)
     }
+}
+
+internal object LenientIntSerializer : KSerializer<Int> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("LenientInt", PrimitiveKind.INT)
+
+    override fun deserialize(decoder: Decoder): Int {
+        val jsonDecoder = decoder as? JsonDecoder ?: return runCatching { decoder.decodeInt() }.getOrDefault(0)
+        val primitive = jsonDecoder.decodeJsonElement() as? JsonPrimitive ?: return 0
+        return primitive.takeUnless(JsonPrimitive::isString)?.intOrNull ?: 0
+    }
+
+    override fun serialize(encoder: Encoder, value: Int) = encoder.encodeInt(value)
 }
 
 @Serializable
@@ -260,11 +274,15 @@ internal data class ApiAdBehavior(
 
 @Serializable
 internal data class ApiCloseBehavior(
+    @Serializable(with = LenientIntSerializer::class)
     @SerialName("delay_seconds") val delaySeconds: Int = 0,
+    @Serializable(with = LenientNullableStringSerializer::class)
     val treatment: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
     val position: String? = null,
     @Serializable(with = LenientNullableStringSerializer::class)
     val action: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
     @SerialName("progress_bar_color") val progressBarColor: String? = null,
 )
 
