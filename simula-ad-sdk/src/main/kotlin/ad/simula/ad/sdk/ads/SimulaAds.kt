@@ -34,14 +34,12 @@ import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.lang.ref.WeakReference
 
 private data class ImperativeStartup(
     val telemetryClaim: FirstWinsProcessTaskClaim<EffectiveTelemetryConfig>,
@@ -91,8 +89,7 @@ object SimulaAds {
     // Character context is no longer global: pass charId/charName/charImage/charDesc
     // to each `SimulaInterstitialAd.load()` / `SimulaRewardedAd.load()` call instead.
 
-    private var currentActivityRef: WeakReference<Activity>? = null
-    internal val currentActivity: Activity? get() = currentActivityRef?.get()
+    internal val currentActivity: Activity? get() = ProcessActivityVisibilityTracker.currentActivity
 
     /** True once [initialize] has been called with a valid key. */
     val isInitialized: Boolean get() = initialization.isInitialized
@@ -204,7 +201,13 @@ object SimulaAds {
                 // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
                 // request. Also a first-party-request signal, primed off the critical path.
                 SimulaDeviceSignals.prime(appContext)
-                store = SimulaSessionStore(apiKey, devMode, primaryUserID)
+                store = SimulaSessionStore(
+                    apiKey = apiKey,
+                    devMode = devMode,
+                    initialUserID = primaryUserID,
+                    sessionGeneration = { ProcessActivityVisibilityTracker.sessionGeneration },
+                    beforeExpiredSessionCreate = { SimulaPrivacy.refreshAdvertisingId() },
+                )
                 // Publish the store identity in the same critical section as imperative initialization.
                 // Telemetry configuration remains first-wins. Envelopes prefer this live imperative
                 // identity only when its API key is compatible with the winning telemetry sender.
@@ -217,18 +220,12 @@ object SimulaAds {
                 this.startupGate = gate
 
                 (appContext as? Application)?.let { application ->
-                    ProcessActivityVisibilityTracker.addForegroundListener(store) {
-                        store.requestForcedRefresh {
-                            SimulaPrivacy.refreshAdvertisingId()
-                        }
-                    }
                     val foregroundActivity = findActivity(context)?.takeIf {
                         runCatching { it.hasWindowFocus() && !it.isFinishing && !it.isDestroyed }
                             .getOrDefault(false)
                     }
                     ProcessActivityVisibilityTracker.register(application, foregroundActivity)
                 }
-                registerActivityTracking()
                 seedWebViewRetentionState(context)
 
                 // Reserve immutable telemetry configuration before publishing initialized=true. This
@@ -496,44 +493,9 @@ object SimulaAds {
         else -> null
     }
 
-    private fun registerActivityTracking() {
-        val app = appContext as? Application ?: return
-        app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
-            override fun onActivityResumed(activity: Activity) {
-                currentActivityRef = WeakReference(activity)
-                WebViewPool.markApplicationActive(activity)
-                // Re-read the GAID on foreground: ad-tracking permission or the GAID itself
-                // can change while the app is backgrounded. Internally throttled (4h TTL), so
-                // this is cheap on every resume. Mirrors the SimulaProvider ON_RESUME hook.
-                SimulaScope.launch { runCatching { SimulaPrivacy.refreshAdvertisingId() } }
-            }
-
-            // Keep the reference while merely paused — a paused Activity is still a
-            // valid context to launch from, which avoids a NEW_TASK fallback during
-            // a normal A→B transition. Clear only once it's actually destroyed.
-            override fun onActivityDestroyed(activity: Activity) {
-                if (currentActivityRef?.get() === activity) currentActivityRef = null
-            }
-
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
-            override fun onActivityStarted(activity: Activity) {}
-            override fun onActivityPaused(activity: Activity) {}
-
-            // Persist + deliver buffered telemetry as the app heads to the background — the
-            // window where a process is most likely to be killed. Cheap + guarded (no-op when
-            // the buffer is empty / telemetry is disabled).
-            override fun onActivityStopped(activity: Activity) {
-                Telemetry.flush()
-            }
-
-            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-        })
-    }
-
     /**
-     * Activity callbacks do not replay an already-delivered resume when hosts initialize lazily
-     * (notably React Native bridges). Seed only a truly foreground process; later resume and
-     * UI-hidden callbacks remain authoritative and this never changes the pressure cooldown.
+     * Activity callbacks do not replay an already-delivered resume when hosts initialize lazily.
+     * Seed only a truly foreground process; the shared callback owns later foreground signals.
      */
     private fun seedWebViewRetentionState(context: Context) {
         val markIfForeground = {

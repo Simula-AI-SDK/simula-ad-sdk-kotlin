@@ -4,71 +4,108 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertSame
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SimulaSessionStoreTest {
     @Test
-    fun `forced refresh replaces a cached id and its session user together`() = runTest {
+    fun `generation change is lazy and next ensure replaces the cached session`() = runTest {
+        var generation = 0L
         var calls = 0
-        val seenUsers = mutableListOf<String?>()
-        val store = testStore(initialUserID = "user-a") { _, _, userID ->
+        val store = testStore(sessionGeneration = { generation }) { _, _, _ ->
             calls++
+            "session-$calls"
+        }
+
+        assertEquals("session-1", store.ensureSession())
+        generation++
+        runCurrent()
+
+        assertEquals(1, calls)
+        assertEquals("session-1", store.sessionId)
+        assertEquals("session-2", store.ensureSession())
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun `expired refresh replaces the cached id and session user together`() = runTest {
+        var generation = 0L
+        val seenUsers = mutableListOf<String?>()
+        val store = testStore(
+            initialUserID = "user-a",
+            sessionGeneration = { generation },
+        ) { _, _, userID ->
             seenUsers += userID
-            if (calls == 1) "session-a" else "session-b"
+            if (seenUsers.size == 1) "session-a" else "session-b"
         }
 
         assertEquals("session-a", store.ensureSession())
         store.updatePpid("user-b")
-        assertEquals("session-b", store.requestForcedRefresh().await())
+        generation++
+        assertEquals("session-b", store.ensureSession())
 
-        assertEquals(2, calls)
         assertEquals(listOf("user-a", "user-b"), seenUsers)
         assertEquals("session-b", store.sessionId)
         assertEquals("user-b", store.sessionUserID)
     }
 
     @Test
-    fun `failed forced refresh keeps the cached id and session user`() = runTest {
+    fun `failed expired refresh fails open but next external ensure retries`() = runTest {
+        var generation = 0L
         var calls = 0
-        val store = testStore(initialUserID = "user-a") { _, _, _ ->
+        val store = testStore(
+            initialUserID = "user-a",
+            sessionGeneration = { generation },
+        ) { _, _, _ ->
             calls++
-            if (calls == 1) "session-a" else null
+            when (calls) {
+                1 -> "session-a"
+                2 -> null
+                else -> "session-b"
+            }
         }
 
         assertEquals("session-a", store.ensureSession())
         store.updatePpid("user-b")
-        assertEquals("session-a", store.requestForcedRefresh().await())
+        generation++
 
-        assertEquals(2, calls)
+        assertEquals("session-a", store.ensureSession())
         assertEquals("session-a", store.sessionId)
         assertEquals("user-a", store.sessionUserID)
-    }
-
-    @Test
-    fun `same id refresh still publishes the refreshed session user`() = runTest {
-        val store = testStore(initialUserID = "user-a") { _, _, _ -> "session" }
-
-        assertEquals("session", store.ensureSession())
-        store.updatePpid("user-b")
-        assertEquals("session", store.requestForcedRefresh().await())
-
-        assertEquals("session", store.sessionId)
+        assertEquals("session-b", store.ensureSession())
+        assertEquals(3, calls)
         assertEquals("user-b", store.sessionUserID)
     }
 
     @Test
-    fun `forced refresh coalesces lifecycle and immediate session callers`() = runTest {
+    fun `same id expired refresh still publishes refreshed session user`() = runTest {
+        var generation = 0L
+        val store = testStore(
+            initialUserID = "user-a",
+            sessionGeneration = { generation },
+        ) { _, _, _ -> "session" }
+
+        assertEquals("session", store.ensureSession())
+        store.updatePpid("user-b")
+        generation++
+        assertEquals("session", store.ensureSession())
+
+        assertEquals("user-b", store.sessionUserID)
+    }
+
+    @Test
+    fun `expired refresh coalesces concurrent ensure callers`() = runTest {
+        var generation = 0L
         var calls = 0
         val refreshEntered = CompletableDeferred<Unit>()
         val releaseRefresh = CompletableDeferred<Unit>()
-        val store = testStore { _, _, _ ->
+        val store = testStore(sessionGeneration = { generation }) { _, _, _ ->
             calls++
             if (calls == 1) {
                 "session-a"
@@ -80,47 +117,127 @@ class SimulaSessionStoreTest {
         }
         assertEquals("session-a", store.ensureSession())
 
-        val lifecycleRefresh = store.requestForcedRefresh()
+        generation++
+        val callers = List(5) { async { store.ensureSession() } }
         refreshEntered.await()
-        val duplicateRefresh = store.requestForcedRefresh()
-        val immediateCallers = List(4) { async { store.ensureSession() } }
         runCurrent()
 
-        assertSame(lifecycleRefresh, duplicateRefresh)
         assertEquals(2, calls)
         releaseRefresh.complete(Unit)
-        assertEquals(List(4) { "session-b" }, immediateCallers.awaitAll())
-        assertEquals("session-b", lifecycleRefresh.await())
+        assertEquals(List(5) { "session-b" }, callers.awaitAll())
         assertEquals(2, calls)
     }
 
     @Test
-    fun `forced refresh claims the flight before waiting for foreground privacy`() = runTest {
+    fun `expired refresh awaits advertising id work before session creation`() = runTest {
+        var generation = 0L
         var calls = 0
-        val privacyReady = CompletableDeferred<Unit>()
-        val store = testStore { _, _, _ ->
+        val advertisingIdReady = CompletableDeferred<Unit>()
+        var refreshStarted = false
+        val store = testStore(
+            sessionGeneration = { generation },
+            beforeExpiredSessionCreate = {
+                refreshStarted = true
+                advertisingIdReady.await()
+            },
+        ) { _, _, _ ->
             calls++
-            if (calls == 1) "session-a" else "session-b"
+            "session-$calls"
         }
-        assertEquals("session-a", store.ensureSession())
+        assertEquals("session-1", store.ensureSession())
 
-        store.requestForcedRefresh { privacyReady.await() }
-        val immediateCaller = async { store.ensureSession() }
+        generation++
+        val callers = List(2) { async { store.ensureSession() } }
         runCurrent()
 
+        assertTrue(refreshStarted)
         assertEquals(1, calls)
-        assertTrue(!immediateCaller.isCompleted)
-        privacyReady.complete(Unit)
-        assertEquals("session-b", immediateCaller.await())
+        assertTrue(callers.none { it.isCompleted })
+        advertisingIdReady.complete(Unit)
+        assertEquals(List(2) { "session-2" }, callers.awaitAll())
         assertEquals(2, calls)
     }
 
     @Test
-    fun `cancelling one waiter does not clear the shared refresh`() = runTest {
+    fun `store created at an existing generation does not prepare ordinary first creation`() = runTest {
+        var generation = 7L
+        var prepared = false
+        val store = testStore(
+            sessionGeneration = { generation },
+            beforeExpiredSessionCreate = { prepared = true },
+        ) { _, _, _ -> "session" }
+
+        assertEquals("session", store.ensureSession())
+
+        assertFalse(prepared)
+    }
+
+    @Test
+    fun `generation advancing during an older flight triggers one current refresh`() = runTest {
+        var generation = 0L
+        var calls = 0
+        val initialEntered = CompletableDeferred<Unit>()
+        val releaseInitial = CompletableDeferred<Unit>()
+        val store = testStore(sessionGeneration = { generation }) { _, _, _ ->
+            calls++
+            if (calls == 1) {
+                initialEntered.complete(Unit)
+                releaseInitial.await()
+                "session-a"
+            } else {
+                "session-b"
+            }
+        }
+
+        val initialCaller = async { store.ensureSession() }
+        initialEntered.await()
+        generation++
+        val foregroundCaller = async { store.ensureSession() }
+        releaseInitial.complete(Unit)
+
+        assertEquals("session-b", initialCaller.await())
+        assertEquals("session-b", foregroundCaller.await())
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun `generation advancing during failed initial flight prepares the next attempt`() = runTest {
+        var generation = 3L
+        var calls = 0
+        var preparations = 0
+        val initialEntered = CompletableDeferred<Unit>()
+        val releaseInitial = CompletableDeferred<Unit>()
+        val store = testStore(
+            sessionGeneration = { generation },
+            beforeExpiredSessionCreate = { preparations++ },
+        ) { _, _, _ ->
+            calls++
+            if (calls == 1) {
+                initialEntered.complete(Unit)
+                releaseInitial.await()
+                null
+            } else {
+                "session-current"
+            }
+        }
+
+        val caller = async { store.ensureSession() }
+        initialEntered.await()
+        generation++
+        releaseInitial.complete(Unit)
+
+        assertEquals("session-current", caller.await())
+        assertEquals(2, calls)
+        assertEquals(1, preparations)
+    }
+
+    @Test
+    fun `cancelling one waiter does not clear the shared expired refresh`() = runTest {
+        var generation = 0L
         var calls = 0
         val refreshEntered = CompletableDeferred<Unit>()
         val releaseRefresh = CompletableDeferred<Unit>()
-        val store = testStore { _, _, _ ->
+        val store = testStore(sessionGeneration = { generation }) { _, _, _ ->
             calls++
             if (calls == 1) "session-a" else {
                 refreshEntered.complete(Unit)
@@ -129,14 +246,13 @@ class SimulaSessionStoreTest {
             }
         }
         store.ensureSession()
-        store.requestForcedRefresh()
-        refreshEntered.await()
+        generation++
 
         val cancelledWaiter = async { store.ensureSession() }
+        refreshEntered.await()
+        val survivingWaiter = async { store.ensureSession() }
         runCurrent()
         cancelledWaiter.cancel()
-        runCurrent()
-        val survivingWaiter = async { store.ensureSession() }
         runCurrent()
 
         assertTrue(cancelledWaiter.isCancelled)
@@ -148,6 +264,8 @@ class SimulaSessionStoreTest {
 
     private fun kotlinx.coroutines.test.TestScope.testStore(
         initialUserID: String? = null,
+        sessionGeneration: () -> Long = { 0L },
+        beforeExpiredSessionCreate: suspend () -> Unit = {},
         createSession: suspend (String, Boolean, String?) -> String?,
     ) = SimulaSessionStore(
         apiKey = "api-key",
@@ -158,5 +276,7 @@ class SimulaSessionStoreTest {
         createSession = createSession,
         recordSessionOperation = { _, _, _, _ -> },
         fireIpv4 = { _, _, _, _ -> },
+        sessionGeneration = sessionGeneration,
+        beforeExpiredSessionCreate = beforeExpiredSessionCreate,
     )
 }

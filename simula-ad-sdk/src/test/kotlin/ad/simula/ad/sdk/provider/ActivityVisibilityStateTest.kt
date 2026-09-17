@@ -2,121 +2,188 @@ package ad.simula.ad.sdk.provider
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ActivityVisibilityStateTest {
     @Test
-    fun `genuine background then foreground emits once`() {
-        val state = ActivityVisibilityState()
+    fun `less than thirty minutes does not expire the session`() {
+        var nowMs = 10L
+        val state = ActivityVisibilityState(clock = { nowMs })
         val activity = Any()
 
         assertFalse(state.onActivityStarted(activity))
-        val generation = state.onActivityStopped(activity, changingConfigurations = false)
-        assertNotNull(generation)
-        assertTrue(state.settleBackground(generation ?: error("missing generation")))
+        assertTrue(state.onActivityStopped(activity, changingConfigurations = false))
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS - 1L
+
+        assertFalse(state.onActivityStarted(activity))
+        assertEquals(0L, state.sessionGeneration)
+    }
+
+    @Test
+    fun `exactly thirty minutes expires the session`() {
+        var nowMs = 100L
+        val state = ActivityVisibilityState(clock = { nowMs })
+        val activity = Any()
+
+        state.onActivityStarted(activity)
+        state.onActivityStopped(activity, changingConfigurations = false)
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
 
         assertTrue(state.onActivityStarted(activity))
+        assertEquals(1L, state.sessionGeneration)
         assertFalse(state.onActivityStarted(activity))
     }
 
     @Test
-    fun `ordinary and sdk fullscreen activity transitions do not emit foreground`() {
-        val state = ActivityVisibilityState()
+    fun `elapsed realtime jump beyond thirty minutes models deep sleep`() {
+        var elapsedRealtimeMs = 5_000L
+        val state = ActivityVisibilityState(clock = { elapsedRealtimeMs })
+        val activity = Any()
+
+        state.onActivityStarted(activity)
+        state.onActivityStopped(activity, changingConfigurations = false)
+        elapsedRealtimeMs += SESSION_BACKGROUND_EXPIRATION_MS + 12L * 60L * 60L * 1_000L
+
+        assertTrue(state.onActivityStarted(activity))
+        assertEquals(1L, state.sessionGeneration)
+    }
+
+    @Test
+    fun `ordinary and sdk fullscreen activity transitions never establish background`() {
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
         val host = Any()
         val secondHost = Any()
         val sdkFullscreen = Any()
 
         state.onActivityStarted(host)
-        val hostTransition = state.onActivityStopped(host, changingConfigurations = false)
-        assertNotNull(hostTransition)
-        assertFalse(state.onActivityStarted(secondHost))
-        assertFalse(state.settleBackground(hostTransition ?: error("missing generation")))
-
-        val sdkTransition = state.onActivityStopped(secondHost, changingConfigurations = false)
-        assertNotNull(sdkTransition)
-        assertFalse(state.onActivityStarted(sdkFullscreen))
-        assertFalse(state.settleBackground(sdkTransition ?: error("missing generation")))
-
-        val returnTransition = state.onActivityStopped(sdkFullscreen, changingConfigurations = false)
-        assertNotNull(returnTransition)
+        state.onActivityStarted(secondHost)
+        assertFalse(state.onActivityStopped(host, changingConfigurations = false))
+        state.onActivityStarted(sdkFullscreen)
+        assertFalse(state.onActivityStopped(secondHost, changingConfigurations = false))
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS * 2L
         assertFalse(state.onActivityStarted(host))
-        assertFalse(state.settleBackground(returnTransition ?: error("missing generation")))
+        assertFalse(state.onActivityStopped(sdkFullscreen, changingConfigurations = false))
+
+        assertEquals(0L, state.sessionGeneration)
     }
 
     @Test
     fun `configuration stop does not establish background`() {
-        val state = ActivityVisibilityState()
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
         val oldActivity = Any()
         val recreatedActivity = Any()
 
         state.onActivityStarted(oldActivity)
-        assertNull(state.onActivityStopped(oldActivity, changingConfigurations = true))
+        assertFalse(state.onActivityStopped(oldActivity, changingConfigurations = true))
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+
         assertFalse(state.onActivityStarted(recreatedActivity))
+        assertEquals(0L, state.sessionGeneration)
     }
 
     @Test
     fun `multiple started activities prevent a false background`() {
-        val state = ActivityVisibilityState()
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
         val first = Any()
         val second = Any()
 
         state.onActivityStarted(first)
         state.onActivityStarted(second)
-        assertNull(state.onActivityStopped(first, changingConfigurations = false))
+        assertFalse(state.onActivityStopped(first, changingConfigurations = false))
         assertEquals(1, state.startedActivityCount)
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+
         assertFalse(state.onActivityStarted(first))
+        assertEquals(0L, state.sessionGeneration)
     }
 
     @Test
     fun `late registration seed participates in the first real background`() {
-        val state = ActivityVisibilityState()
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
         val alreadyStarted = Any()
 
         state.seedStartedActivity(alreadyStarted)
-        val generation = state.onActivityStopped(alreadyStarted, changingConfigurations = false)
-        assertNotNull(generation)
-        assertTrue(state.settleBackground(generation ?: error("missing generation")))
+        assertTrue(state.onActivityStopped(alreadyStarted, changingConfigurations = false))
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
+
         assertTrue(state.onActivityStarted(alreadyStarted))
     }
 
     @Test
-    fun `late registration without activity context observes first stop as background`() {
-        val state = ActivityVisibilityState()
+    fun `late registration without activity context observes the first stop`() {
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
         val alreadyStarted = Any()
 
-        val generation = state.onActivityStopped(alreadyStarted, changingConfigurations = false)
+        assertTrue(state.onActivityStopped(alreadyStarted, changingConfigurations = false))
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS
 
-        assertNotNull(generation)
-        assertTrue(state.settleBackground(generation ?: error("missing generation")))
         assertTrue(state.onActivityStarted(alreadyStarted))
     }
 
     @Test
     fun `untracked stop cannot background while another activity is started`() {
-        val state = ActivityVisibilityState()
+        val state = ActivityVisibilityState(clock = { 0L })
         val tracked = Any()
 
         state.onActivityStarted(tracked)
 
-        assertNull(state.onActivityStopped(Any(), changingConfigurations = false))
+        assertFalse(state.onActivityStopped(Any(), changingConfigurations = false))
         assertEquals(1, state.startedActivityCount)
     }
 
     @Test
-    fun `late untracked stop cannot background while process UI remains visible`() {
-        val state = ActivityVisibilityState()
-        val generation = state.onActivityStopped(Any(), changingConfigurations = false)
+    fun `duplicate stop does not shorten the continuous background interval`() {
+        var nowMs = 0L
+        val state = ActivityVisibilityState(clock = { nowMs })
+        val activity = Any()
 
-        assertNotNull(generation)
-        assertFalse(
-            state.settleBackground(
-                generation ?: error("missing generation"),
-                processHasVisibleUi = true,
-            ),
-        )
-        assertFalse(state.onActivityStarted(Any()))
+        state.onActivityStarted(activity)
+        assertTrue(state.onActivityStopped(activity, changingConfigurations = false))
+        nowMs += SESSION_BACKGROUND_EXPIRATION_MS - 1L
+        assertFalse(state.onActivityStopped(activity, changingConfigurations = false))
+        nowMs++
+
+        assertTrue(state.onActivityStarted(activity))
+    }
+
+    @Test
+    fun `unfocused repeated seed does not replace resumed current activity`() {
+        val state = CurrentActivityState<Any>()
+        val resumed = Any()
+        val merelyStarted = Any()
+
+        state.onResumed(resumed)
+        state.seed(merelyStarted, safeToPresent = false)
+
+        assertTrue(state.current === resumed)
+    }
+
+    @Test
+    fun `safe seed and resume publish current while destroy clears only its target`() {
+        val state = CurrentActivityState<Any>()
+        val focusedSeed = Any()
+        val resumed = Any()
+
+        state.seed(focusedSeed, safeToPresent = true)
+        assertTrue(state.current === focusedSeed)
+        state.onResumed(resumed)
+        state.onDestroyed(focusedSeed)
+        assertTrue(state.current === resumed)
+        state.onDestroyed(resumed)
+        assertTrue(state.current == null)
+    }
+
+    @Test
+    fun `seed presentation safety requires focused live activity`() {
+        assertTrue(isSafeCurrentActivitySeed(hasWindowFocus = true, isFinishing = false, isDestroyed = false))
+        assertFalse(isSafeCurrentActivitySeed(hasWindowFocus = false, isFinishing = false, isDestroyed = false))
+        assertFalse(isSafeCurrentActivitySeed(hasWindowFocus = true, isFinishing = true, isDestroyed = false))
+        assertFalse(isSafeCurrentActivitySeed(hasWindowFocus = true, isFinishing = false, isDestroyed = true))
     }
 }

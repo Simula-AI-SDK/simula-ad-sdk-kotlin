@@ -10,7 +10,6 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
@@ -18,11 +17,16 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** The id and server-side identity are replaced as one observable value. */
-private data class PublishedSession(val id: String?, val userID: String?)
+/** The id, server-side identity, and process generation are replaced as one observable value. */
+private data class PublishedSession(val id: String?, val userID: String?, val generation: Long)
+
+private data class SessionFlight(
+    val deferred: CompletableDeferred<String?>,
+    val generation: Long,
+)
 
 /**
- * Holds the server session and coalesces both ordinary creation and forced refresh calls.
+ * Holds the server session and coalesces both ordinary creation and lazy expired-session refreshes.
  *
  * The process-scope attempt, rather than any individual waiter, owns publication and in-flight
  * cleanup. Cancelling a caller therefore cannot expose a still-running request to a second caller.
@@ -38,8 +42,12 @@ internal class SimulaSessionStore(
         Telemetry.recordOperation(name, durationMs, success, failureClass = failureClass)
     },
     private val fireIpv4: (String, String?, String?, String) -> Unit = Ipv4Beacon::fire,
+    private val sessionGeneration: () -> Long = { 0L },
+    private val beforeExpiredSessionCreate: suspend () -> Unit = {},
 ) {
-    private var publishedSession by mutableStateOf(PublishedSession(id = null, userID = null))
+    private var publishedSession by mutableStateOf(
+        PublishedSession(id = null, userID = null, generation = currentSessionGeneration()),
+    )
 
     /** Observable session id; consumers recompose when a successful refresh replaces it. */
     val sessionId: String? get() = publishedSession.id
@@ -56,7 +64,7 @@ internal class SimulaSessionStore(
     val sessionUserID: String? get() = publishedSession.userID
 
     private val sessionLock = Any()
-    private var sessionDeferred: CompletableDeferred<String?>? = null
+    private var sessionFlight: SessionFlight? = null
 
     /**
      * Optional startup gate resolved for every attempt. This keeps both imperative and provider-only
@@ -105,41 +113,47 @@ internal class SimulaSessionStore(
     }
 
     /**
-     * Return the current id, or await/start the one process-scope request. An already requested
-     * foreground refresh takes precedence over the cached id, so ad callers cannot race past it.
+     * Return the current id, or lazily await/start the one process-scope request for the current
+     * expiration generation. A failed stale refresh returns the cached id without advancing its
+     * generation, so the next external call retries rather than treating the stale cache as fresh.
      */
     suspend fun ensureSession(): String? {
         startupGate()?.await()
 
-        val deferred = synchronized(sessionLock) {
-            sessionDeferred?.let { return@synchronized it }
-            publishedSession.id?.takeIf { it.isNotBlank() }?.let { return it }
-            startAttemptLocked()
+        while (true) {
+            val requestedGeneration = currentSessionGeneration()
+            val flight = synchronized(sessionLock) {
+                sessionFlight?.let { return@synchronized it }
+                val snapshot = publishedSession
+                snapshot.id?.takeIf { it.isNotBlank() && snapshot.generation >= requestedGeneration }
+                    ?.let { return it }
+                startAttemptLocked(
+                    generation = requestedGeneration,
+                    refreshExpiredSession = snapshot.generation < requestedGeneration,
+                )
+            }
+            val result = flight.deferred.await()
+            // Every waiter revalidates after the flight. If lifecycle expiration advanced while
+            // it was suspended, all callers coalesce onto the current generation rather than one
+            // returning an id that became stale mid-flight. A failure at the current generation
+            // still fails open here; only a later external ensure retries that same generation.
+            if (currentSessionGeneration() <= flight.generation) return result
         }
-        return deferred.await()
-    }
-
-    /**
-     * Synchronously claim a forced refresh before scheduling its network work. Lifecycle callbacks
-     * use this so an immediate ad load observes and awaits this exact attempt instead of the cache.
-     */
-    fun requestForcedRefresh(
-        beforeCreate: suspend () -> Unit = {},
-    ): Deferred<String?> = synchronized(sessionLock) {
-        sessionDeferred ?: startAttemptLocked(beforeCreate)
     }
 
     /** Must be called while holding [sessionLock]. */
     private fun startAttemptLocked(
-        beforeCreate: suspend () -> Unit = {},
-    ): CompletableDeferred<String?> {
+        generation: Long,
+        refreshExpiredSession: Boolean,
+    ): SessionFlight {
         val deferred = CompletableDeferred<String?>()
-        sessionDeferred = deferred
+        val flight = SessionFlight(deferred, generation)
+        sessionFlight = flight
         val job = runCatching {
-            workScope.launch { runSessionAttempt(deferred, beforeCreate) }
+            workScope.launch { runSessionAttempt(flight, refreshExpiredSession) }
         }.getOrNull()
         if (job == null) {
-            sessionDeferred = null
+            sessionFlight = null
             deferred.complete(publishedSession.id)
         } else {
             // launch() on an already-cancelled scope returns a cancelled Job rather than throwing.
@@ -147,25 +161,25 @@ internal class SimulaSessionStore(
             job.invokeOnCompletion { cause ->
                 if (cause != null && !deferred.isCompleted) {
                     val fallback = synchronized(sessionLock) {
-                        if (sessionDeferred === deferred) sessionDeferred = null
+                        if (sessionFlight === flight) sessionFlight = null
                         publishedSession.id
                     }
                     deferred.complete(fallback)
                 }
             }
         }
-        return deferred
+        return flight
     }
 
     private suspend fun runSessionAttempt(
-        deferred: CompletableDeferred<String?>,
-        beforeCreate: suspend () -> Unit,
+        flight: SessionFlight,
+        refreshExpiredSession: Boolean,
     ) {
         val startNanos = System.nanoTime()
         // Privacy/device refresh is best-effort. A platform-service failure must not prevent the
         // backend from resuming or replacing an otherwise usable session.
         runCatching { startupGate()?.await() }
-        runCatching { beforeCreate() }
+        if (refreshExpiredSession) runCatching { beforeExpiredSessionCreate() }
         val ppidAtCreation = effectiveUserID
         val createdId = runCatching { createSession(apiKey, devMode, ppidAtCreation) }
             .getOrNull()
@@ -175,22 +189,22 @@ internal class SimulaSessionStore(
         val result = withContext(NonCancellable + publicationDispatcher) {
             runCatching {
                 synchronized(sessionLock) {
-                    if (sessionDeferred !== deferred) return@synchronized publishedSession.id
+                    if (sessionFlight !== flight) return@synchronized publishedSession.id
                     if (createdId != null) {
-                        publishedSession = PublishedSession(createdId, ppidAtCreation)
+                        publishedSession = PublishedSession(createdId, ppidAtCreation, flight.generation)
                     }
-                    sessionDeferred = null
+                    sessionFlight = null
                     publishedSession.id
                 }
             }.getOrElse {
                 // Even an unexpected Compose-state/publication failure must release every ad caller.
                 synchronized(sessionLock) {
-                    if (sessionDeferred === deferred) sessionDeferred = null
+                    if (sessionFlight === flight) sessionFlight = null
                     publishedSession.id
                 }
             }
         }
-        deferred.complete(result)
+        flight.deferred.complete(result)
 
         runCatching {
             if (createdId != null) {
@@ -204,4 +218,6 @@ internal class SimulaSessionStore(
         }
         if (createdId != null && effectiveUserID != ppidAtCreation) reconcileServerPpid()
     }
+
+    private fun currentSessionGeneration(): Long = runCatching(sessionGeneration).getOrDefault(0L)
 }
