@@ -31,6 +31,7 @@ import ad.simula.ad.sdk.network.SimulaDeviceId
 import ad.simula.ad.sdk.network.SimulaDeviceSignals
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.network.ProcessApiEnvironment
+import ad.simula.ad.sdk.network.readStagingEnvironmentManifestValue
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.privacy.ProcessPrivacyOwner
@@ -214,6 +215,9 @@ fun SimulaProvider(
     require(apiKey.isNotBlank()) { "SimulaProvider requires a valid \"apiKey\" (non-blank string)" }
 
     val applicationContext = LocalContext.current.applicationContext
+    val stagingManifestValue = remember(applicationContext) {
+        readStagingEnvironmentManifestValue(applicationContext)
+    }
     val resolvedConfig = remember(privacy, hasPrivacyConsent) {
         privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
     }
@@ -224,7 +228,14 @@ fun SimulaProvider(
     val explicitPrivacy = privacy != null
     val currentPrivacy by rememberUpdatedState(resolvedConfig)
     val currentExplicitPrivacy by rememberUpdatedState(explicitPrivacy)
-    val entryClaim = remember(apiKey, devMode, telemetryEnabled, applicationContext, privacyOwnerToken) {
+    val entryClaim = remember(
+        apiKey,
+        devMode,
+        telemetryEnabled,
+        applicationContext,
+        privacyOwnerToken,
+        stagingManifestValue,
+    ) {
         PostCommitApiKeyClaim {
             ProcessApiKeyOwner.claimAndSeedPrivacyThen(
                 apiKey = apiKey,
@@ -232,7 +243,7 @@ fun SimulaProvider(
                 privacy = currentPrivacy,
                 explicitPrivacy = currentExplicitPrivacy,
             ) {
-                ProcessApiEnvironment.ensureProductionDefault()
+                ProcessApiEnvironment.ensureDefault(stagingManifestValue)
                 Telemetry.claimInitialization(
                     context = applicationContext,
                     apiKey = apiKey,
