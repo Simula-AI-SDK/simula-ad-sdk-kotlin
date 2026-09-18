@@ -10,6 +10,13 @@ import org.junit.Test
 class MetadataApiTest {
 
     @Test
+    fun `effective API environment is exposed read only`() {
+        assertTrue(SimulaAds::class.java.declaredMethods.any { it.name == "getApiEnvironment" })
+        assertFalse(SimulaAds::class.java.declaredMethods.any { it.name == "setApiEnvironment" })
+        assertFalse(SimulaAds::class.java.declaredMethods.any { it.name == "configureApiEnvironment" })
+    }
+
+    @Test
     fun `fullscreen ads expose only canonical metadata setters`() {
         listOf(SimulaInterstitialAd::class.java, SimulaRewardedAd::class.java).forEach { adClass ->
             val metadataSignatures = adClass.declaredMethods

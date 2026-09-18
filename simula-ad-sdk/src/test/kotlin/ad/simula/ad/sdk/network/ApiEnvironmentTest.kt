@@ -2,7 +2,6 @@ package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.BuildConfig
 import ad.simula.ad.sdk.SimulaAdSdkInfo
-import ad.simula.ad.sdk.ads.SimulaApiEnvironment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -17,7 +16,6 @@ class ApiEnvironmentTest {
     fun `stable SDK always selects production`() {
         val selected = resolveApiEnvironment(
             inputs = ApiEnvironmentResolverInputs(
-                requestedEnvironment = SimulaApiEnvironment.Staging,
                 stagingCapable = false,
                 stagingBaseUrl = "",
                 stagingManifestValue = true,
@@ -30,13 +28,9 @@ class ApiEnvironmentTest {
     }
 
     @Test
-    fun `pure resolver requires request capability and exact boolean manifest gate`() {
-        fun resolve(
-            requested: SimulaApiEnvironment,
-            manifestValue: Any?,
-        ) = resolveApiEnvironment(
+    fun `pure resolver requires artifact capability and exact boolean manifest gate`() {
+        fun resolve(manifestValue: Any?) = resolveApiEnvironment(
             inputs = ApiEnvironmentResolverInputs(
-                requestedEnvironment = requested,
                 stagingCapable = true,
                 stagingBaseUrl = staging,
                 stagingManifestValue = manifestValue,
@@ -44,9 +38,8 @@ class ApiEnvironmentTest {
             productionBaseUrl = production,
         )
 
-        assertEquals(production, resolve(SimulaApiEnvironment.Production, true).baseUrl)
-        assertEquals(production, resolve(SimulaApiEnvironment.Staging, false).baseUrl)
-        assertEquals(staging, resolve(SimulaApiEnvironment.Staging, true).baseUrl)
+        assertEquals(production, resolve(false).baseUrl)
+        assertEquals(staging, resolve(true).baseUrl)
     }
 
     @Test
@@ -54,7 +47,6 @@ class ApiEnvironmentTest {
         listOf(null, "true", 1).forEach { manifestValue ->
             val selected = resolveApiEnvironment(
                 inputs = ApiEnvironmentResolverInputs(
-                    requestedEnvironment = SimulaApiEnvironment.Staging,
                     stagingCapable = true,
                     stagingBaseUrl = staging,
                     stagingManifestValue = manifestValue,
@@ -67,7 +59,7 @@ class ApiEnvironmentTest {
     }
 
     @Test
-    fun `policy uses the pure resolver for staging configuration`() {
+    fun `policy uses the pure resolver for host configuration`() {
         val policy = ApiEnvironmentPolicy(
             stagingCapable = false,
             stagingBaseUrl = "",
@@ -76,7 +68,7 @@ class ApiEnvironmentTest {
 
         assertEquals(
             ApiEnvironment.Production,
-            policy.requestedConfiguration(SimulaApiEnvironment.Staging, true).environment,
+            policy.resolvedConfiguration(true).environment,
         )
     }
 
@@ -86,60 +78,25 @@ class ApiEnvironmentTest {
             stagingCapable = true,
             stagingBaseUrl = " ",
             productionBaseUrl = production,
-        ).requestedConfiguration(SimulaApiEnvironment.Staging, true)
+        ).resolvedConfiguration(true)
 
         assertEquals(ApiEnvironment.Production, selected.environment)
         assertEquals(production, selected.baseUrl)
     }
 
     @Test
-    fun `first frozen environment wins conflicting process attempts`() {
+    fun `first frozen host environment remains process wide`() {
         val policy = ApiEnvironmentPolicy(
             stagingCapable = true,
             stagingBaseUrl = staging,
             productionBaseUrl = production,
         )
 
-        val first = policy.configure(SimulaApiEnvironment.Staging, true)
-        val conflict = policy.configure(SimulaApiEnvironment.Production, null)
-        val same = policy.configure(SimulaApiEnvironment.Staging, true)
+        val first = policy.ensureDefault(true)
+        val later = policy.ensureDefault(false)
 
-        assertEquals(ApiEnvironment.Staging, first.configuration.environment)
-        assertEquals(first.configuration, conflict.configuration)
-        assertEquals(first.configuration, same.configuration)
-        assertTrue(conflict.conflictsWithFrozenEnvironment)
-        assertFalse(same.conflictsWithFrozenEnvironment)
-    }
-
-    @Test
-    fun `failed staging gate freezes production and later staging cannot split traffic`() {
-        val policy = ApiEnvironmentPolicy(
-            stagingCapable = true,
-            stagingBaseUrl = staging,
-            productionBaseUrl = production,
-        )
-
-        val denied = policy.configure(SimulaApiEnvironment.Staging, null)
-        val laterAllowed = policy.configure(SimulaApiEnvironment.Staging, true)
-
-        assertEquals(ApiEnvironment.Production, denied.configuration.environment)
-        assertEquals(ApiEnvironment.Production, laterAllowed.configuration.environment)
-        assertTrue(laterAllowed.conflictsWithFrozenEnvironment)
-    }
-
-    @Test
-    fun `initialization host default preserves explicitly configured staging without conflict`() {
-        val policy = ApiEnvironmentPolicy(
-            stagingCapable = true,
-            stagingBaseUrl = staging,
-            productionBaseUrl = production,
-        )
-
-        val configured = policy.configure(SimulaApiEnvironment.Staging, true)
-        val initialized = policy.ensureDefault(false)
-
-        assertEquals(ApiEnvironment.Staging, configured.configuration.environment)
-        assertEquals(ApiEnvironment.Staging, initialized.environment)
+        assertEquals(ApiEnvironment.Staging, first.environment)
+        assertEquals(first, later)
         assertEquals(ApiEnvironment.Staging, policy.currentOrProduction().environment)
     }
 

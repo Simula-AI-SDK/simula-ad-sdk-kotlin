@@ -114,40 +114,6 @@ object SimulaAds {
     val apiEnvironment: SimulaApiEnvironment get() = ProcessApiEnvironment.effectiveEnvironment
 
     /**
-     * Overrides the API environment for this application process.
-     *
-     * Call this before [initialize] or before composing `SimulaProvider`. The first effective
-     * process environment wins. [SimulaApiEnvironment.Staging] is effective only for an exact
-     * `X.Y.Z-dev.N` SDK artifact when the host application's manifest contains an actual Boolean:
-     *
-     * ```xml
-     * <meta-data
-     *     android:name="SimulaStagingEnvironmentEnabled"
-     *     android:value="true" />
-     * ```
-     *
-     * Missing or malformed metadata, lookup failure, and stable SDK artifacts fail closed to
-     * production. This method performs no network or disk work beyond one bounded PackageManager
-     * metadata lookup for a staging request.
-     *
-     * @return true when [environment] is the effective process environment; false when the request
-     * is gated to production or conflicts with the environment that already won.
-     */
-    fun configureApiEnvironment(
-        context: Context,
-        environment: SimulaApiEnvironment,
-    ): Boolean = runCatching {
-        val stagingManifestValue = if (environment == SimulaApiEnvironment.Staging) {
-            readStagingEnvironmentManifestValue(context)
-        } else {
-            null
-        }
-        ProcessApiEnvironment.configure(environment, stagingManifestValue)
-    }.getOrElse {
-        ProcessApiEnvironment.configure(environment, null)
-    }
-
-    /**
      * Initialize the SDK. Idempotent — the first valid call wins; later calls are
      * ignored.
      *
