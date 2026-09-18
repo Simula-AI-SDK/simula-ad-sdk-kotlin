@@ -4,11 +4,13 @@ import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.AutoStoreRedirect
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
+import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.model.CreativeType
+import ad.simula.ad.sdk.model.DEFAULT_FALLBACK_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.MAX_SK_OVERLAY_DELAY_SECONDS
@@ -18,6 +20,7 @@ import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StoreOpen
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.fallbackCloseTreatment
 import ad.simula.ad.sdk.model.validatedHexColor
 import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -39,8 +42,9 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 
 internal object LenientNullableBooleanSerializer : KSerializer<Boolean?> {
     override val descriptor: SerialDescriptor =
@@ -65,7 +69,7 @@ internal object LenientNullableStringSerializer : KSerializer<String?> {
     override fun deserialize(decoder: Decoder): String? {
         val jsonDecoder = decoder as? JsonDecoder ?: return runCatching { decoder.decodeString() }.getOrNull()
         val primitive = jsonDecoder.decodeJsonElement() as? JsonPrimitive ?: return null
-        return primitive.takeIf(JsonPrimitive::isString)?.contentOrNull
+        return primitive.takeIf(JsonPrimitive::isString)?.content
     }
 
     @OptIn(ExperimentalSerializationApi::class)
@@ -92,6 +96,19 @@ internal object LenientNullableExperimentSerializer : KSerializer<ApiExperiment?
         if (value == null) encoder.encodeNull()
         else encoder.encodeSerializableValue(ApiExperiment.serializer(), value)
     }
+}
+
+internal object LenientIntSerializer : KSerializer<Int> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("LenientInt", PrimitiveKind.INT)
+
+    override fun deserialize(decoder: Decoder): Int {
+        val jsonDecoder = decoder as? JsonDecoder ?: return runCatching { decoder.decodeInt() }.getOrDefault(0)
+        val primitive = jsonDecoder.decodeJsonElement() as? JsonPrimitive ?: return 0
+        return primitive.takeUnless(JsonPrimitive::isString)?.intOrNull ?: 0
+    }
+
+    override fun serialize(encoder: Encoder, value: Int) = encoder.encodeInt(value)
 }
 
 @Serializable
@@ -202,7 +219,8 @@ internal data class FallbackAdBody(
     @SerialName("ios_store_url")
     @Serializable(with = LenientNullableStringSerializer::class)
     val iosStoreUrl: String? = null,
-    @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
+    // Keep fallback behavior raw so malformed or partial close config cannot drop the screen.
+    @SerialName("ad_behavior") val adBehavior: JsonElement? = null,
     @Transient val sourceIndex: Int = -1,
     @Transient val routingFieldsPresent: Boolean = listOf(
         destination,
@@ -313,6 +331,7 @@ internal data class AdLoadApiResponse(
     // Null when the payload omits `ad_behavior` — the renderer falls back to today's defaults.
     @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
     val creative: ApiCreative? = null,
+    @Serializable(with = LenientNullableExperimentSerializer::class)
     val experiment: ApiExperiment? = null,
 )
 
@@ -354,9 +373,15 @@ internal data class ApiAdBehavior(
 
 @Serializable
 internal data class ApiCloseBehavior(
-    @SerialName("delay_seconds") val delaySeconds: Int? = null,
+    @Serializable(with = LenientIntSerializer::class)
+    @SerialName("delay_seconds") val delaySeconds: Int = 0,
+    @Serializable(with = LenientNullableStringSerializer::class)
     val treatment: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
     val position: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val action: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
     @SerialName("progress_bar_color") val progressBarColor: String? = null,
 )
 
@@ -418,28 +443,35 @@ internal fun ApiCloseBehavior?.toDomain(): CloseBehavior {
     // regardless; only its resolved close ✕ follows `position`.)
     return CloseBehavior(
         // Clamp to [0, MAX] so a bad/oversized value can't trap the user behind a blocked close.
-        delaySeconds = (delaySeconds ?: 0).coerceIn(0, MAX_CLOSE_DELAY_SECONDS),
+        delaySeconds = delaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS),
         treatment = CloseTreatment.from(treatment),
         position = ClosePosition.from(position),
+        action = CloseAction.from(action),
         progressBarColor = validatedHexColor(progressBarColor),
     )
 }
 
-/** Fallback chrome has a deliberately narrower contract than primary creatives. */
-internal fun fallbackAdBehavior(value: ApiAdBehavior?): AdBehavior {
-    val resolved = value.toDomain() ?: AdBehavior()
-    val wireClose = value?.close
-    val treatment = when (wireClose?.treatment?.trim()?.lowercase()?.replace('-', '_')) {
-        "hidden" -> CloseTreatment.HIDDEN
-        else -> CloseTreatment.COUNTDOWN_CIRCLE
-    }
-    return resolved.copy(
-        close = CloseBehavior(
-            delaySeconds = (wireClose?.delaySeconds ?: 5).coerceIn(0, MAX_CLOSE_DELAY_SECONDS),
-            treatment = treatment,
-            position = ClosePosition.from(wireClose?.position),
-            progressBarColor = validatedHexColor(wireClose?.progressBarColor),
-        ),
+/** Resolves fallback close chrome independently from primary behavior defaults. All malformed,
+ * missing, null, or partial fields fail open to the fallback contract's bounded defaults. */
+internal fun fallbackCloseBehavior(adBehavior: JsonElement?): CloseBehavior {
+    val close = (adBehavior as? JsonObject)?.get("close") as? JsonObject
+        ?: return CloseBehavior(
+            delaySeconds = DEFAULT_FALLBACK_CLOSE_DELAY_SECONDS,
+            treatment = CloseTreatment.COUNTDOWN_CIRCLE,
+        )
+    val delayPrimitive = close["delay_seconds"] as? JsonPrimitive
+    val delay = delayPrimitive
+        ?.takeUnless(JsonPrimitive::isString)
+        ?.longOrNull
+        ?: DEFAULT_FALLBACK_CLOSE_DELAY_SECONDS.toLong()
+    fun stringValue(key: String): String? =
+        (close[key] as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
+    return CloseBehavior(
+        delaySeconds = delay.coerceIn(0L, MAX_CLOSE_DELAY_SECONDS.toLong()).toInt(),
+        treatment = fallbackCloseTreatment(stringValue("treatment")),
+        position = ClosePosition.from(stringValue("position")),
+        action = CloseAction.from(stringValue("action")),
+        progressBarColor = validatedHexColor(stringValue("progress_bar_color")),
     )
 }
 

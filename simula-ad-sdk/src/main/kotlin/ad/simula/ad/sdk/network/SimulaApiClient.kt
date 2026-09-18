@@ -63,7 +63,7 @@ internal fun sessionCreateBody(
  */
 internal object SimulaApiClient {
 
-    private const val API_BASE_URL = "https://simula-api-701226639755.us-central1.run.app"
+    private fun endpoint(path: String): String = ProcessApiEnvironment.current.url(path)
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -143,7 +143,7 @@ internal object SimulaApiClient {
                     add("ppid=${URLEncoder.encode(primaryUserID, "UTF-8")}")
                 }
             }
-            val url = "$API_BASE_URL/session/create" +
+            val url = endpoint("session/create") +
                 if (params.isEmpty()) "" else "?" + params.joinToString("&")
 
             // Establish consent at session creation: the backend ties the `privacy`
@@ -196,7 +196,7 @@ internal object SimulaApiClient {
     suspend fun updatePpid(apiKey: String, sessionId: String, ppid: String): Boolean = withContext(Dispatchers.IO) {
         if (sessionId.isBlank() || ppid.isBlank()) return@withContext false
         try {
-            val url = "$API_BASE_URL/session/" +
+            val url = endpoint("session/") +
                 URLEncoder.encode(sessionId, "UTF-8") +
                 "/ppid/" + URLEncoder.encode(ppid, "UTF-8")
             val response = SimulaHttp.request(
@@ -220,7 +220,7 @@ internal object SimulaApiClient {
      * device id, and other session signals when omitted). Pure/testable.
      */
     internal fun frequencyCapUrl(adUnitId: String, ppid: String?, sessionId: String?): String = buildString {
-        append("$API_BASE_URL/frequency-cap/status?ad_unit_id=${URLEncoder.encode(adUnitId, "UTF-8")}")
+        append(endpoint("frequency-cap/status?ad_unit_id=${URLEncoder.encode(adUnitId, "UTF-8")}"))
         if (!ppid.isNullOrBlank()) {
             append("&ppid=${URLEncoder.encode(ppid, "UTF-8")}")
         }
@@ -323,7 +323,7 @@ internal object SimulaApiClient {
 
     /** Builds the session-independent public catalog URL. Pure/testable. */
     @Suppress("UNUSED_PARAMETER")
-    internal fun catalogUrl(sessionId: String?): String = "$API_BASE_URL/minigames/catalogv2"
+    internal fun catalogUrl(sessionId: String?): String = endpoint("minigames/catalogv2")
 
     // ── Character Picker ──────────────────────────────────────────────────────
 
@@ -343,7 +343,7 @@ internal object SimulaApiClient {
     ): List<CharacterData> = withContext(Dispatchers.IO) {
         try {
             val response = SimulaHttp.request(
-                url = "$API_BASE_URL/character-selector",
+                url = endpoint("character-selector"),
                 method = "POST",
                 headers = authHeaders(apiKey),
                 body = json.encodeToString(
@@ -445,7 +445,7 @@ internal object SimulaApiClient {
         )
 
         val response = SimulaHttp.request(
-            url = "$API_BASE_URL/minigames/init",
+            url = endpoint("minigames/init"),
             method = "POST",
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
@@ -528,7 +528,7 @@ internal object SimulaApiClient {
         )
 
         val response = SimulaHttp.request(
-            url = "$API_BASE_URL/load/interstitial",
+            url = endpoint("load/interstitial"),
             method = "POST",
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
@@ -613,7 +613,7 @@ internal object SimulaApiClient {
         )
 
         val response = SimulaHttp.request(
-            url = "$API_BASE_URL/load/native",
+            url = endpoint("load/native"),
             method = "POST",
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
@@ -704,7 +704,7 @@ internal object SimulaApiClient {
             capabilities = currentDeviceCapabilities(),
         )
         val response = SimulaHttp.request(
-            url = "$API_BASE_URL/load/rewarded",
+            url = endpoint("load/rewarded"),
             method = "POST",
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
@@ -739,7 +739,7 @@ internal object SimulaApiClient {
             completionReason = completionReason,
         )
         val response = SimulaHttp.request(
-            url = "$API_BASE_URL/minigames/verify-reward",
+            url = endpoint("minigames/verify-reward"),
             method = "POST",
             headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
@@ -778,8 +778,8 @@ internal object SimulaApiClient {
             androidStoreUrl,
             iosStoreUrl,
         ).any { !it.isNullOrBlank() },
-        val adBehavior: AdBehavior = fallbackAdBehavior(null),
         val nativeClickBeaconV1Enabled: Boolean = false,
+        val closeBehavior: ad.simula.ad.sdk.model.CloseBehavior = fallbackCloseBehavior(null),
     )
 
     internal fun fallbackAdFromBody(
@@ -804,9 +804,9 @@ internal object SimulaApiClient {
             androidStoreUrl = ad.androidStoreUrl?.trim()?.takeIf { it.isNotEmpty() },
             iosStoreUrl = ad.iosStoreUrl?.trim()?.takeIf { it.isNotEmpty() },
             routingFieldsPresent = ad.routingFieldsPresent,
-            adBehavior = fallbackAdBehavior(ad.adBehavior),
             nativeClickBeaconV1Enabled =
                 ad.nativeClickBeaconV1Enabled ?: responseNativeClickBeaconV1Enabled,
+            closeBehavior = fallbackCloseBehavior(ad.adBehavior),
         )
     }
 
@@ -828,7 +828,7 @@ internal object SimulaApiClient {
         coalesce("fallbacks:$impressionId") {
             withContext(Dispatchers.IO) {
                 val response = SimulaHttp.request(
-                    url = "$API_BASE_URL/load/fallbacks/$impressionId",
+                    url = endpoint("load/fallbacks/$impressionId"),
                     method = "GET",
                     headers = jsonHeaders(),
                 )
@@ -852,7 +852,7 @@ internal object SimulaApiClient {
         try {
             val clickBody = MenuGameClickBody(menuId = menuId, gameName = gameName)
             SimulaHttp.request(
-                url = "$API_BASE_URL/minigames/menu/track/click",
+                url = endpoint("minigames/menu/track/click"),
                 method = "POST",
                 headers = authHeaders(apiKey),
                 body = json.encodeToString(clickBody),
@@ -876,7 +876,7 @@ internal object SimulaApiClient {
         if (impressionId.isBlank()) return@withContext
         try {
             SimulaHttp.request(
-                url = "$API_BASE_URL/impressions/$impressionId/shown",
+                url = endpoint("impressions/$impressionId/shown"),
                 method = "POST",
                 headers = authHeaders(apiKey),
             )
@@ -899,7 +899,7 @@ internal object SimulaApiClient {
         if (impressionId.isBlank()) return@withContext
         try {
             SimulaHttp.request(
-                url = "$API_BASE_URL/impressions/$impressionId/seen",
+                url = endpoint("impressions/$impressionId/seen"),
                 method = "POST",
                 headers = authHeaders(apiKey),
             )
@@ -923,7 +923,7 @@ internal object SimulaApiClient {
         if (impressionId.isBlank()) return@withContext
         try {
             SimulaHttp.request(
-                url = "$API_BASE_URL/impressions/$impressionId/click",
+                url = endpoint("impressions/$impressionId/click"),
                 method = "POST",
                 headers = impressionBeaconHeaders(apiKey, "click", interactionId, clickSource),
             )
@@ -949,7 +949,7 @@ internal object SimulaApiClient {
     ): Int = withContext(Dispatchers.IO) {
         val body = impressionMetadataRequestBody(action, metadata)?.let { json.encodeToString(it) }
         SimulaHttp.request(
-            url = "$API_BASE_URL/impressions/$impressionId/$action",
+            url = endpoint("impressions/$impressionId/$action"),
             method = "POST",
             headers = impressionBeaconHeaders(apiKey, action, interactionId, clickSource),
             body = body,
@@ -989,7 +989,7 @@ internal object SimulaApiClient {
                 if (!note.isNullOrBlank()) put("note", note)
             }
             SimulaHttp.request(
-                url = "$API_BASE_URL/impressions/$adId/report",
+                url = endpoint("impressions/$adId/report"),
                 method = "POST",
                 headers = authHeaders(apiKey),
                 body = json.encodeToString(reportBody),
@@ -1013,7 +1013,7 @@ internal object SimulaApiClient {
         if (impressionId.isBlank()) return@withContext
         try {
             SimulaHttp.request(
-                url = "$API_BASE_URL/impressions/$impressionId/interest?interest=$interest",
+                url = endpoint("impressions/$impressionId/interest?interest=$interest"),
                 method = "PATCH",
                 headers = authHeaders(apiKey),
             )
@@ -1033,7 +1033,7 @@ internal object SimulaApiClient {
     suspend fun postTelemetry(apiKey: String, body: String): Int = withContext(Dispatchers.IO) {
         try {
             SimulaHttp.request(
-                url = "$API_BASE_URL/telemetry/events",
+                url = endpoint("telemetry/events"),
                 method = "POST",
                 headers = authHeaders(apiKey),
                 body = body,

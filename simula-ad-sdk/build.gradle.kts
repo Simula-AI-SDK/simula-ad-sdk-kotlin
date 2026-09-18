@@ -1,4 +1,6 @@
 import org.gradle.api.publish.maven.tasks.AbstractPublishToMaven
+import java.io.ByteArrayInputStream
+import java.util.zip.ZipInputStream
 
 plugins {
     alias(libs.plugins.android.library)
@@ -8,7 +10,10 @@ plugins {
     alias(libs.plugins.vanniktech.maven.publish)
 }
 
-val sdkVersion = "1.2.0"
+val sdkVersion = "1.2.1-dev.3"
+val stagingHostname = "simula-api-staging-701226639755.us-central1.run.app"
+val stagingCapable = Regex("^\\d+\\.\\d+\\.\\d+-dev\\.\\d+$").matches(sdkVersion)
+val stagingBaseUrl = if (stagingCapable) "https://$stagingHostname" else ""
 
 android {
     namespace = "ad.simula.ad.sdk"
@@ -17,6 +22,9 @@ android {
     defaultConfig {
         minSdk = 24
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("boolean", "SIMULA_STAGING_CAPABLE", stagingCapable.toString())
+        buildConfigField("String", "SIMULA_STAGING_BASE_URL", "\"$stagingBaseUrl\"")
 
         consumerProguardFiles("consumer-rules.pro")
     }
@@ -47,6 +55,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -123,8 +132,56 @@ val verifyVersionConsistency = tasks.register("verifyVersionConsistency") {
     }
 }
 
+val verifyStableAarExcludesStaging = tasks.register("verifyStableAarExcludesStaging") {
+    group = "verification"
+    description = "Verifies that stable release AARs do not contain the staging hostname."
+    dependsOn("bundleReleaseAar")
+    val releaseAar = layout.buildDirectory.file("outputs/aar/${project.name}-release.aar")
+    inputs.file(releaseAar)
+    inputs.property("sdkVersion", sdkVersion)
+    inputs.property("stagingHostname", stagingHostname)
+
+    doLast {
+        if (stagingCapable) return@doLast
+        val needle = stagingHostname.toByteArray(Charsets.UTF_8)
+
+        fun containsNeedle(bytes: ByteArray): Boolean {
+            if (bytes.size < needle.size) return false
+            return (0..bytes.size - needle.size).any { offset ->
+                needle.indices.all { index -> bytes[offset + index] == needle[index] }
+            }
+        }
+
+        fun archiveContainsNeedle(bytes: ByteArray): Boolean = ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) {
+                    val entryBytes = zip.readBytes()
+                    if (containsNeedle(entryBytes)) return@use true
+                    if ((entry.name.endsWith(".jar") || entry.name.endsWith(".zip")) &&
+                        runCatching { archiveContainsNeedle(entryBytes) }.getOrDefault(false)
+                    ) {
+                        return@use true
+                    }
+                }
+                entry = zip.nextEntry
+            }
+            false
+        }
+
+        val aar = releaseAar.get().asFile
+        if (archiveContainsNeedle(aar.readBytes())) {
+            throw GradleException("Stable AAR contains staging hostname: $stagingHostname")
+        }
+    }
+}
+
 tasks.withType<AbstractPublishToMaven>().configureEach {
-    dependsOn(verifyVersionConsistency)
+    dependsOn(verifyVersionConsistency, verifyStableAarExcludesStaging)
+}
+
+tasks.matching { it.name == "assembleRelease" }.configureEach {
+    finalizedBy(verifyStableAarExcludesStaging)
 }
 
 dependencies {

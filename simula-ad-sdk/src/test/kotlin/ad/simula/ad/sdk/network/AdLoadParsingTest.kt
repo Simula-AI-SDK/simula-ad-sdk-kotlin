@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
+import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.CreativeType
@@ -252,7 +253,7 @@ class AdLoadParsingTest {
             {"impression_id":"x","ad_inserted":true,
              "creative":{"type":"playable","bundle_url":"https://b","ad_unit_type":"rewarded"},
              "experiment":{"experiment_id":"playable_close_q3","variant_id":"v1","layer":"close_chrome"},
-             "ad_behavior":{"close":{"delay_seconds":3,"treatment":"countdown_circle",
+             "ad_behavior":{"close":{"delay_seconds":3,"treatment":"countdown_circle","action":"forward",
                "position":"top_right","progress_bar_color":"#00FF00"},
                "store_prompt":{"enabled":true,"trigger":"midpoint","position":"top_left","platform":"android"},
                "skoverlay":{"enabled":true,"timing":"on_click","delay_seconds":0,"position":"bottom","dismissible":true}}}
@@ -262,6 +263,7 @@ class AdLoadParsingTest {
         assertEquals(3, b.close.delaySeconds)
         assertEquals(CloseTreatment.COUNTDOWN_CIRCLE, b.close.treatment)
         assertEquals(ClosePosition.TOP_RIGHT, b.close.position)
+        assertEquals(CloseAction.FORWARD, b.close.action)
         assertEquals("#00FF00", b.close.progressBarColor)
 
         val prompt = b.storePrompt!!
@@ -321,6 +323,55 @@ class AdLoadParsingTest {
         assertEquals(ClosePosition.TOP_LEFT, b.close.position)
         assertEquals(OverlayTiming.DURING_PLAY, b.skoverlay!!.timing)
         assertEquals(OverlayPosition.BOTTOM_RAISED, b.skoverlay!!.position)
+    }
+
+    @Test
+    fun `close action normalizes case and hyphens and defaults unknown to close x`() {
+        for (raw in listOf("forward", "FORWARD")) {
+            val close = json.decodeFromString<AdLoadApiResponse>(
+                """{"ad_behavior":{"close":{"action":"$raw"}}}""",
+            ).adBehavior.toDomain()?.close
+            assertEquals(CloseAction.FORWARD, close?.action)
+        }
+        for (raw in listOf("close_x", "Close-X", "skip", "")) {
+            val close = json.decodeFromString<AdLoadApiResponse>(
+                """{"ad_behavior":{"close":{"action":"$raw"}}}""",
+            ).adBehavior.toDomain()?.close
+            assertEquals(CloseAction.CLOSE_X, close?.action)
+        }
+    }
+
+    @Test
+    fun `malformed close fields default independently without rejecting primary or rewarded responses`() {
+        val malformedFields = listOf(
+            "\"delay_seconds\":\"5\"",
+            "\"delay_seconds\":[]",
+            "\"treatment\":false",
+            "\"treatment\":{}",
+            "\"position\":1",
+            "\"position\":[]",
+            "\"action\":true",
+            "\"action\":{}",
+            "\"progress_bar_color\":1",
+            "\"progress_bar_color\":[]",
+        )
+        for (malformedField in malformedFields) {
+            val primary = json.decodeFromString<AdLoadApiResponse>(
+                """{"ad_behavior":{"close":{$malformedField}}}""",
+            )
+            val rewarded = json.decodeFromString<RewardedInitApiResponse>(
+                """{"ad_behavior":{"close":{$malformedField}}}""",
+            )
+
+            for (response in listOf(primary.adBehavior, rewarded.adBehavior)) {
+                val close = response.toDomain()?.close
+                assertEquals(0, close?.delaySeconds)
+                assertEquals(CloseTreatment.HIDDEN, close?.treatment)
+                assertEquals(ClosePosition.TOP_RIGHT, close?.position)
+                assertEquals(CloseAction.CLOSE_X, close?.action)
+                assertEquals("#FFFFFF", close?.progressBarColor)
+            }
+        }
     }
 
     @Test
@@ -481,12 +532,13 @@ class AdLoadParsingTest {
             """{"ad_behavior":{"close":{"delay_seconds":600}}}""",
         ).adBehavior.toDomain()!!
         assertEquals(MAX_CLOSE_DELAY_SECONDS, b.close.delaySeconds)
+        assertEquals(60, MAX_CLOSE_DELAY_SECONDS)
     }
 
     @Test
     fun `ad_behavior honors close_chrome delay arms without clamping`() {
-        // The close_chrome experiment authors 20/30/45; the cap (45) must let all three through.
-        for (d in listOf(20, 30, 45)) {
+        // Authored values through the cross-platform 60-second cap remain unchanged.
+        for (d in listOf(20, 30, 45, 60)) {
             val b = json.decodeFromString<AdLoadApiResponse>(
                 """{"ad_behavior":{"close":{"delay_seconds":$d}}}""",
             ).adBehavior.toDomain()!!

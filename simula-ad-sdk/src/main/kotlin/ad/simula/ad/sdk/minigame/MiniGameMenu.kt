@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,7 +39,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -100,6 +103,9 @@ import ad.simula.ad.sdk.ads.prepareDeferredCtaRoute
 import ad.simula.ad.sdk.ads.AutomaticNavigationOutcome
 import ad.simula.ad.sdk.ads.canRouteFromCurrentFullscreenActivity
 import ad.simula.ad.sdk.ads.shouldEnterFallbackVideoUnavailable
+import ad.simula.ad.sdk.ads.FallbackCloseGateState
+import ad.simula.ad.sdk.ads.closeGateProgress
+import ad.simula.ad.sdk.ads.closeGateSecondsRemaining
 import ad.simula.ad.sdk.ads.coordinateDeferredClickPersistence
 import ad.simula.ad.sdk.ads.enqueueOwnedFallbackClickBeacon
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -107,15 +113,17 @@ import ad.simula.ad.sdk.image.BundledResourceImage
 import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.R
 import ad.simula.ad.sdk.model.GameData
+import ad.simula.ad.sdk.model.CloseBehavior
+import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.model.resolve
-import ad.simula.ad.sdk.model.closeGateSecondsLeft
 import ad.simula.ad.sdk.model.videoCloseGateMs
 import ad.simula.ad.sdk.model.RenderAttemptGate
 import ad.simula.ad.sdk.model.admittedVideoUrl
+import ad.simula.ad.sdk.model.resolveFallbackCloseAction
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.ClickInteractionGate
@@ -206,6 +214,7 @@ fun MiniGameMenu(
     var currentServeId by remember { mutableStateOf<String?>(null) }
     var lastGameHeightDp by remember { mutableStateOf<Float?>(null) }
     var lastGameWasBottomSheet by remember { mutableStateOf(false) }
+    val fallbackCloseGates = remember(currentServeId) { FallbackCloseGateState() }
 
     // The fallback screen currently on display; null when the overlay is closed.
     val currentFallbackAd = fallbackAds.getOrNull(fallbackAdIndex)
@@ -696,6 +705,13 @@ fun MiniGameMenu(
                 FullscreenDialogWindowConfig(opaqueBackground = fallbackPlayableHeightDp == null)
                 // key() so each revealed screen gets fresh overlay state (countdown, WebView).
                 key(currentFallbackAd.sourceIndex) {
+                    val closeBehavior = currentFallbackAd.closeBehavior.copy(
+                        action = resolveFallbackCloseAction(
+                            currentFallbackAd.closeBehavior.action,
+                            fallbackAdIndex,
+                            fallbackAds.size,
+                        ),
+                    )
                     MiniGameFallbackOverlay(
                         ad = currentFallbackAd,
                         nextVideoUrl = nextFallbackVideoUrl(fallbackAds, fallbackAdIndex),
@@ -703,6 +719,9 @@ fun MiniGameMenu(
                         playableHeightDp = fallbackPlayableHeightDp,
                         playableBorderColor = theme.playableBorderColor ?: "#262626",
                         parentServeId = currentServeId,
+                        closeBehavior = closeBehavior,
+                        fallbackIndex = fallbackAdIndex,
+                        closeGateState = fallbackCloseGates,
                     )
                 }
             }
@@ -791,6 +810,9 @@ private fun MiniGameFallbackOverlay(
     playableHeightDp: Float? = null,
     playableBorderColor: String = "#262626",
     parentServeId: String? = null,
+    closeBehavior: CloseBehavior,
+    fallbackIndex: Int,
+    closeGateState: FallbackCloseGateState,
 ) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -800,14 +822,24 @@ private fun MiniGameFallbackOverlay(
     val inlineHtml = ad.renderedHtml?.takeIf { it.isNotBlank() }
     val isVideo = ad.type == CreativeType.VIDEO
     val videoUrl = remember(ad.url) { admittedVideoUrl(ad.url) }
-    val closeBehavior = ad.adBehavior.close
-    var gateMs by remember(adId) { mutableStateOf(closeBehavior.delaySeconds * 1_000L) }
-    var elapsedGateMs by remember(adId) { mutableStateOf(0L) }
+    var videoDurationMs by remember(closeGateState, fallbackIndex) {
+        mutableStateOf(closeGateState.videoDurationMs(fallbackIndex))
+    }
+    var gateMs by remember(closeGateState, fallbackIndex) {
+        mutableStateOf(videoCloseGateMs(closeBehavior.delaySeconds, videoDurationMs))
+    }
 
-    var adCountdown by remember(adId) { mutableStateOf(closeGateSecondsLeft(0L, gateMs)) }
+    val retainedGateMs = closeGateState.elapsedMs(fallbackIndex).coerceAtMost(gateMs)
+    var adCountdown by remember(closeBehavior, fallbackIndex) {
+        mutableStateOf(closeGateSecondsRemaining(retainedGateMs, gateMs))
+    }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
-    val ringProgress = remember { Animatable(0f) }
-    var videoRingProgress by remember(ad.sourceIndex) { mutableFloatStateOf(0f) }
+    val ringProgress = remember(closeBehavior, fallbackIndex) {
+        Animatable(closeGateProgress(retainedGateMs, gateMs))
+    }
+    var videoRingProgress by remember(ad.sourceIndex) {
+        mutableFloatStateOf(closeGateProgress(retainedGateMs, gateMs))
+    }
     val smoothVideoRingProgress = smoothVideoProgress(videoRingProgress)
     var adPageLoaded by remember { mutableStateOf(false) }
     var adPageFailed by remember { mutableStateOf(false) }
@@ -856,15 +888,25 @@ private fun MiniGameFallbackOverlay(
 
     LaunchedEffect(gateMs, isVideo, adPageLoaded) {
         if (isVideo || !adPageLoaded) return@LaunchedEffect
+        if (gateMs <= 0L) {
+            adCountdown = 0
+            ringProgress.snapTo(1f)
+            return@LaunchedEffect
+        }
+        var accumulatedMs = closeGateState.elapsedMs(fallbackIndex).coerceAtMost(gateMs)
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             var lastTickMs = SystemClock.elapsedRealtime()
-            while (elapsedGateMs < gateMs) {
+            while (accumulatedMs < gateMs) {
                 delay(50L)
                 val now = SystemClock.elapsedRealtime()
-                elapsedGateMs = (elapsedGateMs + (now - lastTickMs).coerceAtLeast(0L)).coerceAtMost(gateMs)
+                accumulatedMs = closeGateState.addElapsedMs(
+                    fallbackIndex,
+                    now - lastTickMs,
+                    gateMs,
+                )
                 lastTickMs = now
-                adCountdown = closeGateSecondsLeft(elapsedGateMs, gateMs)
-                ringProgress.snapTo((elapsedGateMs.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f))
+                ringProgress.snapTo(closeGateProgress(accumulatedMs, gateMs))
+                adCountdown = closeGateSecondsRemaining(accumulatedMs, gateMs)
             }
         }
     }
@@ -1102,24 +1144,29 @@ private fun MiniGameFallbackOverlay(
                             serveId = parentServeId?.takeIf { it.isNotBlank() },
                             prewarmNextUrl = nextVideoUrl,
                             configuredGateSeconds = closeBehavior.delaySeconds,
-                            initialPlayedMs = elapsedGateMs,
+                            initialPlayedMs = closeGateState.elapsedMs(fallbackIndex),
                             ctaEnabled = videoRouting != null,
                             modifier = Modifier.fillMaxSize(),
                             onReady = { durationMs ->
+                                videoDurationMs = durationMs
+                                closeGateState.retainVideoDurationMs(fallbackIndex, durationMs)
                                 gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
-                                elapsedGateMs = elapsedGateMs.coerceAtMost(gateMs)
-                                adCountdown = closeGateSecondsLeft(elapsedGateMs, gateMs)
+                                val accumulated = closeGateState.elapsedMs(fallbackIndex).coerceAtMost(gateMs)
+                                adCountdown = closeGateSecondsRemaining(accumulated, gateMs)
+                                videoRingProgress = closeGateProgress(accumulated, gateMs)
                             },
                             onProgress = { _, durationMs, advancedMs ->
+                                videoDurationMs = durationMs
+                                closeGateState.retainVideoDurationMs(fallbackIndex, durationMs)
                                 gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
-                                elapsedGateMs = (elapsedGateMs + advancedMs).coerceAtMost(gateMs)
-                                adCountdown = closeGateSecondsLeft(elapsedGateMs, gateMs)
-                                videoRingProgress =
-                                    (elapsedGateMs.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f)
+                                val accumulated = closeGateState.addElapsedMs(fallbackIndex, advancedMs, gateMs)
+                                adCountdown = closeGateSecondsRemaining(accumulated, gateMs)
+                                videoRingProgress = closeGateProgress(accumulated, gateMs)
                             },
                             onCompleted = {
-                                elapsedGateMs = gateMs
+                                closeGateState.addElapsedMs(fallbackIndex, gateMs, gateMs)
                                 adCountdown = 0
+                                videoRingProgress = 1f
                             },
                             onError = ::applyPageFailure,
                             onCta = {
@@ -1274,11 +1321,20 @@ private fun MiniGameFallbackOverlay(
                     )
                 }
 
-                if (adCountdown <= 0 && !clickHandoffPending) {
+                val closeReady = adCountdown <= 0 && !clickHandoffPending
+                val closeAlignment = when (closeBehavior.position) {
+                    ClosePosition.TOP_RIGHT -> Alignment.TopEnd
+                    ClosePosition.TOP_LEFT -> Alignment.TopStart
+                    ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
+                }
+                if (closeReady) {
                     CloseButton(
                         onClick = ::closeOverlay,
+                        action = closeBehavior.action,
                         modifier = Modifier
-                            .align(Alignment.TopEnd)
+                            .align(closeAlignment)
+                            .windowInsetsPadding(WindowInsets.safeDrawing)
+                            .padding(start = if (closeBehavior.position == ClosePosition.BOTTOM_LEFT) 18.dp else 0.dp)
                             .padding(8.dp),
                     )
                 } else if (closeBehavior.treatment == CloseTreatment.COUNTDOWN_CIRCLE) {
@@ -1286,7 +1342,9 @@ private fun MiniGameFallbackOverlay(
                     // button so nothing jumps when it unlocks.
                     Box(
                         modifier = Modifier
-                            .align(Alignment.TopEnd)
+                            .align(closeAlignment)
+                            .windowInsetsPadding(WindowInsets.safeDrawing)
+                            .padding(start = if (closeBehavior.position == ClosePosition.BOTTOM_LEFT) 18.dp else 0.dp)
                             .padding(8.dp)
                             .size(48.dp),
                         contentAlignment = Alignment.Center,
@@ -1326,7 +1384,10 @@ private fun MiniGameFallbackOverlay(
 
         // Persistent ad-info "i" + report sheet (required disclosure on the post-game ad).
         if (adId.isNotEmpty()) {
-            AdInfoReportOverlay(adId = adId)
+            AdInfoReportOverlay(
+                adId = adId,
+                closeAtBottomLeft = closeBehavior.position == ClosePosition.BOTTOM_LEFT,
+            )
         }
     }
 }

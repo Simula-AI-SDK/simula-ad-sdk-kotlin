@@ -460,7 +460,7 @@ internal object AdBeaconManager {
         synchronized(this) {
             if (engine != null) return
             engine = AdBeaconQueue(
-                store = SqliteBeaconStore(appContext, json),
+                store = SqliteBeaconStore(appContext, json, ProcessApiEnvironment.current.environment),
                 sender = ApiBeaconSender(apiKey),
             )
         }
@@ -543,10 +543,11 @@ internal class SqliteBeaconStore internal constructor(
     constructor(
         context: Context,
         json: Json,
+        environment: ApiEnvironment = ApiEnvironment.Production,
         clock: () -> Long = System::currentTimeMillis,
     ) : this(
-        rows = SqliteDurableQueueRows(context, DB_NAME, TABLE),
-        legacy = SharedPrefsLegacyQueueSource(context, LEGACY_PREFS, LEGACY_KEY),
+        rows = SqliteDurableQueueRows(context, environment.storageName(DB_NAME), TABLE),
+        legacy = SharedPrefsLegacyQueueSource(context, environment.storageName(LEGACY_PREFS), LEGACY_KEY),
         json = json,
         clock = clock,
     )

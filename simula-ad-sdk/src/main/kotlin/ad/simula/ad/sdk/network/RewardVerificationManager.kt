@@ -499,7 +499,11 @@ internal object RewardVerificationManager {
     private fun engine(context: Context): RewardVerificationQueue {
         return engine ?: synchronized(this) {
             engine ?: RewardVerificationQueue(
-                store = SqliteVerificationStore(context.applicationContext, json),
+                store = SqliteVerificationStore(
+                    context.applicationContext,
+                    json,
+                    ProcessApiEnvironment.current.environment,
+                ),
                 verifier = ApiRewardVerifier,
             ).also { engine = it }
         }
@@ -571,10 +575,11 @@ internal class SqliteVerificationStore internal constructor(
     constructor(
         context: Context,
         json: Json,
+        environment: ApiEnvironment = ApiEnvironment.Production,
         clock: () -> Long = System::currentTimeMillis,
     ) : this(
-        rows = SqliteDurableQueueRows(context, DB_NAME, TABLE),
-        legacy = SharedPrefsLegacyQueueSource(context, LEGACY_PREFS, LEGACY_KEY),
+        rows = SqliteDurableQueueRows(context, environment.storageName(DB_NAME), TABLE),
+        legacy = SharedPrefsLegacyQueueSource(context, environment.storageName(LEGACY_PREFS), LEGACY_KEY),
         json = json,
         clock = clock,
     )

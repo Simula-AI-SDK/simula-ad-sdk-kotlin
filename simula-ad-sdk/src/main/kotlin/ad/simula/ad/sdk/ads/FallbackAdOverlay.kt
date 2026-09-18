@@ -4,10 +4,12 @@ import ad.simula.ad.sdk.bridge.recordRenderProcessGone
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirect
+import ad.simula.ad.sdk.model.CloseAction
+import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.CreativeType
-import ad.simula.ad.sdk.model.closeGateSecondsLeft
+import ad.simula.ad.sdk.model.resolveFallbackCloseAction
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.model.videoCloseGateMs
 import ad.simula.ad.sdk.model.admittedVideoUrl
@@ -75,12 +77,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
 import java.lang.ref.WeakReference
 import kotlinx.coroutines.delay
+import kotlin.math.ceil
 
 internal enum class FallbackStage { CONTENT, FETCHING, SHOWING, DONE }
 private const val FALLBACK_FETCH_ATTEMPTS = 2
@@ -144,6 +149,44 @@ internal fun nextFallbackVideoUrl(
     .firstOrNull { it.type == CreativeType.VIDEO }
     ?.url
 
+internal fun closeGateProgress(elapsedMs: Long, durationMs: Long): Float =
+    if (durationMs <= 0L) 1f else (elapsedMs.toFloat() / durationMs).coerceIn(0f, 1f)
+
+internal fun closeGateSecondsRemaining(elapsedMs: Long, durationMs: Long): Int =
+    ceil((durationMs - elapsedMs).coerceAtLeast(0L) / 1000.0).toInt()
+
+internal class FallbackCloseGateState {
+    private val elapsedByIndex = LinkedHashMap<Int, Long>()
+    private val videoDurationByIndex = LinkedHashMap<Int, Long>()
+
+    @Synchronized
+    fun elapsedMs(index: Int): Long = elapsedByIndex[index.coerceAtLeast(0)] ?: 0L
+
+    @Synchronized
+    fun addElapsedMs(index: Int, elapsedMs: Long, durationMs: Long): Long {
+        val key = index.coerceAtLeast(0)
+        val total = durationMs.coerceAtLeast(0L)
+        val current = (elapsedByIndex[key] ?: 0L).coerceAtMost(total)
+        val updated = current + elapsedMs.coerceIn(0L, total - current)
+        elapsedByIndex[key] = updated
+        return updated
+    }
+
+    @Synchronized
+    fun videoDurationMs(index: Int): Long = videoDurationByIndex[index.coerceAtLeast(0)] ?: 0L
+
+    @Synchronized
+    fun retainVideoDurationMs(index: Int, durationMs: Long) {
+        if (durationMs > 0L) videoDurationByIndex[index.coerceAtLeast(0)] = durationMs
+    }
+
+    @Synchronized
+    fun clear() {
+        elapsedByIndex.clear()
+        videoDurationByIndex.clear()
+    }
+}
+
 internal fun fallbackClickBeaconImpressionId(adId: String, serverEnabled: Boolean): String? =
     adId.takeIf { serverEnabled && it.isNotBlank() }
 
@@ -176,8 +219,7 @@ internal class FallbackPresentationState(
     private var cleared = false
     private var fetchWaitGeneration = 0L
     private var fetchWaitDeadlineMs = 0L
-    private val closeGateElapsedByIndex = LinkedHashMap<Int, Long>()
-    private val videoDurationByIndex = LinkedHashMap<Int, Long>()
+    private val closeGateState = FallbackCloseGateState()
     private val automaticNavigationGates = LinkedHashMap<Int, AutomaticNavigationGate>()
     private val rendererAbandonedIndices = mutableSetOf<Int>()
 
@@ -281,26 +323,18 @@ internal class FallbackPresentationState(
     private fun automaticNavigationGate(index: Int): AutomaticNavigationGate =
         automaticNavigationGates.getOrPut(index.coerceAtLeast(0)) { AutomaticNavigationGate() }
 
-    @Synchronized
-    fun closeGateElapsedMs(index: Int): Long = closeGateElapsedByIndex[index.coerceAtLeast(0)] ?: 0L
+    fun closeGateElapsedMs(index: Int): Long = closeGateState.elapsedMs(index)
 
-    @Synchronized
-    fun addCloseGateElapsedMs(index: Int, elapsedMs: Long, gateMs: Long = FALLBACK_CLOSE_GATE_MS): Long {
-        val key = index.coerceAtLeast(0)
-        val current = closeGateElapsedByIndex[key] ?: 0L
-        val remaining = (gateMs - current).coerceAtLeast(0L)
-        val updated = current + elapsedMs.coerceIn(0L, remaining)
-        closeGateElapsedByIndex[key] = updated
-        return updated
-    }
+    fun addCloseGateElapsedMs(
+        index: Int,
+        elapsedMs: Long,
+        durationMs: Long = FALLBACK_CLOSE_GATE_MS,
+    ): Long = closeGateState.addElapsedMs(index, elapsedMs, durationMs)
 
-    @Synchronized
-    fun videoDurationMs(index: Int): Long = videoDurationByIndex[index.coerceAtLeast(0)] ?: 0L
+    fun videoDurationMs(index: Int): Long = closeGateState.videoDurationMs(index)
 
-    @Synchronized
-    fun retainVideoDurationMs(index: Int, durationMs: Long) {
-        if (durationMs > 0L) videoDurationByIndex[index.coerceAtLeast(0)] = durationMs
-    }
+    fun retainVideoDurationMs(index: Int, durationMs: Long) =
+        closeGateState.retainVideoDurationMs(index, durationMs)
 
     fun startPostCloseFetchWait(): Long {
         if (stage != FallbackStage.FETCHING) {
@@ -373,8 +407,7 @@ internal class FallbackPresentationState(
         cleared = true
         clickHandoffPending = false
         cancelNavigationLocked()
-        closeGateElapsedByIndex.clear()
-        videoDurationByIndex.clear()
+        closeGateState.clear()
         automaticNavigationGates.clear()
         rendererAbandonedIndices.clear()
     }
@@ -680,6 +713,9 @@ internal fun FallbackAdHost(
                 // key() so each screen gets fresh overlay state (countdown, WebView) — without it the
                 // next screen would inherit the previous one's elapsed countdown and loaded page.
                 key(screenIndex) {
+                    val resolvedClose = ad.closeBehavior.copy(
+                        action = resolveFallbackCloseAction(ad.closeBehavior.action, p.index, p.ads.size),
+                    )
                     FallbackAdOverlay(
                         ad = ad,
                         onAdClick = onAdClick,
@@ -697,6 +733,7 @@ internal fun FallbackAdHost(
                         fallbackIndex = p.index,
                         sourceIndex = ad.sourceIndex,
                         nextVideoUrl = nextFallbackVideoUrl(p.ads, p.index),
+                        closeBehavior = resolvedClose,
                         onClickHandoffCreated = { handoff ->
                             presentationState.abandonAutomaticNavigation(p.index)
                             presentationState.setClickPending(true)
@@ -740,7 +777,7 @@ private sealed interface FallbackPhase {
 
 /**
  * Full-screen fallback ad: server-rendered HTML in a pooled WebView or a native video surface,
- * with server-constrained close chrome.
+ * with per-item close chrome and close/forward accessibility semantics.
  */
 @Composable
 private fun FallbackAdOverlay(
@@ -757,6 +794,7 @@ private fun FallbackAdOverlay(
     fallbackIndex: Int,
     sourceIndex: Int,
     nextVideoUrl: String?,
+    closeBehavior: CloseBehavior,
     onClickHandoffCreated: (ClickPersistenceHandoff) -> Unit,
     onClickHandoffFinished: (ClickPersistenceHandoff) -> Unit,
     ctaTrackingUrl: String? = null,
@@ -773,7 +811,6 @@ private fun FallbackAdOverlay(
     val lifecycleOwner = LocalLifecycleOwner.current
     val clickHandler = remember { Handler(Looper.getMainLooper()) }
     val inlineHtml = ad.renderedHtml?.takeIf { it.isNotBlank() }
-    val closeBehavior = ad.adBehavior.close
     val isVideo = ad.type == CreativeType.VIDEO
     val videoUrl = remember(ad.url) { admittedVideoUrl(ad.url) }
     var videoDurationMs by remember(presentationState, fallbackIndex) {
@@ -862,9 +899,9 @@ private fun FallbackAdOverlay(
             }
         }
     }
-    val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex)
+    val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
     var countdown by remember(presentationState, fallbackIndex) {
-        mutableStateOf(closeGateSecondsLeft(retainedGateMs, gateMs))
+        mutableStateOf(closeGateSecondsRemaining(retainedGateMs, gateMs))
     }
     // A pooled WebView is transparent and may still contain about:blank. Keep an opaque layer above
     // this one WebView until its current creative has actually committed a visible frame.
@@ -872,10 +909,10 @@ private fun FallbackAdOverlay(
     var pageLoadFailed by remember { mutableStateOf(false) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ring = remember(presentationState, fallbackIndex) {
-        Animatable((retainedGateMs.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f))
+        Animatable(closeGateProgress(retainedGateMs, gateMs))
     }
     var videoRingProgress by remember(presentationState, fallbackIndex) {
-        mutableFloatStateOf((retainedGateMs.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f))
+        mutableFloatStateOf(closeGateProgress(retainedGateMs, gateMs))
     }
     val smoothVideoRingProgress = smoothVideoProgress(videoRingProgress)
     val videoRouting = remember(ad, ctaTrackingUrl, ctaStoreUrl, ctaDestination) {
@@ -887,12 +924,17 @@ private fun FallbackAdOverlay(
             allowParentFallback = true,
         )
     }
-    // Foreground-only 5s gate: time accrues only while the Activity is RESUMED, so leaving the app
+    // Foreground-only per-item gate: time accrues only while the Activity is RESUMED, so leaving the app
     // pauses the countdown (parity with the interstitial / rewarded close gates). repeatOnLifecycle
     // cancels the loop when backgrounded and resumes it from the accrued time on return.
     LaunchedEffect(gateMs, isVideo, pageCommitted) {
         if (isVideo || !pageCommitted) return@LaunchedEffect
-        var accumulatedMs = presentationState.closeGateElapsedMs(fallbackIndex)
+        if (gateMs <= 0L) {
+            countdown = 0
+            ring.snapTo(1f)
+            return@LaunchedEffect
+        }
+        var accumulatedMs = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             // Re-anchor on each resume so the backgrounded interval is never counted.
             var lastTickMs = SystemClock.elapsedRealtime()
@@ -902,8 +944,8 @@ private fun FallbackAdOverlay(
                 val deltaMs = (now - lastTickMs).coerceIn(0L, gateMs)
                 accumulatedMs = presentationState.addCloseGateElapsedMs(fallbackIndex, deltaMs, gateMs)
                 lastTickMs = now
-                ring.snapTo((accumulatedMs.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f))
-                countdown = closeGateSecondsLeft(accumulatedMs, gateMs)
+                ring.snapTo(closeGateProgress(accumulatedMs, gateMs))
+                countdown = closeGateSecondsRemaining(accumulatedMs, gateMs)
             }
         }
     }
@@ -947,10 +989,9 @@ private fun FallbackAdOverlay(
                         videoDurationMs = durationMs
                         presentationState.retainVideoDurationMs(fallbackIndex, durationMs)
                         gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
-                        countdown = closeGateSecondsLeft(
-                            presentationState.closeGateElapsedMs(fallbackIndex),
-                            gateMs,
-                        )
+                        val accumulated = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
+                        countdown = closeGateSecondsRemaining(accumulated, gateMs)
+                        videoRingProgress = closeGateProgress(accumulated, gateMs)
                     },
                     onProgress = { _, durationMs, advancedMs ->
                         videoDurationMs = durationMs
@@ -961,13 +1002,13 @@ private fun FallbackAdOverlay(
                             advancedMs,
                             gateMs,
                         )
-                        countdown = closeGateSecondsLeft(accumulated, gateMs)
-                        videoRingProgress =
-                            (accumulated.toFloat() / gateMs.coerceAtLeast(1L)).coerceIn(0f, 1f)
+                        countdown = closeGateSecondsRemaining(accumulated, gateMs)
+                        videoRingProgress = closeGateProgress(accumulated, gateMs)
                     },
                     onCompleted = {
                         presentationState.addCloseGateElapsedMs(fallbackIndex, gateMs, gateMs)
                         countdown = 0
+                        videoRingProgress = 1f
                     },
                     onError = {
                         applyRendererUnavailable()
@@ -1284,25 +1325,33 @@ private fun FallbackAdOverlay(
             )
         }
 
-        Box(
+        val closeReady = countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitPending
+        val closeAlignment = when (closeBehavior.position) {
+            ClosePosition.TOP_RIGHT -> Alignment.TopEnd
+            ClosePosition.TOP_LEFT -> Alignment.TopStart
+            ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
+        }
+        if (closeReady || closeBehavior.treatment == CloseTreatment.COUNTDOWN_CIRCLE) Box(
             modifier = Modifier
-                .align(
-                    when (closeBehavior.position) {
-                        ClosePosition.TOP_RIGHT -> Alignment.TopEnd
-                        ClosePosition.TOP_LEFT -> Alignment.TopStart
-                        ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
-                    },
-                )
+                .align(closeAlignment)
                 .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(start = if (closeBehavior.position == ClosePosition.BOTTOM_LEFT) 18.dp else 0.dp)
                 .padding(8.dp)
                 .size(48.dp),
             contentAlignment = Alignment.Center,
         ) {
-            if (countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitPending) {
+            if (closeReady) {
                 // Compact close button (16dp circle) with a full 48dp tap target so it's easy to hit.
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
+                        .semantics {
+                            contentDescription = if (closeBehavior.action == CloseAction.FORWARD) {
+                                "Next ad"
+                            } else {
+                                "Close ad"
+                            }
+                        }
                         .clickable(onClick = ::closeOnce),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -1313,7 +1362,7 @@ private fun FallbackAdOverlay(
                             .background(Color.Black.copy(alpha = 0.5f)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("✕", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        CloseActionGlyph(closeBehavior.action)
                     }
                 }
             } else if (closeBehavior.treatment == CloseTreatment.COUNTDOWN_CIRCLE) {
@@ -1342,7 +1391,10 @@ private fun FallbackAdOverlay(
 
         // Persistent ad-info "i" + report sheet (required disclosure on the fallback ad).
         if (adId.isNotEmpty()) {
-            AdInfoReportOverlay(adId = adId)
+            AdInfoReportOverlay(
+                adId = adId,
+                closeAtBottomLeft = closeBehavior.position == ClosePosition.BOTTOM_LEFT,
+            )
         }
     }
 }

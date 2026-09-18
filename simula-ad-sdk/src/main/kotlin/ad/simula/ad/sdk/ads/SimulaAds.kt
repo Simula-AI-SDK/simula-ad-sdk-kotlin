@@ -6,11 +6,14 @@ import ad.simula.ad.sdk.core.ImperativeInitializationAttempt
 import ad.simula.ad.sdk.core.ImperativeInitializationGate
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.minigame.WebViewPool
+import ad.simula.ad.sdk.minigame.findActivity
 import ad.simula.ad.sdk.model.SimulaAdContext
 import ad.simula.ad.sdk.nativead.NativeAdCache
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.nativead.NativeAdPreloadCache
 import ad.simula.ad.sdk.network.Ipv4Beacon
+import ad.simula.ad.sdk.network.ProcessApiEnvironment
+import ad.simula.ad.sdk.network.readStagingEnvironmentManifestValue
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.SimulaConnectionType
 import ad.simula.ad.sdk.network.SimulaDeviceId
@@ -20,6 +23,7 @@ import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import ad.simula.ad.sdk.privacy.ProcessPrivacyOwner
 import ad.simula.ad.sdk.provider.SimulaSessionStore
+import ad.simula.ad.sdk.provider.ProcessActivityVisibilityTracker
 import ad.simula.ad.sdk.provider.awaitInitialAdvertisingIdRefresh
 import ad.simula.ad.sdk.telemetry.EffectiveTelemetryConfig
 import ad.simula.ad.sdk.telemetry.FirstWinsProcessTaskClaim
@@ -32,14 +36,12 @@ import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.lang.ref.WeakReference
 
 private data class ImperativeStartup(
     val telemetryClaim: FirstWinsProcessTaskClaim<EffectiveTelemetryConfig>,
@@ -89,8 +91,7 @@ object SimulaAds {
     // Character context is no longer global: pass charId/charName/charImage/charDesc
     // to each `SimulaInterstitialAd.load()` / `SimulaRewardedAd.load()` call instead.
 
-    private var currentActivityRef: WeakReference<Activity>? = null
-    internal val currentActivity: Activity? get() = currentActivityRef?.get()
+    internal val currentActivity: Activity? get() = ProcessActivityVisibilityTracker.currentActivity
 
     /** True once [initialize] has been called with a valid key. */
     val isInitialized: Boolean get() = initialization.isInitialized
@@ -109,12 +110,31 @@ object SimulaAds {
      */
     val deviceId: String? get() = SimulaDeviceId.value
 
+    /** The effective API environment selected for this application process. */
+    val apiEnvironment: SimulaApiEnvironment get() = ProcessApiEnvironment.effectiveEnvironment
+
+    /**
+     * Selects the process API environment before initialization. Staging succeeds only for an exact
+     * development artifact when the host manifest Boolean `SimulaStagingEnvironmentEnabled` is true.
+     */
+    fun configureApiEnvironment(context: Context, environment: SimulaApiEnvironment): Boolean =
+        ProcessApiEnvironment.configure(
+            requestedEnvironment = environment,
+            stagingManifestValue = if (environment == SimulaApiEnvironment.Staging) {
+                readStagingEnvironmentManifestValue(context)
+            } else {
+                null
+            },
+        )
+
     /**
      * Initialize the SDK. Idempotent — the first valid call wins; later calls are
      * ignored.
      *
      * @param context any Context (its application context is retained).
      * @param apiKey  your Simula API key (must be non-blank).
+     * @param devMode enables development diagnostics and creative behavior. It does not select the
+     *                API environment; host manifest metadata selects the default instead.
      * @param hasPrivacyConsent Legacy coarse consent flag. When false, suppresses PII. Default true.
      * @param privacy Granular privacy / consent configuration (GDPR/TCF/CCPA/GPP/COPPA + IDFA
      *                opt-in). When provided it takes precedence over [hasPrivacyConsent]; when null
@@ -157,8 +177,9 @@ object SimulaAds {
         adContext: SimulaAdContext?,
     ) {
         require(apiKey.isNotBlank()) { "SimulaAds.initialize requires a non-blank apiKey" }
-        val applicationContext = context.applicationContext
+        val applicationContext = context.applicationContext ?: context
         val resolvedPrivacy = privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
+        val stagingManifestValue = readStagingEnvironmentManifestValue(applicationContext)
         val launchSettledGate = ProcessLaunchSettledGate
         var reservedTelemetry: ad.simula.ad.sdk.telemetry.FirstWinsProcessTaskClaim<EffectiveTelemetryConfig>? = null
         val attempt = initialization.initialize(
@@ -169,6 +190,7 @@ object SimulaAds {
                     privacy = resolvedPrivacy,
                     explicitPrivacy = privacy != null,
                 ) {
+                    ProcessApiEnvironment.ensureDefault(stagingManifestValue)
                     Telemetry.claimInitialization(
                         context = applicationContext,
                         apiKey = apiKey,
@@ -202,7 +224,13 @@ object SimulaAds {
                 // Device-context signals (timezone, storage, memory, battery, volume) attached to every API
                 // request. Also a first-party-request signal, primed off the critical path.
                 SimulaDeviceSignals.prime(appContext)
-                store = SimulaSessionStore(apiKey, devMode, primaryUserID)
+                store = SimulaSessionStore(
+                    apiKey = apiKey,
+                    devMode = devMode,
+                    initialUserID = primaryUserID,
+                    sessionGeneration = { ProcessActivityVisibilityTracker.sessionGeneration },
+                    beforeExpiredSessionCreate = { SimulaPrivacy.refreshAdvertisingId() },
+                )
                 // Publish the store identity in the same critical section as imperative initialization.
                 // Telemetry configuration remains first-wins. Envelopes prefer this live imperative
                 // identity only when its API key is compatible with the winning telemetry sender.
@@ -214,7 +242,13 @@ object SimulaAds {
                 store.startupGate = { gate }
                 this.startupGate = gate
 
-                registerActivityTracking()
+                (appContext as? Application)?.let { application ->
+                    val foregroundActivity = findActivity(context)?.takeIf {
+                        runCatching { it.hasWindowFocus() && !it.isFinishing && !it.isDestroyed }
+                            .getOrDefault(false)
+                    }
+                    ProcessActivityVisibilityTracker.register(application, foregroundActivity)
+                }
                 seedWebViewRetentionState(context)
 
                 // Reserve immutable telemetry configuration before publishing initialized=true. This
@@ -313,7 +347,8 @@ object SimulaAds {
                 breadcrumb = configSummary,
             )
             runCatching {
-                val vPrefs = appContext.getSharedPreferences("simula_ad_sdk_version_prefs", Context.MODE_PRIVATE)
+                val prefsName = ProcessApiEnvironment.current.storageName("simula_ad_sdk_version_prefs")
+                val vPrefs = appContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
                 val last = vPrefs.getString("last_seen_sdk_version", null)
                 val current = ad.simula.ad.sdk.telemetry.SIMULA_SDK_VERSION
                 if (last != null && last != current) {
@@ -482,44 +517,9 @@ object SimulaAds {
         else -> null
     }
 
-    private fun registerActivityTracking() {
-        val app = appContext as? Application ?: return
-        app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
-            override fun onActivityResumed(activity: Activity) {
-                currentActivityRef = WeakReference(activity)
-                WebViewPool.markApplicationActive(activity)
-                // Re-read the GAID on foreground: ad-tracking permission or the GAID itself
-                // can change while the app is backgrounded. Internally throttled (4h TTL), so
-                // this is cheap on every resume. Mirrors the SimulaProvider ON_RESUME hook.
-                SimulaScope.launch { runCatching { SimulaPrivacy.refreshAdvertisingId() } }
-            }
-
-            // Keep the reference while merely paused — a paused Activity is still a
-            // valid context to launch from, which avoids a NEW_TASK fallback during
-            // a normal A→B transition. Clear only once it's actually destroyed.
-            override fun onActivityDestroyed(activity: Activity) {
-                if (currentActivityRef?.get() === activity) currentActivityRef = null
-            }
-
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
-            override fun onActivityStarted(activity: Activity) {}
-            override fun onActivityPaused(activity: Activity) {}
-
-            // Persist + deliver buffered telemetry as the app heads to the background — the
-            // window where a process is most likely to be killed. Cheap + guarded (no-op when
-            // the buffer is empty / telemetry is disabled).
-            override fun onActivityStopped(activity: Activity) {
-                Telemetry.flush()
-            }
-
-            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-        })
-    }
-
     /**
-     * Activity callbacks do not replay an already-delivered resume when hosts initialize lazily
-     * (notably React Native bridges). Seed only a truly foreground process; later resume and
-     * UI-hidden callbacks remain authoritative and this never changes the pressure cooldown.
+     * Activity callbacks do not replay an already-delivered resume when hosts initialize lazily.
+     * Seed only a truly foreground process; the shared callback owns later foreground signals.
      */
     private fun seedWebViewRetentionState(context: Context) {
         val markIfForeground = {

@@ -1,5 +1,8 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.model.CloseAction
+import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.CloseTreatment
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -180,6 +183,61 @@ class ApiModelsSerializationTest {
     }
 
     @Test
+    fun `fallback close defaults survive missing null and malformed config`() {
+        val behaviorValues = listOf(
+            null,
+            "null",
+            "true",
+            "\"bad\"",
+            "{}",
+            "{\"close\":null}",
+            "{\"close\":\"bad\"}",
+            "{\"close\":{\"delay_seconds\":\"5\",\"treatment\":false,\"position\":1,\"action\":[]}}",
+        )
+        behaviorValues.forEachIndexed { index, behavior ->
+            val key = behavior?.let { ",\"ad_behavior\":$it" }.orEmpty()
+            val response = json.decodeFromString<FallbackAdsApiResponse>(
+                """{"ads":[{"ad_id":"a$index","html":"<html/>"$key}]}""",
+            )
+            val close = requireNotNull(SimulaApiClient.fallbackAdFromBody(response.ads.single(), false)).closeBehavior
+            assertEquals(5, close.delaySeconds)
+            assertEquals(CloseTreatment.COUNTDOWN_CIRCLE, close.treatment)
+            assertEquals(ClosePosition.TOP_RIGHT, close.position)
+            assertEquals(CloseAction.CLOSE_X, close.action)
+        }
+    }
+
+    @Test
+    fun `fallback close config is bounded restricted and independent per usable item`() {
+        val payload = """
+            {"ads":[
+              {"ad_id":"a1","html":"<html>1</html>","ad_behavior":{"close":{
+                "delay_seconds":-3,"treatment":"hidden","position":"bottom-left","action":"FoRwArD"}}},
+              {"ad_id":"a2","html":"<html>2</html>","ad_behavior":{"close":{
+                "delay_seconds":90,"treatment":"progress_bar","position":"top-left","action":"forward"}}},
+              {"ad_id":"a3","html":"<html>3</html>","ad_behavior":{"close":{
+                "delay_seconds":7,"treatment":"reward_or_close_label","position":"unknown","action":"close-x"}}},
+              {"ad_id":"a4","html":"<html>4</html>","ad_behavior":{"close":{"treatment":"unknown"}}},
+              {"ad_id":"a5","html":"<html>5</html>","ad_behavior":{"close":{"delay_seconds":0}}}
+            ]}
+        """.trimIndent()
+        val response = json.decodeFromString<FallbackAdsApiResponse>(payload)
+        val closes = response.ads.map { body ->
+            requireNotNull(SimulaApiClient.fallbackAdFromBody(body, false)).closeBehavior
+        }
+
+        assertEquals(listOf(0, 60, 7, 5, 0), closes.map { it.delaySeconds })
+        assertEquals(CloseTreatment.HIDDEN, closes[0].treatment)
+        assertTrue(closes.drop(1).all { it.treatment == CloseTreatment.COUNTDOWN_CIRCLE })
+        assertEquals(ClosePosition.BOTTOM_LEFT, closes[0].position)
+        assertEquals(ClosePosition.TOP_LEFT, closes[1].position)
+        assertEquals(ClosePosition.TOP_RIGHT, closes[2].position)
+        assertEquals(CloseAction.FORWARD, closes[0].action)
+        assertEquals(CloseAction.FORWARD, closes[1].action)
+        assertEquals(CloseAction.CLOSE_X, closes[2].action)
+    }
+
+    @Test
     fun `malformed fallback beacon ownership fails closed without dropping screens`() {
         val payload = """
             {"native_click_beacon_v1_enabled":"true","ads":[
@@ -246,17 +304,19 @@ class ApiModelsSerializationTest {
     @Test
     fun `fallback video and tolerant type map with constrained close behavior`() {
         val video = SimulaApiClient.fallbackAdFromBody(
-            FallbackAdBody(
-                type = "video",
-                url = "https://cdn.example/video.mp4",
-                posterUrl = "https://cdn.example/poster.jpg",
-                destination = "web",
-                trackingUrl = "https://tracker.example/click",
-                androidStoreUrl = "https://play.google.com/store/apps/details?id=android.app",
-                iosStoreUrl = "https://apps.apple.com/app/id123",
-                adBehavior = ApiAdBehavior(
-                    close = ApiCloseBehavior(delaySeconds = 99, treatment = "progress_bar", position = "top_left"),
-                ),
+            json.decodeFromString<FallbackAdBody>(
+                """{
+                    "type":"video",
+                    "url":"https://cdn.example/video.mp4",
+                    "poster_url":"https://cdn.example/poster.jpg",
+                    "destination":"web",
+                    "tracking_url":"https://tracker.example/click",
+                    "android_store_url":"https://play.google.com/store/apps/details?id=android.app",
+                    "ios_store_url":"https://apps.apple.com/app/id123",
+                    "ad_behavior":{"close":{
+                        "delay_seconds":99,"treatment":"progress_bar","position":"top_left"
+                    }}
+                }""",
             ),
             false,
         )
@@ -270,12 +330,12 @@ class ApiModelsSerializationTest {
         assertEquals("https://tracker.example/click", video?.trackingUrl)
         assertEquals("https://play.google.com/store/apps/details?id=android.app", video?.androidStoreUrl)
         assertEquals("https://apps.apple.com/app/id123", video?.iosStoreUrl)
-        assertEquals(60, video?.adBehavior?.close?.delaySeconds)
-        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, video?.adBehavior?.close?.treatment)
-        assertEquals(ad.simula.ad.sdk.model.ClosePosition.TOP_LEFT, video?.adBehavior?.close?.position)
+        assertEquals(60, video?.closeBehavior?.delaySeconds)
+        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, video?.closeBehavior?.treatment)
+        assertEquals(ad.simula.ad.sdk.model.ClosePosition.TOP_LEFT, video?.closeBehavior?.position)
         assertEquals(ad.simula.ad.sdk.model.CreativeType.PLAYABLE, unknown?.type)
-        assertEquals(5, unknown?.adBehavior?.close?.delaySeconds)
-        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, unknown?.adBehavior?.close?.treatment)
+        assertEquals(5, unknown?.closeBehavior?.delaySeconds)
+        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, unknown?.closeBehavior?.treatment)
     }
 
     @Test
@@ -345,15 +405,15 @@ class ApiModelsSerializationTest {
 
     @Test
     fun `fallback close treatment trims whitespace before normalization`() {
-        val hidden = fallbackAdBehavior(
-            ApiAdBehavior(close = ApiCloseBehavior(treatment = "  hidden \n")),
+        val hidden = fallbackCloseBehavior(
+            json.parseToJsonElement("""{"close":{"treatment":"  hidden \n"}}"""),
         )
-        val countdown = fallbackAdBehavior(
-            ApiAdBehavior(close = ApiCloseBehavior(treatment = " countdown-circle ")),
+        val countdown = fallbackCloseBehavior(
+            json.parseToJsonElement("""{"close":{"treatment":" countdown-circle "}}"""),
         )
 
-        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.HIDDEN, hidden.close.treatment)
-        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, countdown.close.treatment)
+        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.HIDDEN, hidden.treatment)
+        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, countdown.treatment)
     }
 
     @Test
@@ -368,9 +428,9 @@ class ApiModelsSerializationTest {
         )
         val ads = SimulaApiClient.fallbackAdsFromResponse(response)
 
-        assertEquals(listOf(0, 3), response.ads.map { it.sourceIndex })
-        assertEquals(listOf("first", "later"), ads.map { it.adId })
-        assertEquals(listOf(0, 3), ads.map { it.sourceIndex })
+        assertEquals(listOf(0, 2, 3), response.ads.map { it.sourceIndex })
+        assertEquals(listOf("first", "bad", "later"), ads.map { it.adId })
+        assertEquals(listOf(0, 2, 3), ads.map { it.sourceIndex })
     }
 
     @Test
