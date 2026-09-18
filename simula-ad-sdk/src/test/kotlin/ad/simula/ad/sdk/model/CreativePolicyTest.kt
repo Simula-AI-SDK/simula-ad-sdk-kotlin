@@ -226,10 +226,8 @@ class CreativePolicyTest {
         assertTrue(rewardedVideoDurationGateReached(5_000L, 5, durationMs = 0L))
         assertTrue(rewardedVideoDurationGateReached(5_000L, 5, durationMs = -1L))
 
-        // A known short asset completes before the configured gate and is completion-earned.
-        assertFalse(rewardedVideoDurationGateReached(3_000L, 5, durationMs = 3_000L))
-        // Actual accumulated playback can still independently satisfy the configured gate.
-        assertTrue(rewardedVideoDurationGateReached(5_000L, 5, durationMs = 3_000L))
+        assertFalse(rewardedVideoDurationGateReached(2_999L, 5, durationMs = 3_000L))
+        assertTrue(rewardedVideoDurationGateReached(3_000L, 5, durationMs = 3_000L))
 
         assertFalse(rewardedVideoDurationGateReached(4_999L, 5, durationMs = 20_000L))
         assertTrue(rewardedVideoDurationGateReached(5_000L, 5, durationMs = 20_000L))

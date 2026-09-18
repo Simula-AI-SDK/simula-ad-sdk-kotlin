@@ -169,7 +169,6 @@ class SimulaInterstitialAd(val adUnitId: String) {
         currentKeyAtMs = now
         loadStartNanos = System.nanoTime()
         state = State.Loading
-        clearLoadExperimentAssignment(Telemetry::setExperiment)
         SimulaScope.launch {
             try {
                 val sessionId = SimulaAds.store.ensureSession()
@@ -207,7 +206,6 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 }
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
-                    applyLoadExperimentAssignment(ad.experiment, Telemetry::setExperiment)
                     Telemetry.recordLifecycle(
                         stage = "load_success",
                         adFormat = AD_FORMAT,

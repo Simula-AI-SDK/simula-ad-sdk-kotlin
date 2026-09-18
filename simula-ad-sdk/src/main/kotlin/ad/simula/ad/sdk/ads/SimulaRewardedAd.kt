@@ -171,7 +171,6 @@ class SimulaRewardedAd(val adUnitId: String) {
         currentKeyAtMs = now
         loadStartNanos = System.nanoTime()
         state = State.Loading
-        clearLoadExperimentAssignment(Telemetry::setExperiment)
         SimulaScope.launch {
             try {
                 val session = SimulaAds.store.ensureSession()
@@ -208,7 +207,6 @@ class SimulaRewardedAd(val adUnitId: String) {
                 }
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
-                    applyLoadExperimentAssignment(ad.experiment, Telemetry::setExperiment)
                     Telemetry.recordLifecycle(
                         stage = "load_success",
                         adFormat = AD_FORMAT,
@@ -679,17 +677,6 @@ class SimulaRewardedAd(val adUnitId: String) {
         /** Re-loads of the same dedup key are blocked for this long. */
         const val DEDUP_WINDOW_MS = 5 * 60 * 1000L // 5 minutes
     }
-}
-
-internal fun clearLoadExperimentAssignment(apply: (String?, String?) -> Unit) {
-    runCatching { apply(null, null) }
-}
-
-internal fun applyLoadExperimentAssignment(
-    experiment: ad.simula.ad.sdk.model.Experiment?,
-    apply: (String?, String?) -> Unit,
-) {
-    runCatching { apply(experiment?.experimentId, experiment?.variantId) }
 }
 
 /** Ad-format tag on this class's telemetry events. */
