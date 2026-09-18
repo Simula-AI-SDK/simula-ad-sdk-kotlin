@@ -110,8 +110,11 @@ object SimulaAds {
      */
     val deviceId: String? get() = SimulaDeviceId.value
 
+    /** The effective API environment selected for this application process. */
+    val apiEnvironment: SimulaApiEnvironment get() = ProcessApiEnvironment.effectiveEnvironment
+
     /**
-     * Requests the API environment for this application process.
+     * Overrides the API environment for this application process.
      *
      * Call this before [initialize] or before composing `SimulaProvider`. The first effective
      * process environment wins. [SimulaApiEnvironment.Staging] is effective only for an exact
@@ -151,7 +154,7 @@ object SimulaAds {
      * @param context any Context (its application context is retained).
      * @param apiKey  your Simula API key (must be non-blank).
      * @param devMode enables development diagnostics and creative behavior. It does not select the
-     *                API environment; use [configureApiEnvironment] before initialization instead.
+     *                API environment; host manifest metadata selects the default instead.
      * @param hasPrivacyConsent Legacy coarse consent flag. When false, suppresses PII. Default true.
      * @param privacy Granular privacy / consent configuration (GDPR/TCF/CCPA/GPP/COPPA + IDFA
      *                opt-in). When provided it takes precedence over [hasPrivacyConsent]; when null
@@ -194,8 +197,9 @@ object SimulaAds {
         adContext: SimulaAdContext?,
     ) {
         require(apiKey.isNotBlank()) { "SimulaAds.initialize requires a non-blank apiKey" }
-        val applicationContext = context.applicationContext
+        val applicationContext = context.applicationContext ?: context
         val resolvedPrivacy = privacy ?: SimulaPrivacyConfig(hasPrivacyConsent = hasPrivacyConsent)
+        val stagingManifestValue = readStagingEnvironmentManifestValue(applicationContext)
         val launchSettledGate = ProcessLaunchSettledGate
         var reservedTelemetry: ad.simula.ad.sdk.telemetry.FirstWinsProcessTaskClaim<EffectiveTelemetryConfig>? = null
         val attempt = initialization.initialize(
@@ -206,7 +210,7 @@ object SimulaAds {
                     privacy = resolvedPrivacy,
                     explicitPrivacy = privacy != null,
                 ) {
-                    ProcessApiEnvironment.ensureProductionDefault()
+                    ProcessApiEnvironment.ensureDefault(stagingManifestValue)
                     Telemetry.claimInitialization(
                         context = applicationContext,
                         apiKey = apiKey,

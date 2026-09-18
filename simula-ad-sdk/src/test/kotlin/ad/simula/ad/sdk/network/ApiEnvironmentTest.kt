@@ -128,7 +128,7 @@ class ApiEnvironmentTest {
     }
 
     @Test
-    fun `initialization production default preserves explicitly configured staging without conflict`() {
+    fun `initialization host default preserves explicitly configured staging without conflict`() {
         val policy = ApiEnvironmentPolicy(
             stagingCapable = true,
             stagingBaseUrl = staging,
@@ -136,11 +136,35 @@ class ApiEnvironmentTest {
         )
 
         val configured = policy.configure(SimulaApiEnvironment.Staging, true)
-        val initialized = policy.ensureProductionDefault()
+        val initialized = policy.ensureDefault(false)
 
         assertEquals(ApiEnvironment.Staging, configured.configuration.environment)
         assertEquals(ApiEnvironment.Staging, initialized.environment)
         assertEquals(ApiEnvironment.Staging, policy.currentOrProduction().environment)
+    }
+
+    @Test
+    fun `initialization selects staging directly from host metadata`() {
+        val policy = ApiEnvironmentPolicy(
+            stagingCapable = true,
+            stagingBaseUrl = staging,
+            productionBaseUrl = production,
+        )
+
+        assertEquals(ApiEnvironment.Staging, policy.ensureDefault(true).environment)
+        assertEquals(ApiEnvironment.Staging, policy.effectiveEnvironmentOrProduction())
+    }
+
+    @Test
+    fun `effective environment read does not freeze production before host default`() {
+        val policy = ApiEnvironmentPolicy(
+            stagingCapable = true,
+            stagingBaseUrl = staging,
+            productionBaseUrl = production,
+        )
+
+        assertEquals(ApiEnvironment.Production, policy.effectiveEnvironmentOrProduction())
+        assertEquals(ApiEnvironment.Staging, policy.ensureDefault(true).environment)
     }
 
     @Test

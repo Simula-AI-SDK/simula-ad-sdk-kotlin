@@ -74,16 +74,19 @@ internal class ApiEnvironmentPolicy(
         }
     }
 
-    /** Initialization defaults to production only when no explicit request has already won. */
-    fun ensureProductionDefault(): ApiEndpointConfiguration {
+    /** Initialization derives its default from host metadata unless an explicit request already won. */
+    fun ensureDefault(stagingManifestValue: Any?): ApiEndpointConfiguration {
         while (true) {
             frozen.get()?.let { return it }
-            val production = requestedConfiguration(SimulaApiEnvironment.Production, null)
-            if (frozen.compareAndSet(null, production)) return production
+            val hostDefault = requestedConfiguration(SimulaApiEnvironment.Staging, stagingManifestValue)
+            if (frozen.compareAndSet(null, hostDefault)) return hostDefault
         }
     }
 
-    fun currentOrProduction(): ApiEndpointConfiguration = frozen.get() ?: ensureProductionDefault()
+    fun currentOrProduction(): ApiEndpointConfiguration = frozen.get() ?: ensureDefault(null)
+
+    fun effectiveEnvironmentOrProduction(): ApiEnvironment =
+        frozen.get()?.environment ?: ApiEnvironment.Production
 
     internal fun requestedConfiguration(
         requestedEnvironment: SimulaApiEnvironment,
@@ -126,7 +129,11 @@ internal object ProcessApiEnvironment {
         return result.configuration.environment == requestedEnvironment.toInternalEnvironment()
     }
 
-    fun ensureProductionDefault(): ApiEndpointConfiguration = policy.ensureProductionDefault()
+    fun ensureDefault(stagingManifestValue: Any?): ApiEndpointConfiguration =
+        policy.ensureDefault(stagingManifestValue)
+
+    val effectiveEnvironment: SimulaApiEnvironment
+        get() = policy.effectiveEnvironmentOrProduction().toPublicEnvironment()
 
     /** A pre-initialization caller safely freezes production rather than allowing later traffic to split. */
     val current: ApiEndpointConfiguration get() = policy.currentOrProduction()
@@ -153,6 +160,11 @@ internal fun readStagingEnvironmentManifestValue(context: Context): Any? {
 private fun SimulaApiEnvironment.toInternalEnvironment(): ApiEnvironment = when (this) {
     SimulaApiEnvironment.Production -> ApiEnvironment.Production
     SimulaApiEnvironment.Staging -> ApiEnvironment.Staging
+}
+
+private fun ApiEnvironment.toPublicEnvironment(): SimulaApiEnvironment = when (this) {
+    ApiEnvironment.Production -> SimulaApiEnvironment.Production
+    ApiEnvironment.Staging -> SimulaApiEnvironment.Staging
 }
 
 internal fun apiUrl(baseUrl: String, path: String): String =
