@@ -191,6 +191,38 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun trustedStoreMessagesRequireCurrentNonceAndNoCreativeFields() {
+        val open = """{"type":"SIMULA_INTERNAL_STORE_OPEN","activation_nonce":"nonce-1"}"""
+        val dismiss = """{"type":"SIMULA_INTERNAL_STORE_DISMISS","activation_nonce":"nonce-1"}"""
+
+        assertEquals(TrustedStoreAction.OPEN, trustedStoreAction(open, "nonce-1"))
+        assertEquals(TrustedStoreAction.DISMISS, trustedStoreAction(dismiss, "nonce-1"))
+        assertNull(trustedStoreAction(open, "stale"))
+        assertNull(trustedStoreAction(open, null))
+        assertNull(trustedStoreAction(open, "nonce-1", enabled = false))
+        assertNull(trustedStoreAction("malformed", "nonce-1"))
+        assertNull(trustedStoreAction("""{"type":"SIMULA_INTERNAL_STORE_OPEN"}""", "nonce-1"))
+        assertNull(
+            trustedStoreAction(
+                """{"type":"SIMULA_INTERNAL_STORE_OPEN","activation_nonce":"nonce-1","url":"https://evil.example"}""",
+                "nonce-1",
+            ),
+        )
+        assertNull(
+            trustedStoreAction(
+                """{"type":"SIMULA_INTERNAL_STORE_OPEN","activation_nonce":"nonce-1","payload":{}}""",
+                "nonce-1",
+            ),
+        )
+        assertNull(
+            trustedStoreAction(
+                """{"type":"SIMULA_INTERNAL_STORE_DISMISS","activation_nonce":"nonce-1","id":"other"}""",
+                "nonce-1",
+            ),
+        )
+    }
+
+    @Test
     fun coreDocumentStartRelaySurvivesWithoutTrustedCtaHooks() {
         val source = BridgeWebViewInstaller.coreRelayScript("17", "bridge-capability")
 
@@ -293,7 +325,14 @@ class CreativeBridgeTest {
         val source = BridgeWebViewInstaller.trustedCtaDocumentStartScript(activationNonce = "nonce")
 
         assertTrue(source.contains("SIMULA_CTA_OPEN"))
+        assertTrue(source.contains("SIMULA_INTERNAL_STORE_OPEN"))
+        assertTrue(source.contains("SIMULA_INTERNAL_STORE_DISMISS"))
         assertTrue(source.contains("window.open ="))
+        assertTrue(source.contains("Object.defineProperty(window, 'SimulaAd'"))
+        assertTrue(source.contains("Object.defineProperty(simulaAd, 'openStore'"))
+        assertTrue(source.contains("Object.defineProperty(simulaAd, 'dismissStore'"))
+        assertTrue(source.contains("value: openStore, writable: false, configurable: false"))
+        assertTrue(source.contains("value: dismissStore, writable: false, configurable: false"))
         assertTrue(source.contains("activation_nonce"))
         assertTrue(source.contains("'use strict';"))
         assertTrue(source.contains("if (window === window.top) { return true; }"))
@@ -374,11 +413,44 @@ class CreativeBridgeTest {
         assertTrue(source.contains("return routedWindow;"))
         assertFalse(source.contains("forwardTrustedCta(arguments[0])) { return null;"))
         assertEquals(1, source.split("\"nonce\"").size - 1)
-        val duplicateCheck = requireNotNull(source.indexOf("if (claimedGesture === gestureSequence) { return true; }")
+        val claimStart = requireNotNull(source.indexOf("function claimActiveGesture()")
             .takeIf { it >= 0 })
-        val activeCheck = requireNotNull(source.indexOf("if (!hasActiveUserGesture()) { return false; }")
+        val duplicateCheck = requireNotNull(source.indexOf(
+            "if (gestureSequence === 0 || claimedGesture === gestureSequence) { return false; }",
+            claimStart,
+        ).takeIf { it >= 0 })
+        val activeCheck = requireNotNull(source.indexOf("if (!hasActiveUserGesture()) { return false; }", claimStart)
             .takeIf { it >= 0 })
         assertTrue(duplicateCheck < activeCheck)
+        val claimWrite = requireNotNull(source.indexOf("claimedGesture = gestureSequence;", claimStart)
+            .takeIf { it >= 0 })
+        assertTrue(activeCheck < claimWrite)
+        assertEquals(1, source.split("function claimActiveGesture()").size - 1)
+        assertEquals(3, source.split("postClaimedGestureMessage(").size - 1)
+    }
+
+    @Test
+    fun storeApiSharesGestureClaimWithWindowOpenWhileDismissNeedsNoActivation() {
+        val source = trustedCtaRelaySource("nonce")
+        val openStart = requireNotNull(source.indexOf("function openStore()")
+            .takeIf { it >= 0 })
+        val dismissStart = requireNotNull(source.indexOf("function dismissStore()")
+            .takeIf { it >= 0 })
+        val apiEnd = requireNotNull(source.indexOf("Object.defineProperty(simulaAd, 'openStore'", dismissStart)
+            .takeIf { it >= 0 })
+        val openBody = source.substring(openStart, dismissStart)
+        val dismissBody = source.substring(dismissStart, apiEnd)
+
+        assertTrue(source.contains("forwardTrustedCta(arguments[0])"))
+        assertTrue(openBody.contains("postClaimedGestureMessage("))
+        assertFalse(openBody.contains("arguments["))
+        assertFalse(openBody.contains("url"))
+        assertFalse(openBody.contains("payload"))
+        assertFalse(openBody.contains("id"))
+        assertTrue(dismissBody.contains("nativePost("))
+        assertFalse(dismissBody.contains("hasActiveUserGesture"))
+        assertFalse(dismissBody.contains("claimActiveGesture"))
+        assertFalse(dismissBody.contains("postClaimedGestureMessage"))
     }
 
     @Test
@@ -392,7 +464,7 @@ class CreativeBridgeTest {
         val sameOriginCheck = source.indexOf(
             "if (!url || isInternalCta(url) || isSameOriginCta(url)) { return false; }",
         )
-        val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
+        val gestureClaim = source.indexOf("return postClaimedGestureMessage(", sameOriginCheck)
         assertTrue(sameOriginCheck >= 0)
         assertTrue(gestureClaim >= 0)
         assertTrue(sameOriginCheck < gestureClaim)
@@ -409,7 +481,7 @@ class CreativeBridgeTest {
         assertTrue(source.contains("protocol === 'blob:'"))
         assertTrue(source.contains("protocol === 'javascript:'"))
         val policyCheck = source.indexOf("if (!url || isInternalCta(url) || isSameOriginCta(url)")
-        val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
+        val gestureClaim = source.indexOf("return postClaimedGestureMessage(", policyCheck)
         assertTrue(policyCheck >= 0)
         assertTrue(policyCheck < gestureClaim)
     }

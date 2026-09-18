@@ -19,6 +19,42 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 
+/** One presentation's HTML store request, including cancellation before an external handoff. */
+internal class CreativeStoreRequestGate {
+    private var suppressed = false
+    private var handoff: ClickPersistenceHandoff? = null
+
+    @Synchronized
+    fun canRequest(): Boolean = !suppressed && handoff == null
+
+    fun track(candidate: ClickPersistenceHandoff): Boolean {
+        val accepted = synchronized(this) {
+            if (suppressed || handoff != null) false else {
+                handoff = candidate
+                true
+            }
+        }
+        if (!accepted) candidate.cancel()
+        return accepted
+    }
+
+    @Synchronized
+    fun canOpen(): Boolean = !suppressed
+
+    @Synchronized
+    fun finish(candidate: ClickPersistenceHandoff) {
+        if (handoff === candidate) handoff = null
+    }
+
+    fun dismiss() {
+        val pending = synchronized(this) {
+            suppressed = true
+            handoff.also { handoff = null }
+        }
+        pending?.cancel()
+    }
+}
+
 internal interface ClickHandoffScheduler {
     fun post(block: Runnable)
     fun postDelayed(block: Runnable, delayMs: Long)

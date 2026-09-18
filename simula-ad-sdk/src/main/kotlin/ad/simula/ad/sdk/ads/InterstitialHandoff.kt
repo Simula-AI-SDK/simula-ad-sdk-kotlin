@@ -70,6 +70,7 @@ internal class InterstitialPresentation(
     val installBannerState = InstallBannerPresentationState(ad.adBehavior?.skoverlay)
     val fallbackState = FallbackPresentationState()
     val automaticNavigationGate = AutomaticNavigationGate()
+    val creativeStoreRequest = CreativeStoreRequestGate()
     val storeExit by lazy(LazyThreadSafetyMode.NONE) {
         StoreExitTracker(
             adId = ad.impressionId.takeIf { it.isNotBlank() },

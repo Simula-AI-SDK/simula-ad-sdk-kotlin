@@ -102,6 +102,20 @@ class InstallBannerPresentationStateTest {
     }
 
     @Test
+    fun `dismissal suppresses scheduled and future on-click banners`() {
+        val delayed = state(OverlayTiming.DELAYED, delaySeconds = 1)
+        assertTrue(delayed.start())
+        assertTrue(delayed.dismiss())
+        assertFalse(delayed.onDelayedDeadlineReached())
+        assertEquals(InstallBannerPhase.DISMISSED, delayed.snapshot.phase)
+
+        val onClick = state(OverlayTiming.ON_CLICK)
+        assertTrue(onClick.dismiss())
+        assertFalse(onClick.onPrimaryCtaAdmitted())
+        assertEquals(InstallBannerPhase.DISMISSED, onClick.snapshot.phase)
+    }
+
+    @Test
     fun `failed external route does not hide admitted on-click banner`() {
         val state = state(OverlayTiming.ON_CLICK)
 

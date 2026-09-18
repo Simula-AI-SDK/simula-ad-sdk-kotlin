@@ -735,7 +735,10 @@ private fun CreativeInterstitial(
                     routeAutomaticCta()
                 },
                 onAutomaticNavigationReady = ::routeAutomaticCta,
-                onPrimaryCta = primaryCta@{ route ->
+                onPrimaryCta = primaryCta@{ route, storeRequest ->
+                    if (storeRequest && !presentation.creativeStoreRequest.canRequest()) {
+                        return@primaryCta true
+                    }
                     val claim = presentation.claimClick(ClickSources.PRIMARY_CTA)
                         ?: return@primaryCta false
                     if (Build.VERSION.SDK_INT >= 21) {
@@ -774,6 +777,9 @@ private fun CreativeInterstitial(
                                 requestRoute = presentation::routeClick,
                                 completion = completion,
                                 open = { routeActivity, prepared ->
+                                    if (storeRequest && !presentation.creativeStoreRequest.canOpen()) {
+                                        return@prepareDeferredCtaRoute false
+                                    }
                                     if (!canRouteFromCurrentFullscreenActivity(
                                             isFinishing = routeActivity.isFinishing,
                                             isDestroyed = routeActivity.isDestroyed,
@@ -801,10 +807,14 @@ private fun CreativeInterstitial(
                             )
                         },
                         onCreated = { handoff ->
+                            if (storeRequest && !presentation.creativeStoreRequest.track(handoff)) {
+                                return@coordinateDeferredClickPersistence
+                            }
                             presentation.trackClickHandoff(handoff)
                             clickHandoffPending = true
                         },
                         onFinished = { handoff ->
+                            if (storeRequest) presentation.creativeStoreRequest.finish(handoff)
                             presentation.clearClickHandoff(handoff)
                             clickHandoffPending = presentation.pendingClickHandoff() != null
                         },
@@ -1014,7 +1024,7 @@ private fun CreativeHtml(
     onBridgeReady: () -> Unit,
     onAutomaticCta: (PendingAutomaticNavigation) -> Unit,
     onAutomaticNavigationReady: () -> Unit,
-    onPrimaryCta: (PrimaryCtaRoute) -> Boolean,
+    onPrimaryCta: (PrimaryCtaRoute, storeRequest: Boolean) -> Boolean,
     modifier: Modifier = Modifier,
 ) {
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
@@ -1033,7 +1043,7 @@ private fun CreativeHtml(
             CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> false
             CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> true
             is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> {
-                onPrimaryCta(plan.route)
+                onPrimaryCta(plan.route, false)
                 true
             }
         }
@@ -1159,6 +1169,17 @@ private fun CreativeHtml(
                     webView = this,
                     bridge = bridge,
                     onTrustedCtaOpen = { url -> handlePrimaryCta(url, this) },
+                    onTrustedStoreOpen = {
+                        CreativeCtaRouter.trustedStoreRoute(
+                            destination = presentation.ad.destination,
+                            trackingUrl = presentation.ad.trackingUrl,
+                            storeUrl = presentation.ad.androidStoreUrl,
+                        )?.let { route -> onPrimaryCta(route, true) }
+                    },
+                    onTrustedStoreDismiss = {
+                        presentation.creativeStoreRequest.dismiss()
+                        presentation.installBannerState.dismiss()
+                    },
                 )
                 if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
                     post { if (creativeWebView === this) onBridgeUnavailable() }

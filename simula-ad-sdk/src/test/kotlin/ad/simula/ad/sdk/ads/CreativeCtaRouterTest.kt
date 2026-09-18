@@ -57,6 +57,46 @@ class CreativeCtaRouterTest {
     }
 
     @Test
+    fun `trusted store route uses only current validated app-store metadata`() {
+        val tracker = "https://tracker.example/click?a=1%2B2"
+        val store = "market://details?id=com.example.app&referrer=click%2Bvalue"
+        val normalizedStore =
+            "https://play.google.com/store/apps/details?id=com.example.app&referrer=click%2Bvalue"
+
+        assertEquals(
+            ad.simula.ad.sdk.network.PrimaryCtaRoute(
+                tappedUrl = normalizedStore,
+                externalTarget = tracker,
+                externalTargetIsTracker = true,
+            ),
+            CreativeCtaRouter.trustedStoreRoute("appstore", tracker, store),
+        )
+        assertEquals(
+            ad.simula.ad.sdk.network.PrimaryCtaRoute(
+                tappedUrl = normalizedStore,
+                externalTarget = normalizedStore,
+            ),
+            CreativeCtaRouter.trustedStoreRoute("appstore", null, store),
+        )
+        assertEquals(
+            ad.simula.ad.sdk.network.PrimaryCtaRoute(
+                tappedUrl = null,
+                externalTarget = tracker,
+                externalTargetIsTracker = true,
+            ),
+            CreativeCtaRouter.trustedStoreRoute("appstore", tracker, null),
+        )
+        assertNull(CreativeCtaRouter.trustedStoreRoute("web", tracker, store))
+        assertNull(
+            CreativeCtaRouter.trustedStoreRoute(
+                "appstore",
+                "javascript:alert(1)",
+                "https://play.google.com/store/apps/details?referrer=missing-id",
+            ),
+        )
+    }
+
+    @Test
     fun `opaque document does not inherit metadata host for CTA suppression`() {
         assertEquals(
             CreativeCtaRouter.PrimaryCtaTapPlan.Route(

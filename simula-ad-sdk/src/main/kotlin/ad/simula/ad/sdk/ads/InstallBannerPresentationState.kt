@@ -76,7 +76,7 @@ internal class InstallBannerStateMachine(
 
     @Synchronized
     fun dismiss(): Boolean {
-        if (state.phase != InstallBannerPhase.VISIBLE) return false
+        if (!enabled || state.phase == InstallBannerPhase.DISMISSED) return false
         state = InstallBannerSnapshot(InstallBannerPhase.DISMISSED)
         return true
     }
