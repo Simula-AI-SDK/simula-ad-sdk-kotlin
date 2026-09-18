@@ -114,6 +114,20 @@ object SimulaAds {
     val apiEnvironment: SimulaApiEnvironment get() = ProcessApiEnvironment.effectiveEnvironment
 
     /**
+     * Selects the process API environment before initialization. Staging succeeds only for an exact
+     * development artifact when the host manifest Boolean `SimulaStagingEnvironmentEnabled` is true.
+     */
+    fun configureApiEnvironment(context: Context, environment: SimulaApiEnvironment): Boolean =
+        ProcessApiEnvironment.configure(
+            requestedEnvironment = environment,
+            stagingManifestValue = if (environment == SimulaApiEnvironment.Staging) {
+                readStagingEnvironmentManifestValue(context)
+            } else {
+                null
+            },
+        )
+
+    /**
      * Initialize the SDK. Idempotent — the first valid call wins; later calls are
      * ignored.
      *

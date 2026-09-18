@@ -21,6 +21,7 @@ internal data class ApiEndpointConfiguration(
 }
 
 internal data class ApiEnvironmentResolverInputs(
+    val requestedEnvironment: SimulaApiEnvironment,
     val stagingCapable: Boolean,
     val stagingBaseUrl: String,
     val stagingManifestValue: Any?,
@@ -31,7 +32,8 @@ internal fun resolveApiEnvironment(
     productionBaseUrl: String = ApiEnvironmentPolicy.PRODUCTION_BASE_URL,
 ): ApiEndpointConfiguration {
     val stagingEnabled =
-        inputs.stagingCapable &&
+        inputs.requestedEnvironment == SimulaApiEnvironment.Staging &&
+            inputs.stagingCapable &&
             inputs.stagingBaseUrl.isNotBlank() &&
             (inputs.stagingManifestValue as? Boolean) == true
     return if (stagingEnabled) {
@@ -49,11 +51,26 @@ internal class ApiEnvironmentPolicy(
 ) {
     private val frozen = AtomicReference<ApiEndpointConfiguration?>(null)
 
+    fun configure(
+        requestedEnvironment: SimulaApiEnvironment,
+        stagingManifestValue: Any?,
+    ): Boolean {
+        val requested = resolvedConfiguration(requestedEnvironment, stagingManifestValue)
+        if (requestedEnvironment == SimulaApiEnvironment.Staging && requested.environment != ApiEnvironment.Staging) {
+            return false
+        }
+        while (true) {
+            val existing = frozen.get()
+            if (existing != null) return existing.environment == requested.environment
+            if (frozen.compareAndSet(null, requested)) return true
+        }
+    }
+
     /** Initialization derives its process-wide environment from host metadata. */
     fun ensureDefault(stagingManifestValue: Any?): ApiEndpointConfiguration {
         while (true) {
             frozen.get()?.let { return it }
-            val hostDefault = resolvedConfiguration(stagingManifestValue)
+            val hostDefault = resolvedConfiguration(SimulaApiEnvironment.Staging, stagingManifestValue)
             if (frozen.compareAndSet(null, hostDefault)) return hostDefault
         }
     }
@@ -63,8 +80,12 @@ internal class ApiEnvironmentPolicy(
     fun effectiveEnvironmentOrProduction(): ApiEnvironment =
         frozen.get()?.environment ?: ApiEnvironment.Production
 
-    internal fun resolvedConfiguration(stagingManifestValue: Any?): ApiEndpointConfiguration = resolveApiEnvironment(
+    internal fun resolvedConfiguration(
+        requestedEnvironment: SimulaApiEnvironment,
+        stagingManifestValue: Any?,
+    ): ApiEndpointConfiguration = resolveApiEnvironment(
         inputs = ApiEnvironmentResolverInputs(
+            requestedEnvironment = requestedEnvironment,
             stagingCapable = stagingCapable,
             stagingBaseUrl = stagingBaseUrl,
             stagingManifestValue = stagingManifestValue,
@@ -82,6 +103,9 @@ internal object ProcessApiEnvironment {
         stagingCapable = BuildConfig.SIMULA_STAGING_CAPABLE,
         stagingBaseUrl = BuildConfig.SIMULA_STAGING_BASE_URL,
     )
+    fun configure(requestedEnvironment: SimulaApiEnvironment, stagingManifestValue: Any?): Boolean =
+        policy.configure(requestedEnvironment, stagingManifestValue)
+
     fun ensureDefault(stagingManifestValue: Any?): ApiEndpointConfiguration =
         policy.ensureDefault(stagingManifestValue)
 

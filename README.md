@@ -81,8 +81,8 @@ host manifest opt-in:
 
 The first process environment wins. Missing or non-Boolean metadata, metadata lookup failure, and
 stable SDK artifacts fail closed to production. `SimulaAds.apiEnvironment` reports the effective
-value. `devMode` remains available on existing APIs for its non-endpoint development behavior, but it
-does not select the API environment.
+value. Development hosts may explicitly call `configureApiEnvironment(...)` before initialization;
+stable artifacts refuse staging. `devMode` remains independent and does not select the environment.
 
 Initial advertising-ID collection is best effort. Session startup waits at most 2.5 seconds for the
 first lookup, then proceeds without the ID; a late lookup can still enrich later requests.

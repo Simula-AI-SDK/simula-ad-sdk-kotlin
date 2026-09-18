@@ -10,10 +10,10 @@ import org.junit.Test
 class MetadataApiTest {
 
     @Test
-    fun `effective API environment is exposed read only`() {
+    fun `API environment exposes diagnostics and gated configuration`() {
         assertTrue(SimulaAds::class.java.declaredMethods.any { it.name == "getApiEnvironment" })
         assertFalse(SimulaAds::class.java.declaredMethods.any { it.name == "setApiEnvironment" })
-        assertFalse(SimulaAds::class.java.declaredMethods.any { it.name == "configureApiEnvironment" })
+        assertTrue(SimulaAds::class.java.declaredMethods.any { it.name == "configureApiEnvironment" })
     }
 
     @Test

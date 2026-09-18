@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.BuildConfig
 import ad.simula.ad.sdk.SimulaAdSdkInfo
+import ad.simula.ad.sdk.ads.SimulaApiEnvironment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -16,6 +17,7 @@ class ApiEnvironmentTest {
     fun `stable SDK always selects production`() {
         val selected = resolveApiEnvironment(
             inputs = ApiEnvironmentResolverInputs(
+                requestedEnvironment = SimulaApiEnvironment.Staging,
                 stagingCapable = false,
                 stagingBaseUrl = "",
                 stagingManifestValue = true,
@@ -31,6 +33,7 @@ class ApiEnvironmentTest {
     fun `pure resolver requires artifact capability and exact boolean manifest gate`() {
         fun resolve(manifestValue: Any?) = resolveApiEnvironment(
             inputs = ApiEnvironmentResolverInputs(
+                requestedEnvironment = SimulaApiEnvironment.Staging,
                 stagingCapable = true,
                 stagingBaseUrl = staging,
                 stagingManifestValue = manifestValue,
@@ -47,6 +50,7 @@ class ApiEnvironmentTest {
         listOf(null, "true", 1).forEach { manifestValue ->
             val selected = resolveApiEnvironment(
                 inputs = ApiEnvironmentResolverInputs(
+                    requestedEnvironment = SimulaApiEnvironment.Staging,
                     stagingCapable = true,
                     stagingBaseUrl = staging,
                     stagingManifestValue = manifestValue,
@@ -68,7 +72,7 @@ class ApiEnvironmentTest {
 
         assertEquals(
             ApiEnvironment.Production,
-            policy.resolvedConfiguration(true).environment,
+            policy.resolvedConfiguration(SimulaApiEnvironment.Staging, true).environment,
         )
     }
 
@@ -78,7 +82,7 @@ class ApiEnvironmentTest {
             stagingCapable = true,
             stagingBaseUrl = " ",
             productionBaseUrl = production,
-        ).resolvedConfiguration(true)
+        ).resolvedConfiguration(SimulaApiEnvironment.Staging, true)
 
         assertEquals(ApiEnvironment.Production, selected.environment)
         assertEquals(production, selected.baseUrl)
@@ -98,6 +102,25 @@ class ApiEnvironmentTest {
         assertEquals(ApiEnvironment.Staging, first.environment)
         assertEquals(first, later)
         assertEquals(ApiEnvironment.Staging, policy.currentOrProduction().environment)
+    }
+
+    @Test
+    fun `explicit staging is refused without development host capability`() {
+        val denied = ApiEnvironmentPolicy(
+            stagingCapable = false,
+            stagingBaseUrl = "",
+            productionBaseUrl = production,
+        )
+        assertFalse(denied.configure(SimulaApiEnvironment.Staging, true))
+        assertEquals(ApiEnvironment.Production, denied.effectiveEnvironmentOrProduction())
+
+        val allowed = ApiEnvironmentPolicy(
+            stagingCapable = true,
+            stagingBaseUrl = staging,
+            productionBaseUrl = production,
+        )
+        assertTrue(allowed.configure(SimulaApiEnvironment.Staging, true))
+        assertFalse(allowed.configure(SimulaApiEnvironment.Production, null))
     }
 
     @Test
