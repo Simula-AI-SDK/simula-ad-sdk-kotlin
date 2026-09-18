@@ -4,8 +4,6 @@ import ad.simula.ad.sdk.BuildConfig
 import ad.simula.ad.sdk.ads.SimulaApiEnvironment
 import android.content.Context
 import android.content.pm.PackageManager
-import android.util.Log
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 internal enum class ApiEnvironment {
@@ -21,11 +19,6 @@ internal data class ApiEndpointConfiguration(
 
     fun storageName(productionName: String): String = environment.storageName(productionName)
 }
-
-internal data class ApiEnvironmentFreezeResult(
-    val configuration: ApiEndpointConfiguration,
-    val conflictsWithFrozenEnvironment: Boolean,
-)
 
 internal data class ApiEnvironmentResolverInputs(
     val requestedEnvironment: SimulaApiEnvironment,
@@ -61,31 +54,33 @@ internal class ApiEnvironmentPolicy(
     fun configure(
         requestedEnvironment: SimulaApiEnvironment,
         stagingManifestValue: Any?,
-    ): ApiEnvironmentFreezeResult {
-        val requested = requestedConfiguration(requestedEnvironment, stagingManifestValue)
+    ): Boolean {
+        val requested = resolvedConfiguration(requestedEnvironment, stagingManifestValue)
+        if (requestedEnvironment == SimulaApiEnvironment.Staging && requested.environment != ApiEnvironment.Staging) {
+            return false
+        }
         while (true) {
             val existing = frozen.get()
-            if (existing != null) {
-                return ApiEnvironmentFreezeResult(existing, requested.environment != existing.environment)
-            }
-            if (frozen.compareAndSet(null, requested)) {
-                return ApiEnvironmentFreezeResult(requested, false)
-            }
+            if (existing != null) return existing.environment == requested.environment
+            if (frozen.compareAndSet(null, requested)) return true
         }
     }
 
-    /** Initialization defaults to production only when no explicit request has already won. */
-    fun ensureProductionDefault(): ApiEndpointConfiguration {
+    /** Initialization derives its process-wide environment from host metadata. */
+    fun ensureDefault(stagingManifestValue: Any?): ApiEndpointConfiguration {
         while (true) {
             frozen.get()?.let { return it }
-            val production = requestedConfiguration(SimulaApiEnvironment.Production, null)
-            if (frozen.compareAndSet(null, production)) return production
+            val hostDefault = resolvedConfiguration(SimulaApiEnvironment.Staging, stagingManifestValue)
+            if (frozen.compareAndSet(null, hostDefault)) return hostDefault
         }
     }
 
-    fun currentOrProduction(): ApiEndpointConfiguration = frozen.get() ?: ensureProductionDefault()
+    fun currentOrProduction(): ApiEndpointConfiguration = frozen.get() ?: ensureDefault(null)
 
-    internal fun requestedConfiguration(
+    fun effectiveEnvironmentOrProduction(): ApiEnvironment =
+        frozen.get()?.environment ?: ApiEnvironment.Production
+
+    internal fun resolvedConfiguration(
         requestedEnvironment: SimulaApiEnvironment,
         stagingManifestValue: Any?,
     ): ApiEndpointConfiguration = resolveApiEnvironment(
@@ -108,25 +103,14 @@ internal object ProcessApiEnvironment {
         stagingCapable = BuildConfig.SIMULA_STAGING_CAPABLE,
         stagingBaseUrl = BuildConfig.SIMULA_STAGING_BASE_URL,
     )
-    private val conflictWarned = AtomicBoolean(false)
+    fun configure(requestedEnvironment: SimulaApiEnvironment, stagingManifestValue: Any?): Boolean =
+        policy.configure(requestedEnvironment, stagingManifestValue)
 
-    fun configure(
-        requestedEnvironment: SimulaApiEnvironment,
-        stagingManifestValue: Any?,
-    ): Boolean {
-        val result = policy.configure(requestedEnvironment, stagingManifestValue)
-        if (result.conflictsWithFrozenEnvironment && conflictWarned.compareAndSet(false, true)) {
-            runCatching {
-                Log.w(
-                    "SimulaAdSDK",
-                    "Ignoring a conflicting API environment request; the first process environment remains active.",
-                )
-            }
-        }
-        return result.configuration.environment == requestedEnvironment.toInternalEnvironment()
-    }
+    fun ensureDefault(stagingManifestValue: Any?): ApiEndpointConfiguration =
+        policy.ensureDefault(stagingManifestValue)
 
-    fun ensureProductionDefault(): ApiEndpointConfiguration = policy.ensureProductionDefault()
+    val effectiveEnvironment: SimulaApiEnvironment
+        get() = policy.effectiveEnvironmentOrProduction().toPublicEnvironment()
 
     /** A pre-initialization caller safely freezes production rather than allowing later traffic to split. */
     val current: ApiEndpointConfiguration get() = policy.currentOrProduction()
@@ -150,9 +134,9 @@ internal fun readStagingEnvironmentManifestValue(context: Context): Any? {
     }.getOrNull()
 }
 
-private fun SimulaApiEnvironment.toInternalEnvironment(): ApiEnvironment = when (this) {
-    SimulaApiEnvironment.Production -> ApiEnvironment.Production
-    SimulaApiEnvironment.Staging -> ApiEnvironment.Staging
+private fun ApiEnvironment.toPublicEnvironment(): SimulaApiEnvironment = when (this) {
+    ApiEnvironment.Production -> SimulaApiEnvironment.Production
+    ApiEnvironment.Staging -> SimulaApiEnvironment.Staging
 }
 
 internal fun apiUrl(baseUrl: String, path: String): String =
