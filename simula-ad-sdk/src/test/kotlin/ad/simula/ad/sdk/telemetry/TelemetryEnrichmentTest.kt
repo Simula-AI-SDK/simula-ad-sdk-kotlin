@@ -379,6 +379,21 @@ class TelemetryEnrichmentTest {
     }
 
     @Test
+    fun `missing experiment clears the previous envelope assignment`() = runTest {
+        val sender = FakeSender()
+        val m = build(this, FakeStore(), sender, clock = { 1_000L })
+
+        m.setExperiment("stale_experiment", "stale_variant")
+        m.setExperiment(null, null)
+        m.recordError("api:boom", "boom")
+        advanceUntilIdle()
+
+        val env = sender.batches.first()
+        assertNull(env.experimentId)
+        assertNull(env.variantId)
+    }
+
+    @Test
     fun `device diagnostics are attached to the envelope`() = runTest {
         val sender = FakeSender()
         val ctx = TelemetryContext(

@@ -172,7 +172,6 @@ class NativeAdParsingTest {
         assertEquals("serve-123", r.impressionId)
         assertTrue(r.adInserted)
         assertEquals("character_ad", r.adFormat)
-        assertEquals("https://api/iframe/abc", r.iframeUrl)
         assertEquals("<iframe srcdoc=...></iframe>", r.renderedHtml)
         assertEquals("web", r.destination)
         assertEquals("https://mmp.example/click?cid=1", r.trackingUrl)
@@ -201,7 +200,6 @@ class NativeAdParsingTest {
         assertNull(r.impressionId)
         assertFalse(r.adInserted)
         assertEquals("", r.adFormat)
-        assertNull(r.iframeUrl)
         assertNull(r.renderedHtml)
         assertEquals("appstore", r.destination)
         assertNull(r.trackingUrl)
@@ -213,7 +211,6 @@ class NativeAdParsingTest {
         assertNull(r.impressionId)
         assertFalse(r.adInserted)
         assertEquals("", r.adFormat)
-        assertNull(r.iframeUrl)
         assertNull(r.renderedHtml)
         assertEquals("appstore", r.destination)
         assertNull(r.trackingUrl)
@@ -224,6 +221,6 @@ class NativeAdParsingTest {
         val payload = """{"ad_inserted":true,"ad_format":"character_ad","iframe_url":"u","future":1}"""
         val r = json.decodeFromString<NativeAdApiResponse>(payload)
         assertTrue(r.adInserted)
-        assertEquals("u", r.iframeUrl)
+        assertNull(r.renderedHtml)
     }
 }

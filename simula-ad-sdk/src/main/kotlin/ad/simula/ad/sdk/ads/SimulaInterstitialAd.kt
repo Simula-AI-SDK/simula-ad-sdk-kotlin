@@ -10,6 +10,7 @@ import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.ExtraParametersStore
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayTiming
@@ -17,6 +18,7 @@ import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.validatedHexColor
+import ad.simula.ad.sdk.model.isRenderable
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.network.AdUnitNotFoundException
 import ad.simula.ad.sdk.network.SimulaApiClient
@@ -197,46 +199,55 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
-                val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
-                if (!ad.adInserted || html == null) {
+                val creative = ad.creative ?: Creative()
+                if (!ad.adInserted || !creative.isRenderable(ad.renderedHtml)) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
-                Telemetry.setExperiment(ad.experiment?.experimentId, ad.experiment?.variantId)
-                Telemetry.recordLifecycle(
-                    stage = "load_success",
-                    adFormat = AD_FORMAT,
-                    adUnitId = adUnitId,
-                    adId = ad.impressionId,
-                    serveId = ad.impressionId,
-                    durationMs = elapsedSinceLoad(),
-                    errorCode = null,
-                )
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
+                    Telemetry.recordLifecycle(
+                        stage = "load_success",
+                        adFormat = AD_FORMAT,
+                        adUnitId = adUnitId,
+                        adId = ad.impressionId,
+                        serveId = ad.impressionId,
+                        durationMs = elapsedSinceLoad(),
+                        errorCode = null,
+                    )
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
+                    if (ad.creative?.type == CreativeType.VIDEO) {
+                        FullscreenVideoPreparer.prepare(ad.creative.url)
+                    }
                     runCatching { listener?.onAdLoaded(this@SimulaInterstitialAd) }
                 }
                 scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
+                if (generation != loadGeneration) return@launch
                 // Genuine exception (network/decoding) — always-sent, deduped handled error,
                 // in addition to the sampled `load_fail` lifecycle event from failLoad().
                 // ad_unit_not_found is a distinct, non-retryable misconfiguration — surface it as
                 // its own case rather than burying it in the generic Network bucket.
                 val error =
                     if (e is AdUnitNotFoundException) SimulaAdError.AdUnitNotFound else SimulaAdError.Network(e)
-                Telemetry.recordError(
-                    signature = "interstitial:load",
-                    errorCode = error.telemetryCode(),
-                    message = e.message,
-                    breadcrumb = "SimulaInterstitialAd.load",
-                )
-                failLoadOnMain(generation, error)
+                withContext(Dispatchers.Main) {
+                    if (generation != loadGeneration) return@withContext
+                    Telemetry.recordError(
+                        signature = "interstitial:load",
+                        errorCode = error.telemetryCode(),
+                        message = e.message,
+                        breadcrumb = "SimulaInterstitialAd.load",
+                    )
+                    failLoad(error)
+                }
             }
         }
     }
 
     private fun scheduleWebViewPrewarm(generation: Int, ad: SimulaApiClient.AdLoadResult) {
+        if (ad.creative?.type == CreativeType.VIDEO) {
+            return
+        }
         val context = SimulaAds.appContext
         SimulaScope.launch {
             runCatching {
@@ -358,7 +369,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
             trackingUrl = PREVIEW_TRACKING_URL,  // lets a store-prompt / install-banner tap route
             renderedHtml = PREVIEW_CREATIVE_HTML,
             adBehavior = behavior,
-            creative = Creative(type = "preview", adUnitType = AdUnitType.from(adUnitType)),
+            creative = Creative(type = CreativeType.PLAYABLE, adUnitType = AdUnitType.from(adUnitType)),
         )
 
         val token = UUID.randomUUID().toString()

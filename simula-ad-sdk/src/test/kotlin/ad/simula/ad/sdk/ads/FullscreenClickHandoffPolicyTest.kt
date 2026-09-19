@@ -22,6 +22,290 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FullscreenClickHandoffPolicyTest {
+    @Test
+    fun `invalid internal fallback video enters unavailable path once`() {
+        assertTrue(
+            shouldEnterFallbackVideoUnavailable(
+                ad.simula.ad.sdk.model.CreativeType.VIDEO,
+                url = null,
+                alreadyUnavailable = false,
+            ),
+        )
+        assertTrue(
+            shouldEnterFallbackVideoUnavailable(
+                ad.simula.ad.sdk.model.CreativeType.VIDEO,
+                url = "javascript:invalid",
+                alreadyUnavailable = false,
+            ),
+        )
+        assertFalse(
+            shouldEnterFallbackVideoUnavailable(
+                ad.simula.ad.sdk.model.CreativeType.VIDEO,
+                url = null,
+                alreadyUnavailable = true,
+            ),
+        )
+        assertFalse(
+            shouldEnterFallbackVideoUnavailable(
+                ad.simula.ad.sdk.model.CreativeType.VIDEO,
+                url = "https://cdn.example/video.mp4",
+                alreadyUnavailable = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `invalid video unavailable advance defers for blockers`() {
+        assertFalse(shouldExitUnavailableCreative(true, clickHandoffPending = true, storeVisitPending = false))
+        assertFalse(shouldExitUnavailableCreative(true, clickHandoffPending = false, storeVisitPending = true))
+        assertTrue(shouldExitUnavailableCreative(true, clickHandoffPending = false, storeVisitPending = false))
+    }
+
+    @Test
+    fun `fallback HTML failures skip only initial main-frame load`() {
+        assertEquals(
+            FallbackHtmlFailureAction.SKIP_INITIAL,
+            fallbackHtmlFailureAction(pageCommitted = false, isMainFrame = true),
+        )
+        assertEquals(
+            FallbackHtmlFailureAction.IGNORE,
+            fallbackHtmlFailureAction(pageCommitted = true, isMainFrame = true),
+        )
+        assertEquals(
+            FallbackHtmlFailureAction.IGNORE,
+            fallbackHtmlFailureAction(pageCommitted = false, isMainFrame = false),
+        )
+    }
+
+    @Test
+    fun `post-commit navigation and tracker errors keep visible fallback`() {
+        for (error in listOf("navigation", "tracker", "http")) {
+            assertEquals(
+                error,
+                FallbackHtmlFailureAction.IGNORE,
+                fallbackHtmlFailureAction(pageCommitted = true, isMainFrame = true),
+            )
+        }
+    }
+
+    @Test
+    fun `fallback video item route wins and parent route is inherited only when item fields are absent`() {
+        val item = SimulaApiClient.FallbackAd(
+            adId = "item",
+            trackingUrl = "https://item.example/click",
+            destination = "web",
+        )
+        val itemRoute = resolveFallbackVideoRouting(
+            item,
+            parentTrackingUrl = "https://parent.example/click",
+            parentDestination = "appstore",
+            parentStoreUrl = "https://play.google.com/store/apps/details?id=parent",
+            allowParentFallback = true,
+        )
+        assertEquals("https://item.example/click", itemRoute?.route?.externalTarget)
+        assertFalse(itemRoute?.inheritedFromPrimary ?: true)
+
+        val absent = SimulaApiClient.FallbackAd(adId = "absent")
+        val inherited = resolveFallbackVideoRouting(
+            absent,
+            parentTrackingUrl = "https://parent.example/click",
+            parentDestination = "appstore",
+            parentStoreUrl = null,
+            allowParentFallback = true,
+        )
+        assertEquals("https://parent.example/click", inherited?.route?.externalTarget)
+        assertTrue(inherited?.inheritedFromPrimary == true)
+        assertNull(
+            resolveFallbackVideoRouting(absent, null, "appstore", null, allowParentFallback = false),
+        )
+    }
+
+    @Test
+    fun `destination-only or ios-only item route inherits parent on Android`() {
+        val destinationOnly = SimulaApiClient.FallbackAd(adId = "destination", destination = "appstore")
+        val iosOnly = SimulaApiClient.FallbackAd(
+            adId = "ios",
+            iosStoreUrl = "https://apps.apple.com/app/id123",
+        )
+        for (ad in listOf(destinationOnly, iosOnly)) {
+            val route = resolveFallbackVideoRouting(
+                ad,
+                parentTrackingUrl = "https://parent.example/click",
+                parentDestination = "appstore",
+                parentStoreUrl = "https://play.google.com/store/apps/details?id=parent",
+                allowParentFallback = true,
+            )
+            assertEquals("https://parent.example/click", route?.route?.externalTarget)
+            assertTrue(route?.inheritedFromPrimary == true)
+        }
+    }
+
+    @Test
+    fun `blank item routing inherits parent but malformed-present item fails closed`() {
+        val blank = SimulaApiClient.FallbackAd(
+            adId = "blank",
+            destination = "  ",
+            trackingUrl = "\n",
+        )
+        val inherited = resolveFallbackVideoRouting(
+            blank,
+            parentTrackingUrl = "https://parent.example/click",
+            parentDestination = "appstore",
+            parentStoreUrl = null,
+            allowParentFallback = true,
+        )
+        assertTrue(inherited?.inheritedFromPrimary == true)
+
+        val malformedPresent = SimulaApiClient.FallbackAd(
+            adId = "malformed",
+            routingFieldsPresent = true,
+        )
+        assertNull(
+            resolveFallbackVideoRouting(
+                malformedPresent,
+                parentTrackingUrl = "https://parent.example/click",
+                parentDestination = "appstore",
+                parentStoreUrl = null,
+                allowParentFallback = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `fallback item routing enforces field semantics`() {
+        val webWithStore = SimulaApiClient.FallbackAd(
+            adId = "web-store",
+            destination = "web",
+            androidStoreUrl = "https://play.google.com/store/apps/details?id=com.example",
+        )
+        val invalidStoreHost = SimulaApiClient.FallbackAd(
+            adId = "store-host",
+            destination = "appstore",
+            androidStoreUrl = "https://example.com/store/apps/details?id=com.example",
+        )
+        val customTracker = SimulaApiClient.FallbackAd(
+            adId = "custom-tracker",
+            destination = "web",
+            trackingUrl = "partner-app://offer",
+        )
+
+        for (ad in listOf(webWithStore, invalidStoreHost, customTracker)) {
+            assertNull(
+                resolveFallbackVideoRouting(
+                    ad,
+                    parentTrackingUrl = "https://parent.example/click",
+                    parentDestination = "appstore",
+                    parentStoreUrl = "https://play.google.com/store/apps/details?id=parent",
+                    allowParentFallback = true,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `valid item tracker wins even when secondary store is invalid or irrelevant`() {
+        val invalidStore = "https://example.com/store/apps/details?id=com.example"
+        for (destination in listOf("web", "appstore")) {
+            val routing = resolveFallbackVideoRouting(
+                SimulaApiClient.FallbackAd(
+                    adId = destination,
+                    destination = destination,
+                    trackingUrl = "https://tracker.example/click",
+                    androidStoreUrl = invalidStore,
+                ),
+                parentTrackingUrl = "https://parent.example/click",
+                parentDestination = "appstore",
+                parentStoreUrl = "https://play.google.com/store/apps/details?id=parent",
+                allowParentFallback = true,
+            )
+
+            assertEquals("https://tracker.example/click", routing?.route?.externalTarget)
+            assertNull(routing?.storeUrl)
+            assertFalse(routing?.inheritedFromPrimary ?: true)
+        }
+    }
+
+    @Test
+    fun `appstore uses valid Play store only when tracker is absent or invalid`() {
+        val playStore = "https://play.google.com/store/apps/details?id=com.example"
+        val trackerWins = resolveFallbackVideoRouting(
+            SimulaApiClient.FallbackAd(
+                adId = "tracker",
+                destination = "appstore",
+                trackingUrl = "https://tracker.example/click",
+                androidStoreUrl = playStore,
+            ),
+            null,
+            "appstore",
+            null,
+            allowParentFallback = false,
+        )
+        assertEquals("https://tracker.example/click", trackerWins?.route?.externalTarget)
+        assertEquals(playStore, trackerWins?.storeUrl)
+
+        val storeFallback = resolveFallbackVideoRouting(
+            SimulaApiClient.FallbackAd(
+                adId = "store",
+                destination = "appstore",
+                trackingUrl = "partner-app://invalid-tracker",
+                androidStoreUrl = playStore,
+            ),
+            null,
+            "appstore",
+            null,
+            allowParentFallback = false,
+        )
+        assertEquals(playStore, storeFallback?.route?.externalTarget)
+        assertEquals(playStore, storeFallback?.storeUrl)
+    }
+
+    @Test
+    fun `video telemetry stages match cross-platform contract`() {
+        assertEquals(listOf("video_start", "video_complete", "video_fail"), listOf(
+            VIDEO_STAGE_START,
+            VIDEO_STAGE_COMPLETE,
+            VIDEO_STAGE_FAIL,
+        ))
+    }
+
+    @Test
+    fun `video CTA is available only with an admitted destination`() {
+        assertNull(videoCtaRoute(null, null, "appstore"))
+        assertNull(videoCtaRoute("javascript:alert(1)", null, "appstore"))
+        assertEquals(
+            "https://tracker.example/click",
+            videoCtaRoute("https://tracker.example/click", null, "appstore")?.externalTarget,
+        )
+        assertEquals(
+            "https://play.google.com/store/apps/details?id=com.example",
+            videoCtaRoute(
+                null,
+                "https://play.google.com/store/apps/details?id=com.example",
+                "appstore",
+            )?.externalTarget,
+        )
+        assertEquals(
+            "https://play.google.com/store/apps/details?id=com.example",
+            videoCtaRoute(
+                "javascript:alert(1)",
+                "https://play.google.com/store/apps/details?id=com.example",
+                "appstore",
+            )?.externalTarget,
+        )
+    }
+
+    @Test
+    fun `upcoming fallback video selection supports consecutive videos with one next owner`() {
+        val ads = listOf(
+            SimulaApiClient.FallbackAd("one", type = ad.simula.ad.sdk.model.CreativeType.VIDEO, url = "https://cdn/1"),
+            SimulaApiClient.FallbackAd("two", type = ad.simula.ad.sdk.model.CreativeType.VIDEO, url = "https://cdn/2"),
+            SimulaApiClient.FallbackAd("html", renderedHtml = "<html/>"),
+        )
+
+        assertEquals("https://cdn/1", nextFallbackVideoUrl(ads, -1))
+        assertEquals("https://cdn/2", nextFallbackVideoUrl(ads, 0))
+        assertNull(nextFallbackVideoUrl(ads, 1))
+    }
     private class TestScheduler : ClickHandoffScheduler {
         private val ready = ArrayDeque<Runnable>()
         private val delayed = LinkedHashSet<Runnable>()
@@ -642,7 +926,7 @@ class FullscreenClickHandoffPolicyTest {
     @Test
     fun `fallback presentation retains fetched ads and accepted click through refetch failure`() {
         val state = FallbackPresentationState()
-        val ads = listOf(SimulaApiClient.FallbackAd("ad-1", html = "<html/>"))
+        val ads = listOf(SimulaApiClient.FallbackAd("ad-1", renderedHtml = "<html/>"))
         state.retainFetchedAds(ads)
         state.showing(0)
         state.setClickPending(true)
@@ -666,7 +950,7 @@ class FullscreenClickHandoffPolicyTest {
     @Test
     fun `fetch exhaustion never overwrites retained fallback content`() {
         val state = FallbackPresentationState()
-        val retained = listOf(SimulaApiClient.FallbackAd("retained", html = "<html/>"))
+        val retained = listOf(SimulaApiClient.FallbackAd("retained", renderedHtml = "<html/>"))
         state.retainFetchedAds(retained)
 
         assertEquals(retained, state.terminalizeInitialFetchFailure())
@@ -1005,7 +1289,7 @@ class FullscreenClickHandoffPolicyTest {
         assertFalse(
             state.resolvePostCloseFetchWait(
                 generation,
-                listOf(SimulaApiClient.FallbackAd("late", html = "<html/>")),
+                listOf(SimulaApiClient.FallbackAd("late", renderedHtml = "<html/>")),
             ),
         )
         assertEquals(FallbackStage.DONE, state.stage)
@@ -1016,7 +1300,7 @@ class FullscreenClickHandoffPolicyTest {
         var now = 5_000L
         val state = FallbackPresentationState(clockMs = { now })
         val generation = state.startPostCloseFetchWait()
-        val ads = listOf(SimulaApiClient.FallbackAd("fallback", html = "<html/>"))
+        val ads = listOf(SimulaApiClient.FallbackAd("fallback", renderedHtml = "<html/>"))
 
         now += FALLBACK_POST_CLOSE_WAIT_MS - 1L
         assertTrue(state.resolvePostCloseFetchWait(generation, ads))

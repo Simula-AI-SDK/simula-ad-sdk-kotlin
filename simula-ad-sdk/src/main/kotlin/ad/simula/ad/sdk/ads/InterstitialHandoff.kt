@@ -171,6 +171,8 @@ internal class InterstitialPresentation(
      * the app pauses the countdown. Lives here (not in the Activity) so a config-change recreation
      * resumes the remaining dwell instead of restarting it. `0L` until the gate first ticks. */
     var accumulatedGateTimeMs = 0L
+    var videoDurationMs = 0L
+    var videoPositionMs = 0L
 }
 
 /**

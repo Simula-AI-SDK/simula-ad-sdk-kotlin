@@ -16,6 +16,12 @@ class MiniGameMenuPolicyTest {
     private class Node(var parent: Node? = null, val host: Boolean = false)
 
     @Test
+    fun `minigame video routes use deferred preparation while HTML stays synchronous`() {
+        assertTrue(fallbackRouteRequiresDeferredPreparation(isVideo = true))
+        assertFalse(fallbackRouteRequiresDeferredPreparation(isVideo = false))
+    }
+
+    @Test
     fun `nested wrappers resolve the first host`() {
         val host = Node(host = true)
         val nested = Node(Node(Node(host)))

@@ -4,6 +4,7 @@ import ad.simula.ad.sdk.core.LaunchSettledGate
 import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.telemetry.Telemetry
+import ad.simula.ad.sdk.model.RewardCompletionReason
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -14,6 +15,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
@@ -35,6 +37,8 @@ internal data class PendingVerification(
     // entries persisted before this field existed still decode (with adUnitId = "").
     val adUnitId: String = "",
     val createdTimestamp: Long = 0L,
+    // Optional and defaulted so rows persisted before completion-reason support still decode.
+    @SerialName("completion_reason") val completionReason: String? = null,
 )
 
 /** Persists the pending-verification queue. Abstracted so the queue engine can be unit-tested. */
@@ -96,6 +100,13 @@ internal class DurableQueuePersistenceException(message: String) : Exception(mes
 /** Performs one `verify-reward` call; returns the reward token (may be null) or throws. */
 internal interface RewardVerifier {
     suspend fun verify(serveId: String, sessionId: String, elapsedPlayTime: Double, adUnitId: String): String?
+    suspend fun verify(
+        serveId: String,
+        sessionId: String,
+        elapsedPlayTime: Double,
+        adUnitId: String,
+        completionReason: String?,
+    ): String? = verify(serveId, sessionId, elapsedPlayTime, adUnitId)
 }
 
 /** Exponential backoff: first attempt immediate, then 5s, 10s, 20s, 40s, 60s cap. */
@@ -114,6 +125,10 @@ internal fun isPermanentVerificationError(e: Throwable): Boolean {
         ?.groupValues?.get(1)?.toIntOrNull() ?: return false
     return code in 400..499 && code != 408 && code != 429
 }
+
+internal fun hasUnsupportedRewardCompletionReason(verification: PendingVerification): Boolean =
+    verification.completionReason != null &&
+        RewardCompletionReason.fromWire(verification.completionReason) == null
 
 /**
  * Thread-safe, persistent queue that delivers `verify-reward` calls reliably and
@@ -137,6 +152,13 @@ internal class RewardVerificationQueue(
     private val scope: CoroutineScope = SimulaScope,
     private val sleep: suspend (Long) -> Unit = { delay(it) },
     private val maxPendingEnqueues: Int = DEFAULT_MAX_PENDING_ENQUEUES,
+    private val recordUnsupportedCompletionReason: () -> Unit = {
+        Telemetry.recordError(
+            signature = "reward_verification:unsupported_completion_reason",
+            errorCode = "unknown_completion_reason",
+            breadcrumb = "queue=reward_verification",
+        )
+    },
 ) {
     private data class PendingEnqueue(
         val verification: PendingVerification,
@@ -157,6 +179,7 @@ internal class RewardVerificationQueue(
     private val pendingEnqueues = LinkedHashMap<String, PendingEnqueue>()
     private var storageFailureCount = 0
     private var storageFailureReported = false
+    private var unsupportedCompletionReasonReported = false
 
     /**
      * Per-`serveId` result callbacks, so a verification's outcome reaches the caller
@@ -177,6 +200,7 @@ internal class RewardVerificationQueue(
         sessionId: String,
         elapsedPlayTime: Double,
         adUnitId: String = "",
+        completionReason: String? = null,
         onResult: ((Result<String?>) -> Unit)? = null,
     ) {
         scope.launch {
@@ -199,6 +223,7 @@ internal class RewardVerificationQueue(
                     lastAttemptTimestamp = 0L,
                     adUnitId = adUnitId,
                     createdTimestamp = clock(),
+                    completionReason = completionReason,
                 )
                 pendingEnqueues[serveId] = PendingEnqueue(
                     verification = verification,
@@ -306,12 +331,22 @@ internal class RewardVerificationQueue(
         var bailedForBackoff = false
         var madeProgress = false
         var loadFailed = false
+        var compatibilityBlocked = false
         try {
             while (true) {
                 val selection: DurableLoadResult<PendingVerification?> = mutex.withLock {
                     when (val loaded = store.load()) {
                         is DurableLoadResult.Loaded -> {
                             noteStorageSuccess()
+                            if (loaded.value.any(::hasUnsupportedRewardCompletionReason)) {
+                                compatibilityBlocked = true
+                                if (!unsupportedCompletionReasonReported) {
+                                    unsupportedCompletionReasonReported = true
+                                    runCatching(recordUnsupportedCompletionReason)
+                                }
+                                return@withLock DurableLoadResult.Loaded(null)
+                            }
+                            unsupportedCompletionReasonReported = false
                             val now = clock()
                             DurableLoadResult.Loaded(
                                 loaded.value.firstOrNull {
@@ -335,7 +370,13 @@ internal class RewardVerificationQueue(
 
                 val outcome = try {
                     Result.success(
-                        verifier.verify(task.serveId, task.sessionId, task.elapsedPlayTime, task.adUnitId),
+                        verifier.verify(
+                            task.serveId,
+                            task.sessionId,
+                            task.elapsedPlayTime,
+                            task.adUnitId,
+                            task.completionReason,
+                        ),
                     )
                 } catch (e: Exception) {
                     Result.failure(e)
@@ -366,7 +407,13 @@ internal class RewardVerificationQueue(
                 if (retryable && bailedForBackoff) break
             }
         } finally {
-            finishProcessing(bailedForBackoff, scheduleIneligibleWake, madeProgress, loadFailed)
+            finishProcessing(
+                bailedForBackoff,
+                scheduleIneligibleWake,
+                madeProgress,
+                loadFailed,
+                compatibilityBlocked,
+            )
         }
     }
 
@@ -390,10 +437,12 @@ internal class RewardVerificationQueue(
         scheduleIneligibleWake: Boolean,
         madeProgress: Boolean,
         loadFailed: Boolean,
+        compatibilityBlocked: Boolean,
     ) {
         val (reDrain, wakeDelay) = withContext(NonCancellable) {
             mutex.withLock {
                 isProcessing = false
+                if (compatibilityBlocked) return@withLock false to null
                 if (loadFailed) {
                     scheduleStorageRecoveryLocked()
                     return@withLock false to null
@@ -466,6 +515,7 @@ internal object RewardVerificationManager {
         sessionId: String,
         elapsedPlayTime: Double,
         adUnitId: String = "",
+        completionReason: String? = null,
         onResult: ((Result<String?>) -> Unit)? = null,
     ) {
         // Store construction can open/migrate SQLite. Keep it off the Activity caller even if an ad
@@ -481,7 +531,7 @@ internal object RewardVerificationManager {
                 }
                 return@launch
             }
-            queue.queue(serveId, sessionId, elapsedPlayTime, adUnitId, onResult)
+            queue.queue(serveId, sessionId, elapsedPlayTime, adUnitId, completionReason, onResult)
         }
     }
 
@@ -499,6 +549,20 @@ internal object RewardVerificationManager {
 private object ApiRewardVerifier : RewardVerifier {
     override suspend fun verify(serveId: String, sessionId: String, elapsedPlayTime: Double, adUnitId: String): String? =
         SimulaApiClient.verifyReward(serveId, sessionId, elapsedPlayTime, adUnitId).token
+
+    override suspend fun verify(
+        serveId: String,
+        sessionId: String,
+        elapsedPlayTime: Double,
+        adUnitId: String,
+        completionReason: String?,
+    ): String? = SimulaApiClient.verifyReward(
+        serveId,
+        sessionId,
+        elapsedPlayTime,
+        adUnitId,
+        completionReason,
+    ).token
 }
 
 /** WAL SQLite rows keyed by the stable reward action key (`serveId`). */

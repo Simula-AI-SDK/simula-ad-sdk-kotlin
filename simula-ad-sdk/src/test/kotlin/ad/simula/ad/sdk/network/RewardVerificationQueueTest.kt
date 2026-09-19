@@ -51,6 +51,7 @@ class RewardVerificationQueueTest {
         val tokens = mutableMapOf<String, String?>()
         val errors = mutableMapOf<String, Throwable>()
         val callCounts = mutableMapOf<String, Int>()
+        val completionReasons = mutableMapOf<String, MutableList<String?>>()
         private val release = mutableMapOf<String, CompletableDeferred<Unit>>()
         val entered = mutableMapOf<String, CompletableDeferred<Unit>>()
 
@@ -71,9 +72,92 @@ class RewardVerificationQueueTest {
             errors[serveId]?.let { throw it }
             return tokens[serveId]
         }
+
+        override suspend fun verify(
+            serveId: String,
+            sessionId: String,
+            elapsedPlayTime: Double,
+            adUnitId: String,
+            completionReason: String?,
+        ): String? {
+            completionReasons.getOrPut(serveId) { mutableListOf() } += completionReason
+            return verify(serveId, sessionId, elapsedPlayTime, adUnitId)
+        }
     }
 
     // ── Single-task outcomes ───────────────────────────────────────────────────
+
+    @Test
+    fun `unknown completion reason in first row blocks drain without mutation or send`() = runTest {
+        val rows = listOf(
+            PendingVerification(
+                "future",
+                "sess",
+                4.0,
+                retryCount = 0,
+                lastAttemptTimestamp = 0L,
+                completionReason = "future_reason",
+            ),
+            PendingVerification(
+                "known",
+                "sess",
+                30.0,
+                retryCount = 0,
+                lastAttemptTimestamp = 0L,
+                completionReason = "duration_elapsed",
+            ),
+        )
+        val store = FakeStore(rows)
+        val verifier = FakeVerifier()
+        var telemetryCount = 0
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 0L },
+            scope = this,
+            recordUnsupportedCompletionReason = { telemetryCount++ },
+        )
+
+        engine.trigger()
+        advanceUntilIdle()
+        engine.trigger()
+        advanceUntilIdle()
+
+        assertEquals(rows, store.data)
+        assertTrue(verifier.callCounts.isEmpty())
+        assertEquals(1, telemetryCount)
+    }
+
+    @Test
+    fun `unknown completion reason in later row blocks earlier known row without mutation or send`() = runTest {
+        val rows = listOf(
+            PendingVerification(
+                "known",
+                "sess",
+                30.0,
+                retryCount = 2,
+                lastAttemptTimestamp = 123L,
+                completionReason = "duration_elapsed",
+            ),
+            PendingVerification(
+                "future",
+                "sess",
+                5.0,
+                retryCount = 1,
+                lastAttemptTimestamp = 456L,
+                completionReason = "future_reason",
+            ),
+        )
+        val store = FakeStore(rows)
+        val verifier = FakeVerifier()
+        val engine = RewardVerificationQueue(store, verifier, clock = { 10_000L }, scope = this)
+
+        engine.trigger()
+        advanceUntilIdle()
+
+        assertEquals(rows, store.data)
+        assertTrue(verifier.callCounts.isEmpty())
+    }
 
     @Test
     fun `success delivers the token and removes the task`() = runTest {
@@ -344,6 +428,33 @@ class RewardVerificationQueueTest {
         assertEquals(1, store.data[0].retryCount)
         assertEquals(1_000L, store.data[0].lastAttemptTimestamp)
         assertEquals(1, verifier.callCounts["A"]) // not hammered
+    }
+
+    @Test
+    fun `retry preserves original completion reason`() = runTest {
+        var now = 1_000L
+        val store = FakeStore()
+        val verifier = FakeVerifier().apply { errors["A"] = Exception("HTTP error! status: 500") }
+        val engine = RewardVerificationQueue(store, verifier, clock = { now }, scope = this)
+
+        engine.queue(
+            serveId = "A",
+            sessionId = "sess",
+            elapsedPlayTime = 4.0,
+            completionReason = "video_completed",
+        )
+        advanceUntilIdle()
+
+        assertEquals("video_completed", store.data.single().completionReason)
+        assertEquals(listOf("video_completed"), verifier.completionReasons["A"])
+
+        verifier.errors.remove("A")
+        now = 6_000L
+        engine.trigger()
+        advanceUntilIdle()
+
+        assertEquals(listOf("video_completed", "video_completed"), verifier.completionReasons["A"])
+        assertTrue(store.data.isEmpty())
     }
 
     // ── Routing / dropping / stranding (the core regression guards) ──────────────

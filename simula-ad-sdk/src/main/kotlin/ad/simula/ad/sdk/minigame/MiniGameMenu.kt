@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.os.Build
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -54,6 +53,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -91,6 +91,18 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.ads.AdInfoReportOverlay
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
+import ad.simula.ad.sdk.ads.FullscreenVideo
+import ad.simula.ad.sdk.ads.FullscreenVideoPreparer
+import ad.simula.ad.sdk.ads.FALLBACK_RENDER_TIMEOUT_MS
+import ad.simula.ad.sdk.ads.nextFallbackVideoUrl
+import ad.simula.ad.sdk.ads.smoothVideoProgress
+import ad.simula.ad.sdk.ads.FallbackHtmlFailureAction
+import ad.simula.ad.sdk.ads.fallbackHtmlFailureAction
+import ad.simula.ad.sdk.ads.resolveFallbackVideoRouting
+import ad.simula.ad.sdk.ads.prepareDeferredCtaRoute
+import ad.simula.ad.sdk.ads.AutomaticNavigationOutcome
+import ad.simula.ad.sdk.ads.canRouteFromCurrentFullscreenActivity
+import ad.simula.ad.sdk.ads.shouldEnterFallbackVideoUnavailable
 import ad.simula.ad.sdk.ads.FallbackCloseGateState
 import ad.simula.ad.sdk.ads.closeGateProgress
 import ad.simula.ad.sdk.ads.closeGateSecondsRemaining
@@ -104,9 +116,13 @@ import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
+import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.model.resolve
+import ad.simula.ad.sdk.model.videoCloseGateMs
+import ad.simula.ad.sdk.model.RenderAttemptGate
+import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.resolveFallbackCloseAction
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.AdBeaconManager
@@ -116,6 +132,7 @@ import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.DeclarativeClickRouteOwner
 import ad.simula.ad.sdk.network.PresentationRouteResult
+import ad.simula.ad.sdk.network.PrimaryCtaRoute
 import ad.simula.ad.sdk.network.ResumedPresentationRoute
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
@@ -140,6 +157,8 @@ internal fun <T : Any> unwrapNestedHost(
     }
     return null
 }
+
+internal fun fallbackRouteRequiresDeferredPreparation(isVideo: Boolean): Boolean = isVideo
 
 internal fun findActivity(context: Context?): Activity? = unwrapNestedHost(
     start = context,
@@ -213,7 +232,7 @@ fun MiniGameMenu(
     LaunchedEffect(isOpen) {
         if (!isOpen) return@LaunchedEffect
 
-        // Prewarm a WebView so the game/ad iframe opens without renderer cold-start.
+        // Prewarm a WebView so the game or HTML fallback opens without renderer cold-start.
         WebViewPool.prewarm(context, trigger = "minigame_menu")
 
         // Imperative interstitial path: catalog was already fetched by load().
@@ -277,6 +296,7 @@ fun MiniGameMenu(
                 scope.launch {
                     val ads = SimulaApiClient.fetchFallbacks(sid)
                     if (ads.isNotEmpty()) {
+                        FullscreenVideoPreparer.prepare(nextFallbackVideoUrl(ads, afterDisplayIndex = -1))
                         fallbackAds = ads
                         fallbackAdIndex = 0
                         adFetched = true
@@ -291,12 +311,15 @@ fun MiniGameMenu(
         }
     }
 
-    fun handleAdIframeClose() {
+    fun handleFallbackClose() {
         // Reveal the next fetched ad screen on each close tap; after the last one,
         // return to the catalog menu (isOpen stays true) instead of dismissing —
         // the menu is dismissed only by an explicit close/back action.
         if (fallbackAdIndex + 1 < fallbackAds.size) {
             fallbackAdIndex += 1
+            FullscreenVideoPreparer.prepare(
+                fallbackAds.getOrNull(fallbackAdIndex)?.takeIf { it.type == CreativeType.VIDEO }?.url,
+            )
         } else {
             fallbackAds = emptyList()
             fallbackAdIndex = 0
@@ -315,7 +338,7 @@ fun MiniGameMenu(
 
     // ── Back handler chain: ad -> game -> menu ───────────────────────────────
     BackHandler(enabled = currentFallbackAd != null) {
-        handleAdIframeClose()
+        handleFallbackClose()
     }
     BackHandler(enabled = selectedGameId != null && currentFallbackAd == null) {
         handleIframeClose()
@@ -672,7 +695,7 @@ fun MiniGameMenu(
         if (currentFallbackAd != null) {
             val fallbackPlayableHeightDp = if (lastGameWasBottomSheet) lastGameHeightDp else null
             Dialog(
-                // AdIframeOverlay owns Back/close gating while click persistence or routing is pending.
+                // The fallback overlay owns Back/close gating while click persistence or routing is pending.
                 onDismissRequest = {},
                 properties = DialogProperties(
                     usePlatformDefaultWidth = false,
@@ -681,7 +704,7 @@ fun MiniGameMenu(
             ) {
                 FullscreenDialogWindowConfig(opaqueBackground = fallbackPlayableHeightDp == null)
                 // key() so each revealed screen gets fresh overlay state (countdown, WebView).
-                key(fallbackAdIndex) {
+                key(currentFallbackAd.sourceIndex) {
                     val closeBehavior = currentFallbackAd.closeBehavior.copy(
                         action = resolveFallbackCloseAction(
                             currentFallbackAd.closeBehavior.action,
@@ -689,15 +712,13 @@ fun MiniGameMenu(
                             fallbackAds.size,
                         ),
                     )
-                    AdIframeOverlay(
-                        url = currentFallbackAd.iframeUrl ?: "",
-                        html = currentFallbackAd.html,
-                        onClose = { handleAdIframeClose() },
+                    MiniGameFallbackOverlay(
+                        ad = currentFallbackAd,
+                        nextVideoUrl = nextFallbackVideoUrl(fallbackAds, fallbackAdIndex),
+                        onClose = { handleFallbackClose() },
                         playableHeightDp = fallbackPlayableHeightDp,
                         playableBorderColor = theme.playableBorderColor ?: "#262626",
-                        adId = currentFallbackAd.adId,
                         parentServeId = currentServeId,
-                        nativeClickBeaconV1Enabled = currentFallbackAd.nativeClickBeaconV1Enabled,
                         closeBehavior = closeBehavior,
                         fallbackIndex = fallbackAdIndex,
                         closeGateState = fallbackCloseGates,
@@ -778,19 +799,17 @@ private fun FullscreenDialogWindowConfig(opaqueBackground: Boolean = false) {
     }
 }
 
-// ── Ad Iframe Overlay ────────────────────────────────────────────────────────
+// ── Post-game Ad Overlay ─────────────────────────────────────────────────────
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun AdIframeOverlay(
-    url: String,
-    html: String? = null,
+private fun MiniGameFallbackOverlay(
+    ad: SimulaApiClient.FallbackAd,
+    nextVideoUrl: String?,
     onClose: () -> Unit,
     playableHeightDp: Float? = null,
     playableBorderColor: String = "#262626",
-    adId: String = "",
     parentServeId: String? = null,
-    nativeClickBeaconV1Enabled: Boolean = false,
     closeBehavior: CloseBehavior,
     fallbackIndex: Int,
     closeGateState: FallbackCloseGateState,
@@ -798,26 +817,52 @@ private fun AdIframeOverlay(
     val context = LocalContext.current
     val view = LocalView.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val inlineHtml = html?.takeIf { it.isNotBlank() }
+    val adId = ad.adId
+    val nativeClickBeaconV1Enabled = ad.nativeClickBeaconV1Enabled
+    val inlineHtml = ad.renderedHtml?.takeIf { it.isNotBlank() }
+    val isVideo = ad.type == CreativeType.VIDEO
+    val videoUrl = remember(ad.url) { admittedVideoUrl(ad.url) }
+    var videoDurationMs by remember(closeGateState, fallbackIndex) {
+        mutableStateOf(closeGateState.videoDurationMs(fallbackIndex))
+    }
+    var gateMs by remember(closeGateState, fallbackIndex) {
+        mutableStateOf(videoCloseGateMs(closeBehavior.delaySeconds, videoDurationMs))
+    }
 
-    val closeGateMs = closeBehavior.delaySeconds * 1_000L
-    val retainedGateMs = closeGateState.elapsedMs(fallbackIndex).coerceAtMost(closeGateMs)
+    val retainedGateMs = closeGateState.elapsedMs(fallbackIndex).coerceAtMost(gateMs)
     var adCountdown by remember(closeBehavior, fallbackIndex) {
-        mutableStateOf(closeGateSecondsRemaining(retainedGateMs, closeGateMs))
+        mutableStateOf(closeGateSecondsRemaining(retainedGateMs, gateMs))
     }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ringProgress = remember(closeBehavior, fallbackIndex) {
-        Animatable(closeGateProgress(retainedGateMs, closeGateMs))
+        Animatable(closeGateProgress(retainedGateMs, gateMs))
     }
+    var videoRingProgress by remember(ad.sourceIndex) {
+        mutableFloatStateOf(closeGateProgress(retainedGateMs, gateMs))
+    }
+    val smoothVideoRingProgress = smoothVideoProgress(videoRingProgress)
     var adPageLoaded by remember { mutableStateOf(false) }
     var adPageFailed by remember { mutableStateOf(false) }
+    var renderToken by remember(ad.sourceIndex) { mutableStateOf(0L) }
+    var renderProcessGone by remember(ad.sourceIndex) { mutableStateOf(false) }
+    val renderGate = remember(ad.sourceIndex) { RenderAttemptGate() }
     var clickHandoffPending by remember { mutableStateOf(false) }
+    var closeIssued by remember(ad.sourceIndex) { mutableStateOf(false) }
     var adWebView by remember { mutableStateOf<WebView?>(null) }
     val clickGate = remember(adId) { ClickInteractionGate() }
     val clickHandler = remember { Handler(Looper.getMainLooper()) }
     val hostActivity = remember(context) { findActivity(context) }
     val clickOwner = remember(adId, hostActivity) { DeclarativeClickRouteOwner(hostActivity) }
     val routeCoordinator = clickOwner.routes
+    val videoRouting = remember(ad) {
+        resolveFallbackVideoRouting(
+            ad = ad,
+            parentTrackingUrl = null,
+            parentDestination = "appstore",
+            parentStoreUrl = null,
+            allowParentFallback = false,
+        )
+    }
 
     DisposableEffect(lifecycleOwner, hostActivity, clickOwner) {
         val activity = hostActivity
@@ -841,33 +886,178 @@ private fun AdIframeOverlay(
         }
     }
 
-    LaunchedEffect(Unit) {
-        if (closeGateMs <= 0L) {
+    LaunchedEffect(gateMs, isVideo, adPageLoaded) {
+        if (isVideo || !adPageLoaded) return@LaunchedEffect
+        if (gateMs <= 0L) {
             adCountdown = 0
             ringProgress.snapTo(1f)
             return@LaunchedEffect
         }
-        var accumulatedMs = closeGateState.elapsedMs(fallbackIndex)
+        var accumulatedMs = closeGateState.elapsedMs(fallbackIndex).coerceAtMost(gateMs)
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             var lastTickMs = SystemClock.elapsedRealtime()
-            while (accumulatedMs < closeGateMs) {
+            while (accumulatedMs < gateMs) {
                 delay(50L)
                 val now = SystemClock.elapsedRealtime()
                 accumulatedMs = closeGateState.addElapsedMs(
                     fallbackIndex,
                     now - lastTickMs,
-                    closeGateMs,
+                    gateMs,
                 )
                 lastTickMs = now
-                ringProgress.snapTo(closeGateProgress(accumulatedMs, closeGateMs))
-                adCountdown = closeGateSecondsRemaining(accumulatedMs, closeGateMs)
+                ringProgress.snapTo(closeGateProgress(accumulatedMs, gateMs))
+                adCountdown = closeGateSecondsRemaining(accumulatedMs, gateMs)
             }
         }
     }
 
     fun closeOverlay() {
+        if (closeIssued) return
+        closeIssued = true
         clickOwner.cancel()
         onClose()
+    }
+
+    fun applyPageFailure() {
+        if (adPageFailed) return
+        adPageLoaded = false
+        adPageFailed = true
+    }
+
+    fun failInitialPage(token: Long) {
+        if (renderGate.fail(token)) applyPageFailure()
+    }
+
+    LaunchedEffect(isVideo, videoUrl, adPageFailed) {
+        if (shouldEnterFallbackVideoUnavailable(ad.type, videoUrl, adPageFailed)) {
+            applyPageFailure()
+        }
+    }
+
+    fun beginFallbackClick(
+        routePlan: PrimaryCtaRoute,
+        destination: String = "web",
+        storeUrl: String? = null,
+        retainWebViewFallback: Boolean = true,
+        deferredPreparation: Boolean = false,
+    ): Boolean {
+        if (clickHandoffPending) return true
+        val claim = clickGate.claim(ClickSources.FALLBACK_CTA) ?: return true
+        val interaction = claim.interaction
+        val routeStartedAtNanos = System.nanoTime()
+        coordinateDeferredClickPersistence(
+            mainHandler = clickHandler,
+            claim = claim,
+            enqueueBeacon = { completion ->
+                enqueueOwnedFallbackClickBeacon(
+                    adId = adId,
+                    serverEnabled = nativeClickBeaconV1Enabled,
+                    completion = completion,
+                ) { beaconId ->
+                    AdBeaconManager.enqueue(
+                        beaconId,
+                        "click",
+                        adFormat = "interstitial",
+                        telemetryServeId = parentServeId.orEmpty(),
+                        interactionId = interaction.id,
+                        clickSource = interaction.source,
+                        onPersistenceComplete = completion,
+                    )
+                }
+            },
+            recordTelemetry = { completion ->
+                Telemetry.recordLifecycle(
+                    stage = "click",
+                    adFormat = "interstitial",
+                    adId = adId.takeIf { it.isNotBlank() },
+                    serveId = parentServeId?.takeIf { it.isNotBlank() },
+                    interactionId = interaction.id,
+                    clickSource = interaction.source,
+                    critical = true,
+                    onPersisted = completion,
+                )
+            },
+            onHandoff = { _, completion ->
+                if (deferredPreparation) {
+                    prepareDeferredCtaRoute(
+                        prepare = {
+                            CreativeCtaRouter.preparePrimaryCta(
+                                routePlan,
+                                destination,
+                                storeUrl,
+                                routeStartedAtNanos,
+                            )
+                        },
+                        requestRoute = { route, routeCompletion ->
+                            routeCoordinator.request(
+                                route = { activity ->
+                                    if (!canRouteFromCurrentFullscreenActivity(
+                                            activity.isFinishing,
+                                            activity.isDestroyed,
+                                        )
+                                    ) false else route(activity)
+                                },
+                                completion = routeCompletion,
+                            )
+                        },
+                        completion = completion,
+                        open = { activity, prepared ->
+                            val outcome = CreativeCtaRouter.launchPrepared(activity, prepared)
+                            outcome != AutomaticNavigationOutcome.FAILED &&
+                                outcome != AutomaticNavigationOutcome.HANDLED
+                        },
+                    )
+                } else {
+                    val result = routeCoordinator.request(
+                        route = { activity ->
+                            val opened = CreativeCtaRouter.openPrimaryCta(
+                                activity.applicationContext,
+                                routePlan,
+                                destination = destination,
+                                storeUrl = storeUrl,
+                            )
+                            if (!opened && retainWebViewFallback) {
+                                routePlan.tappedUrl?.let { fallbackUrl ->
+                                    adWebView?.post {
+                                        if (adWebView != null) runCatching { adWebView?.loadUrl(fallbackUrl) }
+                                    }
+                                }
+                            }
+                            opened
+                        },
+                        completion = completion,
+                    )
+                    if (result == PresentationRouteResult.REJECTED) {
+                        ClickRouteStart.REJECTED
+                    } else {
+                        ClickRouteStart.STARTED
+                    }
+                }
+            },
+            onCreated = { handoff ->
+                clickOwner.track(handoff)
+                clickHandoffPending = clickOwner.hasPending()
+            },
+            onFinished = { handoff ->
+                clickOwner.finish(handoff)
+                clickHandoffPending = clickOwner.hasPending()
+            },
+        )
+        return true
+    }
+
+    LaunchedEffect(adPageFailed, clickHandoffPending) {
+        if (adPageFailed && !clickHandoffPending) closeOverlay()
+    }
+    LaunchedEffect(isVideo, renderToken, adPageLoaded, adPageFailed) {
+        val token = renderToken
+        if (isVideo || token == 0L || adPageLoaded || adPageFailed || !renderGate.isPending(token)) {
+            return@LaunchedEffect
+        }
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            delay(FALLBACK_RENDER_TIMEOUT_MS)
+            if (renderGate.fail(token)) applyPageFailure()
+        }
     }
 
     val isBottomSheet = playableHeightDp != null
@@ -944,19 +1134,69 @@ private fun AdIframeOverlay(
             }
 
             Box(modifier = Modifier.fillMaxSize().weight(1f)) {
-                AndroidView(
+                if (isVideo) {
+                    videoUrl?.let { videoUrl ->
+                        FullscreenVideo(
+                            url = videoUrl,
+                            posterUrl = ad.posterUrl,
+                            adFormat = "interstitial",
+                            adId = adId.takeIf { it.isNotBlank() },
+                            serveId = parentServeId?.takeIf { it.isNotBlank() },
+                            prewarmNextUrl = nextVideoUrl,
+                            configuredGateSeconds = closeBehavior.delaySeconds,
+                            initialPlayedMs = closeGateState.elapsedMs(fallbackIndex),
+                            ctaEnabled = videoRouting != null,
+                            modifier = Modifier.fillMaxSize(),
+                            onReady = { durationMs ->
+                                videoDurationMs = durationMs
+                                closeGateState.retainVideoDurationMs(fallbackIndex, durationMs)
+                                gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
+                                val accumulated = closeGateState.elapsedMs(fallbackIndex).coerceAtMost(gateMs)
+                                adCountdown = closeGateSecondsRemaining(accumulated, gateMs)
+                                videoRingProgress = closeGateProgress(accumulated, gateMs)
+                            },
+                            onProgress = { _, durationMs, advancedMs ->
+                                videoDurationMs = durationMs
+                                closeGateState.retainVideoDurationMs(fallbackIndex, durationMs)
+                                gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
+                                val accumulated = closeGateState.addElapsedMs(fallbackIndex, advancedMs, gateMs)
+                                adCountdown = closeGateSecondsRemaining(accumulated, gateMs)
+                                videoRingProgress = closeGateProgress(accumulated, gateMs)
+                            },
+                            onCompleted = {
+                                closeGateState.addElapsedMs(fallbackIndex, gateMs, gateMs)
+                                adCountdown = 0
+                                videoRingProgress = 1f
+                            },
+                            onError = ::applyPageFailure,
+                            onCta = {
+                                val routing = videoRouting ?: return@FullscreenVideo
+                                beginFallbackClick(
+                                    routePlan = routing.route,
+                                    destination = routing.destination,
+                                    storeUrl = routing.storeUrl,
+                                    retainWebViewFallback = false,
+                                    deferredPreparation = fallbackRouteRequiresDeferredPreparation(isVideo = true),
+                                )
+                            },
+                        )
+                    }
+                } else AndroidView(
                     factory = { ctx ->
                         var realLoadStarted = false
+                        val token = renderGate.begin().also { renderToken = it }
                         WebViewPool.acquire(
                             context = ctx,
                             client = object : WebViewClient() {
                                 override fun onPageStarted(view: WebView?, startedUrl: String?, favicon: Bitmap?) {
                                     if (!realLoadStarted) return
-                                    adPageLoaded = false
-                                    if (!startedUrl.isNullOrBlank() &&
-                                        (startedUrl != "about:blank" || inlineHtml != null)
-                                    ) {
-                                        adPageFailed = false
+                                    if (renderGate.isPending(token)) {
+                                        adPageLoaded = false
+                                        if (!startedUrl.isNullOrBlank() &&
+                                            (startedUrl != "about:blank" || inlineHtml != null)
+                                        ) {
+                                            adPageFailed = false
+                                        }
                                     }
                                 }
                                 override fun onPageCommitVisible(view: WebView?, committedUrl: String?) {
@@ -965,7 +1205,7 @@ private fun AdIframeOverlay(
                                         (committedUrl != "about:blank" || inlineHtml != null) &&
                                         !adPageFailed
                                     ) {
-                                        adPageLoaded = true
+                                        if (renderGate.ready(token)) adPageLoaded = true
                                     }
                                 }
                                 override fun onReceivedError(
@@ -974,9 +1214,10 @@ private fun AdIframeOverlay(
                                     error: WebResourceError?,
                                 ) {
                                     if (!realLoadStarted) return
-                                    if (request?.isForMainFrame == true) {
-                                        adPageFailed = true
-                                        adPageLoaded = false
+                            if (request?.isForMainFrame == true) {
+                                if (fallbackHtmlFailureAction(adPageLoaded, isMainFrame = true) ==
+                                    FallbackHtmlFailureAction.SKIP_INITIAL
+                                ) failInitialPage(token)
                                     }
                                 }
                                 override fun onReceivedHttpError(
@@ -985,9 +1226,10 @@ private fun AdIframeOverlay(
                                     errorResponse: WebResourceResponse?,
                                 ) {
                                     if (!realLoadStarted) return
-                                    if (request?.isForMainFrame == true) {
-                                        adPageFailed = true
-                                        adPageLoaded = false
+                            if (request?.isForMainFrame == true) {
+                                if (fallbackHtmlFailureAction(adPageLoaded, isMainFrame = true) ==
+                                    FallbackHtmlFailureAction.SKIP_INITIAL
+                                ) failInitialPage(token)
                                     }
                                 }
                                 override fun shouldOverrideUrlLoading(
@@ -996,29 +1238,13 @@ private fun AdIframeOverlay(
                                 ): Boolean {
                                     val requestUrl = request?.url?.toString() ?: return false
                                     if (clickHandoffPending) return true
-                                    val requestUri = runCatching { Uri.parse(requestUrl) }.getOrNull() ?: return true
-                                    if (requestUri.scheme?.lowercase() in setOf("about", "data", "blob")) return false
+                                    val requestScheme = requestUrl.substringBefore(':', "").lowercase()
+                                    if (requestScheme in setOf("about", "data", "blob")) return false
                                     if (request?.isForMainFrame != true) return false
-                                    val originalUri = runCatching { Uri.parse(url) }.getOrNull()
-                                    val originalPort = originalUri?.port?.takeIf { it >= 0 } ?: when (originalUri?.scheme?.lowercase()) {
-                                        "http" -> 80
-                                        "https" -> 443
-                                        else -> -1
-                                    }
-                                    val requestPort = requestUri.port.takeIf { it >= 0 } ?: when (requestUri.scheme?.lowercase()) {
-                                        "http" -> 80
-                                        "https" -> 443
-                                        else -> -1
-                                    }
-                                    val sameOrigin = originalUri?.host != null &&
-                                        originalUri.scheme.equals(requestUri.scheme, ignoreCase = true) &&
-                                        originalUri.host.equals(requestUri.host, ignoreCase = true) &&
-                                        originalPort == requestPort
-                                    if (sameOrigin) return false
                                     if (!request.hasGesture()) return true
                                     val routePlan = when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
                                         tappedUrl = requestUrl,
-                                        creativeBaseUrl = url,
+                                        creativeBaseUrl = null,
                                         trackingUrl = null,
                                         destination = "web",
                                     )) {
@@ -1026,96 +1252,31 @@ private fun AdIframeOverlay(
                                         CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> return true
                                         is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
                                     }
-                                    val claim = clickGate.claim(ClickSources.FALLBACK_CTA) ?: return true
-                                    val interaction = claim.interaction
-                                    coordinateDeferredClickPersistence(
-                                        mainHandler = clickHandler,
-                                        claim = claim,
-                                        enqueueBeacon = { completion ->
-                                            enqueueOwnedFallbackClickBeacon(
-                                                adId = adId,
-                                                serverEnabled = nativeClickBeaconV1Enabled,
-                                                completion = completion,
-                                            ) { beaconId ->
-                                                AdBeaconManager.enqueue(
-                                                    beaconId,
-                                                    "click",
-                                                    adFormat = "interstitial",
-                                                    telemetryServeId = parentServeId.orEmpty(),
-                                                    interactionId = interaction.id,
-                                                    clickSource = interaction.source,
-                                                    onPersistenceComplete = completion,
-                                                )
-                                            }
-                                        },
-                                        recordTelemetry = { completion ->
-                                            Telemetry.recordLifecycle(
-                                                stage = "click",
-                                                adFormat = "interstitial",
-                                                adId = adId.takeIf { it.isNotBlank() },
-                                                serveId = parentServeId?.takeIf { it.isNotBlank() },
-                                                interactionId = interaction.id,
-                                                clickSource = interaction.source,
-                                                critical = true,
-                                                onPersisted = completion,
-                                            )
-                                        },
-                                        onHandoff = { _, completion ->
-                                            val result = routeCoordinator.request(
-                                                route = { activity ->
-                                                    val opened = CreativeCtaRouter.openPrimaryCta(
-                                                        activity.applicationContext,
-                                                        routePlan,
-                                                        destination = "web",
-                                                    )
-                                                    if (!opened) {
-                                                        routePlan.tappedUrl?.let { fallbackUrl ->
-                                                            adWebView?.post {
-                                                                if (adWebView != null) {
-                                                                    runCatching { adWebView?.loadUrl(fallbackUrl) }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    opened
-                                                },
-                                                completion = completion,
-                                            )
-                                            if (result == PresentationRouteResult.REJECTED) {
-                                                ClickRouteStart.REJECTED
-                                            } else {
-                                                ClickRouteStart.STARTED
-                                            }
-                                        },
-                                        onCreated = { handoff ->
-                                            clickOwner.track(handoff)
-                                            clickHandoffPending = clickOwner.hasPending()
-                                        },
-                                        onFinished = { handoff ->
-                                            clickOwner.finish(handoff)
-                                            clickHandoffPending = clickOwner.hasPending()
-                                        },
-                                    )
-                                    return true
+                                    return beginFallbackClick(routePlan)
                                 }
                                 // Absorb a renderer-process death so a crashing ad creative can't
                                 // take the host app process down with it (surfaced as telemetry).
-                                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean =
-                                    recordRenderProcessGone("minigame_ad", detail)
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: RenderProcessGoneDetail?,
+                                ): Boolean {
+                                    runCatching { recordRenderProcessGone("minigame_ad", detail) }
+                                    renderProcessGone = true
+                                    applyPageFailure()
+                                    runCatching { view?.visibility = android.view.View.INVISIBLE }
+                                    return true
+                                }
                             },
                         ).apply {
                             if (inlineHtml != null) {
                                 realLoadStarted = true
                                 loadDataWithBaseURL(
-                                    url.takeIf { it.isNotBlank() },
+                                    null,
                                     inlineHtml,
                                     "text/html",
                                     "UTF-8",
                                     null,
                                 )
-                            } else if (url.isNotBlank()) {
-                                realLoadStarted = true
-                                loadUrl(url)
                             }
                             adWebView = this
                         }
@@ -1123,11 +1284,15 @@ private fun AdIframeOverlay(
                     modifier = Modifier.fillMaxSize(),
                     onRelease = { webView ->
                         if (adWebView === webView) adWebView = null
-                        WebViewPool.release(webView)
+                        if (renderProcessGone) {
+                            WebViewPool.discardAfterRendererGone(webView)
+                        } else {
+                            WebViewPool.release(webView)
+                        }
                     },
                 )
 
-                if (!adPageLoaded) {
+                if (!isVideo && !adPageLoaded) {
                     // Fail blank: keep WebView error pages hidden without spinning forever.
                     Box(
                         modifier = Modifier
@@ -1198,7 +1363,7 @@ private fun AdIframeOverlay(
                             drawArc(
                                 color = Color.White,
                                 startAngle = -90f,
-                                sweepAngle = 360f * ringProgress.value,
+                                sweepAngle = 360f * (if (isVideo) smoothVideoRingProgress else ringProgress.value),
                                 useCenter = false,
                                 topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f),
                                 size = Size(arcSize, arcSize),

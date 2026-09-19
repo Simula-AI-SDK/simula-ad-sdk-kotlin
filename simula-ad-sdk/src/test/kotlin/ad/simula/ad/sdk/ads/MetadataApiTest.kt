@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.AdValue
+import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.network.SimulaApiClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -94,7 +95,8 @@ class MetadataApiTest {
             metadata = snapshot,
         )
         val rewarded = RewardedPresentation(
-            iframeUrl = "https://example.test/creative",
+            renderedHtml = "<html></html>",
+            creative = Creative(),
             impressionId = "rewarded-impression",
             apiKey = "test-key",
             callbacks = object : RewardedCallbacks {
@@ -107,7 +109,11 @@ class MetadataApiTest {
                 ) = Unit
                 override fun notifyClicked() = Unit
                 override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
-                override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
+                override fun onRewardCompleted(
+                    earned: Boolean,
+                    elapsedPlayTimeSeconds: Double,
+                    completionReason: ad.simula.ad.sdk.model.RewardCompletionReason?,
+                ) = Unit
             },
             metadata = snapshot,
         )
