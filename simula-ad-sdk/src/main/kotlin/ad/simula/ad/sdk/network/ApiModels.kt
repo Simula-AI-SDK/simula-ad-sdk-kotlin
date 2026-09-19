@@ -223,10 +223,8 @@ internal data class FallbackAdBody(
     @SerialName("ad_behavior") val adBehavior: JsonElement? = null,
     @Transient val sourceIndex: Int = -1,
     @Transient val routingFieldsPresent: Boolean = listOf(
-        destination,
         trackingUrl,
         androidStoreUrl,
-        iosStoreUrl,
     ).any { !it.isNullOrBlank() },
 )
 
@@ -266,10 +264,8 @@ internal object LossyFallbackAdBodiesSerializer : KSerializer<List<FallbackAdBod
 }
 
 private fun JsonObject.hasPresentRoutingField(): Boolean = listOf(
-    "destination",
     "tracking_url",
     "android_store_url",
-    "ios_store_url",
 ).any { key ->
     when (val value = this[key]) {
         null, JsonNull -> false

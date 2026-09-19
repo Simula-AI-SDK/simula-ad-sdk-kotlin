@@ -121,22 +121,22 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
-    fun `present but invalid or ios-only item route never falls back to parent on Android`() {
-        val invalid = SimulaApiClient.FallbackAd(adId = "invalid", destination = "appstore")
+    fun `destination-only or ios-only item route inherits parent on Android`() {
+        val destinationOnly = SimulaApiClient.FallbackAd(adId = "destination", destination = "appstore")
         val iosOnly = SimulaApiClient.FallbackAd(
             adId = "ios",
             iosStoreUrl = "https://apps.apple.com/app/id123",
         )
-        for (ad in listOf(invalid, iosOnly)) {
-            assertNull(
-                resolveFallbackVideoRouting(
-                    ad,
-                    parentTrackingUrl = "https://parent.example/click",
-                    parentDestination = "appstore",
-                    parentStoreUrl = "https://play.google.com/store/apps/details?id=parent",
-                    allowParentFallback = true,
-                ),
+        for (ad in listOf(destinationOnly, iosOnly)) {
+            val route = resolveFallbackVideoRouting(
+                ad,
+                parentTrackingUrl = "https://parent.example/click",
+                parentDestination = "appstore",
+                parentStoreUrl = "https://play.google.com/store/apps/details?id=parent",
+                allowParentFallback = true,
             )
+            assertEquals("https://parent.example/click", route?.route?.externalTarget)
+            assertTrue(route?.inheritedFromPrimary == true)
         }
     }
 

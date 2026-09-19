@@ -773,10 +773,8 @@ internal object SimulaApiClient {
         val androidStoreUrl: String? = null,
         val iosStoreUrl: String? = null,
         val routingFieldsPresent: Boolean = listOf(
-            destination,
             trackingUrl,
             androidStoreUrl,
-            iosStoreUrl,
         ).any { !it.isNullOrBlank() },
         val nativeClickBeaconV1Enabled: Boolean = false,
         val closeBehavior: ad.simula.ad.sdk.model.CloseBehavior = fallbackCloseBehavior(null),
