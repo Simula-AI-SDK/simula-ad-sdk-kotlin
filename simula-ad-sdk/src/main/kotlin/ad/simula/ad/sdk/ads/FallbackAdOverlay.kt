@@ -1268,11 +1268,10 @@ private fun FallbackAdOverlay(
                             runCatching { recordRenderProcessGone("fallback_ad", detail) }
                             if (view != null && view === fallbackWebView) {
                                 renderProcessGone = true
-                                rendererGone = true
                                 pageLoadFailed = true
                                 pageCommitted = false
                                 renderGate.fail(token)
-                                runCatching(onRendererUnavailable)
+                                applyRendererUnavailable()
                                 runCatching { view.visibility = View.INVISIBLE }
                                 fallbackWebView = null
                             }

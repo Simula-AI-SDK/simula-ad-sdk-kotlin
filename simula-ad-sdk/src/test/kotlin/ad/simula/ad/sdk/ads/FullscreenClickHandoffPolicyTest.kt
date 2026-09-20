@@ -1082,6 +1082,19 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `renderer death abandonment is retained for fallback auto advance`() {
+        val state = FallbackPresentationState()
+        val owner = Any()
+        state.retainFetchedAds(emptyList())
+        state.showing(0)
+        state.claimNavigationOwner(owner)
+
+        assertTrue(state.abandonRenderer(0, owner))
+        assertTrue(state.isRendererAbandoned(0))
+        assertFalse(state.abandonRenderer(0, owner))
+    }
+
+    @Test
     fun `stale fallback renderer cannot abandon replacement owner`() {
         val state = FallbackPresentationState()
         val staleOwner = Any()
