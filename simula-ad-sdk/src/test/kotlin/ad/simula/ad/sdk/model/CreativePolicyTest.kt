@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.model
 
+import ad.simula.ad.sdk.ads.continueAfterVideoPositionPoll
+import ad.simula.ad.sdk.ads.dispatchNaturalVideoCompletion
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -147,6 +149,29 @@ class CreativePolicyTest {
         assertFalse(coalescer.shouldEmit(200L))
         assertTrue(coalescer.shouldEmit(210L, gateCrossed = true))
         assertTrue(coalescer.shouldEmit(211L, force = true))
+    }
+
+    @Test
+    fun `position polling continues after one transient read failure`() {
+        val reads = ArrayDeque<Long?>(listOf(null, 250L))
+        val observed = mutableListOf<Long>()
+
+        assertTrue(continueAfterVideoPositionPoll(read = { reads.removeFirst() }) { observed += it; true })
+        assertTrue(observed.isEmpty())
+        assertTrue(continueAfterVideoPositionPoll(read = { reads.removeFirst() }) { observed += it; true })
+        assertEquals(listOf(250L), observed)
+    }
+
+    @Test
+    fun `natural completion callback precedes forced final progress`() {
+        val callbacks = mutableListOf<String>()
+
+        dispatchNaturalVideoCompletion(
+            onCompleted = { callbacks += "video_completed" },
+            emitFinalProgress = { callbacks += "duration_elapsed" },
+        )
+
+        assertEquals(listOf("video_completed", "duration_elapsed"), callbacks)
     }
 
     @Test

@@ -207,15 +207,20 @@ class SimulaRewardedAd(val adUnitId: String) {
                 }
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
-                    Telemetry.recordLifecycle(
-                        stage = "load_success",
-                        adFormat = AD_FORMAT,
-                        adUnitId = adUnitId,
-                        adId = ad.impressionId,
-                        serveId = ad.impressionId,
-                        durationMs = elapsedSinceLoad(),
-                        errorCode = null,
-                    )
+                    recordAcceptedLoadTelemetry(
+                        experiment = ad.experiment,
+                        applyExperiment = Telemetry::setExperiment,
+                    ) {
+                        Telemetry.recordLifecycle(
+                            stage = "load_success",
+                            adFormat = AD_FORMAT,
+                            adUnitId = adUnitId,
+                            adId = ad.impressionId,
+                            serveId = ad.impressionId,
+                            durationMs = elapsedSinceLoad(),
+                            errorCode = null,
+                        )
+                    }
                     sessionId = session
                     impressionId = ad.impressionId
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
@@ -677,6 +682,15 @@ class SimulaRewardedAd(val adUnitId: String) {
         /** Re-loads of the same dedup key are blocked for this long. */
         const val DEDUP_WINDOW_MS = 5 * 60 * 1000L // 5 minutes
     }
+}
+
+internal fun recordAcceptedLoadTelemetry(
+    experiment: ad.simula.ad.sdk.model.Experiment?,
+    applyExperiment: (String?, String?) -> Unit,
+    recordLoadSuccess: () -> Unit,
+) {
+    runCatching { applyExperiment(experiment?.experimentId, experiment?.variantId) }
+    runCatching(recordLoadSuccess)
 }
 
 /** Ad-format tag on this class's telemetry events. */

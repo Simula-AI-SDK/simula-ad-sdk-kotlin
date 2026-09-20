@@ -378,9 +378,11 @@ internal fun initialRewardEarned(
 internal fun monotonicRewardEarned(candidate: Boolean, retained: Boolean): Boolean = candidate || retained
 
 internal fun rewardEarnedAfterCreativeFailure(
+    isVideo: Boolean,
+    everCreativeReady: Boolean,
     candidate: Boolean,
     retained: Boolean,
-): Boolean = candidate || retained
+): Boolean = candidate || retained || (!isVideo && everCreativeReady)
 
 internal fun rewardedDismissalDisplayAdmitted(
     currentDisplayAdmitted: Boolean,
@@ -566,7 +568,12 @@ private fun RewardedMinigame(
     }
     fun markBridgeUnavailable() {
         presentation.earlyCompleteState.discard()
+        if (!isVideo && presentation.everCreativeReady && !presentation.rewardEarned && !rewardEarned) {
+            presentation.recordCompletionReason(RewardCompletionReason.CREATIVE_COMPLETED)
+        }
         val earned = rewardEarnedAfterCreativeFailure(
+            isVideo = isVideo,
+            everCreativeReady = presentation.everCreativeReady,
             candidate = rewardEarned,
             retained = presentation.rewardEarned,
         )
@@ -929,6 +936,7 @@ private fun RewardedMinigame(
         commitTimeoutBudget.complete()
         htmlReadiness.terminate()
         creativeCommitted = true
+        presentation.everCreativeReady = true
         if (bridgeInstalled && !bridgeReady) {
             displayAdmitted = admitFullscreenDisplay(
                 alreadyReported = presentation.displayedReported,
@@ -1143,8 +1151,8 @@ private fun RewardedMinigame(
                                 rendererGone = true
                                 presentation.clearPrimaryFallback(fallbackOwner)
                                 view.visibility = View.INVISIBLE
-                                // Renderer loss advances safely but cannot create a reward. A reward
-                                // already earned by the gate or AD_EARLY_COMPLETE remains monotonic.
+                                // Playable HTML fails open after a visible commit. Video failures use
+                                // the same path but preserve only rewards already earned by playback.
                                 markBridgeUnavailable()
                             }
                             return true

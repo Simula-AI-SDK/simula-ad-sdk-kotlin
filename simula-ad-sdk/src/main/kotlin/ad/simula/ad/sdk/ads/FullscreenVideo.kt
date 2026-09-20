@@ -103,6 +103,22 @@ private const val VIDEO_PREPARED_RETENTION_MS = 5 * 60_000L
 private const val VIDEO_POSITION_POLL_MS = 100L
 private const val VIDEO_UI_PROGRESS_INTERVAL_MS = 250L
 
+internal fun <T> continueAfterVideoPositionPoll(
+    read: () -> T?,
+    consume: (T) -> Boolean,
+): Boolean {
+    val value = runCatching(read).getOrNull() ?: return true
+    return runCatching { consume(value) }.getOrDefault(false)
+}
+
+internal fun dispatchNaturalVideoCompletion(
+    onCompleted: () -> Unit,
+    emitFinalProgress: () -> Unit,
+) {
+    runCatching(onCompleted)
+    runCatching(emitFinalProgress)
+}
+
 @Composable
 internal fun smoothVideoProgress(target: Float): Float {
     val progress by animateFloatAsState(
@@ -478,24 +494,31 @@ private class NativeVideoController(
     private val positionPoll = object : Runnable {
         override fun run() {
             if (!lifecycleActive || released || failed || !firstFrameRendered) return
-            val progress = emitProgress(force = false) ?: return
-            val isPlaying = runCatching { player?.isPlaying == true }.getOrElse {
-                fail(VideoFailureCode.PLAYBACK_ERROR)
-                return
+            val continuePolling = continueAfterVideoPositionPoll(
+                read = { emitProgress(force = false) },
+                consume = { progress ->
+                    val isPlaying = runCatching { player?.isPlaying == true }.getOrElse {
+                        fail(VideoFailureCode.PLAYBACK_ERROR)
+                        return@continueAfterVideoPositionPoll false
+                    }
+                    if (nearEndCompletion.observe(
+                            durationMs = progress.durationMs,
+                            positionMs = progress.sample.positionMs,
+                            firstFrameRendered = firstFrameRendered,
+                            playerActive = player != null && lifecycleActive && !released && !failed,
+                            isPlaying = isPlaying,
+                        )
+                    ) {
+                        completePlayback(renderToken)
+                        false
+                    } else {
+                        !completed && !released && !failed
+                    }
+                },
+            )
+            if (continuePolling && lifecycleActive && !released && !failed && firstFrameRendered) {
+                handler.postDelayed(this, VIDEO_POSITION_POLL_MS)
             }
-            if (nearEndCompletion.observe(
-                    durationMs = progress.durationMs,
-                    positionMs = progress.sample.positionMs,
-                    firstFrameRendered = firstFrameRendered,
-                    playerActive = player != null && lifecycleActive && !released && !failed,
-                    isPlaying = isPlaying,
-                )
-            ) {
-                completePlayback(renderToken)
-                return
-            }
-            if (completed || released || failed) return
-            handler.postDelayed(this, VIDEO_POSITION_POLL_MS)
         }
     }
 
@@ -690,11 +713,13 @@ private class NativeVideoController(
         }
         val transition = completionGate.complete()
         if (!transition.accepted) return
-        emitProgress(force = true, completed = true)
         completed = true
+        dispatchNaturalVideoCompletion(
+            onCompleted = onCompleted,
+            emitFinalProgress = { emitProgress(force = true, completed = true) },
+        )
         if (transition.cancelPlaybackTimeout) cancelPlaybackCallbacks()
         recordLifecycle(VIDEO_STAGE_COMPLETE)
-        runCatching(onCompleted)
         release()
     }
 

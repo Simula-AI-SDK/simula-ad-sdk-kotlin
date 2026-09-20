@@ -98,6 +98,8 @@ import ad.simula.ad.sdk.ads.nextFallbackVideoUrl
 import ad.simula.ad.sdk.ads.smoothVideoProgress
 import ad.simula.ad.sdk.ads.FallbackHtmlFailureAction
 import ad.simula.ad.sdk.ads.fallbackHtmlFailureAction
+import ad.simula.ad.sdk.ads.fallbackCloseGateUsesPresentedTime
+import ad.simula.ad.sdk.ads.fallbackFailureAutoAdvances
 import ad.simula.ad.sdk.ads.resolveFallbackVideoRouting
 import ad.simula.ad.sdk.ads.prepareDeferredCtaRoute
 import ad.simula.ad.sdk.ads.AutomaticNavigationOutcome
@@ -886,8 +888,8 @@ private fun MiniGameFallbackOverlay(
         }
     }
 
-    LaunchedEffect(gateMs, isVideo, adPageLoaded) {
-        if (isVideo || !adPageLoaded) return@LaunchedEffect
+    LaunchedEffect(gateMs, isVideo) {
+        if (!fallbackCloseGateUsesPresentedTime(ad.type)) return@LaunchedEffect
         if (gateMs <= 0L) {
             adCountdown = 0
             ringProgress.snapTo(1f)
@@ -1047,7 +1049,7 @@ private fun MiniGameFallbackOverlay(
     }
 
     LaunchedEffect(adPageFailed, clickHandoffPending) {
-        if (adPageFailed && !clickHandoffPending) closeOverlay()
+        if (adPageFailed && fallbackFailureAutoAdvances(ad.type) && !clickHandoffPending) closeOverlay()
     }
     LaunchedEffect(isVideo, renderToken, adPageLoaded, adPageFailed) {
         val token = renderToken
@@ -1216,7 +1218,7 @@ private fun MiniGameFallbackOverlay(
                                     if (!realLoadStarted) return
                             if (request?.isForMainFrame == true) {
                                 if (fallbackHtmlFailureAction(adPageLoaded, isMainFrame = true) ==
-                                    FallbackHtmlFailureAction.SKIP_INITIAL
+                                    FallbackHtmlFailureAction.FAIL_BLANK
                                 ) failInitialPage(token)
                                     }
                                 }
@@ -1228,7 +1230,7 @@ private fun MiniGameFallbackOverlay(
                                     if (!realLoadStarted) return
                             if (request?.isForMainFrame == true) {
                                 if (fallbackHtmlFailureAction(adPageLoaded, isMainFrame = true) ==
-                                    FallbackHtmlFailureAction.SKIP_INITIAL
+                                    FallbackHtmlFailureAction.FAIL_BLANK
                                 ) failInitialPage(token)
                                     }
                                 }

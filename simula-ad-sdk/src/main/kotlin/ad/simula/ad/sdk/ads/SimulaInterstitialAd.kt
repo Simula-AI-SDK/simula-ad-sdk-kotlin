@@ -206,15 +206,20 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 }
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
-                    Telemetry.recordLifecycle(
-                        stage = "load_success",
-                        adFormat = AD_FORMAT,
-                        adUnitId = adUnitId,
-                        adId = ad.impressionId,
-                        serveId = ad.impressionId,
-                        durationMs = elapsedSinceLoad(),
-                        errorCode = null,
-                    )
+                    recordAcceptedLoadTelemetry(
+                        experiment = ad.experiment,
+                        applyExperiment = Telemetry::setExperiment,
+                    ) {
+                        Telemetry.recordLifecycle(
+                            stage = "load_success",
+                            adFormat = AD_FORMAT,
+                            adUnitId = adUnitId,
+                            adId = ad.impressionId,
+                            serveId = ad.impressionId,
+                            durationMs = elapsedSinceLoad(),
+                            errorCode = null,
+                        )
+                    }
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
                     if (ad.creative?.type == CreativeType.VIDEO) {
                         FullscreenVideoPreparer.prepare(ad.creative.url)

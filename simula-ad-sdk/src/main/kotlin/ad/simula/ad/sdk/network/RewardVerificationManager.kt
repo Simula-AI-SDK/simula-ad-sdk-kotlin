@@ -165,6 +165,11 @@ internal class RewardVerificationQueue(
         val callback: ((Result<String?>) -> Unit)?,
     )
 
+    private data class StorageRecoveryResult(
+        val recovered: Boolean,
+        val incompatibleCallbacks: List<(Result<String?>) -> Unit> = emptyList(),
+    )
+
     private val mutex = Mutex()
     private var isProcessing = false
 
@@ -205,6 +210,7 @@ internal class RewardVerificationQueue(
     ) {
         scope.launch {
             var rejectedCallback: ((Result<String?>) -> Unit)? = null
+            var recovery = StorageRecoveryResult(recovered = false)
             val shouldProcess = mutex.withLock {
                 val existing = pendingEnqueues[serveId]
                 if (existing == null && pendingEnqueues.size >= maxPendingEnqueues.coerceAtLeast(0)) {
@@ -232,9 +238,10 @@ internal class RewardVerificationQueue(
                 if (storageRecoveryJob?.isActive == true) {
                     false
                 } else {
-                    recoverStorageLocked()
+                    recoverStorageLocked().also { recovery = it }.recovered
                 }
             }
+            failIncompatibleCallbacks(recovery.incompatibleCallbacks)
             if (rejectedCallback != null) {
                 try {
                     rejectedCallback?.invoke(
@@ -252,14 +259,20 @@ internal class RewardVerificationQueue(
     }
 
     /** Called with [mutex] held. Persists pending serve ids atomically before exposing callbacks. */
-    private fun recoverStorageLocked(scheduleOnFailure: Boolean = true): Boolean {
+    private fun recoverStorageLocked(scheduleOnFailure: Boolean = true): StorageRecoveryResult {
         val durable = when (val loaded = store.load()) {
             is DurableLoadResult.Loaded -> loaded.value
             DurableLoadResult.Failed -> {
                 noteStorageFailure()
                 if (scheduleOnFailure) scheduleStorageRecoveryLocked()
-                return false
+                return StorageRecoveryResult(recovered = false)
             }
+        }
+        val unsupportedIds = durable.asSequence()
+            .filter(::hasUnsupportedRewardCompletionReason)
+            .mapTo(HashSet()) { it.serveId }
+        val incompatibleCallbacks = unsupportedIds.mapNotNull { serveId ->
+            pendingEnqueues.remove(serveId)?.callback
         }
         val durableIds = durable.mapTo(HashSet()) { it.serveId }
         val records = pendingEnqueues.values
@@ -269,14 +282,36 @@ internal class RewardVerificationQueue(
         if (persistence == DurableMutationResult.Failed) {
             noteStorageFailure()
             if (scheduleOnFailure) scheduleStorageRecoveryLocked()
-            return false
+            return StorageRecoveryResult(
+                recovered = false,
+                incompatibleCallbacks = incompatibleCallbacks,
+            )
         }
         for ((serveId, pending) in pendingEnqueues) {
             pending.callback?.let { activeCallbacks[serveId] = it }
         }
         pendingEnqueues.clear()
         noteStorageSuccess()
-        return true
+        return StorageRecoveryResult(
+            recovered = true,
+            incompatibleCallbacks = incompatibleCallbacks,
+        )
+    }
+
+    private fun failIncompatibleCallbacks(callbacks: List<(Result<String?>) -> Unit>) {
+        for (callback in callbacks) {
+            try {
+                callback(
+                    Result.failure(
+                        DurableQueuePersistenceException(
+                            "Reward verification conflicts with unsupported persisted completion reason",
+                        ),
+                    ),
+                )
+            } catch (_: Exception) {
+                // A publisher callback must not break queue recovery.
+            }
+        }
     }
 
     /** Called with [mutex] held. At most one storage-recovery job exists per queue. */
@@ -289,11 +324,13 @@ internal class RewardVerificationQueue(
                     durableMutationBackoffMs(storageFailureCount.coerceAtLeast(1))
                 }
                 sleep(delayMs)
-                recovered = mutex.withLock {
+                val recovery = mutex.withLock {
                     val result = recoverStorageLocked(scheduleOnFailure = false)
-                    if (result) storageRecoveryJob = null
+                    if (result.recovered) storageRecoveryJob = null
                     result
                 }
+                failIncompatibleCallbacks(recovery.incompatibleCallbacks)
+                recovered = recovery.recovered
             }
             processQueue(scheduleIneligibleWake = true)
         }
@@ -331,25 +368,25 @@ internal class RewardVerificationQueue(
         var bailedForBackoff = false
         var madeProgress = false
         var loadFailed = false
-        var compatibilityBlocked = false
         try {
             while (true) {
                 val selection: DurableLoadResult<PendingVerification?> = mutex.withLock {
                     when (val loaded = store.load()) {
                         is DurableLoadResult.Loaded -> {
                             noteStorageSuccess()
-                            if (loaded.value.any(::hasUnsupportedRewardCompletionReason)) {
-                                compatibilityBlocked = true
+                            val hasUnsupportedRows = loaded.value.any(::hasUnsupportedRewardCompletionReason)
+                            if (hasUnsupportedRows) {
                                 if (!unsupportedCompletionReasonReported) {
                                     unsupportedCompletionReasonReported = true
                                     runCatching(recordUnsupportedCompletionReason)
                                 }
-                                return@withLock DurableLoadResult.Loaded(null)
+                            } else {
+                                unsupportedCompletionReasonReported = false
                             }
-                            unsupportedCompletionReasonReported = false
                             val now = clock()
                             DurableLoadResult.Loaded(
                                 loaded.value.firstOrNull {
+                                    !hasUnsupportedRewardCompletionReason(it) &&
                                     now - it.lastAttemptTimestamp >= rewardVerificationBackoffMs(it.retryCount)
                                 },
                             )
@@ -412,7 +449,6 @@ internal class RewardVerificationQueue(
                 scheduleIneligibleWake,
                 madeProgress,
                 loadFailed,
-                compatibilityBlocked,
             )
         }
     }
@@ -437,12 +473,10 @@ internal class RewardVerificationQueue(
         scheduleIneligibleWake: Boolean,
         madeProgress: Boolean,
         loadFailed: Boolean,
-        compatibilityBlocked: Boolean,
     ) {
         val (reDrain, wakeDelay) = withContext(NonCancellable) {
             mutex.withLock {
                 isProcessing = false
-                if (compatibilityBlocked) return@withLock false to null
                 if (loadFailed) {
                     scheduleStorageRecoveryLocked()
                     return@withLock false to null
@@ -450,7 +484,7 @@ internal class RewardVerificationQueue(
                 val remaining = when (val loaded = store.load()) {
                     is DurableLoadResult.Loaded -> {
                         noteStorageSuccess()
-                        loaded.value
+                        loaded.value.filterNot(::hasUnsupportedRewardCompletionReason)
                     }
                     DurableLoadResult.Failed -> {
                         noteStorageFailure()

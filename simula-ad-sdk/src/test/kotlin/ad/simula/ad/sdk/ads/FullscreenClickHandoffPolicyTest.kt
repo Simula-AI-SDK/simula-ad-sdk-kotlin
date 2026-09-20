@@ -62,9 +62,9 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
-    fun `fallback HTML failures skip only initial main-frame load`() {
+    fun `fallback HTML failures fail blank only for initial main-frame load`() {
         assertEquals(
-            FallbackHtmlFailureAction.SKIP_INITIAL,
+            FallbackHtmlFailureAction.FAIL_BLANK,
             fallbackHtmlFailureAction(pageCommitted = false, isMainFrame = true),
         )
         assertEquals(
@@ -75,6 +75,22 @@ class FullscreenClickHandoffPolicyTest {
             FallbackHtmlFailureAction.IGNORE,
             fallbackHtmlFailureAction(pageCommitted = false, isMainFrame = false),
         )
+    }
+
+    @Test
+    fun `HTML fallback failures stay for manual close while video failures advance`() {
+        assertFalse(fallbackFailureAutoAdvances(ad.simula.ad.sdk.model.CreativeType.PLAYABLE))
+        assertTrue(fallbackFailureAutoAdvances(ad.simula.ad.sdk.model.CreativeType.VIDEO))
+    }
+
+    @Test
+    fun `HTML fallback close gate uses presentation time while video uses played time`() {
+        assertTrue(fallbackCloseGateUsesPresentedTime(ad.simula.ad.sdk.model.CreativeType.PLAYABLE))
+        assertFalse(fallbackCloseGateUsesPresentedTime(ad.simula.ad.sdk.model.CreativeType.VIDEO))
+
+        val state = FallbackCloseGateState()
+        assertEquals(5_000L, state.addElapsedMs(0, 5_000L, FALLBACK_CLOSE_GATE_MS))
+        assertEquals(0, closeGateSecondsRemaining(state.elapsedMs(0), FALLBACK_CLOSE_GATE_MS))
     }
 
     @Test

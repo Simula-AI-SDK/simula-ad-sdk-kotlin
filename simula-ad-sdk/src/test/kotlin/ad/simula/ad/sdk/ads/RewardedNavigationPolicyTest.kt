@@ -104,30 +104,99 @@ class RewardedNavigationPolicyTest {
     }
 
     @Test
-    fun `terminal creative failure never earns reward after first frame`() {
-        assertEquals(
-            false,
-            rewardEarnedAfterCreativeFailure(candidate = false, retained = false),
+    fun `playable failure fails open only after a visible commit and evidence survives recreation`() {
+        val presentation = RewardedPresentation(
+            creative = ad.simula.ad.sdk.model.Creative(),
+            impressionId = "serve",
+            apiKey = "key",
+            callbacks = NoOpRewardedCallbacks,
         )
         assertEquals(
             false,
-            rewardEarnedAfterCreativeFailure(candidate = false, retained = false),
+            rewardEarnedAfterCreativeFailure(
+                isVideo = false,
+                everCreativeReady = presentation.everCreativeReady,
+                candidate = false,
+                retained = false,
+            ),
+        )
+        presentation.everCreativeReady = true
+        val recreated = presentation
+        assertEquals(
+            true,
+            rewardEarnedAfterCreativeFailure(
+                isVideo = false,
+                everCreativeReady = recreated.everCreativeReady,
+                candidate = false,
+                retained = false,
+            ),
         )
         assertEquals(
             true,
-            rewardEarnedAfterCreativeFailure(candidate = true, retained = false),
+            rewardEarnedAfterCreativeFailure(
+                isVideo = false,
+                everCreativeReady = false,
+                candidate = true,
+                retained = false,
+            ),
         )
         assertEquals(
             true,
-            rewardEarnedAfterCreativeFailure(candidate = false, retained = true),
+            rewardEarnedAfterCreativeFailure(
+                isVideo = false,
+                everCreativeReady = false,
+                candidate = false,
+                retained = true,
+            ),
         )
     }
 
     @Test
-    fun `stall preserves only rewards already earned by gate completion or early complete`() {
-        assertEquals(false, rewardEarnedAfterCreativeFailure(candidate = false, retained = false))
-        assertEquals(true, rewardEarnedAfterCreativeFailure(candidate = true, retained = false))
-        assertEquals(true, rewardEarnedAfterCreativeFailure(candidate = false, retained = true))
+    fun `video failure preserves only rewards already earned by playback`() {
+        assertEquals(
+            false,
+            rewardEarnedAfterCreativeFailure(
+                isVideo = true,
+                everCreativeReady = true,
+                candidate = false,
+                retained = false,
+            ),
+        )
+        assertEquals(
+            true,
+            rewardEarnedAfterCreativeFailure(
+                isVideo = true,
+                everCreativeReady = true,
+                candidate = true,
+                retained = false,
+            ),
+        )
+        assertEquals(
+            true,
+            rewardEarnedAfterCreativeFailure(
+                isVideo = true,
+                everCreativeReady = true,
+                candidate = false,
+                retained = true,
+            ),
+        )
+    }
+
+    private object NoOpRewardedCallbacks : RewardedCallbacks {
+        override fun onDisplayed() = Unit
+        override fun onImpression() = Unit
+        override fun onPaid(adValue: ad.simula.ad.sdk.model.AdValue) = Unit
+        override fun persistClick(
+            interaction: ad.simula.ad.sdk.network.ClickInteraction,
+            onTelemetryPersisted: () -> Unit,
+        ) = onTelemetryPersisted()
+        override fun notifyClicked() = Unit
+        override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
+        override fun onRewardCompleted(
+            earned: Boolean,
+            elapsedPlayTimeSeconds: Double,
+            completionReason: RewardCompletionReason?,
+        ) = Unit
     }
 
     @Test

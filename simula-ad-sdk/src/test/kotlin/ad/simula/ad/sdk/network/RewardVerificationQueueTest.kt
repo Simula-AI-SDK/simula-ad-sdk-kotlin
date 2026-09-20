@@ -88,7 +88,7 @@ class RewardVerificationQueueTest {
     // ── Single-task outcomes ───────────────────────────────────────────────────
 
     @Test
-    fun `unknown completion reason in first row blocks drain without mutation or send`() = runTest {
+    fun `unknown completion reason is preserved while supported rows drain around it`() = runTest {
         val rows = listOf(
             PendingVerification(
                 "future",
@@ -123,13 +123,14 @@ class RewardVerificationQueueTest {
         engine.trigger()
         advanceUntilIdle()
 
-        assertEquals(rows, store.data)
-        assertTrue(verifier.callCounts.isEmpty())
+        assertEquals(listOf(rows.first()), store.data)
+        assertEquals(1, verifier.callCounts["known"])
+        assertEquals(null, verifier.callCounts["future"])
         assertEquals(1, telemetryCount)
     }
 
     @Test
-    fun `unknown completion reason in later row blocks earlier known row without mutation or send`() = runTest {
+    fun `unsupported-only remainder does not schedule a hot retry`() = runTest {
         val rows = listOf(
             PendingVerification(
                 "known",
@@ -150,13 +151,100 @@ class RewardVerificationQueueTest {
         )
         val store = FakeStore(rows)
         val verifier = FakeVerifier()
-        val engine = RewardVerificationQueue(store, verifier, clock = { 10_000L }, scope = this)
+        val delays = mutableListOf<Long>()
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 10_123L },
+            scope = this,
+            sleep = { delays += it },
+        )
 
         engine.trigger()
         advanceUntilIdle()
 
-        assertEquals(rows, store.data)
+        assertEquals(listOf(rows.last()), store.data)
+        assertEquals(1, verifier.callCounts["known"])
+        assertEquals(null, verifier.callCounts["future"])
+        assertTrue(delays.isEmpty())
+    }
+
+    @Test
+    fun `supported callback completes while unsupported persisted row is retained`() = runTest {
+        val unsupported = PendingVerification(
+            "future",
+            "sess",
+            5.0,
+            retryCount = 0,
+            lastAttemptTimestamp = 0L,
+            completionReason = "future_reason",
+        )
+        val store = FakeStore(listOf(unsupported))
+        val verifier = FakeVerifier().apply { tokens["known"] = "token" }
+        val engine = RewardVerificationQueue(store, verifier, clock = { 0L }, scope = this)
+        var received: Result<String?>? = null
+
+        engine.queue(
+            serveId = "known",
+            sessionId = "sess",
+            elapsedPlayTime = 30.0,
+            completionReason = "duration_elapsed",
+        ) { received = it }
+        advanceUntilIdle()
+
+        assertEquals("token", received?.getOrNull())
+        assertEquals(listOf(unsupported), store.data)
+        assertEquals(1, verifier.callCounts["known"])
+        assertEquals(null, verifier.callCounts["future"])
+    }
+
+    @Test
+    fun `same serve enqueue fails callback without touching unsupported persisted row`() = runTest {
+        val unsupported = PendingVerification(
+            "same",
+            "persisted-session",
+            5.0,
+            retryCount = 0,
+            lastAttemptTimestamp = 0L,
+            completionReason = "future_reason",
+        )
+        val store = FakeStore(listOf(unsupported))
+        val verifier = FakeVerifier()
+        val delays = mutableListOf<Long>()
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 0L },
+            scope = this,
+            sleep = { delays += it },
+        )
+        var received: Result<String?>? = null
+        var callbackCount = 0
+
+        engine.queue(
+            serveId = "same",
+            sessionId = "new-session",
+            elapsedPlayTime = 30.0,
+            completionReason = "duration_elapsed",
+        ) {
+            callbackCount++
+            received = it
+        }
+        advanceUntilIdle()
+
+        assertEquals(1, callbackCount)
+        assertTrue(received?.exceptionOrNull() is DurableQueuePersistenceException)
+        assertTrue(received?.exceptionOrNull()?.message?.contains("unsupported persisted") == true)
+        assertEquals(listOf(unsupported), store.data)
         assertTrue(verifier.callCounts.isEmpty())
+        assertTrue(delays.isEmpty())
+
+        engine.trigger()
+        advanceUntilIdle()
+        assertEquals(1, callbackCount)
+        assertEquals(listOf(unsupported), store.data)
+        assertTrue(verifier.callCounts.isEmpty())
+        assertTrue(delays.isEmpty())
     }
 
     @Test

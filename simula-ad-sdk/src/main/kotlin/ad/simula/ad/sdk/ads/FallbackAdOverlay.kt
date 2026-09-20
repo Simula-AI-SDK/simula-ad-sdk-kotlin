@@ -94,16 +94,20 @@ internal const val FALLBACK_POST_CLOSE_WAIT_MS = 2_000L
 internal const val FALLBACK_CLOSE_GATE_MS = 5_000L
 internal const val FALLBACK_RENDER_TIMEOUT_MS = 10_000L
 
-internal enum class FallbackHtmlFailureAction { SKIP_INITIAL, IGNORE }
+internal enum class FallbackHtmlFailureAction { FAIL_BLANK, IGNORE }
 
 internal fun fallbackHtmlFailureAction(
     pageCommitted: Boolean,
     isMainFrame: Boolean,
 ): FallbackHtmlFailureAction = if (isMainFrame && !pageCommitted) {
-    FallbackHtmlFailureAction.SKIP_INITIAL
+    FallbackHtmlFailureAction.FAIL_BLANK
 } else {
     FallbackHtmlFailureAction.IGNORE
 }
+
+internal fun fallbackFailureAutoAdvances(type: CreativeType): Boolean = type == CreativeType.VIDEO
+
+internal fun fallbackCloseGateUsesPresentedTime(type: CreativeType): Boolean = type != CreativeType.VIDEO
 
 internal fun shouldEnterFallbackVideoUnavailable(
     type: CreativeType,
@@ -831,6 +835,9 @@ private fun FallbackAdOverlay(
     val navigationOwner = remember(presentationState, fallbackIndex) { Any() }
     val renderGate = remember(presentationState, sourceIndex) { RenderAttemptGate() }
     var renderToken by remember(presentationState, sourceIndex) { mutableStateOf(0L) }
+    // Keep an opaque layer over the pooled WebView until this creative commits a visible frame.
+    var pageCommitted by remember { mutableStateOf(false) }
+    var pageLoadFailed by remember { mutableStateOf(false) }
     DisposableEffect(presentationState, navigationOwner, fallbackWebView) {
         val webView = fallbackWebView ?: return@DisposableEffect onDispose {}
         val webViewRef = WeakReference(webView)
@@ -872,7 +879,7 @@ private fun FallbackAdOverlay(
         runCatching(onRendererUnavailable)
     }
     fun failInitialRenderer(token: Long) {
-        if (renderGate.fail(token)) applyRendererUnavailable()
+        if (renderGate.fail(token)) pageLoadFailed = true
     }
     var unavailableExitIssued by remember { mutableStateOf(false) }
     fun closeOnce() {
@@ -903,10 +910,6 @@ private fun FallbackAdOverlay(
     var countdown by remember(presentationState, fallbackIndex) {
         mutableStateOf(closeGateSecondsRemaining(retainedGateMs, gateMs))
     }
-    // A pooled WebView is transparent and may still contain about:blank. Keep an opaque layer above
-    // this one WebView until its current creative has actually committed a visible frame.
-    var pageCommitted by remember { mutableStateOf(false) }
-    var pageLoadFailed by remember { mutableStateOf(false) }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ring = remember(presentationState, fallbackIndex) {
         Animatable(closeGateProgress(retainedGateMs, gateMs))
@@ -927,8 +930,8 @@ private fun FallbackAdOverlay(
     // Foreground-only per-item gate: time accrues only while the Activity is RESUMED, so leaving the app
     // pauses the countdown (parity with the interstitial / rewarded close gates). repeatOnLifecycle
     // cancels the loop when backgrounded and resumes it from the accrued time on return.
-    LaunchedEffect(gateMs, isVideo, pageCommitted) {
-        if (isVideo || !pageCommitted) return@LaunchedEffect
+    LaunchedEffect(gateMs, isVideo) {
+        if (!fallbackCloseGateUsesPresentedTime(ad.type)) return@LaunchedEffect
         if (gateMs <= 0L) {
             countdown = 0
             ring.snapTo(1f)
@@ -956,7 +959,7 @@ private fun FallbackAdOverlay(
         }
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             delay(FALLBACK_RENDER_TIMEOUT_MS)
-            if (renderGate.fail(token)) applyRendererUnavailable()
+            if (renderGate.fail(token)) pageLoadFailed = true
         }
     }
     // Back can only close once the countdown elapses (parity with the creative's gated close).
@@ -1117,7 +1120,7 @@ private fun FallbackAdOverlay(
                             if (!realLoadStarted) return
                             if (request?.isForMainFrame == true) {
                                 if (fallbackHtmlFailureAction(pageCommitted, isMainFrame = true) ==
-                                    FallbackHtmlFailureAction.SKIP_INITIAL
+                                    FallbackHtmlFailureAction.FAIL_BLANK
                                 ) {
                                     pageLoadFailed = true
                                     failInitialRenderer(token)
@@ -1132,7 +1135,7 @@ private fun FallbackAdOverlay(
                             if (!realLoadStarted) return
                             if (request?.isForMainFrame == true) {
                                 if (fallbackHtmlFailureAction(pageCommitted, isMainFrame = true) ==
-                                    FallbackHtmlFailureAction.SKIP_INITIAL
+                                    FallbackHtmlFailureAction.FAIL_BLANK
                                 ) {
                                     pageLoadFailed = true
                                     failInitialRenderer(token)
@@ -1265,7 +1268,11 @@ private fun FallbackAdOverlay(
                             runCatching { recordRenderProcessGone("fallback_ad", detail) }
                             if (view != null && view === fallbackWebView) {
                                 renderProcessGone = true
-                                applyRendererUnavailable()
+                                rendererGone = true
+                                pageLoadFailed = true
+                                pageCommitted = false
+                                renderGate.fail(token)
+                                runCatching(onRendererUnavailable)
                                 runCatching { view.visibility = View.INVISIBLE }
                                 fallbackWebView = null
                             }

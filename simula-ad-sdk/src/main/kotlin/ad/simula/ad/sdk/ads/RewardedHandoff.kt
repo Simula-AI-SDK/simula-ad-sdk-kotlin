@@ -191,6 +191,10 @@ internal class RewardedPresentation(
 
     /** Set true once the required play duration elapses; gates the reward. */
     var rewardEarned = false
+
+    /** Sticky evidence that playable HTML committed a visible frame before a later SDK failure. */
+    var everCreativeReady = false
+
     var completionReason: RewardCompletionReason? = null
         private set
 
