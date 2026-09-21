@@ -406,7 +406,7 @@ internal fun commitFullscreenImpression(
 private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
     nextVideoUrl: String?,
-    hasNextStep: Boolean,
+    hasNextStep: () -> Boolean,
     storeVisitPending: Boolean,
     onFinish: () -> Unit,
     recordStoreOpen: (String) -> Unit,

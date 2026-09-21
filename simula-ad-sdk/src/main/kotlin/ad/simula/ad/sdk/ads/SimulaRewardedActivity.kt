@@ -437,7 +437,7 @@ internal fun rewardedNavigationAction(
 private fun RewardedMinigame(
     presentation: RewardedPresentation,
     nextVideoUrl: String?,
-    hasNextStep: Boolean,
+    hasNextStep: () -> Boolean,
     storeVisitPending: Boolean,
     recordStoreOpen: (String) -> Unit,
     onFinish: (earned: Boolean) -> Unit,

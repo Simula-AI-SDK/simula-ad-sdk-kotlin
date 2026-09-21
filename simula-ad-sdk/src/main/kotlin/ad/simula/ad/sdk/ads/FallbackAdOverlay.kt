@@ -163,6 +163,11 @@ internal fun nextVideoPlanV2Url(
     ?.takeIf { it.isVideoPlanV2 }
     ?.url
 
+internal fun primaryVideoWillHandoff(
+    videoPlanV2: Boolean,
+    fallbackAds: List<SimulaApiClient.FallbackAd>?,
+): Boolean = videoPlanV2 && fallbackAds?.isEmpty() != true
+
 internal fun closeGateProgress(elapsedMs: Long, durationMs: Long): Float =
     if (durationMs <= 0L) 1f else (elapsedMs.toFloat() / durationMs).coerceIn(0f, 1f)
 
@@ -263,6 +268,9 @@ internal class FallbackPresentationState(
     fun retainFetchedAds(ads: List<SimulaApiClient.FallbackAd>) {
         fetchedAds = ads
         if (ads.any { it.videoPlanV2 }) videoPlan.activateVideoPlanV2()
+    }
+    fun notifyFirstResolvedStepReady(ads: List<SimulaApiClient.FallbackAd>) {
+        if (ads.firstOrNull()?.type == CreativeType.PLAYABLE) videoPlan.nextStepReady()
     }
     fun fetchFailed() = Unit
     fun terminalizeInitialFetchFailure(): List<SimulaApiClient.FallbackAd> {
@@ -378,6 +386,7 @@ internal class FallbackPresentationState(
     ): Boolean {
         if (stage != FallbackStage.FETCHING || generation != fetchWaitGeneration) return false
         if (ads.isNotEmpty()) showing(0) else done()
+        notifyFirstResolvedStepReady(ads)
         return true
     }
 
@@ -565,7 +574,7 @@ internal fun FallbackAdHost(
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
     videoPlanV2: Boolean = false,
-    content: @Composable (onClose: () -> Unit, nextVideoUrl: String?, hasNextStep: Boolean) -> Unit,
+    content: @Composable (onClose: () -> Unit, nextVideoUrl: String?, hasNextStep: () -> Boolean) -> Unit,
 ) {
     var phase by remember(presentationState) {
         mutableStateOf<FallbackPhase>(
@@ -644,8 +653,7 @@ internal fun FallbackAdHost(
                 presentationState.done()
             }
         }
-        ads?.firstOrNull()?.takeIf { it.type == CreativeType.PLAYABLE }
-            ?.let { presentationState.videoPlan.nextStepReady() }
+        ads?.let(presentationState::notifyFirstResolvedStepReady)
     }
 
     // This root survives every phase, including Done's final callback frame, so no transition can
@@ -655,7 +663,7 @@ internal fun FallbackAdHost(
             FallbackPhase.Content -> content(
                 { onPrimaryClosed() },
                 prefetched?.firstOrNull()?.takeIf { videoPlanV2 && it.isVideoPlanV2 }?.url,
-                videoPlanV2,
+                { primaryVideoWillHandoff(videoPlanV2, presentationState.fetchedAds) },
             )
             // Prefetch wasn't ready at close — hold on the black backdrop and advance when it lands.
             is FallbackPhase.Fetching -> {
@@ -1057,7 +1065,7 @@ private fun FallbackAdOverlay(
                     videoPlanV2 = ad.isVideoPlanV2,
                     videoPlanState = presentationState.videoPlan,
                     presentationBlocked = presentationState.clickHandoffPending || storeVisitPending,
-                    willHandoff = hasNextStep,
+                    willHandoff = { hasNextStep },
                     modifier = Modifier
                         .fillMaxSize()
                         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),

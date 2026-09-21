@@ -24,9 +24,11 @@ import ad.simula.ad.sdk.model.videoMuteInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteActionLabel
 import ad.simula.ad.sdk.model.videoMuteControlVisible
 import ad.simula.ad.sdk.model.videoDesiredMutedAfterTap
+import ad.simula.ad.sdk.model.videoDesiredMutedAfterLifecycleDeactivation
 import ad.simula.ad.sdk.model.videoPreparationClaimPolicy
 import ad.simula.ad.sdk.model.videoReadinessTimeoutCode
 import ad.simula.ad.sdk.model.videoMediaErrorCode
+import ad.simula.ad.sdk.model.initialVideoDesiredMuted
 import ad.simula.ad.sdk.model.resolveVideoDimensions
 import ad.simula.ad.sdk.model.resolvedVideoChromeStyle
 import ad.simula.ad.sdk.model.effectiveVideoMuted
@@ -145,6 +147,11 @@ internal fun dispatchNaturalVideoCompletion(
     runCatching(onCompleted)
     runCatching(emitFinalProgress)
 }
+
+internal fun shouldBeginVideoHandoff(
+    videoPlanV2: Boolean,
+    hasNextStep: () -> Boolean,
+): Boolean = videoPlanV2 && runCatching(hasNextStep).getOrDefault(false)
 
 @Composable
 internal fun smoothVideoProgress(target: Float): Float {
@@ -288,7 +295,7 @@ internal fun FullscreenVideo(
         VideoPlanPresentationState(videoPlanV2)
     },
     presentationBlocked: Boolean = false,
-    willHandoff: Boolean = false,
+    willHandoff: () -> Boolean = { false },
     modifier: Modifier = Modifier,
     onReady: (Long) -> Unit,
     onProgress: (Long, Long, Long) -> Unit,
@@ -302,13 +309,15 @@ internal fun FullscreenVideo(
     val currentOnProgress by rememberUpdatedState(onProgress)
     val currentOnCompleted by rememberUpdatedState(onCompleted)
     val currentOnError by rememberUpdatedState(onError)
+    val currentWillHandoff by rememberUpdatedState(willHandoff)
     var firstFrameRendered by remember(url) { mutableStateOf(false) }
     var completed by remember(url) { mutableStateOf(false) }
-    var muted by remember(url, videoPlanState) { mutableStateOf(videoPlanState.audio.desiredMuted) }
+    val initialDesiredMuted = initialVideoDesiredMuted(videoPlanV2, videoPlanState.audio.desiredMuted)
+    var muted by remember(url, videoPlanV2, videoPlanState) { mutableStateOf(initialDesiredMuted) }
     val resolvedStyle = remember(chromeStyle, appName, appIconUrl) {
         resolvedVideoChromeStyle(chromeStyle, appName, appIconUrl)
     }
-    val controller = remember(url) {
+    val controller = remember(url, videoPlanV2, videoPlanState) {
         NativeVideoController(
             context = context,
             telemetry = VideoTelemetryContext(
@@ -327,8 +336,8 @@ internal fun FullscreenVideo(
             initialPlayedMs = initialPlayedMs,
             videoPlanV2 = videoPlanV2,
             videoPlanState = videoPlanState,
-            desiredMuted = videoPlanState.audio.desiredMuted,
-            willHandoff = willHandoff,
+            desiredMuted = initialDesiredMuted,
+            hasNextStep = { currentWillHandoff() },
         )
     }
 
@@ -348,7 +357,7 @@ internal fun FullscreenVideo(
         currentOnProgress(sample.positionMs, durationMs, sample.advancedMs)
     }
     controller.onEffectiveMutedChanged = { muted = it }
-    controller.onDesiredMutedChanged = { videoPlanState.audio.updateFromTap(it) }
+    controller.onDesiredMutedChanged = { videoPlanState.audio.updateFromTap(videoPlanV2, it) }
     controller.onCompleted = {
         completed = true
         currentOnCompleted()
@@ -695,7 +704,7 @@ private class NativeVideoController(
     private val videoPlanV2: Boolean,
     private val videoPlanState: VideoPlanPresentationState,
     desiredMuted: Boolean,
-    private val willHandoff: Boolean,
+    private val hasNextStep: () -> Boolean,
 ) {
     var onReady: (Long) -> Unit = {}
     var onProgress: (VideoPositionSample, Long) -> Unit = { _, _ -> }
@@ -956,6 +965,8 @@ private class NativeVideoController(
                 pausedAtMs = nowMs
                 recordLifecycle(VIDEO_STAGE_PAUSE, reason = "backgrounded")
             }
+            desiredMuted = videoDesiredMutedAfterLifecycleDeactivation(videoPlanV2, desiredMuted)
+            applyEffectiveMuted(true)
             abandonAudioFocus()
         }
     }
@@ -1064,7 +1075,7 @@ private class NativeVideoController(
         recordLifecycle(VIDEO_STAGE_COMPLETE)
         if (videoPlanV2) {
             val snapshot = telemetrySnapshot()
-            if (willHandoff) videoPlanState.beginHandoff(snapshot)
+            if (shouldBeginVideoHandoff(videoPlanV2, hasNextStep)) videoPlanState.beginHandoff(snapshot)
             else videoPlanState.close(snapshot, reason = "completed")
         }
         release()
@@ -1272,7 +1283,7 @@ private class NativeVideoController(
         recordLifecycle(VIDEO_STAGE_FAIL, errorCode = code.wire)
         if (videoPlanV2) {
             val snapshot = telemetrySnapshot()
-            if (willHandoff) videoPlanState.beginHandoff(snapshot)
+            if (shouldBeginVideoHandoff(videoPlanV2, hasNextStep)) videoPlanState.beginHandoff(snapshot)
             else videoPlanState.close(snapshot, reason = "failed")
         }
         Telemetry.recordError(

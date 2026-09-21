@@ -14,7 +14,9 @@ import ad.simula.ad.sdk.model.storePromptHalfGateReached
 import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.model.videoStorePromptReached
 import ad.simula.ad.sdk.model.effectiveVideoMuted
+import ad.simula.ad.sdk.model.initialVideoDesiredMuted
 import ad.simula.ad.sdk.model.videoDesiredMutedAfterTap
+import ad.simula.ad.sdk.model.videoDesiredMutedAfterLifecycleDeactivation
 import ad.simula.ad.sdk.network.SimulaApiClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -138,7 +140,7 @@ class VideoPlanV2PolicyTest {
     fun `v2 desired mute is tap-owned and independent of effective watch accounting`() {
         val audio = VideoAudioSessionState(videoPlanV2 = true)
         assertFalse(audio.desiredMuted)
-        audio.updateFromTap(true)
+        audio.updateFromTap(videoPlanV2 = true, value = true)
         audio.activateVideoPlanV2()
         assertTrue(audio.desiredMuted)
     }
@@ -167,7 +169,10 @@ class VideoPlanV2PolicyTest {
         val effectiveMuted = effectiveVideoMuted(audio.desiredMuted, audioFocusHeld = false)
 
         assertTrue(effectiveMuted)
-        audio.updateFromTap(videoDesiredMutedAfterTap(effectiveMuted))
+        audio.updateFromTap(
+            videoPlanV2 = true,
+            value = videoDesiredMutedAfterTap(effectiveMuted),
+        )
 
         assertFalse(audio.desiredMuted)
         assertTrue(effectiveVideoMuted(audio.desiredMuted, audioFocusHeld = false))
@@ -240,5 +245,117 @@ class VideoPlanV2PolicyTest {
         assertEquals(4.3, timing.secondsSinceVideoStart, 0.0)
         assertEquals("next_step", timing.on)
         assertTrue(state.overlayReady())
+    }
+
+    @Test
+    fun `primary v2 handoff reads live fallback knowledge at terminal time`() {
+        val state = FallbackPresentationState(videoPlanV2 = true)
+        val hasNextStep = {
+            primaryVideoWillHandoff(videoPlanV2 = true, fallbackAds = state.fetchedAds)
+        }
+
+        assertTrue(shouldBeginVideoHandoff(videoPlanV2 = true, hasNextStep))
+
+        state.retainFetchedAds(emptyList())
+        assertFalse(shouldBeginVideoHandoff(videoPlanV2 = true, hasNextStep))
+
+        assertTrue(primaryVideoWillHandoff(videoPlanV2 = true, fallbackAds = listOf(playable(0))))
+        assertFalse(primaryVideoWillHandoff(videoPlanV2 = false, fallbackAds = null))
+    }
+
+    @Test
+    fun `accepted delayed playable fallback reports first step ready immediately`() {
+        val state = pendingFallbackHandoffState()
+        val generation = state.startPostCloseFetchWait()
+
+        assertTrue(state.resolvePostCloseFetchWait(generation, listOf(playable(0))))
+        assertNull(state.videoPlan.nextStepReady())
+    }
+
+    @Test
+    fun `accepted delayed video fallback waits for its first frame readiness`() {
+        val state = pendingFallbackHandoffState()
+        val generation = state.startPostCloseFetchWait()
+
+        assertTrue(state.resolvePostCloseFetchWait(generation, listOf(video(0))))
+        assertTrue(state.videoPlan.nextStepReady() != null)
+    }
+
+    @Test
+    fun `late delayed fallback after timeout does not report readiness`() {
+        val state = pendingFallbackHandoffState()
+        val generation = state.startPostCloseFetchWait()
+
+        assertTrue(state.timeoutPostCloseFetchWait(generation))
+        assertFalse(state.resolvePostCloseFetchWait(generation, listOf(playable(0))))
+        assertTrue(state.videoPlan.nextStepReady() != null)
+    }
+
+    @Test
+    fun `v1 backgrounding permanently remutes without changing v2 presentation preference`() {
+        val presentationAudio = VideoAudioSessionState(videoPlanV2 = true)
+        val v1InitialMuted = initialVideoDesiredMuted(
+            videoPlanV2 = false,
+            presentationDesiredMuted = presentationAudio.desiredMuted,
+        )
+        assertTrue(v1InitialMuted)
+
+        presentationAudio.updateFromTap(videoPlanV2 = false, value = true)
+        assertFalse(presentationAudio.desiredMuted)
+
+        val v1Unmuted = false
+        val v1AfterBackground = videoDesiredMutedAfterLifecycleDeactivation(
+            videoPlanV2 = false,
+            desiredMuted = v1Unmuted,
+        )
+        assertTrue(v1AfterBackground)
+        assertTrue(effectiveVideoMuted(v1AfterBackground, audioFocusHeld = true))
+    }
+
+    @Test
+    fun `v2 desired unmuted preference survives background and clip handoff`() {
+        val presentationAudio = VideoAudioSessionState(videoPlanV2 = true)
+        presentationAudio.updateFromTap(videoPlanV2 = true, value = false)
+
+        val afterBackground = videoDesiredMutedAfterLifecycleDeactivation(
+            videoPlanV2 = true,
+            desiredMuted = presentationAudio.desiredMuted,
+        )
+        assertFalse(afterBackground)
+        assertTrue(effectiveVideoMuted(afterBackground, audioFocusHeld = false))
+        assertFalse(effectiveVideoMuted(afterBackground, audioFocusHeld = true))
+        assertFalse(
+            initialVideoDesiredMuted(
+                videoPlanV2 = true,
+                presentationDesiredMuted = presentationAudio.desiredMuted,
+            ),
+        )
+    }
+
+    private fun pendingFallbackHandoffState(): FallbackPresentationState {
+        val state = FallbackPresentationState(clockMs = { 0L }, videoPlanV2 = true)
+        state.videoPlan.beginHandoff(
+            VideoPlaybackTelemetry(
+                context = VideoTelemetryContext(
+                    adFormat = "interstitial",
+                    adUnitId = "unit",
+                    adId = "ad",
+                    serveId = "serve",
+                    impressionId = "serve",
+                    style = "corner_cta",
+                    skoverlayEnabled = false,
+                    skoverlayDelaySeconds = 3,
+                    clipIndex = 0,
+                    pool = "ugc",
+                ),
+                videoPositionS = 1.0,
+                muted = false,
+                durationS = 2.0,
+                watchedS = 1.0,
+                secondsUnmuted = 1.0,
+                secondsMuted = 0.0,
+            ),
+        )
+        return state
     }
 }

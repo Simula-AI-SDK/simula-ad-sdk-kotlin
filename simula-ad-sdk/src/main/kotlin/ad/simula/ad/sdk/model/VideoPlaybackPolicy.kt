@@ -214,6 +214,16 @@ internal fun effectiveVideoMuted(desiredMuted: Boolean, audioFocusHeld: Boolean)
 
 internal fun videoDesiredMutedAfterTap(effectiveMuted: Boolean): Boolean = !effectiveMuted
 
+internal fun initialVideoDesiredMuted(
+    videoPlanV2: Boolean,
+    presentationDesiredMuted: Boolean,
+): Boolean = if (videoPlanV2) presentationDesiredMuted else true
+
+internal fun videoDesiredMutedAfterLifecycleDeactivation(
+    videoPlanV2: Boolean,
+    desiredMuted: Boolean,
+): Boolean = if (videoPlanV2) desiredMuted else true
+
 /** Presentation-owned user preference. Effective muting remains player/audio-focus owned. */
 internal class VideoAudioSessionState(videoPlanV2: Boolean) {
     var desiredMuted: Boolean = !videoPlanV2
@@ -221,7 +231,8 @@ internal class VideoAudioSessionState(videoPlanV2: Boolean) {
     private var preferenceChanged = false
 
     @Synchronized
-    fun updateFromTap(value: Boolean) {
+    fun updateFromTap(videoPlanV2: Boolean, value: Boolean) {
+        if (!videoPlanV2) return
         desiredMuted = value
         preferenceChanged = true
     }

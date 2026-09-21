@@ -1259,7 +1259,7 @@ private fun MiniGameFallbackOverlay(
                             videoPlanV2 = ad.isVideoPlanV2,
                             videoPlanState = videoPlan,
                             presentationBlocked = clickHandoffPending || storeVisitPending,
-                            willHandoff = hasNextStep,
+                            willHandoff = { hasNextStep },
                             modifier = Modifier.fillMaxSize(),
                             onReady = { durationMs ->
                                 videoDurationMs = durationMs
