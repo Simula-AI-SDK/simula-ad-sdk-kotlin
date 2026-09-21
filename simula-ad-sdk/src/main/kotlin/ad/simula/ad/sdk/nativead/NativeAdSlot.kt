@@ -192,7 +192,6 @@ fun NativeAdSlot(
                     impressionId = "",
                     adInserted = true,
                     adFormat = "character_ad",
-                    iframeUrl = null,
                     renderedHtml = previewHtml,
                 ),
                 seenMetadata = null,
@@ -208,8 +207,7 @@ fun NativeAdSlot(
             seenMetadata: Map<String, String>?,
             durationMs: Long? = null,
         ) {
-            val hasCreative = result.adInserted &&
-                (!result.iframeUrl.isNullOrBlank() || !result.renderedHtml.isNullOrBlank())
+            val hasCreative = result.adInserted && !result.renderedHtml.isNullOrBlank()
             if (hasCreative) {
                 NativeAdCache.putFill(adUnitId, position, result, seenMetadata)
                 heightDp = 0f
@@ -290,7 +288,6 @@ fun NativeAdSlot(
             val visibilityRelay = remember(result.impressionId) { VisibilityRelay() }
             Box(slotModifier) {
                 NativeAdWebView(
-                    iframeUrl = result.iframeUrl,
                     renderedHtml = result.renderedHtml,
                     apiKey = ctx.apiKey,
                     devMode = ctx.devMode,

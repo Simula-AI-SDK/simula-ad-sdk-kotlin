@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.network
 
+import ad.simula.ad.sdk.model.CreativeType
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -47,6 +48,7 @@ class RewardedParsingTest {
         val body = RewardedInitRequestBody(adUnitId = "unit_1")
         val decoded = json.decodeFromString<RewardedInitRequestBody>(json.encodeToString(body))
         assertEquals("", decoded.sessionId)
+        assertFalse(decoded.capabilities.videoV1)
     }
 
     @Test
@@ -84,17 +86,31 @@ class RewardedParsingTest {
         val payload = """
             {
               "impression_id": "imp_1",
-              "iframe_url": "https://cdn/play",
               "rendered_html": "<html>primary</html>",
+              "creative": {"type":"video","url":"https://cdn/video.mp4","poster_url":"https://cdn/poster.jpg"},
+              "experiment": {
+                "experiment_id": "rewarded_video_q3",
+                "variant_id": "video_b",
+                "layer": "creative_media"
+              },
               "prewarm_sk_product": true,
               "ad_behavior": { "close": { "delay_seconds": 30 } }
             }
         """.trimIndent()
 
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
+        val result = SimulaApiClient.rewardedResultFromResponse(r)
         assertEquals("imp_1", r.impressionId)
-        assertEquals("https://cdn/play", r.iframeUrl)
         assertEquals("<html>primary</html>", r.renderedHtml)
+        assertEquals(CreativeType.VIDEO, r.creative.toDomain()?.type)
+        assertEquals("https://cdn/video.mp4", r.creative.toDomain()?.url)
+        assertEquals("https://cdn/poster.jpg", r.creative.toDomain()?.posterUrl)
+        assertEquals("rewarded_video_q3", r.experiment?.experimentId)
+        assertEquals("video_b", r.experiment?.variantId)
+        assertEquals("creative_media", r.experiment?.layer)
+        assertEquals("rewarded_video_q3", result.experiment?.experimentId)
+        assertEquals("video_b", result.experiment?.variantId)
+        assertEquals("creative_media", result.experiment?.layer)
         assertTrue(r.prewarmSkProduct)
         // The play-to-earn gate now rides on `ad_behavior.close.delay_seconds` (no top-level field).
         assertEquals(30, r.adBehavior?.close?.delaySeconds)
@@ -103,9 +119,8 @@ class RewardedParsingTest {
     @Test
     fun `init response empty object decodes to safe defaults`() {
         val r = json.decodeFromString<RewardedInitApiResponse>("{}")
-        assertEquals("", r.impressionId)
-        assertEquals("", r.iframeUrl)
-        assertEquals("", r.renderedHtml)
+        assertNull(r.impressionId)
+        assertNull(r.renderedHtml)
         // Absent `ad_behavior` → null → no gate (instantly earned) and no store prompt.
         assertNull(r.adBehavior)
         assertFalse(r.prewarmSkProduct)
@@ -114,27 +129,69 @@ class RewardedParsingTest {
     @Test
     fun `init response ignores unknown keys`() {
         // Legacy `serve_id`/`ad_id` keys are unknown now and must be ignored, not remapped.
-        val payload = """{"impression_id":"i","iframe_url":"u","serve_id":"s","ad_id":"a","future_field":42}"""
+        val payload = """{"impression_id":"i","iframe_url":"ignored","serve_id":"s","ad_id":"a","future_field":42}"""
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
         assertEquals("i", r.impressionId)
-        assertEquals("u", r.iframeUrl)
+        assertNull(r.renderedHtml)
+    }
+
+    @Test
+    fun `explicit null no-fill fields decode and normalize safely`() {
+        val response = json.decodeFromString<RewardedInitApiResponse>(
+            """{"impression_id":null,"rendered_html":null,"creative":null,"experiment":null}""",
+        )
+        val result = SimulaApiClient.rewardedResultFromResponse(response)
+
+        assertNull(response.impressionId)
+        assertNull(response.renderedHtml)
+        assertEquals("", result.impressionId)
+        assertEquals("", result.renderedHtml)
+        assertNull(result.experiment)
+    }
+
+    @Test
+    fun `malformed experiment is ignored without rejecting rewarded creative`() {
+        val response = json.decodeFromString<RewardedInitApiResponse>(
+            """{"impression_id":"i","rendered_html":"<html/>","experiment":"invalid"}""",
+        )
+        val result = SimulaApiClient.rewardedResultFromResponse(response)
+
+        assertNull(response.experiment)
+        assertNull(result.experiment)
+        assertEquals("<html/>", result.renderedHtml)
     }
 
     // ── Verify request / response ────────────────────────────────────────────────
 
     @Test
     fun `verify request encodes snake_case keys`() {
-        val body = VerifyRewardRequestBody(serveId = "srv_1", sessionId = "sess_9", elapsedPlayTime = 31.5)
+        val body = VerifyRewardRequestBody(
+            serveId = "srv_1",
+            sessionId = "sess_9",
+            elapsedPlayTime = 31.5,
+            completionReason = "duration_elapsed",
+        )
         val encoded = json.encodeToString(body)
 
         assertTrue(encoded.contains("\"serve_id\""))
         assertTrue(encoded.contains("\"session_id\""))
         assertTrue(encoded.contains("\"elapsed_play_time\""))
+        assertTrue(encoded.contains("\"completion_reason\":\"duration_elapsed\""))
 
         val decoded = json.decodeFromString<VerifyRewardRequestBody>(encoded)
         assertEquals("srv_1", decoded.serveId)
         assertEquals("sess_9", decoded.sessionId)
         assertEquals(31.5, decoded.elapsedPlayTime, 0.0001)
+        assertEquals("duration_elapsed", decoded.completionReason)
+    }
+
+    @Test
+    fun `legacy verify request without completion reason decodes with null`() {
+        val decoded = json.decodeFromString<VerifyRewardRequestBody>(
+            """{"serve_id":"srv","session_id":"sess","elapsed_play_time":4.0}""",
+        )
+
+        assertNull(decoded.completionReason)
     }
 
     @Test

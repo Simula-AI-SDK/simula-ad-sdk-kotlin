@@ -286,10 +286,9 @@ internal class TelemetryManager(
 
     /** Set the session experiment assignment for the envelope (last assignment wins). */
     fun setExperiment(experimentId: String?, variantId: String?) {
-        if (experimentId.isNullOrBlank() && variantId.isNullOrBlank()) return
         synchronized(auxLock) {
-            this.experimentId = experimentId
-            this.variantId = variantId
+            this.experimentId = experimentId?.takeIf { it.isNotBlank() }
+            this.variantId = variantId?.takeIf { it.isNotBlank() }
         }
     }
 

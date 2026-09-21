@@ -7,9 +7,13 @@ import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.ExtraParametersStore
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.RewardCompletionReason
+import ad.simula.ad.sdk.model.isRenderable
 import ad.simula.ad.sdk.nativead.NativeAdContextStore
 import ad.simula.ad.sdk.network.AdUnitNotFoundException
 import ad.simula.ad.sdk.network.RewardVerificationManager
@@ -20,7 +24,6 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -30,8 +33,8 @@ import java.util.UUID
 /**
  * Imperative full-screen rewarded minigame ad (mirrors [SimulaInterstitialAd]).
  *
- * Lifecycle: `load()` calls `POST /minigames/init/rewarded` and prepares the playable
- * iframe; `show(...)` presents it full-screen. The reward is earned by playing for at
+ * Lifecycle: `load()` calls `POST /load/rewarded` and prepares the playable HTML or native video;
+ * `show(...)` presents it full-screen. The reward is earned by playing for at
  * least the server-returned `ad_behavior.close.delay_seconds` (the same gate that ungates
  * the close button); an exit confirmation appears if the user leaves early. On a
  * qualifying dismiss the play is verified server-side (`/minigames/verify-reward`,
@@ -198,44 +201,59 @@ class SimulaRewardedAd(val adUnitId: String) {
                     metadata = metadata,
                 )
                 if (generation != loadGeneration) return@launch // superseded
-                if (rewardedCreativeSource(ad.renderedHtml, ad.iframeUrl) == null) {
+                if (!ad.creative.isRenderable(ad.renderedHtml)) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
-                Telemetry.recordLifecycle(
-                    stage = "load_success",
-                    adFormat = AD_FORMAT,
-                    adUnitId = adUnitId,
-                    adId = ad.impressionId,
-                    serveId = ad.impressionId,
-                    durationMs = elapsedSinceLoad(),
-                    errorCode = null,
-                )
                 withContext(Dispatchers.Main) {
                     if (generation != loadGeneration) return@withContext // superseded
+                    recordAcceptedLoadTelemetry(
+                        experiment = ad.experiment,
+                        applyExperiment = Telemetry::setExperiment,
+                    ) {
+                        Telemetry.recordLifecycle(
+                            stage = "load_success",
+                            adFormat = AD_FORMAT,
+                            adUnitId = adUnitId,
+                            adId = ad.impressionId,
+                            serveId = ad.impressionId,
+                            durationMs = elapsedSinceLoad(),
+                            errorCode = null,
+                        )
+                    }
                     sessionId = session
                     impressionId = ad.impressionId
                     state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
+                    if (ad.creative.type == CreativeType.VIDEO) {
+                        FullscreenVideoPreparer.prepare(ad.creative.url)
+                    }
                     runCatching { listener?.onAdLoaded(this@SimulaRewardedAd) }
                 }
                 scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
+                if (generation != loadGeneration) return@launch
                 // ad_unit_not_found is a distinct, non-retryable misconfiguration — surface it as
                 // its own case rather than burying it in the generic Network bucket.
                 val error =
                     if (e is AdUnitNotFoundException) SimulaAdError.AdUnitNotFound else SimulaAdError.Network(e)
-                Telemetry.recordError(
-                    signature = "rewarded:load",
-                    errorCode = error.telemetryCode(),
-                    message = e.message,
-                    breadcrumb = "SimulaRewardedAd.load",
-                )
-                failLoadOnMain(generation, error)
+                withContext(Dispatchers.Main) {
+                    if (generation != loadGeneration) return@withContext
+                    Telemetry.recordError(
+                        signature = "rewarded:load",
+                        errorCode = error.telemetryCode(),
+                        message = e.message,
+                        breadcrumb = "SimulaRewardedAd.load",
+                    )
+                    failLoad(error)
+                }
             }
         }
     }
 
     private fun scheduleWebViewPrewarm(generation: Int, ad: SimulaApiClient.RewardedInitResult) {
+        if (ad.creative.type == CreativeType.VIDEO) {
+            return
+        }
         val context = SimulaAds.appContext
         SimulaScope.launch {
             runCatching {
@@ -324,7 +342,8 @@ class SimulaRewardedAd(val adUnitId: String) {
         RewardedHandoff.put(
             token,
             RewardedPresentation(
-                iframeUrl = PREVIEW_MINIGAME_DATA_URL,
+                renderedHtml = PREVIEW_MINIGAME_HTML,
+                creative = Creative(type = CreativeType.PLAYABLE),
                 impressionId = "", // empty → no impression tracked
                 apiKey = SimulaAds.apiKey,
                 // Preview is local-only: report lifecycle but do NOT verify a reward or auto-preload.
@@ -360,7 +379,11 @@ class SimulaRewardedAd(val adUnitId: String) {
 
                     // Preview is local-only: no verification — just signal the earned reward once the
                     // whole (screen-less) unit completes, mirroring the live onRewardCompleted timing.
-                    override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+                    override fun onRewardCompleted(
+                        earned: Boolean,
+                        elapsedPlayTimeSeconds: Double,
+                        completionReason: RewardCompletionReason?,
+                    ) {
                         if (earned) runCatching { listener?.onAdEarnedReward(this@SimulaRewardedAd) }
                     }
                 },
@@ -411,8 +434,8 @@ class SimulaRewardedAd(val adUnitId: String) {
         RewardedHandoff.put(
             token,
             RewardedPresentation(
-                iframeUrl = ad.iframeUrl,
                 renderedHtml = ad.renderedHtml,
+                creative = ad.creative,
                 impressionId = ad.impressionId,
                 apiKey = SimulaAds.apiKey,
                 callbacks = bridge(ad.impressionId),
@@ -500,10 +523,19 @@ class SimulaRewardedAd(val adUnitId: String) {
             load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
         }
 
-        override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+        override fun onRewardCompleted(
+            earned: Boolean,
+            elapsedPlayTimeSeconds: Double,
+            completionReason: RewardCompletionReason?,
+        ) {
             // Fired once the user has completed the whole unit (playable + every fallback ad screen).
             // A non-earned completion grants nothing.
-            if (!earned) return
+            val reason = completionReason ?: return
+            val verificationElapsedPlayTime = RewardGate.verificationElapsedSeconds(
+                earned = earned,
+                actualElapsedSeconds = elapsedPlayTimeSeconds,
+                completionReason = reason,
+            ) ?: return
             Telemetry.recordLifecycle("reward_earned", AD_FORMAT, adUnitId, adId, adId, null, null)
             runCatching { listener?.onAdEarnedReward(this@SimulaRewardedAd) }
             val sid = impressionId
@@ -526,8 +558,9 @@ class SimulaRewardedAd(val adUnitId: String) {
                     context = SimulaAds.appContext,
                     serveId = sid,
                     sessionId = sess,
-                    elapsedPlayTime = elapsedPlayTimeSeconds,
+                    elapsedPlayTime = verificationElapsedPlayTime,
                     adUnitId = verificationAdUnitId,
+                    completionReason = reason.wire,
                 ) { result ->
                     val verifyMs = (System.nanoTime() - verifyStartNanos) / 1_000_000
                     Telemetry.recordOperation("reward_verification", verifyMs, success = result.isSuccess)
@@ -651,6 +684,15 @@ class SimulaRewardedAd(val adUnitId: String) {
     }
 }
 
+internal fun recordAcceptedLoadTelemetry(
+    experiment: ad.simula.ad.sdk.model.Experiment?,
+    applyExperiment: (String?, String?) -> Unit,
+    recordLoadSuccess: () -> Unit,
+) {
+    runCatching { applyExperiment(experiment?.experimentId, experiment?.variantId) }
+    runCatching(recordLoadSuccess)
+}
+
 /** Ad-format tag on this class's telemetry events. */
 private const val AD_FORMAT = "rewarded"
 
@@ -659,8 +701,7 @@ private const val AD_FORMAT = "rewarded"
 private const val PREVIEW_TRACKING_URL =
     "https://play.google.com/store/apps/details?id=com.google.android.apps.maps"
 
-/** A self-contained placeholder "playable" so [SimulaRewardedAd.showPreview] can render the
- * play-to-earn gate + store-prompt chrome over a visible surface without loading a network iframe. */
+/** A self-contained placeholder playable for the preview's gate and store-prompt chrome. */
 private const val PREVIEW_MINIGAME_HTML =
     "<!doctype html><html><head><meta name=\"viewport\" " +
         "content=\"width=device-width, initial-scale=1, viewport-fit=cover\"></head>" +
@@ -669,7 +710,3 @@ private const val PREVIEW_MINIGAME_HTML =
         "<div><div style=\"font-size:22px;font-weight:700\">Rewarded Minigame Preview</div>" +
         "<div style=\"opacity:.8;margin-top:8px;font-size:15px\">Mid-ad store prompt — no network</div></div>" +
         "</body></html>"
-
-/** The placeholder playable as a `data:` URL the pooled WebView can `loadUrl(...)` directly. */
-private val PREVIEW_MINIGAME_DATA_URL: String =
-    "data:text/html;base64," + Base64.encodeToString(PREVIEW_MINIGAME_HTML.toByteArray(), Base64.NO_WRAP)

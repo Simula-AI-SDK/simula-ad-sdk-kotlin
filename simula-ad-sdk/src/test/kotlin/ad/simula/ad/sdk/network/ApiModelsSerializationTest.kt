@@ -50,23 +50,37 @@ class ApiModelsSerializationTest {
         val root = json.parseToJsonElement(
             sessionCreateBody(
                 privacy = buildJsonObject { put("hasPrivacyConsent", true) },
-                capabilities = ApiDeviceCapabilities(),
+                capabilities = ApiDeviceCapabilities(videoV1 = true),
             ),
         ).jsonObject
 
         assertTrue(root.getValue("capabilities").jsonObject
             .getValue("native_click_beacon_v1").jsonPrimitive.boolean)
+        assertTrue(root.getValue("capabilities").jsonObject
+            .getValue("video_v1").jsonPrimitive.boolean)
         assertTrue(root.containsKey("privacy"))
     }
 
     @Test
     fun `load request preserves native click beacon capability`() {
         val root = json.parseToJsonElement(
-            json.encodeToString(AdLoadRequestBody(adUnitId = "unit")),
+            json.encodeToString(
+                AdLoadRequestBody(
+                    adUnitId = "unit",
+                    capabilities = ApiDeviceCapabilities(videoV1 = true),
+                ),
+            ),
         ).jsonObject
 
         assertTrue(root.getValue("capabilities").jsonObject
             .getValue("native_click_beacon_v1").jsonPrimitive.boolean)
+        assertTrue(root.getValue("capabilities").jsonObject
+            .getValue("video_v1").jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun `neutral capabilities do not advertise video support`() {
+        assertFalse(ApiDeviceCapabilities().videoV1)
     }
 
     // ── Error body (4xx {code, message}) ─────────────────────────────────────
@@ -136,8 +150,8 @@ class ApiModelsSerializationTest {
     fun `fallbacks response decodes screens in order`() {
         val payload = """
             {"impression_id":"imp_1","native_click_beacon_v1_enabled":true,"ads":[
-              {"ad_id":"a1","html":"<html>1</html>","iframe_url":"https://i/1"},
-              {"ad_id":"a2","native_click_beacon_v1_enabled":false,"html":"<html>2</html>","iframe_url":"https://i/2"}
+              {"ad_id":"a1","rendered_html":"<html>1</html>","iframe_url":"https://ignored/1"},
+              {"ad_id":"a2","native_click_beacon_v1_enabled":false,"html":"<html>2</html>"}
             ]}
         """.trimIndent()
         val r = json.decodeFromString<FallbackAdsApiResponse>(payload)
@@ -146,9 +160,7 @@ class ApiModelsSerializationTest {
         assertEquals(2, r.ads.size)
         assertEquals("a1", r.ads[0].adId)
         assertNull(r.ads[0].nativeClickBeaconV1Enabled)
-        assertEquals("https://i/1", r.ads[0].iframeUrl)
-        // html is the preferred creative source rendered by FallbackAdOverlay.
-        assertEquals("<html>1</html>", r.ads[0].html)
+        assertEquals("<html>1</html>", r.ads[0].renderedHtml)
         assertEquals("a2", r.ads[1].adId)
         assertEquals(false, r.ads[1].nativeClickBeaconV1Enabled)
     }
@@ -165,7 +177,7 @@ class ApiModelsSerializationTest {
 
         val partial = json.decodeFromString<FallbackAdsApiResponse>("""{"ads":[{"ad_id":"a1"}]}""")
         assertEquals("a1", partial.ads[0].adId)
-        assertNull(partial.ads[0].iframeUrl)
+        assertNull(partial.ads[0].renderedHtml)
         assertNull(partial.ads[0].html)
         assertNull(partial.ads[0].nativeClickBeaconV1Enabled)
     }
@@ -264,13 +276,178 @@ class ApiModelsSerializationTest {
             responseNativeClickBeaconV1Enabled = true,
         )
         val defaulted = SimulaApiClient.fallbackAdFromBody(
-            FallbackAdBody(adId = "a3", iframeUrl = "https://i/3"),
+            FallbackAdBody(adId = "a3", renderedHtml = "<html/>") ,
             responseNativeClickBeaconV1Enabled = false,
         )
 
         assertEquals(true, inherited?.nativeClickBeaconV1Enabled)
         assertEquals(false, overridden?.nativeClickBeaconV1Enabled)
         assertEquals(false, defaulted?.nativeClickBeaconV1Enabled)
+    }
+
+    @Test
+    fun `fallback prefers rendered HTML tolerates legacy html and never accepts iframe only`() {
+        val preferred = SimulaApiClient.fallbackAdFromBody(
+            FallbackAdBody(renderedHtml = "<new/>", html = "<legacy/>"),
+            false,
+        )
+        val legacy = SimulaApiClient.fallbackAdFromBody(FallbackAdBody(html = "<legacy/>"), false)
+        val iframeOnly = json.decodeFromString<FallbackAdBody>(
+            """{"iframe_url":"https://ignored.example/creative"}""",
+        )
+
+        assertEquals("<new/>", preferred?.renderedHtml)
+        assertEquals("<legacy/>", legacy?.renderedHtml)
+        assertNull(SimulaApiClient.fallbackAdFromBody(iframeOnly, false))
+    }
+
+    @Test
+    fun `fallback video and tolerant type map with constrained close behavior`() {
+        val video = SimulaApiClient.fallbackAdFromBody(
+            json.decodeFromString<FallbackAdBody>(
+                """{
+                    "type":"video",
+                    "url":"https://cdn.example/video.mp4",
+                    "poster_url":"https://cdn.example/poster.jpg",
+                    "destination":"web",
+                    "tracking_url":"https://tracker.example/click",
+                    "android_store_url":"https://play.google.com/store/apps/details?id=android.app",
+                    "ios_store_url":"https://apps.apple.com/app/id123",
+                    "ad_behavior":{"close":{
+                        "delay_seconds":99,"treatment":"progress_bar","position":"top_left"
+                    }}
+                }""",
+            ),
+            false,
+        )
+        val unknown = SimulaApiClient.fallbackAdFromBody(
+            FallbackAdBody(type = "future", renderedHtml = "<html/>"),
+            false,
+        )
+
+        assertEquals(ad.simula.ad.sdk.model.CreativeType.VIDEO, video?.type)
+        assertEquals("web", video?.destination)
+        assertEquals("https://tracker.example/click", video?.trackingUrl)
+        assertEquals("https://play.google.com/store/apps/details?id=android.app", video?.androidStoreUrl)
+        assertEquals("https://apps.apple.com/app/id123", video?.iosStoreUrl)
+        assertEquals(60, video?.closeBehavior?.delaySeconds)
+        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, video?.closeBehavior?.treatment)
+        assertEquals(ad.simula.ad.sdk.model.ClosePosition.TOP_LEFT, video?.closeBehavior?.position)
+        assertEquals(ad.simula.ad.sdk.model.CreativeType.PLAYABLE, unknown?.type)
+        assertEquals(5, unknown?.closeBehavior?.delaySeconds)
+        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, unknown?.closeBehavior?.treatment)
+    }
+
+    @Test
+    fun `fallback routing fields decode exact backend keys`() {
+        val body = json.decodeFromString<FallbackAdBody>(
+            """{
+                "ad_id":"video",
+                "type":"video",
+                "url":"https://cdn.example/video.mp4",
+                "destination":"appstore",
+                "tracking_url":"https://tracker.example/click",
+                "android_store_url":"https://play.google.com/store/apps/details?id=android.app",
+                "ios_store_url":"https://apps.apple.com/app/id123"
+            }""",
+        )
+        val ad = requireNotNull(SimulaApiClient.fallbackAdFromBody(body, false))
+
+        assertEquals("appstore", ad.destination)
+        assertEquals("https://tracker.example/click", ad.trackingUrl)
+        assertEquals("https://play.google.com/store/apps/details?id=android.app", ad.androidStoreUrl)
+        assertEquals("https://apps.apple.com/app/id123", ad.iosStoreUrl)
+    }
+
+    @Test
+    fun `malformed optional fallback routing fields become null without dropping item`() {
+        val response = json.decodeFromString<FallbackAdsApiResponse>(
+            """{"ads":[{
+                "ad_id":"video",
+                "type":"video",
+                "url":"https://cdn.example/video.mp4",
+                "destination":{"bad":true},
+                "tracking_url":42,
+                "android_store_url":["bad"],
+                "ios_store_url":false
+            }]}""",
+        )
+        val ad = SimulaApiClient.fallbackAdsFromResponse(response).single()
+
+        assertNull(ad.destination)
+        assertNull(ad.trackingUrl)
+        assertNull(ad.androidStoreUrl)
+        assertNull(ad.iosStoreUrl)
+        assertTrue(ad.routingFieldsPresent)
+    }
+
+    @Test
+    fun `blank optional fallback routing fields normalize as absent`() {
+        val response = json.decodeFromString<FallbackAdsApiResponse>(
+            """{"ads":[{
+                "ad_id":"video",
+                "type":"video",
+                "url":"https://cdn.example/video.mp4",
+                "destination":"  ",
+                "tracking_url":"\n",
+                "android_store_url":" ",
+                "ios_store_url":"\t"
+            }]}""",
+        )
+        val ad = SimulaApiClient.fallbackAdsFromResponse(response).single()
+
+        assertNull(ad.destination)
+        assertNull(ad.trackingUrl)
+        assertNull(ad.androidStoreUrl)
+        assertNull(ad.iosStoreUrl)
+        assertFalse(ad.routingFieldsPresent)
+    }
+
+    @Test
+    fun `fallback close treatment trims whitespace before normalization`() {
+        val hidden = fallbackCloseBehavior(
+            json.parseToJsonElement("""{"close":{"treatment":"  hidden \n"}}"""),
+        )
+        val countdown = fallbackCloseBehavior(
+            json.parseToJsonElement("""{"close":{"treatment":" countdown-circle "}}"""),
+        )
+
+        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.HIDDEN, hidden.treatment)
+        assertEquals(ad.simula.ad.sdk.model.CloseTreatment.COUNTDOWN_CIRCLE, countdown.treatment)
+    }
+
+    @Test
+    fun `fallback array decoding is lossy per item and retains original stage indices`() {
+        val response = json.decodeFromString<FallbackAdsApiResponse>(
+            """{"ads":[
+                {"ad_id":"first","rendered_html":"<first/>"},
+                42,
+                {"ad_id":"bad","rendered_html":"<bad/>","ad_behavior":"invalid"},
+                {"ad_id":"later","rendered_html":"<later/>"}
+            ]}""",
+        )
+        val ads = SimulaApiClient.fallbackAdsFromResponse(response)
+
+        assertEquals(listOf(0, 2, 3), response.ads.map { it.sourceIndex })
+        assertEquals(listOf("first", "bad", "later"), ads.map { it.adId })
+        assertEquals(listOf(0, 2, 3), ads.map { it.sourceIndex })
+    }
+
+    @Test
+    fun `invalid creative skip does not renumber later fallback stage`() {
+        val response = json.decodeFromString<FallbackAdsApiResponse>(
+            """{"ads":[
+                {"iframe_url":"https://ignored.example/only"},
+                {"ad_id":"end-two","rendered_html":"<html/>"}
+            ]}""",
+        )
+        val ads = SimulaApiClient.fallbackAdsFromResponse(response)
+
+        assertEquals(1, ads.single().sourceIndex)
+        assertEquals(
+            ad.simula.ad.sdk.model.AutoStoreRedirectTrigger.END_SCREEN_2_OPEN,
+            ad.simula.ad.sdk.model.endScreenTriggerForIndex(ads.single().sourceIndex),
+        )
     }
 
     // ── Menu game click ──────────────────────────────────────────────────────

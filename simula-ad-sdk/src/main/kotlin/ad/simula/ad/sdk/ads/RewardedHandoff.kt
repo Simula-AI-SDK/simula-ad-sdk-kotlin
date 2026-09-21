@@ -3,6 +3,9 @@ package ad.simula.ad.sdk.ads
 import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AdValue
+import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.RewardCompletionReason
+import ad.simula.ad.sdk.model.monotonicRewardCompletionReason
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
@@ -53,16 +56,19 @@ internal interface RewardedCallbacks {
      * The whole rewarded unit has been completed — the user dismissed the playable AND every
      * post-game fallback ad screen (fires immediately on close when there are none). The reward is
      * contingent on reaching this point, so the earned-reward signal and server-side verification
-     * happen here rather than at [onClose].
+     * happen here rather than at [onClose]. [completionReason] is the first legitimate earning cause.
      */
-    fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double)
+    fun onRewardCompleted(
+        earned: Boolean,
+        elapsedPlayTimeSeconds: Double,
+        completionReason: RewardCompletionReason?,
+    )
 }
 
 /** Everything [SimulaRewardedActivity] needs to render one rewarded presentation. */
 internal class RewardedPresentation(
-    val iframeUrl: String,
-    // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty.
     val renderedHtml: String = "",
+    val creative: Creative,
     // The impression id from /load/rewarded — the handle for tracking, reporting and fallbacks.
     val impressionId: String,
     val apiKey: String,
@@ -94,6 +100,7 @@ internal class RewardedPresentation(
         )
     }
     val autoRedirectCoordinator = AutoRedirectCoordinator()
+    val earlyCompleteState = RewardedEarlyCompleteState()
     var primaryCreativeUnavailable by mutableStateOf(false)
 
     @Synchronized
@@ -185,8 +192,15 @@ internal class RewardedPresentation(
     /** Set true once the required play duration elapses; gates the reward. */
     var rewardEarned = false
 
-    /** Sticky evidence that this serve committed its intended creative at least once. */
+    /** Sticky evidence that playable HTML committed a visible frame before a later SDK failure. */
     var everCreativeReady = false
+
+    var completionReason: RewardCompletionReason? = null
+        private set
+
+    fun recordCompletionReason(reason: RewardCompletionReason) {
+        completionReason = monotonicRewardCompletionReason(completionReason, reason)
+    }
 
     /**
      * Foreground-only accumulated play time, in milliseconds. Time accrues only while
@@ -197,6 +211,8 @@ internal class RewardedPresentation(
      * `verify-reward`.
      */
     var accumulatedPlayTimeMs = 0L
+    var videoDurationMs = 0L
+    var videoPositionMs = 0L
 }
 
 /**

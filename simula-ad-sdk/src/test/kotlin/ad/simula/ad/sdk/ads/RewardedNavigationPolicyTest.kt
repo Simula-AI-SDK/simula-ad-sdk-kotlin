@@ -1,9 +1,93 @@
 package ad.simula.ad.sdk.ads
 
+import ad.simula.ad.sdk.network.ClickInteractionGate
+import ad.simula.ad.sdk.network.ClickSources
+import ad.simula.ad.sdk.network.PrimaryCtaRoute
+import ad.simula.ad.sdk.model.RewardCompletionReason
+import ad.simula.ad.sdk.model.monotonicRewardCompletionReason
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RewardedNavigationPolicyTest {
+    @Test
+    fun `early complete before readiness latches across recreation and consumes once`() {
+        val retained = RewardedEarlyCompleteState()
+
+        assertFalse(retained.signal(creativeReady = false))
+        assertEquals(RewardedEarlyCompleteStatus.PENDING, retained.status)
+
+        // The presentation-owned instance is retained while the Activity is recreated.
+        val recreated = retained
+        assertTrue(recreated.consumePending(creativeReady = true))
+        assertEquals(RewardedEarlyCompleteStatus.CONSUMED, recreated.status)
+        assertFalse(recreated.consumePending(creativeReady = true))
+        assertFalse(recreated.signal(creativeReady = true))
+    }
+
+    @Test
+    fun `early complete after readiness earns immediately and duplicate events no-op`() {
+        val state = RewardedEarlyCompleteState()
+
+        assertTrue(state.signal(creativeReady = true))
+        assertEquals(RewardedEarlyCompleteStatus.CONSUMED, state.status)
+        assertFalse(state.signal(creativeReady = true))
+    }
+
+    @Test
+    fun `creative failure discards pending early complete permanently`() {
+        val state = RewardedEarlyCompleteState()
+        assertFalse(state.signal(creativeReady = false))
+
+        state.discard()
+
+        assertEquals(RewardedEarlyCompleteStatus.DISCARDED, state.status)
+        assertFalse(state.consumePending(creativeReady = true))
+        assertFalse(state.signal(creativeReady = true))
+    }
+
+    @Test
+    fun `pending early complete wins zero-gate ordering and video bridge is inapplicable`() {
+        val state = RewardedEarlyCompleteState()
+        assertFalse(state.signal(creativeReady = false))
+        var reason: RewardCompletionReason? = null
+        if (state.consumePending(creativeReady = true)) {
+            reason = monotonicRewardCompletionReason(reason, RewardCompletionReason.CREATIVE_COMPLETED)
+        }
+        reason = monotonicRewardCompletionReason(reason, RewardCompletionReason.DURATION_ELAPSED)
+
+        assertEquals(RewardCompletionReason.CREATIVE_COMPLETED, reason)
+        assertTrue(rewardedEarlyCompleteApplicable(isVideo = false))
+        assertFalse(rewardedEarlyCompleteApplicable(isVideo = true))
+    }
+
+    @Test
+    fun `rewarded video executes admitted route without reclassification and click admission stays once`() {
+        val admitted = PrimaryCtaRoute(
+            tappedUrl = "https://advertiser.example/original",
+            externalTarget = "resolved-route://opaque",
+            externalTargetIsTracker = false,
+        )
+        assertSame(admitted, rewardedVideoCtaExecutionRoute(admitted))
+        assertEquals(
+            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick,
+            CreativeCtaRouter.primaryCtaTapPlan(
+                tappedUrl = admitted.externalTarget,
+                creativeBaseUrl = null,
+                trackingUrl = null,
+                destination = "appstore",
+            ),
+        )
+
+        val gate = ClickInteractionGate(clockMs = { 1L }, idFactory = { "video-click" })
+        val claim = gate.claim(ClickSources.PRIMARY_CTA)
+        assertNull(gate.claim(ClickSources.PRIMARY_CTA))
+        assertEquals("video-click", claim?.interaction?.id)
+    }
+
     @Test
     fun `zero gate reward waits for usable creative bridge`() {
         assertEquals(false, initialRewardEarned(false, accumulatedPlayTimeMs = 0L, gateSeconds = 0))
@@ -20,23 +104,99 @@ class RewardedNavigationPolicyTest {
     }
 
     @Test
-    fun `terminal creative failure fails open only after rewarded creative becomes visible`() {
+    fun `playable failure fails open only after a visible commit and evidence survives recreation`() {
+        val presentation = RewardedPresentation(
+            creative = ad.simula.ad.sdk.model.Creative(),
+            impressionId = "serve",
+            apiKey = "key",
+            callbacks = NoOpRewardedCallbacks,
+        )
         assertEquals(
             false,
-            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = false, retained = false),
+            rewardEarnedAfterCreativeFailure(
+                isVideo = false,
+                everCreativeReady = presentation.everCreativeReady,
+                candidate = false,
+                retained = false,
+            ),
+        )
+        presentation.everCreativeReady = true
+        val recreated = presentation
+        assertEquals(
+            true,
+            rewardEarnedAfterCreativeFailure(
+                isVideo = false,
+                everCreativeReady = recreated.everCreativeReady,
+                candidate = false,
+                retained = false,
+            ),
         )
         assertEquals(
             true,
-            rewardEarnedAfterCreativeFailure(everCreativeReady = true, candidate = false, retained = false),
+            rewardEarnedAfterCreativeFailure(
+                isVideo = false,
+                everCreativeReady = false,
+                candidate = true,
+                retained = false,
+            ),
         )
         assertEquals(
             true,
-            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = true, retained = false),
+            rewardEarnedAfterCreativeFailure(
+                isVideo = false,
+                everCreativeReady = false,
+                candidate = false,
+                retained = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `video failure preserves only rewards already earned by playback`() {
+        assertEquals(
+            false,
+            rewardEarnedAfterCreativeFailure(
+                isVideo = true,
+                everCreativeReady = true,
+                candidate = false,
+                retained = false,
+            ),
         )
         assertEquals(
             true,
-            rewardEarnedAfterCreativeFailure(everCreativeReady = false, candidate = false, retained = true),
+            rewardEarnedAfterCreativeFailure(
+                isVideo = true,
+                everCreativeReady = true,
+                candidate = true,
+                retained = false,
+            ),
         )
+        assertEquals(
+            true,
+            rewardEarnedAfterCreativeFailure(
+                isVideo = true,
+                everCreativeReady = true,
+                candidate = false,
+                retained = true,
+            ),
+        )
+    }
+
+    private object NoOpRewardedCallbacks : RewardedCallbacks {
+        override fun onDisplayed() = Unit
+        override fun onImpression() = Unit
+        override fun onPaid(adValue: ad.simula.ad.sdk.model.AdValue) = Unit
+        override fun persistClick(
+            interaction: ad.simula.ad.sdk.network.ClickInteraction,
+            onTelemetryPersisted: () -> Unit,
+        ) = onTelemetryPersisted()
+        override fun notifyClicked() = Unit
+        override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
+        override fun onRewardCompleted(
+            earned: Boolean,
+            elapsedPlayTimeSeconds: Double,
+            completionReason: RewardCompletionReason?,
+        ) = Unit
     }
 
     @Test

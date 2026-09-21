@@ -15,10 +15,14 @@ import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
+import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.videoCloseGateMs
+import ad.simula.ad.sdk.model.retainVideoMaxPosition
+import ad.simula.ad.sdk.model.videoReachedMidpoint
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.ClickInteraction
@@ -79,6 +83,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -166,6 +171,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                 // reported when the primary creative closes; the Activity finishes after the fallback.
                 FallbackAdHost(
                     impressionId = p.ad.impressionId,
+                    adUnitId = p.ad.adUnitId,
                     presentationState = p.fallbackState,
                     onFullyClosed = ::finishAd,
                     autoStoreRedirect = p.ad.adBehavior?.autoStoreRedirect,
@@ -388,12 +394,6 @@ internal fun commitFullscreenImpression(
     runCatching(enqueueSeen)
 }
 
-/** True if the close gate's foreground dwell was already satisfied in a prior Activity instance
- * (config-change recreation), so the close should start enabled. Based on accumulated foreground
- * time so rotation can't reset the dwell. */
-private fun gateAlreadyElapsed(p: InterstitialPresentation, total: Duration): Boolean =
-    p.accumulatedGateTimeMs >= total.inWholeMilliseconds
-
 @Composable
 private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
@@ -406,6 +406,7 @@ private fun CreativeInterstitial(
 
     // Server-driven render config (null → render today's literal close button / store path).
     val behavior = ad.adBehavior
+    val isVideo = ad.creative?.type == CreativeType.VIDEO
     val treatment = behavior?.close?.treatment ?: CloseTreatment.HIDDEN
     // "Reward in X" vs "Close in X" copy for the reward_or_close_label treatment.
     val isRewardCopy = ad.adUnitType == AdUnitType.REWARDED
@@ -417,7 +418,12 @@ private fun CreativeInterstitial(
     // prior Activity instance (config-change recreation) also starts closable — anchored to
     // wall-clock so rotation can't reset the dwell or strand the user with close blocked.
     var closeEnabled by remember {
-        mutableStateOf(gateTotal <= Duration.ZERO || gateAlreadyElapsed(presentation, gateTotal))
+        val requiredMs = if (isVideo && presentation.videoDurationMs > 0L) {
+            videoCloseGateMs(behavior?.close?.delaySeconds ?: 0, presentation.videoDurationMs)
+        } else {
+            gateTotal.inWholeMilliseconds
+        }
+        mutableStateOf(requiredMs <= 0L || presentation.accumulatedGateTimeMs >= requiredMs)
     }
 
     // Countdown affordance state. `closeRemaining` drives the reward_or_close_label copy.
@@ -425,13 +431,28 @@ private fun CreativeInterstitial(
         mutableStateOf(ceil(gateTotal.toDouble(DurationUnit.SECONDS)).toInt().coerceAtLeast(0))
     }
     val closeProgress = remember { Animatable(0f) }
+    var videoCloseProgress by remember(presentation) {
+        val totalMs = videoCloseGateMs(behavior?.close?.delaySeconds ?: 0, presentation.videoDurationMs)
+        mutableFloatStateOf(
+            if (totalMs > 0L) (presentation.accumulatedGateTimeMs.toFloat() / totalMs).coerceIn(0f, 1f) else 1f,
+        )
+    }
+    val smoothVideoCloseProgress = smoothVideoProgress(videoCloseProgress)
 
     // Mid-ad store prompt (`store_prompt`) — an early install affordance revealed at the halfway
     // point to the close button and removed the instant the real close button appears (see
     // `!closeEnabled` at the render site). Revealed from the gate loop below so it tracks the same
     // foreground-only dwell; with no gate (immediate close) there is no pre-close window.
     val storePrompt = behavior?.storePrompt
-    var storePromptVisible by remember { mutableStateOf(false) }
+    var storePromptVisible by remember {
+        mutableStateOf(
+            isVideo && videoReachedMidpoint(
+                presentation.videoPositionMs,
+                presentation.videoDurationMs,
+            ),
+        )
+    }
+    var videoDurationMs by remember(presentation) { mutableStateOf(presentation.videoDurationMs) }
 
     // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE unlocks the close button immediately,
     // bypassing the close-delay gate.
@@ -571,7 +592,7 @@ private fun CreativeInterstitial(
         }
     }
 
-    if (gateTotal > Duration.ZERO) {
+    if (!isVideo && gateTotal > Duration.ZERO) {
         // Foreground-only close gate. Dwell accrues only while the Activity is RESUMED:
         // repeatOnLifecycle cancels the ticking loop when the app is backgrounded and restarts it on
         // return, so the close can't be unlocked by simply leaving the app for the gate duration. The
@@ -702,13 +723,154 @@ private fun CreativeInterstitial(
         }
     }
 
+    fun beginPrimaryCta(route: PrimaryCtaRoute): Boolean {
+        val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return false
+        if (Build.VERSION.SDK_INT >= 21) presentation.installBannerState.onPrimaryCtaAdmitted()
+        notifyPublisherClick { presentation.callbacks.notifyClicked() }
+        val interaction = claim.interaction
+        val routeStartedAtNanos = System.nanoTime()
+        coordinateDeferredClickPersistence(
+            mainHandler = clickHandoffHandler,
+            claim = claim,
+            enqueueBeacon = { completion ->
+                AdBeaconManager.enqueue(
+                    ad.impressionId,
+                    "click",
+                    adFormat = "interstitial",
+                    telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
+                    interactionId = interaction.id,
+                    clickSource = interaction.source,
+                    onPersistenceComplete = completion,
+                )
+            },
+            recordTelemetry = { completion -> presentation.callbacks.persistClick(interaction, completion) },
+            onHandoff = { committedInteraction, completion ->
+                prepareDeferredCtaRoute(
+                    prepare = {
+                        CreativeCtaRouter.preparePrimaryCta(
+                            route,
+                            ad.destination,
+                            ad.androidStoreUrl,
+                            routeStartedAtNanos,
+                        )
+                    },
+                    requestRoute = presentation::routeClick,
+                    completion = completion,
+                    open = { routeActivity, prepared ->
+                        if (!canRouteFromCurrentFullscreenActivity(
+                                isFinishing = routeActivity.isFinishing,
+                                isDestroyed = routeActivity.isDestroyed,
+                            )
+                        ) return@prepareDeferredCtaRoute false
+                        val outcome = CreativeCtaRouter.launchPrepared(routeActivity, prepared)
+                        val opened = outcome != AutomaticNavigationOutcome.FAILED &&
+                            outcome != AutomaticNavigationOutcome.HANDLED
+                        if (opened) {
+                            presentation.primaryCtaNavigation.lockAfterExternalOpen()
+                            presentation.autoRedirectCoordinator.recordUserRouteOpened()
+                            if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                                routeActivity.recordClickStoreOpen(committedInteraction.source)
+                            }
+                        } else {
+                            CreativeCtaRouter.admittedInWebViewFallback(
+                                route.tappedUrl,
+                                ad.trackingUrl,
+                            )?.let { presentation.openPrimaryFallback(it, routeActivity) }
+                        }
+                        opened
+                    },
+                )
+            },
+            onCreated = { handoff ->
+                presentation.trackClickHandoff(handoff)
+                clickHandoffPending = true
+            },
+            onFinished = { handoff ->
+                presentation.clearClickHandoff(handoff)
+                clickHandoffPending = presentation.pendingClickHandoff() != null
+            },
+        )
+        return true
+    }
+
+    fun beginVideoCta() {
+        val route = videoCtaRoute(ad.trackingUrl, ad.androidStoreUrl, ad.destination) ?: return
+        beginPrimaryCta(route)
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        // Interstitial is rendered_html-only; iframe_url is intentionally unsupported.
-        if (html != null && !bridgeUnavailable) {
+        if (isVideo && !bridgeUnavailable) {
+            ad.creative?.url?.let { videoUrl ->
+                FullscreenVideo(
+                    url = videoUrl,
+                    posterUrl = ad.creative.posterUrl,
+                    adFormat = "interstitial",
+                    adUnitId = ad.adUnitId,
+                    adId = ad.impressionId.takeIf { it.isNotBlank() },
+                    serveId = ad.impressionId.takeIf { it.isNotBlank() },
+                    configuredGateSeconds = behavior?.close?.delaySeconds ?: 0,
+                    initialPlayedMs = presentation.accumulatedGateTimeMs,
+                    ctaEnabled = videoCtaRoute(ad.trackingUrl, ad.androidStoreUrl, ad.destination) != null,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
+                    onReady = { durationMs ->
+                        videoDurationMs = durationMs
+                        presentation.videoDurationMs = durationMs
+                        val totalMs = videoCloseGateMs(behavior?.close?.delaySeconds ?: 0, durationMs)
+                        closeEnabled = presentation.accumulatedGateTimeMs >= totalMs
+                        displayAdmitted = admitFullscreenDisplay(
+                            alreadyReported = presentation.displayedReported,
+                            markReported = { presentation.displayedReported = true },
+                            notifyDisplayed = presentation.callbacks::onDisplayed,
+                            enqueueShown = {
+                                AdBeaconManager.enqueue(
+                                    ad.impressionId,
+                                    "shown",
+                                    adFormat = "interstitial",
+                                    telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
+                                )
+                            },
+                        )
+                        bridgeReady = true
+                    },
+                    onProgress = { positionMs, durationMs, advancedMs ->
+                        videoDurationMs = durationMs
+                        presentation.videoDurationMs = durationMs
+                        presentation.videoPositionMs = retainVideoMaxPosition(
+                            presentation.videoPositionMs,
+                            positionMs,
+                        )
+                        val totalMs = videoCloseGateMs(behavior?.close?.delaySeconds ?: 0, durationMs)
+                        presentation.accumulatedGateTimeMs =
+                            (presentation.accumulatedGateTimeMs + advancedMs).coerceAtMost(totalMs)
+                        val accumulated = presentation.accumulatedGateTimeMs
+                        closeRemaining = ceil((totalMs - accumulated).coerceAtLeast(0L) / 1000.0).toInt()
+                        videoCloseProgress = if (totalMs > 0L) {
+                            (accumulated.toFloat() / totalMs).coerceIn(0f, 1f)
+                        } else 1f
+                        if (accumulated >= totalMs) closeEnabled = true
+                        if (videoReachedMidpoint(presentation.videoPositionMs, durationMs)) {
+                            storePromptVisible = true
+                        }
+                    },
+                    onCompleted = {
+                        presentation.accumulatedGateTimeMs = videoCloseGateMs(
+                            behavior?.close?.delaySeconds ?: 0,
+                            videoDurationMs,
+                        )
+                        closeRemaining = 0
+                        closeEnabled = true
+                    },
+                    onError = ::markBridgeUnavailable,
+                    onCta = ::beginVideoCta,
+                )
+            }
+        } else if (html != null && !bridgeUnavailable) {
             CreativeHtml(
                 html = html,
                 bridge = bridge,
@@ -735,82 +897,7 @@ private fun CreativeInterstitial(
                     routeAutomaticCta()
                 },
                 onAutomaticNavigationReady = ::routeAutomaticCta,
-                onPrimaryCta = primaryCta@{ route ->
-                    val claim = presentation.claimClick(ClickSources.PRIMARY_CTA)
-                        ?: return@primaryCta false
-                    if (Build.VERSION.SDK_INT >= 21) {
-                        presentation.installBannerState.onPrimaryCtaAdmitted()
-                    }
-                    notifyPublisherClick { presentation.callbacks.notifyClicked() }
-                    val interaction = claim.interaction
-                    val routeStartedAtNanos = System.nanoTime()
-                    coordinateDeferredClickPersistence(
-                        mainHandler = clickHandoffHandler,
-                        claim = claim,
-                        enqueueBeacon = { completion ->
-                            AdBeaconManager.enqueue(
-                                ad.impressionId,
-                                "click",
-                                adFormat = "interstitial",
-                                telemetryServeId = ad.impressionId.takeIf { it.isNotBlank() },
-                                interactionId = interaction.id,
-                                clickSource = interaction.source,
-                                onPersistenceComplete = completion,
-                            )
-                        },
-                        recordTelemetry = { completion ->
-                            presentation.callbacks.persistClick(interaction, completion)
-                        },
-                        onHandoff = { committedInteraction, completion ->
-                            prepareDeferredCtaRoute(
-                                prepare = {
-                                    CreativeCtaRouter.preparePrimaryCta(
-                                        route,
-                                        ad.destination,
-                                        ad.androidStoreUrl,
-                                        routeStartedAtNanos,
-                                    )
-                                },
-                                requestRoute = presentation::routeClick,
-                                completion = completion,
-                                open = { routeActivity, prepared ->
-                                    if (!canRouteFromCurrentFullscreenActivity(
-                                            isFinishing = routeActivity.isFinishing,
-                                            isDestroyed = routeActivity.isDestroyed,
-                                        )
-                                    ) return@prepareDeferredCtaRoute false
-                                    val outcome = CreativeCtaRouter.launchPrepared(routeActivity, prepared)
-                                    val opened = outcome != AutomaticNavigationOutcome.FAILED &&
-                                        outcome != AutomaticNavigationOutcome.HANDLED
-                                    if (opened) {
-                                        presentation.primaryCtaNavigation.lockAfterExternalOpen()
-                                        presentation.autoRedirectCoordinator.recordUserRouteOpened()
-                                        if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
-                                            routeActivity.recordClickStoreOpen(committedInteraction.source)
-                                        }
-                                    } else {
-                                        CreativeCtaRouter.admittedInWebViewFallback(
-                                            route.tappedUrl,
-                                            ad.trackingUrl,
-                                        )?.let {
-                                            presentation.openPrimaryFallback(it, routeActivity)
-                                        }
-                                    }
-                                    opened
-                                },
-                            )
-                        },
-                        onCreated = { handoff ->
-                            presentation.trackClickHandoff(handoff)
-                            clickHandoffPending = true
-                        },
-                        onFinished = { handoff ->
-                            presentation.clearClickHandoff(handoff)
-                            clickHandoffPending = presentation.pendingClickHandoff() != null
-                        },
-                    )
-                    true
-                },
+                onPrimaryCta = ::beginPrimaryCta,
                 // Same config as the rewarded minigame WebView: fill the screen, inset only
                 // vertically (top notch / status, bottom nav) and draw under any horizontal cutout.
                 modifier = Modifier
@@ -832,7 +919,7 @@ private fun CreativeInterstitial(
             isRewardCopy = isRewardCopy,
             enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending),
             remaining = closeRemaining,
-            progress = closeProgress.value,
+            progress = if (isVideo) smoothVideoCloseProgress else closeProgress.value,
             onClose = {
                 if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending)) {
                     presentation.automaticNavigationGate.clear()

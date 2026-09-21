@@ -9,6 +9,7 @@ import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.DEFAULT_FALLBACK_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
@@ -26,6 +27,8 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.descriptors.SerialDescriptor
@@ -33,11 +36,13 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 
@@ -70,6 +75,26 @@ internal object LenientNullableStringSerializer : KSerializer<String?> {
     @OptIn(ExperimentalSerializationApi::class)
     override fun serialize(encoder: Encoder, value: String?) {
         if (value == null) encoder.encodeNull() else encoder.encodeString(value)
+    }
+}
+
+internal object LenientNullableExperimentSerializer : KSerializer<ApiExperiment?> {
+    override val descriptor: SerialDescriptor = ApiExperiment.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): ApiExperiment? {
+        val jsonDecoder = decoder as? JsonDecoder
+            ?: return runCatching { decoder.decodeSerializableValue(ApiExperiment.serializer()) }.getOrNull()
+        val element = jsonDecoder.decodeJsonElement()
+        if (element !is JsonObject) return null
+        return runCatching {
+            jsonDecoder.json.decodeFromJsonElement(ApiExperiment.serializer(), element)
+        }.getOrNull()
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    override fun serialize(encoder: Encoder, value: ApiExperiment?) {
+        if (value == null) encoder.encodeNull()
+        else encoder.encodeSerializableValue(ApiExperiment.serializer(), value)
     }
 }
 
@@ -166,6 +191,7 @@ internal data class FallbackAdsApiResponse(
     @SerialName("native_click_beacon_v1_enabled")
     @Serializable(with = LenientNullableBooleanSerializer::class)
     val nativeClickBeaconV1Enabled: Boolean? = null,
+    @Serializable(with = LossyFallbackAdBodiesSerializer::class)
     val ads: List<FallbackAdBody> = emptyList(),
 )
 
@@ -176,11 +202,77 @@ internal data class FallbackAdBody(
     @SerialName("native_click_beacon_v1_enabled")
     @Serializable(with = LenientNullableBooleanSerializer::class)
     val nativeClickBeaconV1Enabled: Boolean? = null,
+    val type: String? = null,
+    @SerialName("rendered_html") val renderedHtml: String? = null,
+    // Shipped fallback payloads used `html`; keep decode-only compatibility while preferring rendered_html.
     val html: String? = null,
-    @SerialName("iframe_url") val iframeUrl: String? = null,
-    // Kept as raw JSON so a malformed fallback-only behavior block cannot drop the response.
+    val url: String? = null,
+    @SerialName("poster_url") val posterUrl: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val destination: String? = null,
+    @SerialName("tracking_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val trackingUrl: String? = null,
+    @SerialName("android_store_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val androidStoreUrl: String? = null,
+    @SerialName("ios_store_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val iosStoreUrl: String? = null,
+    // Keep fallback behavior raw so malformed or partial close config cannot drop the screen.
     @SerialName("ad_behavior") val adBehavior: JsonElement? = null,
+    @Transient val sourceIndex: Int = -1,
+    @Transient val routingFieldsPresent: Boolean = listOf(
+        trackingUrl,
+        androidStoreUrl,
+    ).any { !it.isNullOrBlank() },
 )
+
+internal object LossyFallbackAdBodiesSerializer : KSerializer<List<FallbackAdBody>> {
+    private val delegate = ListSerializer(FallbackAdBody.serializer())
+    override val descriptor: SerialDescriptor = delegate.descriptor
+
+    override fun deserialize(decoder: Decoder): List<FallbackAdBody> {
+        val jsonDecoder = decoder as? JsonDecoder
+        if (jsonDecoder == null) {
+            return decoder.decodeSerializableValue(delegate).mapIndexed { index, item ->
+                item.copy(sourceIndex = index)
+            }
+        }
+        val array = jsonDecoder.decodeJsonElement() as? JsonArray ?: return emptyList()
+        return array.mapIndexedNotNull { index, element ->
+            runCatching {
+                val body = jsonDecoder.json.decodeFromJsonElement(FallbackAdBody.serializer(), element)
+                body.copy(
+                    sourceIndex = index,
+                    routingFieldsPresent = (element as? JsonObject)?.hasPresentRoutingField() == true,
+                )
+            }.getOrNull()
+        }
+    }
+
+    override fun serialize(encoder: Encoder, value: List<FallbackAdBody>) {
+        val jsonEncoder = encoder as? JsonEncoder
+        if (jsonEncoder == null) {
+            encoder.encodeSerializableValue(delegate, value)
+            return
+        }
+        jsonEncoder.encodeJsonElement(
+            JsonArray(value.map { jsonEncoder.json.encodeToJsonElement(FallbackAdBody.serializer(), it) }),
+        )
+    }
+}
+
+private fun JsonObject.hasPresentRoutingField(): Boolean = listOf(
+    "tracking_url",
+    "android_store_url",
+).any { key ->
+    when (val value = this[key]) {
+        null, JsonNull -> false
+        is JsonPrimitive -> !value.isString || !value.content.isBlank()
+        else -> true
+    }
+}
 
 @Serializable
 internal data class MenuGameClickBody(
@@ -235,6 +327,7 @@ internal data class AdLoadApiResponse(
     // Null when the payload omits `ad_behavior` — the renderer falls back to today's defaults.
     @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
     val creative: ApiCreative? = null,
+    @Serializable(with = LenientNullableExperimentSerializer::class)
     val experiment: ApiExperiment? = null,
 )
 
@@ -248,6 +341,7 @@ internal data class ApiDeviceCapabilities(
     @SerialName("install_referrer_available") val installReferrerAvailable: Boolean = false,
     // Declares SDK support only. The fallback response separately grants native beacon ownership.
     @SerialName("native_click_beacon_v1") val nativeClickBeaconV1: Boolean = true,
+    @SerialName("video_v1") val videoV1: Boolean = false,
 )
 
 /** Reads the running device's capabilities (Android framework). Called from the ad path only —
@@ -259,6 +353,7 @@ internal fun currentDeviceCapabilities(): ApiDeviceCapabilities = ApiDeviceCapab
     playServicesAvailable = android.os.Build.VERSION.SDK_INT >= 21,
     installReferrerAvailable = android.os.Build.VERSION.SDK_INT >= 21,
     nativeClickBeaconV1 = true,
+    videoV1 = true,
 )
 
 // ── Ad behavior (server-driven A/B render config) ─────────────────────────────
@@ -288,8 +383,10 @@ internal data class ApiCloseBehavior(
 
 @Serializable
 internal data class ApiCreative(
-    val type: String = "",
+    val type: String? = null,
     @SerialName("bundle_url") val bundleUrl: String? = null,
+    val url: String? = null,
+    @SerialName("poster_url") val posterUrl: String? = null,
     @SerialName("ad_unit_type") val adUnitType: String? = null,
 )
 
@@ -370,12 +467,19 @@ internal fun fallbackCloseBehavior(adBehavior: JsonElement?): CloseBehavior {
         treatment = fallbackCloseTreatment(stringValue("treatment")),
         position = ClosePosition.from(stringValue("position")),
         action = CloseAction.from(stringValue("action")),
+        progressBarColor = validatedHexColor(stringValue("progress_bar_color")),
     )
 }
 
 internal fun ApiCreative?.toDomain(): Creative? {
     if (this == null) return null
-    return Creative(type = type, bundleUrl = bundleUrl, adUnitType = AdUnitType.from(adUnitType))
+    return Creative(
+        type = CreativeType.from(type),
+        bundleUrl = bundleUrl,
+        url = url,
+        posterUrl = posterUrl,
+        adUnitType = AdUnitType.from(adUnitType),
+    )
 }
 
 internal fun ApiExperiment?.toDomain(): Experiment? {
@@ -443,17 +547,19 @@ internal data class RewardedInitRequestBody(
     // full-screen formats target the same way native does.
     val context: NativeContextBody? = null,
     val metadata: Map<String, String>? = null,
+    val capabilities: ApiDeviceCapabilities = ApiDeviceCapabilities(),
 )
 
 @Serializable
 internal data class RewardedInitApiResponse(
     // The impression (minigame serve) id — replaces the old `serve_id`/`ad_id` pair as the
     // single handle for verify-reward, fallbacks, tracking and reporting.
-    @SerialName("impression_id") val impressionId: String = "",
-    @SerialName("iframe_url") val iframeUrl: String = "",
-    // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty (parity with the
-    // interstitial), so the playable fills the surface the same way.
-    @SerialName("rendered_html") val renderedHtml: String = "",
+    @SerialName("impression_id") val impressionId: String? = null,
+    // Playables are rendered from server HTML; video assets are described by creative.url.
+    @SerialName("rendered_html") val renderedHtml: String? = null,
+    val creative: ApiCreative? = null,
+    @Serializable(with = LenientNullableExperimentSerializer::class)
+    val experiment: ApiExperiment? = null,
     val destination: String = "appstore",
     @SerialName("tracking_url") val trackingUrl: String? = null,
     // Raw, unwrapped Play Store link — see [AdLoadApiResponse.androidStoreUrl].
@@ -474,6 +580,7 @@ internal data class VerifyRewardRequestBody(
     // Sent alongside serve_id so the SSV reward callback can resolve/validate the ad unit off the
     // body. Default "" keeps existing callers + already-persisted queue entries decoding cleanly.
     @SerialName("ad_unit_id") val adUnitId: String = "",
+    @SerialName("completion_reason") val completionReason: String? = null,
 )
 
 @Serializable
@@ -530,7 +637,7 @@ internal data class NativeContextBody(
 )
 
 /** Response for `POST /load/native` (backend `CaiNativeResponse`). A flat envelope mirroring the
- * imperative [AdLoadApiResponse]: the creative (`iframe_url` + `rendered_html`) and the click-through
+ * imperative [AdLoadApiResponse]: the creative (`rendered_html`) and the click-through
  * params (`destination`, `tracking_url`) sit at the top level (the creative was previously nested
  * under a camelCase `adResponse`). Every field defaults to its empty/no-fill value, so a `{}` or
  * partial payload decodes safely. */
@@ -539,8 +646,7 @@ internal data class NativeAdApiResponse(
     @SerialName("impression_id") val impressionId: String? = null,
     @SerialName("ad_inserted") val adInserted: Boolean = false,
     @SerialName("ad_format") val adFormat: String = "",
-    // The mountable creative — now top-level (was nested under `adResponse`); both null on a no-fill.
-    @SerialName("iframe_url") val iframeUrl: String? = null,
+    // The mountable server-rendered creative; null on a no-fill.
     @SerialName("rendered_html") val renderedHtml: String? = null,
     // Click-through routing (mirrors [AdLoadApiResponse]): `destination` is where a CTA tap goes
     // ("appstore" | "web") and `tracking_url` is the MMP click tracker the SDK routes

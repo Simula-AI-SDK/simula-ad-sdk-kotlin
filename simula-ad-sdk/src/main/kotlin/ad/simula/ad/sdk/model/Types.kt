@@ -4,6 +4,8 @@ import ad.simula.ad.sdk.privacy.ConsentSnapshot
 import ad.simula.ad.sdk.privacy.SimulaPrivacyConfig
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import java.net.URI
+import kotlin.math.ceil
 
 // ── Core Types ──────────────────────────────────────────────────────────────
 
@@ -15,7 +17,6 @@ data class Message(
 internal data class AdData(
     val id: String,
     val format: String,
-    val iframeUrl: String? = null,
     val html: String? = null,
 )
 
@@ -168,11 +169,10 @@ data class CharacterSelectorTheme(
 /** Lowercases and normalizes hyphens to underscores so the tolerant enum factories accept
  * either wire spelling (`circular-progress` ≡ `circular_progress`). */
 private fun normalizeBehaviorToken(raw: String?): String =
-    (raw ?: "").lowercase().replace("-", "_")
+    (raw ?: "").trim().lowercase().replace("-", "_")
 
-/** Hard cap on the server-driven close delay. The close button — and the system Back button,
- * which is blocked while the gate is active — stays locked until the delay elapses, so an
- * out-of-range value would otherwise trap the user. Kept at the cross-platform spec maximum. */
+/** Hard cap on the server-driven close delay. The close button and system Back stay locked until
+ * the delay elapses, so malformed or oversized values must remain bounded. */
 internal const val MAX_CLOSE_DELAY_SECONDS = 60
 
 internal const val DEFAULT_FALLBACK_CLOSE_DELAY_SECONDS = 5
@@ -340,12 +340,73 @@ internal data class CloseBehavior(
     val progressBarColor: String = "#FFFFFF",
 )
 
+/** Canonical creative kind. Missing and future wire values remain playable for forward compatibility. */
+internal enum class CreativeType {
+    PLAYABLE, VIDEO;
+
+    companion object {
+        fun from(raw: String?): CreativeType = when (normalizeBehaviorToken(raw)) {
+            "video" -> VIDEO
+            else -> PLAYABLE
+        }
+    }
+}
+
+internal enum class RewardCompletionReason(val wire: String) {
+    DURATION_ELAPSED("duration_elapsed"),
+    VIDEO_COMPLETED("video_completed"),
+    CREATIVE_COMPLETED("creative_completed");
+
+    companion object {
+        fun fromWire(value: String?): RewardCompletionReason? = entries.firstOrNull { it.wire == value }
+    }
+}
+
+internal fun monotonicRewardCompletionReason(
+    current: RewardCompletionReason?,
+    candidate: RewardCompletionReason,
+): RewardCompletionReason = current ?: candidate
+
 /** The creative descriptor (`creative` node). `adUnitType` drives format-aware close copy. */
 internal data class Creative(
-    val type: String = "",
+    val type: CreativeType = CreativeType.PLAYABLE,
     val bundleUrl: String? = null,
+    val url: String? = null,
+    val posterUrl: String? = null,
     val adUnitType: AdUnitType = AdUnitType.INTERSTITIAL,
 )
+
+/** Accept only network video assets. Invalid or opaque values are rejected before MediaPlayer sees them. */
+internal fun admittedVideoUrl(raw: String?): String? {
+    val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val uri = runCatching { URI(value) }.getOrNull() ?: return null
+    val networkScheme = uri.scheme.equals("http", true) || uri.scheme.equals("https", true)
+    return value.takeIf { networkScheme && !uri.host.isNullOrBlank() }
+}
+
+internal fun Creative.isRenderable(renderedHtml: String?): Boolean = when (type) {
+    CreativeType.PLAYABLE -> !renderedHtml.isNullOrBlank()
+    CreativeType.VIDEO -> admittedVideoUrl(url) != null
+}
+
+/** Video close gates cannot outlive the asset. Unknown duration keeps the configured bounded delay. */
+internal fun videoCloseGateMs(delaySeconds: Int, durationMs: Long): Long {
+    val configured = delaySeconds.coerceIn(0, MAX_CLOSE_DELAY_SECONDS) * 1_000L
+    return if (durationMs > 0L) minOf(configured, durationMs) else configured
+}
+
+/** Reward and close use the same bounded gate. Unknown duration keeps the configured delay. */
+internal fun rewardedVideoDurationGateReached(
+    accumulatedPlayTimeMs: Long,
+    configuredDelaySeconds: Int,
+    durationMs: Long,
+): Boolean {
+    val thresholdMs = videoCloseGateMs(configuredDelaySeconds, durationMs)
+    return accumulatedPlayTimeMs.coerceAtLeast(0L) >= thresholdMs
+}
+
+internal fun closeGateSecondsLeft(elapsedMs: Long, requiredMs: Long): Int =
+    ceil((requiredMs - elapsedMs).coerceAtLeast(0L) / 1000.0).toInt()
 
 /** Experiment-assignment metadata (`experiment` node), carried for telemetry only. */
 internal data class Experiment(
