@@ -23,6 +23,7 @@ import ad.simula.ad.sdk.model.videoCtaInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteActionLabel
 import ad.simula.ad.sdk.model.videoMuteControlVisible
+import ad.simula.ad.sdk.model.videoDesiredMutedAfterTap
 import ad.simula.ad.sdk.model.videoPreparationClaimPolicy
 import ad.simula.ad.sdk.model.videoReadinessTimeoutCode
 import ad.simula.ad.sdk.model.videoMediaErrorCode
@@ -779,7 +780,17 @@ private class NativeVideoController(
                             healthyProgress = healthyProgress,
                         )
                     ) {
-                        fail(VideoFailureCode.PLAYBACK_TIMEOUT)
+                        if (nearEndCompletion.onPlaybackTimeout(
+                                durationMs = progress.durationMs,
+                                positionMs = progress.sample.positionMs,
+                                firstFrameRendered = firstFrameRendered,
+                                playerActive = player != null && lifecycleActive && !released && !failed,
+                            )
+                        ) {
+                            completePlayback(renderToken)
+                        } else {
+                            fail(VideoFailureCode.PLAYBACK_TIMEOUT)
+                        }
                         return@continueAfterVideoPositionPoll false
                     }
                     if (nearEndCompletion.observe(
@@ -959,7 +970,7 @@ private class NativeVideoController(
 
     fun toggleMuted() {
         if (!videoMuteInteractionAllowed(firstFrameRendered, playerActive = !released && !failed)) return
-        desiredMuted = !desiredMuted
+        desiredMuted = videoDesiredMutedAfterTap(effectiveMuted)
         onDesiredMutedChanged(desiredMuted)
         if (desiredMuted) {
             applyEffectiveMuted(true)

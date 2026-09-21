@@ -14,6 +14,7 @@ import ad.simula.ad.sdk.model.storePromptHalfGateReached
 import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.model.videoStorePromptReached
 import ad.simula.ad.sdk.model.effectiveVideoMuted
+import ad.simula.ad.sdk.model.videoDesiredMutedAfterTap
 import ad.simula.ad.sdk.network.SimulaApiClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -158,6 +159,19 @@ class VideoPlanV2PolicyTest {
         assertTrue(effectiveVideoMuted(desiredMuted = false, audioFocusHeld = false))
         assertFalse(effectiveVideoMuted(desiredMuted = false, audioFocusHeld = true))
         assertTrue(effectiveVideoMuted(desiredMuted = true, audioFocusHeld = true))
+    }
+
+    @Test
+    fun `focus denial mute tap retries unmute without storing mute`() {
+        val audio = VideoAudioSessionState(videoPlanV2 = true)
+        val effectiveMuted = effectiveVideoMuted(audio.desiredMuted, audioFocusHeld = false)
+
+        assertTrue(effectiveMuted)
+        audio.updateFromTap(videoDesiredMutedAfterTap(effectiveMuted))
+
+        assertFalse(audio.desiredMuted)
+        assertTrue(effectiveVideoMuted(audio.desiredMuted, audioFocusHeld = false))
+        assertFalse(effectiveVideoMuted(audio.desiredMuted, audioFocusHeld = true))
     }
 
     @Test

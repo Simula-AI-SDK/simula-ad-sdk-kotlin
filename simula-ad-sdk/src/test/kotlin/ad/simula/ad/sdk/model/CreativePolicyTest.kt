@@ -50,6 +50,25 @@ class CreativePolicyTest {
     }
 
     @Test
+    fun `v2 stall expiry completes stable near end and fails away from end`() {
+        val nearEnd = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        val nearEndBudget = VideoStallBudget(1_000L)
+        assertFalse(nearEnd.observe(10_000L, 9_700L, true, true, isPlaying = true))
+        assertFalse(nearEnd.observe(10_000L, 9_900L, true, true, isPlaying = true))
+        assertFalse(nearEndBudget.observe(0L, eligible = true, healthyProgress = false))
+        assertTrue(nearEndBudget.observe(1_000L, eligible = true, healthyProgress = false))
+        assertTrue(nearEnd.onPlaybackTimeout(10_000L, 9_900L, true, true))
+
+        val notNearEnd = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        val stalledBudget = VideoStallBudget(1_000L)
+        assertFalse(notNearEnd.observe(10_000L, 5_000L, true, true, isPlaying = true))
+        assertFalse(notNearEnd.observe(10_000L, 5_000L, true, true, isPlaying = false))
+        assertFalse(stalledBudget.observe(0L, eligible = true, healthyProgress = false))
+        assertTrue(stalledBudget.observe(1_000L, eligible = true, healthyProgress = false))
+        assertFalse(notNearEnd.onPlaybackTimeout(10_000L, 5_000L, true, true))
+    }
+
+    @Test
     fun `duration change backward position and lifecycle pause reject terminal inference`() {
         val durationMismatch = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
         assertFalse(durationMismatch.observe(10_000L, 9_700L, true, true, isPlaying = true))

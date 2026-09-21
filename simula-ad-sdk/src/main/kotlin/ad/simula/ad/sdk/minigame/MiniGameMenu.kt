@@ -58,6 +58,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -98,6 +99,7 @@ import ad.simula.ad.sdk.ads.nextFallbackVideoUrl
 import ad.simula.ad.sdk.ads.nextVideoPlanV2Url
 import ad.simula.ad.sdk.ads.VideoPlanPresentationState
 import ad.simula.ad.sdk.ads.VideoPlanOverlayClockEffect
+import ad.simula.ad.sdk.ads.StoreExitTracker
 import ad.simula.ad.sdk.ads.smoothVideoProgress
 import ad.simula.ad.sdk.ads.FallbackHtmlFailureAction
 import ad.simula.ad.sdk.ads.fallbackHtmlFailureAction
@@ -127,9 +129,11 @@ import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.model.videoCloseGateMs
 import ad.simula.ad.sdk.model.VideoChromeStyle
+import ad.simula.ad.sdk.model.VideoSequenceAdvance
 import ad.simula.ad.sdk.model.RenderAttemptGate
 import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.resolveFallbackCloseAction
+import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.ClickInteractionGate
@@ -165,6 +169,22 @@ internal fun <T : Any> unwrapNestedHost(
 }
 
 internal fun fallbackRouteRequiresDeferredPreparation(isVideo: Boolean): Boolean = isVideo
+
+internal fun miniGameVideoAutoAdvanceReady(
+    videoPlanV2: Boolean,
+    currentType: CreativeType,
+    terminal: Boolean,
+    clickHandoffPending: Boolean,
+    storeVisitPending: Boolean,
+    lifecycleResumed: Boolean,
+    framePresented: Boolean,
+): Boolean = lifecycleResumed && framePresented && videoSequenceAdvance(
+    videoPlanV2 = videoPlanV2,
+    currentType = currentType,
+    terminal = terminal,
+    clickHandoffPending = clickHandoffPending,
+    storeVisitPending = storeVisitPending,
+) == VideoSequenceAdvance.ADVANCE
 
 internal fun findActivity(context: Context?): Activity? = unwrapNestedHost(
     start = context,
@@ -203,6 +223,7 @@ fun MiniGameMenu(
     if (simulaContext.apiKey.isBlank()) return
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val configuration = LocalConfiguration.current
     val preloadedCatalog = LocalPreloadedCatalog.current
 
@@ -222,6 +243,29 @@ fun MiniGameMenu(
     var lastGameWasBottomSheet by remember { mutableStateOf(false) }
     val fallbackCloseGates = remember(currentServeId) { FallbackCloseGateState() }
     val fallbackVideoPlan = remember(currentServeId) { VideoPlanPresentationState(videoPlanV2 = false) }
+    val fallbackStoreExit = remember(currentServeId) {
+        StoreExitTracker(
+            adId = currentServeId,
+            adFormat = "interstitial",
+        )
+    }
+    DisposableEffect(lifecycleOwner, fallbackStoreExit) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> fallbackStoreExit.onResume()
+                Lifecycle.Event.ON_PAUSE -> fallbackStoreExit.onPause()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            fallbackStoreExit.onResume()
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            fallbackStoreExit.onAdClosed()
+        }
+    }
 
     // The fallback screen currently on display; null when the overlay is closed.
     val currentFallbackAd = fallbackAds.getOrNull(fallbackAdIndex)
@@ -338,6 +382,7 @@ fun MiniGameMenu(
                 ?.let { fallbackVideoPlan.nextStepReady() }
         } else {
             fallbackVideoPlan.closePendingHandoff("next_step_failed")
+            fallbackStoreExit.onAdClosed()
             fallbackAds = emptyList()
             fallbackAdIndex = 0
         }
@@ -745,6 +790,7 @@ fun MiniGameMenu(
                         fallbackIndex = fallbackAdIndex,
                         closeGateState = fallbackCloseGates,
                         videoPlan = fallbackVideoPlan,
+                        storeExit = fallbackStoreExit,
                     )
                 }
             }
@@ -838,6 +884,7 @@ private fun MiniGameFallbackOverlay(
     fallbackIndex: Int,
     closeGateState: FallbackCloseGateState,
     videoPlan: VideoPlanPresentationState,
+    storeExit: StoreExitTracker,
 ) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -872,6 +919,7 @@ private fun MiniGameFallbackOverlay(
     var renderProcessGone by remember(ad.sourceIndex) { mutableStateOf(false) }
     val renderGate = remember(ad.sourceIndex) { RenderAttemptGate() }
     var clickHandoffPending by remember { mutableStateOf(false) }
+    val storeVisitPending = storeExit.hasPendingStoreVisit()
     var closeIssued by remember(ad.sourceIndex) { mutableStateOf(false) }
     var videoTerminal by remember(ad.sourceIndex) { mutableStateOf(false) }
     var adWebView by remember { mutableStateOf<WebView?>(null) }
@@ -889,7 +937,7 @@ private fun MiniGameFallbackOverlay(
             allowParentFallback = false,
         )
     }
-    VideoPlanOverlayClockEffect(videoPlan) { clickHandoffPending }
+    VideoPlanOverlayClockEffect(videoPlan) { clickHandoffPending || storeVisitPending }
 
     DisposableEffect(lifecycleOwner, hostActivity, clickOwner) {
         val activity = hostActivity
@@ -1031,6 +1079,9 @@ private fun MiniGameFallbackOverlay(
                         completion = completion,
                         open = { activity, prepared ->
                             val outcome = CreativeCtaRouter.launchPrepared(activity, prepared)
+                            if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                                storeExit.recordStoreOpen(interaction.source)
+                            }
                             outcome != AutomaticNavigationOutcome.FAILED &&
                                 outcome != AutomaticNavigationOutcome.HANDLED
                         },
@@ -1044,6 +1095,11 @@ private fun MiniGameFallbackOverlay(
                                 destination = destination,
                                 storeUrl = storeUrl,
                             )
+                            if (opened && (destination == "appstore" ||
+                                    CreativeCtaRouter.admittedDirectPlayStoreUrl(routePlan.externalTarget) != null)
+                            ) {
+                                storeExit.recordStoreOpen(interaction.source)
+                            }
                             if (!opened && retainWebViewFallback) {
                                 routePlan.tappedUrl?.let { fallbackUrl ->
                                     adWebView?.post {
@@ -1074,11 +1130,25 @@ private fun MiniGameFallbackOverlay(
         return true
     }
 
-    LaunchedEffect(adPageFailed, clickHandoffPending) {
-        if (adPageFailed && fallbackFailureAutoAdvances(ad.type) && !clickHandoffPending) closeOverlay()
+    LaunchedEffect(adPageFailed, clickHandoffPending, storeVisitPending) {
+        if (adPageFailed && fallbackFailureAutoAdvances(ad.type) &&
+            !clickHandoffPending && !storeVisitPending
+        ) closeOverlay()
     }
-    LaunchedEffect(videoTerminal, clickHandoffPending) {
-        if (videoTerminal && ad.isVideoPlanV2 && !clickHandoffPending) closeOverlay()
+    LaunchedEffect(videoTerminal, clickHandoffPending, storeVisitPending) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            withFrameNanos { }
+            if (miniGameVideoAutoAdvanceReady(
+                    videoPlanV2 = ad.isVideoPlanV2,
+                    currentType = ad.type,
+                    terminal = videoTerminal,
+                    clickHandoffPending = clickHandoffPending,
+                    storeVisitPending = storeVisitPending,
+                    lifecycleResumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+                    framePresented = true,
+                )
+            ) closeOverlay()
+        }
     }
     LaunchedEffect(isVideo, renderToken, adPageLoaded, adPageFailed) {
         val token = renderToken
@@ -1115,7 +1185,7 @@ private fun MiniGameFallbackOverlay(
     }
 
     BackHandler(enabled = true) {
-        if (adCountdown <= 0 && !clickHandoffPending) closeOverlay()
+        if (adCountdown <= 0 && !clickHandoffPending && !storeVisitPending) closeOverlay()
     }
 
     Box(
@@ -1188,7 +1258,7 @@ private fun MiniGameFallbackOverlay(
                             skoverlayDelaySeconds = ad.skoverlay?.delaySeconds,
                             videoPlanV2 = ad.isVideoPlanV2,
                             videoPlanState = videoPlan,
-                            presentationBlocked = clickHandoffPending,
+                            presentationBlocked = clickHandoffPending || storeVisitPending,
                             willHandoff = hasNextStep,
                             modifier = Modifier.fillMaxSize(),
                             onReady = { durationMs ->
@@ -1354,7 +1424,7 @@ private fun MiniGameFallbackOverlay(
                     }
                 }
 
-                if (clickHandoffPending) {
+                if (clickHandoffPending || storeVisitPending) {
                     Box(
                         Modifier
                             .fillMaxSize()
@@ -1366,7 +1436,7 @@ private fun MiniGameFallbackOverlay(
                     )
                 }
 
-                val closeReady = adCountdown <= 0 && !clickHandoffPending
+                val closeReady = adCountdown <= 0 && !clickHandoffPending && !storeVisitPending
                 val closeAlignment = when (closeBehavior.position) {
                     ClosePosition.TOP_RIGHT -> Alignment.TopEnd
                     ClosePosition.TOP_LEFT -> Alignment.TopStart

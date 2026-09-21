@@ -212,6 +212,8 @@ internal class VideoAudioWatchAccounting {
 internal fun effectiveVideoMuted(desiredMuted: Boolean, audioFocusHeld: Boolean): Boolean =
     desiredMuted || !audioFocusHeld
 
+internal fun videoDesiredMutedAfterTap(effectiveMuted: Boolean): Boolean = !effectiveMuted
+
 /** Presentation-owned user preference. Effective muting remains player/audio-focus owned. */
 internal class VideoAudioSessionState(videoPlanV2: Boolean) {
     var desiredMuted: Boolean = !videoPlanV2
