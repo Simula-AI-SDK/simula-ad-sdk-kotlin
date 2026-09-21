@@ -22,7 +22,12 @@ import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.videoCloseGateMs
 import ad.simula.ad.sdk.model.retainVideoMaxPosition
-import ad.simula.ad.sdk.model.videoReachedMidpoint
+import ad.simula.ad.sdk.model.isVideoPlanV2
+import ad.simula.ad.sdk.model.videoStorePromptReached
+import ad.simula.ad.sdk.model.VideoChromeStyle
+import ad.simula.ad.sdk.model.VideoSequenceAdvance
+import ad.simula.ad.sdk.model.videoSequenceAdvance
+import ad.simula.ad.sdk.model.effectiveSkOverlayConfig
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.ClickInteraction
@@ -271,9 +276,12 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     ctaTrackingUrl = p.ad.trackingUrl,
                     ctaDestination = p.ad.destination,
                     ctaStoreUrl = p.ad.androidStoreUrl,
-                ) { onClose ->
+                    videoPlanV2 = p.ad.videoPlanV2,
+                ) { onClose, nextVideoUrl, hasNextStep ->
                     CreativeInterstitial(
                         presentation = p,
+                        nextVideoUrl = nextVideoUrl,
+                        hasNextStep = hasNextStep,
                         storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
                         onFinish = {
                             // CLOSED is deferred to finishAd (after the last fallback screen), so
@@ -397,6 +405,8 @@ internal fun commitFullscreenImpression(
 @Composable
 private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
+    nextVideoUrl: String?,
+    hasNextStep: Boolean,
     storeVisitPending: Boolean,
     onFinish: () -> Unit,
     recordStoreOpen: (String) -> Unit,
@@ -446,9 +456,15 @@ private fun CreativeInterstitial(
     val storePrompt = behavior?.storePrompt
     var storePromptVisible by remember {
         mutableStateOf(
-            isVideo && videoReachedMidpoint(
-                presentation.videoPositionMs,
-                presentation.videoDurationMs,
+            isVideo && videoStorePromptReached(
+                videoPlanV2 = ad.creative?.isVideoPlanV2 == true,
+                positionMs = presentation.videoPositionMs,
+                durationMs = presentation.videoDurationMs,
+                gateElapsedMs = presentation.accumulatedGateTimeMs,
+                effectiveGateMs = videoCloseGateMs(
+                    behavior?.close?.delaySeconds ?: 0,
+                    presentation.videoDurationMs,
+                ),
             ),
         )
     }
@@ -467,6 +483,7 @@ private fun CreativeInterstitial(
     var bridgeUnavailable by remember(presentation) {
         mutableStateOf(presentation.primaryCreativeUnavailable)
     }
+    var videoTerminal by remember(presentation) { mutableStateOf(false) }
     DisposableEffect(presentation) {
         val subscription = presentation.pendingClickHandoff()?.addResultListener {
             clickHandoffPending = false
@@ -501,6 +518,20 @@ private fun CreativeInterstitial(
                 unavailableExitIssued = true
                 runCatching(onFinish)
             }
+        }
+    }
+    LaunchedEffect(videoTerminal, clickHandoffPending, storeVisitPending) {
+        if (videoSequenceAdvance(
+                videoPlanV2 = ad.creative?.isVideoPlanV2 == true,
+                currentType = ad.creative?.type ?: CreativeType.PLAYABLE,
+                terminal = videoTerminal,
+                clickHandoffPending = clickHandoffPending,
+                storeVisitPending = storeVisitPending,
+            ) != VideoSequenceAdvance.ADVANCE
+        ) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            withFrameNanos { }
+            runCatching(onFinish)
         }
     }
     // auto_store_redirect: open the advertiser store once (no user tap). PLAYABLE_END fires when the
@@ -648,9 +679,11 @@ private fun CreativeInterstitial(
     }
 
     // Play Install Prompt (`skoverlay`) — an SDK-presented bottom install banner. Gated to API 21+.
-    val skoverlay = behavior?.skoverlay
+    val videoSkOverlay = behavior.effectiveSkOverlayConfig(ad.creative?.isVideoPlanV2 == true)
+    val skoverlay = behavior?.skoverlay.takeUnless { ad.creative?.isVideoPlanV2 == true }
     if (skoverlay != null && skoverlay.enabled && Build.VERSION.SDK_INT >= 21) {
-        LaunchedEffect(presentation.installBannerState) {
+        LaunchedEffect(presentation.installBannerState, bridgeReady) {
+            if (ad.creative?.isVideoPlanV2 == true && !bridgeReady) return@LaunchedEffect
             presentation.installBannerState.start()
             while (true) {
                 val remainingMs = presentation.installBannerState.delayedRemainingMs() ?: break
@@ -718,6 +751,9 @@ private fun CreativeInterstitial(
     // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
     BackHandler(enabled = true) {
         if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending)) {
+            if (ad.creative?.isVideoPlanV2 == true && !videoTerminal) {
+                presentation.fallbackState.videoPlan.closeCurrent("user")
+            }
             presentation.automaticNavigationGate.clear()
             onFinish()
         }
@@ -812,9 +848,23 @@ private fun CreativeInterstitial(
                     adUnitId = ad.adUnitId,
                     adId = ad.impressionId.takeIf { it.isNotBlank() },
                     serveId = ad.impressionId.takeIf { it.isNotBlank() },
+                    prewarmNextUrl = nextVideoUrl,
                     configuredGateSeconds = behavior?.close?.delaySeconds ?: 0,
                     initialPlayedMs = presentation.accumulatedGateTimeMs,
                     ctaEnabled = videoCtaRoute(ad.trackingUrl, ad.androidStoreUrl, ad.destination) != null,
+                    ctaLabel = ad.creative.cta,
+                    appIconUrl = ad.creative.appIconUrl,
+                    appName = ad.creative.appName,
+                    subtitle = ad.creative.subtitle,
+                    chromeStyle = behavior?.video?.style ?: VideoChromeStyle.CORNER_CTA,
+                    videoPool = ad.creative.videoPool,
+                    clipIndex = ad.creative.clipIndex,
+                    skoverlayEnabled = videoSkOverlay?.enabled,
+                    skoverlayDelaySeconds = videoSkOverlay?.delaySeconds,
+                    videoPlanV2 = ad.creative.isVideoPlanV2,
+                    videoPlanState = presentation.fallbackState.videoPlan,
+                    presentationBlocked = clickHandoffPending || storeVisitPending,
+                    willHandoff = hasNextStep,
                     modifier = Modifier
                         .fillMaxSize()
                         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
@@ -854,7 +904,14 @@ private fun CreativeInterstitial(
                             (accumulated.toFloat() / totalMs).coerceIn(0f, 1f)
                         } else 1f
                         if (accumulated >= totalMs) closeEnabled = true
-                        if (videoReachedMidpoint(presentation.videoPositionMs, durationMs)) {
+                        val promptReached = videoStorePromptReached(
+                            videoPlanV2 = ad.creative.isVideoPlanV2,
+                            positionMs = presentation.videoPositionMs,
+                            durationMs = durationMs,
+                            gateElapsedMs = accumulated,
+                            effectiveGateMs = totalMs,
+                        )
+                        if (promptReached) {
                             storePromptVisible = true
                         }
                     },
@@ -865,6 +922,7 @@ private fun CreativeInterstitial(
                         )
                         closeRemaining = 0
                         closeEnabled = true
+                        if (ad.creative.isVideoPlanV2) videoTerminal = true
                     },
                     onError = ::markBridgeUnavailable,
                     onCta = ::beginVideoCta,
@@ -922,6 +980,9 @@ private fun CreativeInterstitial(
             progress = if (isVideo) smoothVideoCloseProgress else closeProgress.value,
             onClose = {
                 if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending)) {
+                    if (ad.creative?.isVideoPlanV2 == true && !videoTerminal) {
+                        presentation.fallbackState.videoPlan.closeCurrent("user")
+                    }
                     presentation.automaticNavigationGate.clear()
                     onFinish()
                 }

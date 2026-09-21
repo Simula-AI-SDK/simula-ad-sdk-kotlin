@@ -95,6 +95,9 @@ import ad.simula.ad.sdk.ads.FullscreenVideo
 import ad.simula.ad.sdk.ads.FullscreenVideoPreparer
 import ad.simula.ad.sdk.ads.FALLBACK_RENDER_TIMEOUT_MS
 import ad.simula.ad.sdk.ads.nextFallbackVideoUrl
+import ad.simula.ad.sdk.ads.nextVideoPlanV2Url
+import ad.simula.ad.sdk.ads.VideoPlanPresentationState
+import ad.simula.ad.sdk.ads.VideoPlanOverlayClockEffect
 import ad.simula.ad.sdk.ads.smoothVideoProgress
 import ad.simula.ad.sdk.ads.FallbackHtmlFailureAction
 import ad.simula.ad.sdk.ads.fallbackHtmlFailureAction
@@ -123,6 +126,7 @@ import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.model.videoCloseGateMs
+import ad.simula.ad.sdk.model.VideoChromeStyle
 import ad.simula.ad.sdk.model.RenderAttemptGate
 import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.resolveFallbackCloseAction
@@ -217,6 +221,7 @@ fun MiniGameMenu(
     var lastGameHeightDp by remember { mutableStateOf<Float?>(null) }
     var lastGameWasBottomSheet by remember { mutableStateOf(false) }
     val fallbackCloseGates = remember(currentServeId) { FallbackCloseGateState() }
+    val fallbackVideoPlan = remember(currentServeId) { VideoPlanPresentationState(videoPlanV2 = false) }
 
     // The fallback screen currently on display; null when the overlay is closed.
     val currentFallbackAd = fallbackAds.getOrNull(fallbackAdIndex)
@@ -298,7 +303,11 @@ fun MiniGameMenu(
                 scope.launch {
                     val ads = SimulaApiClient.fetchFallbacks(sid)
                     if (ads.isNotEmpty()) {
-                        FullscreenVideoPreparer.prepare(nextFallbackVideoUrl(ads, afterDisplayIndex = -1))
+                        if (ads.any { it.isVideoPlanV2 }) {
+                            fallbackVideoPlan.activateVideoPlanV2()
+                        } else {
+                            FullscreenVideoPreparer.prepare(nextFallbackVideoUrl(ads, afterDisplayIndex = -1))
+                        }
                         fallbackAds = ads
                         fallbackAdIndex = 0
                         adFetched = true
@@ -319,10 +328,16 @@ fun MiniGameMenu(
         // the menu is dismissed only by an explicit close/back action.
         if (fallbackAdIndex + 1 < fallbackAds.size) {
             fallbackAdIndex += 1
-            FullscreenVideoPreparer.prepare(
-                fallbackAds.getOrNull(fallbackAdIndex)?.takeIf { it.type == CreativeType.VIDEO }?.url,
-            )
+            if (fallbackAds.none { it.isVideoPlanV2 }) {
+                FullscreenVideoPreparer.prepare(
+                    fallbackAds.getOrNull(fallbackAdIndex)?.takeIf { it.type == CreativeType.VIDEO }?.url,
+                )
+            }
+            fallbackAds.getOrNull(fallbackAdIndex)
+                ?.takeIf { it.type == CreativeType.PLAYABLE }
+                ?.let { fallbackVideoPlan.nextStepReady() }
         } else {
+            fallbackVideoPlan.closePendingHandoff("next_step_failed")
             fallbackAds = emptyList()
             fallbackAdIndex = 0
         }
@@ -716,7 +731,12 @@ fun MiniGameMenu(
                     )
                     MiniGameFallbackOverlay(
                         ad = currentFallbackAd,
-                        nextVideoUrl = nextFallbackVideoUrl(fallbackAds, fallbackAdIndex),
+                        nextVideoUrl = if (currentFallbackAd.isVideoPlanV2) {
+                            nextVideoPlanV2Url(fallbackAds, fallbackAdIndex)
+                        } else {
+                            nextFallbackVideoUrl(fallbackAds, fallbackAdIndex)
+                        },
+                        hasNextStep = fallbackAdIndex + 1 < fallbackAds.size,
                         onClose = { handleFallbackClose() },
                         playableHeightDp = fallbackPlayableHeightDp,
                         playableBorderColor = theme.playableBorderColor ?: "#262626",
@@ -724,6 +744,7 @@ fun MiniGameMenu(
                         closeBehavior = closeBehavior,
                         fallbackIndex = fallbackAdIndex,
                         closeGateState = fallbackCloseGates,
+                        videoPlan = fallbackVideoPlan,
                     )
                 }
             }
@@ -808,6 +829,7 @@ private fun FullscreenDialogWindowConfig(opaqueBackground: Boolean = false) {
 private fun MiniGameFallbackOverlay(
     ad: SimulaApiClient.FallbackAd,
     nextVideoUrl: String?,
+    hasNextStep: Boolean,
     onClose: () -> Unit,
     playableHeightDp: Float? = null,
     playableBorderColor: String = "#262626",
@@ -815,6 +837,7 @@ private fun MiniGameFallbackOverlay(
     closeBehavior: CloseBehavior,
     fallbackIndex: Int,
     closeGateState: FallbackCloseGateState,
+    videoPlan: VideoPlanPresentationState,
 ) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -850,6 +873,7 @@ private fun MiniGameFallbackOverlay(
     val renderGate = remember(ad.sourceIndex) { RenderAttemptGate() }
     var clickHandoffPending by remember { mutableStateOf(false) }
     var closeIssued by remember(ad.sourceIndex) { mutableStateOf(false) }
+    var videoTerminal by remember(ad.sourceIndex) { mutableStateOf(false) }
     var adWebView by remember { mutableStateOf<WebView?>(null) }
     val clickGate = remember(adId) { ClickInteractionGate() }
     val clickHandler = remember { Handler(Looper.getMainLooper()) }
@@ -865,6 +889,7 @@ private fun MiniGameFallbackOverlay(
             allowParentFallback = false,
         )
     }
+    VideoPlanOverlayClockEffect(videoPlan) { clickHandoffPending }
 
     DisposableEffect(lifecycleOwner, hostActivity, clickOwner) {
         val activity = hostActivity
@@ -916,6 +941,7 @@ private fun MiniGameFallbackOverlay(
     fun closeOverlay() {
         if (closeIssued) return
         closeIssued = true
+        if (ad.isVideoPlanV2 && !videoTerminal) videoPlan.closeCurrent("user")
         clickOwner.cancel()
         onClose()
     }
@@ -1051,6 +1077,9 @@ private fun MiniGameFallbackOverlay(
     LaunchedEffect(adPageFailed, clickHandoffPending) {
         if (adPageFailed && fallbackFailureAutoAdvances(ad.type) && !clickHandoffPending) closeOverlay()
     }
+    LaunchedEffect(videoTerminal, clickHandoffPending) {
+        if (videoTerminal && ad.isVideoPlanV2 && !clickHandoffPending) closeOverlay()
+    }
     LaunchedEffect(isVideo, renderToken, adPageLoaded, adPageFailed) {
         val token = renderToken
         if (isVideo || token == 0L || adPageLoaded || adPageFailed || !renderGate.isPending(token)) {
@@ -1148,6 +1177,19 @@ private fun MiniGameFallbackOverlay(
                             configuredGateSeconds = closeBehavior.delaySeconds,
                             initialPlayedMs = closeGateState.elapsedMs(fallbackIndex),
                             ctaEnabled = videoRouting != null,
+                            ctaLabel = ad.cta,
+                            appIconUrl = ad.appIconUrl,
+                            appName = ad.appName,
+                            subtitle = ad.subtitle,
+                            chromeStyle = ad.videoBehavior?.style ?: VideoChromeStyle.CORNER_CTA,
+                            videoPool = ad.videoPool,
+                            clipIndex = ad.clipIndex,
+                            skoverlayEnabled = ad.skoverlay?.enabled,
+                            skoverlayDelaySeconds = ad.skoverlay?.delaySeconds,
+                            videoPlanV2 = ad.isVideoPlanV2,
+                            videoPlanState = videoPlan,
+                            presentationBlocked = clickHandoffPending,
+                            willHandoff = hasNextStep,
                             modifier = Modifier.fillMaxSize(),
                             onReady = { durationMs ->
                                 videoDurationMs = durationMs
@@ -1169,6 +1211,7 @@ private fun MiniGameFallbackOverlay(
                                 closeGateState.addElapsedMs(fallbackIndex, gateMs, gateMs)
                                 adCountdown = 0
                                 videoRingProgress = 1f
+                                if (ad.isVideoPlanV2) videoTerminal = true
                             },
                             onError = ::applyPageFailure,
                             onCta = {

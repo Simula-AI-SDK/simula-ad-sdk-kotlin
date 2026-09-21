@@ -50,7 +50,7 @@ class ApiModelsSerializationTest {
         val root = json.parseToJsonElement(
             sessionCreateBody(
                 privacy = buildJsonObject { put("hasPrivacyConsent", true) },
-                capabilities = ApiDeviceCapabilities(videoV1 = true),
+                capabilities = ApiDeviceCapabilities(videoV1 = true, videoPlanV2 = true),
             ),
         ).jsonObject
 
@@ -58,6 +58,8 @@ class ApiModelsSerializationTest {
             .getValue("native_click_beacon_v1").jsonPrimitive.boolean)
         assertTrue(root.getValue("capabilities").jsonObject
             .getValue("video_v1").jsonPrimitive.boolean)
+        assertTrue(root.getValue("capabilities").jsonObject
+            .getValue("video_plan_v2").jsonPrimitive.boolean)
         assertTrue(root.containsKey("privacy"))
     }
 
@@ -67,7 +69,7 @@ class ApiModelsSerializationTest {
             json.encodeToString(
                 AdLoadRequestBody(
                     adUnitId = "unit",
-                    capabilities = ApiDeviceCapabilities(videoV1 = true),
+                    capabilities = ApiDeviceCapabilities(videoV1 = true, videoPlanV2 = true),
                 ),
             ),
         ).jsonObject
@@ -76,11 +78,22 @@ class ApiModelsSerializationTest {
             .getValue("native_click_beacon_v1").jsonPrimitive.boolean)
         assertTrue(root.getValue("capabilities").jsonObject
             .getValue("video_v1").jsonPrimitive.boolean)
+        assertTrue(root.getValue("capabilities").jsonObject
+            .getValue("video_plan_v2").jsonPrimitive.boolean)
     }
 
     @Test
     fun `neutral capabilities do not advertise video support`() {
         assertFalse(ApiDeviceCapabilities().videoV1)
+        assertFalse(ApiDeviceCapabilities().videoPlanV2)
+    }
+
+    @Test
+    fun `fully wired capabilities advertise both video versions`() {
+        val capabilities = ApiDeviceCapabilities(videoV1 = true, videoPlanV2 = true)
+        val root = json.parseToJsonElement(json.encodeToString(capabilities)).jsonObject
+        assertTrue(root.getValue("video_v1").jsonPrimitive.boolean)
+        assertTrue(root.getValue("video_plan_v2").jsonPrimitive.boolean)
     }
 
     // ── Error body (4xx {code, message}) ─────────────────────────────────────
@@ -180,6 +193,54 @@ class ApiModelsSerializationTest {
         assertNull(partial.ads[0].renderedHtml)
         assertNull(partial.ads[0].html)
         assertNull(partial.ads[0].nativeClickBeaconV1Enabled)
+    }
+
+    @Test
+    fun `v2 fallback supports nested creative metadata and retains raw source index after dead clip`() {
+        val payload = """
+            {"ads":[
+              {"ad_id":"dead","creative":{"type":"video","url":"not-a-url","clip_index":0}},
+              {"ad_id":"live","creative":{"type":"video","url":"https://cdn.example/live.mp4",
+                "cta":"Install","app_name":"Game","app_icon_url":"https://cdn.example/icon.png",
+                "video_pool":"ugc","clip_index":1},"ad_behavior":{"video":{"style":"bottom_card"}}}
+            ]}
+        """.trimIndent()
+        val response = json.decodeFromString<FallbackAdsApiResponse>(payload)
+        val ads = SimulaApiClient.fallbackAdsFromResponse(response)
+
+        assertEquals(1, ads.size)
+        assertEquals(1, ads.single().sourceIndex)
+        assertEquals(1, ads.single().clipIndex)
+        assertEquals("ugc", ads.single().videoPool)
+        assertEquals("Install", ads.single().cta)
+        assertTrue(ads.single().isVideoPlanV2)
+    }
+
+    @Test
+    fun `explicit fallback plan marker activates v2 without clip inference`() {
+        val response = json.decodeFromString<FallbackAdsApiResponse>(
+            """{"plan_version":"video_plan_v2","ads":[
+                {"ad_id":"v","type":"video","url":"https://cdn.example/video.mp4"}
+            ]}""",
+        )
+        val ad = SimulaApiClient.fallbackAdsFromResponse(response).single()
+
+        assertTrue(ad.videoPlanV2)
+        assertTrue(ad.isVideoPlanV2)
+        assertNull(ad.clipIndex)
+    }
+
+    @Test
+    fun `clip index is bounded to backend ordinals`() {
+        val response = json.decodeFromString<FallbackAdsApiResponse>(
+            """{"ads":[
+                {"ad_id":"v","type":"video","url":"https://cdn.example/video.mp4","clip_index":3}
+            ]}""",
+        )
+        val ad = SimulaApiClient.fallbackAdsFromResponse(response).single()
+
+        assertNull(ad.clipIndex)
+        assertFalse(ad.isVideoPlanV2)
     }
 
     @Test

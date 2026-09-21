@@ -13,6 +13,10 @@ import ad.simula.ad.sdk.model.VideoPositionSample
 import ad.simula.ad.sdk.model.VideoPreparationPhase
 import ad.simula.ad.sdk.model.VideoReadinessDeadline
 import ad.simula.ad.sdk.model.VideoUiProgressCoalescer
+import ad.simula.ad.sdk.model.VideoAudioWatchAccounting
+import ad.simula.ad.sdk.model.VideoChromeStyle
+import ad.simula.ad.sdk.model.VideoQuartileTracker
+import ad.simula.ad.sdk.model.VideoStallBudget
 import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.videoAspectFitTransform
 import ad.simula.ad.sdk.model.videoCtaInteractionAllowed
@@ -23,6 +27,8 @@ import ad.simula.ad.sdk.model.videoPreparationClaimPolicy
 import ad.simula.ad.sdk.model.videoReadinessTimeoutCode
 import ad.simula.ad.sdk.model.videoMediaErrorCode
 import ad.simula.ad.sdk.model.resolveVideoDimensions
+import ad.simula.ad.sdk.model.resolvedVideoChromeStyle
+import ad.simula.ad.sdk.model.effectiveVideoMuted
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.content.Context
 import android.graphics.Matrix
@@ -41,14 +47,25 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,7 +86,10 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -97,8 +117,14 @@ internal fun videoCtaRoute(
 internal const val VIDEO_READINESS_TIMEOUT_MS = 10_000L
 internal const val VIDEO_PLAYBACK_TIMEOUT_MS = 10_000L
 internal const val VIDEO_STAGE_START = "video_start"
+internal const val VIDEO_STAGE_DURATION = "video_duration"
 internal const val VIDEO_STAGE_COMPLETE = "video_complete"
 internal const val VIDEO_STAGE_FAIL = "video_fail"
+internal const val VIDEO_STAGE_MUTE_TOGGLE = "video_mute_toggle"
+internal const val VIDEO_STAGE_PAUSE = "video_pause"
+internal const val VIDEO_STAGE_RESUME = "video_resume"
+internal const val VIDEO_STAGE_CLOSE = "video_close"
+internal const val VIDEO_STAGE_HANDOFF = "video_handoff"
 private const val VIDEO_PREPARED_RETENTION_MS = 5 * 60_000L
 private const val VIDEO_POSITION_POLL_MS = 100L
 private const val VIDEO_UI_PROGRESS_INTERVAL_MS = 250L
@@ -228,6 +254,7 @@ private fun detachPlayerListeners(player: MediaPlayer) {
     runCatching { player.setOnErrorListener(null) }
     runCatching { player.setOnInfoListener(null) }
     runCatching { player.setOnVideoSizeChangedListener(null) }
+    runCatching { player.setOnBufferingUpdateListener(null) }
 }
 
 private fun releasePlayerOffMain(player: MediaPlayer) {
@@ -246,6 +273,21 @@ internal fun FullscreenVideo(
     configuredGateSeconds: Int = 0,
     initialPlayedMs: Long = 0L,
     ctaEnabled: Boolean = true,
+    ctaLabel: String? = null,
+    appIconUrl: String? = null,
+    appName: String? = null,
+    subtitle: String? = null,
+    chromeStyle: VideoChromeStyle = VideoChromeStyle.CORNER_CTA,
+    videoPool: String? = null,
+    clipIndex: Int? = null,
+    skoverlayEnabled: Boolean? = null,
+    skoverlayDelaySeconds: Int? = null,
+    videoPlanV2: Boolean = false,
+    videoPlanState: VideoPlanPresentationState = remember(videoPlanV2) {
+        VideoPlanPresentationState(videoPlanV2)
+    },
+    presentationBlocked: Boolean = false,
+    willHandoff: Boolean = false,
     modifier: Modifier = Modifier,
     onReady: (Long) -> Unit,
     onProgress: (Long, Long, Long) -> Unit,
@@ -261,35 +303,66 @@ internal fun FullscreenVideo(
     val currentOnError by rememberUpdatedState(onError)
     var firstFrameRendered by remember(url) { mutableStateOf(false) }
     var completed by remember(url) { mutableStateOf(false) }
-    var muted by remember(url) { mutableStateOf(true) }
+    var muted by remember(url, videoPlanState) { mutableStateOf(videoPlanState.audio.desiredMuted) }
+    val resolvedStyle = remember(chromeStyle, appName, appIconUrl) {
+        resolvedVideoChromeStyle(chromeStyle, appName, appIconUrl)
+    }
     val controller = remember(url) {
         NativeVideoController(
             context = context,
-            telemetry = VideoTelemetryContext(adFormat, adUnitId, adId, serveId),
+            telemetry = VideoTelemetryContext(
+                adFormat = adFormat,
+                adUnitId = adUnitId,
+                adId = adId,
+                serveId = serveId,
+                impressionId = serveId ?: adId,
+                clipIndex = clipIndex,
+                style = resolvedStyle.wire,
+                skoverlayEnabled = skoverlayEnabled,
+                skoverlayDelaySeconds = skoverlayDelaySeconds,
+                pool = videoPool,
+            ),
             configuredGateSeconds = configuredGateSeconds,
             initialPlayedMs = initialPlayedMs,
+            videoPlanV2 = videoPlanV2,
+            videoPlanState = videoPlanState,
+            desiredMuted = videoPlanState.audio.desiredMuted,
+            willHandoff = willHandoff,
         )
     }
 
     controller.onReady = { durationMs ->
         firstFrameRendered = true
+        videoPlanState.firstVideoFrame(
+            ad.simula.ad.sdk.model.SkOverlayConfig(
+                enabled = skoverlayEnabled == true,
+                timing = ad.simula.ad.sdk.model.OverlayTiming.DELAYED,
+                delaySeconds = skoverlayDelaySeconds ?: 3,
+            ).takeIf { skoverlayEnabled != null },
+        )
+        videoPlanState.nextStepReady()
         currentOnReady(durationMs)
     }
     controller.onProgress = { sample, durationMs ->
         currentOnProgress(sample.positionMs, durationMs, sample.advancedMs)
     }
-    controller.onMutedChanged = { muted = it }
+    controller.onEffectiveMutedChanged = { muted = it }
+    controller.onDesiredMutedChanged = { videoPlanState.audio.updateFromTap(it) }
     controller.onCompleted = {
         completed = true
         currentOnCompleted()
     }
     controller.onError = currentOnError
+    controller.setPresentationBlocked(presentationBlocked)
 
     DisposableEffect(controller, url) {
         controller.setLifecycleActive(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
         controller.prepare(url)
-        FullscreenVideoPreparer.prepare(prewarmNextUrl)
+        if (!videoPlanV2) FullscreenVideoPreparer.prepare(prewarmNextUrl)
         onDispose { controller.release() }
+    }
+    LaunchedEffect(firstFrameRendered, prewarmNextUrl) {
+        if (videoPlanV2 && firstFrameRendered) FullscreenVideoPreparer.prepare(prewarmNextUrl)
     }
     DisposableEffect(lifecycleOwner, controller) {
         val observer = LifecycleEventObserver { _, event ->
@@ -349,14 +422,189 @@ internal fun FullscreenVideo(
             Modifier.consumeVideoTouches()
         }
         Box(Modifier.fillMaxSize().then(ctaModifier))
+        if (videoPlanV2 && ctaEnabled && firstFrameRendered && !completed) {
+            VideoCtaChrome(
+                style = resolvedStyle,
+                cta = ctaLabel?.takeIf { it.isNotBlank() } ?: "Install",
+                appIconUrl = appIconUrl,
+                appName = appName,
+                subtitle = subtitle,
+                onClick = onCta,
+                modifier = Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(16.dp),
+            )
+        }
         if (videoMuteControlVisible(completed)) {
+            val muteModifier = if (videoPlanV2 && ctaEnabled) {
+                Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(16.dp)
+            } else {
+                Modifier.align(Alignment.BottomEnd).safeDrawingPadding().padding(16.dp)
+            }
             VideoMuteControl(
                 muted = muted,
                 enabled = videoMuteInteractionAllowed(firstFrameRendered, playerActive = true),
                 onClick = controller::toggleMuted,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                modifier = muteModifier,
             )
         }
+    }
+}
+
+@Composable
+private fun VideoCtaChrome(
+    style: VideoChromeStyle,
+    cta: String,
+    appIconUrl: String?,
+    appName: String?,
+    subtitle: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    when (style) {
+        VideoChromeStyle.CORNER_CTA -> CtaPill(cta, onClick, modifier.fillMaxWidth(), alignEnd = true)
+        VideoChromeStyle.FLOATING_PILL -> IdentityChrome(
+            cta = cta,
+            appIconUrl = appIconUrl,
+            appName = appName.orEmpty(),
+            subtitle = subtitle,
+            onClick = onClick,
+            modifier = modifier.background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(50)),
+            compact = true,
+        )
+        VideoChromeStyle.BOTTOM_BAR -> IdentityChrome(
+            cta = cta,
+            appIconUrl = appIconUrl,
+            appName = appName.orEmpty(),
+            subtitle = subtitle,
+            onClick = onClick,
+            modifier = modifier.fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.82f), RoundedCornerShape(18.dp)),
+        )
+        VideoChromeStyle.BOTTOM_CARD -> IdentityChrome(
+            cta = cta,
+            appIconUrl = appIconUrl,
+            appName = appName.orEmpty(),
+            subtitle = subtitle,
+            onClick = onClick,
+            modifier = modifier.fillMaxWidth().background(Color(0xFFF5F5F5), RoundedCornerShape(24.dp)),
+            darkText = true,
+        )
+        VideoChromeStyle.FEED_CARD -> FeedChrome(
+            cta = cta,
+            appIconUrl = appIconUrl,
+            appName = appName.orEmpty(),
+            subtitle = subtitle,
+            onClick = onClick,
+            modifier = modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.76f), RoundedCornerShape(16.dp)),
+        )
+    }
+}
+
+@Composable
+private fun FeedChrome(
+    cta: String,
+    appIconUrl: String?,
+    appName: String,
+    subtitle: String?,
+    onClick: () -> Unit,
+    modifier: Modifier,
+) {
+    Column(modifier.padding(14.dp)) {
+        IdentityTitle(appIconUrl, appName, subtitle, Color.White)
+        Spacer(Modifier.size(10.dp))
+        Button(
+            onClick = onClick,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+        ) {
+            Text(cta, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun IdentityTitle(appIconUrl: String?, appName: String, subtitle: String?, foreground: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (!appIconUrl.isNullOrBlank()) {
+            CachedAsyncImage(
+                model = appIconUrl,
+                contentDescription = null,
+                modifier = Modifier.size(44.dp).background(Color(0xFFE5E7EB), RoundedCornerShape(10.dp)),
+                contentScale = ContentScale.Crop,
+            )
+            Spacer(Modifier.width(10.dp))
+        }
+        Column {
+            Text(appName, color = foreground, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!subtitle.isNullOrBlank()) {
+                Text(subtitle, color = foreground.copy(alpha = 0.72f), fontSize = 12.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CtaPill(cta: String, onClick: () -> Unit, modifier: Modifier, alignEnd: Boolean = false) {
+    Box(modifier = modifier, contentAlignment = if (alignEnd) Alignment.CenterEnd else Alignment.Center) {
+        Button(
+            onClick = onClick,
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+        ) { Text(cta, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold) }
+    }
+}
+
+@Composable
+private fun IdentityChrome(
+    cta: String,
+    appIconUrl: String?,
+    appName: String,
+    subtitle: String?,
+    onClick: () -> Unit,
+    modifier: Modifier,
+    darkText: Boolean = false,
+    compact: Boolean = false,
+) {
+    val foreground = if (darkText) Color(0xFF171717) else Color.White
+    Row(
+        modifier = modifier.padding(if (compact) 10.dp else 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (!appIconUrl.isNullOrBlank()) {
+            CachedAsyncImage(
+                model = appIconUrl,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(if (compact) 44.dp else 52.dp)
+                    .background(Color(0xFFE5E7EB), RoundedCornerShape(12.dp)),
+                contentScale = ContentScale.Crop,
+            )
+            Spacer(Modifier.width(12.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = appName,
+                color = foreground,
+                fontSize = if (compact) 15.sp else 17.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    text = subtitle,
+                    color = foreground.copy(alpha = 0.7f),
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Button(
+            onClick = onClick,
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+        ) { Text(cta, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
     }
 }
 
@@ -438,22 +686,20 @@ private fun Modifier.consumeVideoTouches(): Modifier = pointerInput(Unit) {
     }
 }
 
-internal data class VideoTelemetryContext(
-    val adFormat: String,
-    val adUnitId: String?,
-    val adId: String?,
-    val serveId: String?,
-)
-
 private class NativeVideoController(
     context: Context,
     private val telemetry: VideoTelemetryContext,
     configuredGateSeconds: Int,
     initialPlayedMs: Long,
+    private val videoPlanV2: Boolean,
+    private val videoPlanState: VideoPlanPresentationState,
+    desiredMuted: Boolean,
+    private val willHandoff: Boolean,
 ) {
     var onReady: (Long) -> Unit = {}
     var onProgress: (VideoPositionSample, Long) -> Unit = { _, _ -> }
-    var onMutedChanged: (Boolean) -> Unit = {}
+    var onEffectiveMutedChanged: (Boolean) -> Unit = {}
+    var onDesiredMutedChanged: (Boolean) -> Unit = {}
     var onCompleted: () -> Unit = {}
     var onError: () -> Unit = {}
 
@@ -464,6 +710,9 @@ private class NativeVideoController(
     private val progressCoalescer = VideoUiProgressCoalescer(VIDEO_UI_PROGRESS_INTERVAL_MS)
     private val nearEndCompletion = VideoNearEndCompletionDetector()
     private val completionGate = VideoCompletionGate()
+    private val stallBudget = VideoStallBudget()
+    private val audioWatch = VideoAudioWatchAccounting()
+    private val quartiles = VideoQuartileTracker()
     private val configuredGateMs = configuredGateSeconds.coerceAtLeast(0) * 1_000L
     private var renderToken = 0L
     private var player: MediaPlayer? = null
@@ -474,7 +723,11 @@ private class NativeVideoController(
     private var prepared = false
     private var firstFrameRendered = false
     private var completed = false
-    private var muted = true
+    private var desiredMuted = desiredMuted
+    private var effectiveMuted = desiredMuted
+    private var presentationBlocked = false
+    private var bufferingProgressSincePoll = false
+    private var lastBufferingPercent = -1
     private var released = false
     private var failed = false
     private var videoDimensions = VideoDimensions()
@@ -483,9 +736,25 @@ private class NativeVideoController(
     private var pendingAdvancedMs = 0L
     private var lastDeliveredTotalMs = initialPlayedMs.coerceAtLeast(0L)
     private var lastDeliveredPositionMs = 0L
+    private var lastVideoPositionMs = 0L
     private var focusRequest: AudioFocusRequest? = null
+    private var audioFocusHeld = false
+    private var pausedAtMs: Long? = null
+    private var startedAtMs: Long? = null
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        if (change <= 0) setMuted(true)
+        when (change) {
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                audioFocusHeld = true
+                applyEffectiveMuted(effectiveVideoMuted(desiredMuted, audioFocusHeld = true))
+            }
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
+            -> {
+                audioFocusHeld = false
+                applyEffectiveMuted(true)
+            }
+        }
     }
     private val readinessTimeout = Runnable {
         fail(videoReadinessTimeoutCode(prepared))
@@ -499,6 +768,18 @@ private class NativeVideoController(
                 consume = { progress ->
                     val isPlaying = runCatching { player?.isPlaying == true }.getOrElse {
                         fail(VideoFailureCode.PLAYBACK_ERROR)
+                        return@continueAfterVideoPositionPoll false
+                    }
+                    val nowMs = SystemClock.elapsedRealtime()
+                    val healthyProgress = progress.sample.advancedMs > 0L || bufferingProgressSincePoll
+                    bufferingProgressSincePoll = false
+                    if (videoPlanV2 && stallBudget.observe(
+                            nowMs = nowMs,
+                            eligible = lifecycleActive && !presentationBlocked,
+                            healthyProgress = healthyProgress,
+                        )
+                    ) {
+                        fail(VideoFailureCode.PLAYBACK_TIMEOUT)
                         return@continueAfterVideoPositionPoll false
                     }
                     if (nearEndCompletion.observe(
@@ -542,9 +823,9 @@ private class NativeVideoController(
             prepared = warmed?.phase == VideoPreparationPhase.PREPARED
             if (prepared) seedVideoDimensions(mediaPlayer)
             configurePlayer(mediaPlayer, token)
+            mediaPlayer.setVolume(if (effectiveMuted) 0f else 1f, if (effectiveMuted) 0f else 1f)
             if (warmed == null) {
                 mediaPlayer.setAudioAttributes(videoAudioAttributes())
-                mediaPlayer.setVolume(0f, 0f)
                 mediaPlayer.isLooping = false
                 mediaPlayer.setDataSource(url)
                 mediaPlayer.prepareAsync()
@@ -575,7 +856,16 @@ private class NativeVideoController(
             if (!ownsCallback(token)) return@setOnInfoListener false
             when (what) {
                 MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START -> admitFirstFrame(token)
-                MediaPlayer.MEDIA_INFO_BUFFERING_START, MediaPlayer.MEDIA_INFO_BUFFERING_END -> resetPlaybackTimeout()
+                MediaPlayer.MEDIA_INFO_BUFFERING_START -> {
+                    lastBufferingPercent = -1
+                    stallBudget.reset()
+                    resetPlaybackTimeout()
+                }
+                MediaPlayer.MEDIA_INFO_BUFFERING_END -> {
+                    bufferingProgressSincePoll = true
+                    stallBudget.reset()
+                    resetPlaybackTimeout()
+                }
             }
             false
         }
@@ -583,6 +873,14 @@ private class NativeVideoController(
             if (!ownsCallback(token)) return@setOnVideoSizeChangedListener
             videoDimensions = resolveVideoDimensions(videoDimensions, width, height)
             applyTextureTransform()
+        }
+        mediaPlayer.setOnBufferingUpdateListener { _, percent ->
+            if (!ownsCallback(token)) return@setOnBufferingUpdateListener
+            val bounded = percent.coerceIn(0, 100)
+            if (bounded > lastBufferingPercent) {
+                lastBufferingPercent = bounded
+                bufferingProgressSincePoll = true
+            }
         }
         surface?.let(mediaPlayer::setSurface)
     }
@@ -629,17 +927,47 @@ private class NativeVideoController(
             readinessDeadline?.resume(nowMs)
             scheduleReadinessTimeout(nowMs)
             startIfPossible()
+            val pausedAt = pausedAtMs
+            if (videoPlanV2 && firstFrameRendered && pausedAt != null) {
+                pausedAtMs = null
+                recordLifecycle(
+                    stage = VIDEO_STAGE_RESUME,
+                    pausedMs = (nowMs - pausedAt).coerceAtLeast(0L).toDouble(),
+                )
+            }
         } else {
             readinessDeadline?.pause(nowMs)
             handler.removeCallbacks(readinessTimeout)
+            if (firstFrameRendered && !completed && !failed) emitProgress(force = true)
             pause()
-            if (!muted) setMuted(true)
+            stallBudget.observe(nowMs, eligible = false, healthyProgress = false)
+            if (videoPlanV2 && firstFrameRendered && pausedAtMs == null && !completed && !failed) {
+                pausedAtMs = nowMs
+                recordLifecycle(VIDEO_STAGE_PAUSE, reason = "backgrounded")
+            }
+            abandonAudioFocus()
+        }
+    }
+
+    fun setPresentationBlocked(blocked: Boolean) {
+        if (presentationBlocked == blocked) return
+        presentationBlocked = blocked
+        if (blocked) {
+            stallBudget.observe(SystemClock.elapsedRealtime(), eligible = false, healthyProgress = false)
         }
     }
 
     fun toggleMuted() {
         if (!videoMuteInteractionAllowed(firstFrameRendered, playerActive = !released && !failed)) return
-        setMuted(if (muted) !requestAudioFocus() else true)
+        desiredMuted = !desiredMuted
+        onDesiredMutedChanged(desiredMuted)
+        if (desiredMuted) {
+            applyEffectiveMuted(true)
+            abandonAudioFocus()
+        } else {
+            applyEffectiveMuted(effectiveVideoMuted(desiredMuted = false, audioFocusHeld = requestAudioFocus()))
+        }
+        if (videoPlanV2) recordLifecycle(VIDEO_STAGE_MUTE_TOGGLE)
     }
 
     fun release() {
@@ -680,6 +1008,8 @@ private class NativeVideoController(
         if (!prepared || !lifecycleActive || surface == null || released || failed) return
         runCatching {
             val mediaPlayer = player ?: return
+            val focusHeld = !desiredMuted && requestAudioFocus()
+            applyEffectiveMuted(effectiveVideoMuted(desiredMuted, focusHeld))
             mediaPlayer.start()
             scheduleReadinessTimeout(SystemClock.elapsedRealtime())
             if (firstFrameRendered) {
@@ -692,6 +1022,7 @@ private class NativeVideoController(
     private fun admitFirstFrame(token: Long) {
         if (!renderGate.ready(token)) return
         firstFrameRendered = true
+        startedAtMs = SystemClock.elapsedRealtime()
         handler.removeCallbacks(readinessTimeout)
         emitProgress(force = true)
         runCatching { onReady(durationMs()) }
@@ -720,6 +1051,11 @@ private class NativeVideoController(
         )
         if (transition.cancelPlaybackTimeout) cancelPlaybackCallbacks()
         recordLifecycle(VIDEO_STAGE_COMPLETE)
+        if (videoPlanV2) {
+            val snapshot = telemetrySnapshot()
+            if (willHandoff) videoPlanState.beginHandoff(snapshot)
+            else videoPlanState.close(snapshot, reason = "completed")
+        }
         release()
     }
 
@@ -757,6 +1093,14 @@ private class NativeVideoController(
             position.sample(current)
         }
         pendingAdvancedMs += sample.advancedMs
+        lastVideoPositionMs = maxOf(lastVideoPositionMs, sample.positionMs)
+        audioWatch.add(sample.advancedMs, effectiveMuted)
+        if (videoPlanV2) {
+            quartiles.crossed(sample.positionMs, durationMs).forEach { quartile ->
+                recordLifecycle(VIDEO_STAGE_DURATION, quartile = quartile)
+            }
+            videoPlanState.retainCurrentTelemetry(telemetrySnapshot())
+        }
         if (sample.advancedMs > 0L) resetPlaybackTimeout()
         val gateDurationMs = if (durationMs > 0L) minOf(configuredGateMs, durationMs) else configuredGateMs
         val gateCrossed = lastDeliveredTotalMs < gateDurationMs && sample.totalPlayedMs >= gateDurationMs
@@ -815,19 +1159,21 @@ private class NativeVideoController(
     private fun resetPlaybackTimeout() {
         if (!lifecycleActive || !firstFrameRendered || released || failed) return
         handler.removeCallbacks(playbackTimeout)
+        if (videoPlanV2) return
         handler.postDelayed(playbackTimeout, VIDEO_PLAYBACK_TIMEOUT_MS)
     }
 
-    private fun setMuted(value: Boolean) {
-        muted = value
+    private fun applyEffectiveMuted(value: Boolean) {
+        if (effectiveMuted == value) return
+        effectiveMuted = value
         runCatching { player?.setVolume(if (value) 0f else 1f, if (value) 0f else 1f) }
-        if (value) abandonAudioFocus()
-        runCatching { onMutedChanged(value) }
+        runCatching { onEffectiveMutedChanged(value) }
     }
 
     private fun requestAudioFocus(): Boolean {
+        if (audioFocusHeld) return true
         val manager = audioManager ?: return false
-        return runCatching {
+        val granted = runCatching {
             if (Build.VERSION.SDK_INT >= 26) {
                 val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
                     .setAudioAttributes(videoAudioAttributes())
@@ -844,6 +1190,8 @@ private class NativeVideoController(
                 ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
             }
         }.getOrDefault(false)
+        audioFocusHeld = granted
+        return granted
     }
 
     private fun abandonAudioFocus() {
@@ -857,16 +1205,49 @@ private class NativeVideoController(
             }
         }
         focusRequest = null
+        audioFocusHeld = false
     }
 
-    private fun recordLifecycle(stage: String, errorCode: String? = null) {
-        Telemetry.recordLifecycle(
-            stage = stage,
-            adFormat = telemetry.adFormat,
-            adUnitId = telemetry.adUnitId,
-            adId = telemetry.adId,
-            serveId = telemetry.serveId,
-            errorCode = errorCode,
+    private fun recordLifecycle(
+        stage: String,
+        quartile: Int? = null,
+        reason: String? = null,
+        pausedMs: Double? = null,
+        errorCode: String? = null,
+    ) {
+        if (videoPlanV2) {
+            telemetrySnapshot().record(
+                stage = stage,
+                quartile = quartile,
+                reason = reason,
+                pausedMs = pausedMs,
+                secondsSinceVideoStart = startedAtMs?.let {
+                    (SystemClock.elapsedRealtime() - it).coerceAtLeast(0L) / 1_000.0
+                },
+                error = errorCode,
+            )
+        } else {
+            Telemetry.recordLifecycle(
+                stage = stage,
+                adFormat = telemetry.adFormat,
+                adUnitId = telemetry.adUnitId,
+                adId = telemetry.adId,
+                serveId = telemetry.serveId,
+                errorCode = errorCode,
+            )
+        }
+    }
+
+    private fun telemetrySnapshot(): VideoPlaybackTelemetry {
+        val totals = audioWatch.totals()
+        return VideoPlaybackTelemetry(
+            context = telemetry,
+            videoPositionS = lastVideoPositionMs / 1_000.0,
+            muted = effectiveMuted,
+            durationS = durationMs().takeIf { it > 0L }?.div(1_000.0),
+            watchedS = (totals.mutedMs + totals.unmutedMs) / 1_000.0,
+            secondsUnmuted = totals.unmutedMs / 1_000.0,
+            secondsMuted = totals.mutedMs / 1_000.0,
         )
     }
 
@@ -877,7 +1258,12 @@ private class NativeVideoController(
         renderGate.fail(renderToken)
         handler.removeCallbacks(readinessTimeout)
         cancelPlaybackCallbacks()
-        recordLifecycle(VIDEO_STAGE_FAIL, code.wire)
+        recordLifecycle(VIDEO_STAGE_FAIL, errorCode = code.wire)
+        if (videoPlanV2) {
+            val snapshot = telemetrySnapshot()
+            if (willHandoff) videoPlanState.beginHandoff(snapshot)
+            else videoPlanState.close(snapshot, reason = "failed")
+        }
         Telemetry.recordError(
             signature = "video:playback_failed",
             errorCode = code.wire,

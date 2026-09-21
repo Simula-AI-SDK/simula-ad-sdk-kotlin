@@ -2,6 +2,8 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdValue
+import ad.simula.ad.sdk.model.isVideoPlanV2
+import ad.simula.ad.sdk.model.effectiveSkOverlayConfig
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
@@ -67,8 +69,10 @@ internal class InterstitialPresentation(
     private var pendingClickHandoff: ClickPersistenceHandoff? = null
     private val clickRoute = ResumedPresentationRoute<SimulaInterstitialActivity>()
     val primaryCtaNavigation = RetainedPrimaryCtaNavigationState<SimulaInterstitialActivity>()
-    val installBannerState = InstallBannerPresentationState(ad.adBehavior?.skoverlay)
-    val fallbackState = FallbackPresentationState()
+    val installBannerState = InstallBannerPresentationState(
+        ad.adBehavior?.skoverlay.takeUnless { ad.videoPlanV2 },
+    )
+    val fallbackState = FallbackPresentationState(videoPlanV2 = ad.videoPlanV2)
     val automaticNavigationGate = AutomaticNavigationGate()
     val storeExit by lazy(LazyThreadSafetyMode.NONE) {
         StoreExitTracker(

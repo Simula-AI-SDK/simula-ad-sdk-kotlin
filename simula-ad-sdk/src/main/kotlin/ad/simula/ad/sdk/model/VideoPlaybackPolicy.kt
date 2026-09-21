@@ -111,6 +111,153 @@ internal data class VideoPositionSample(
     val totalPlayedMs: Long,
 )
 
+internal fun resolvedVideoChromeStyle(
+    requested: VideoChromeStyle,
+    appName: String?,
+    appIconUrl: String?,
+): VideoChromeStyle = when (requested) {
+    VideoChromeStyle.BOTTOM_BAR,
+    VideoChromeStyle.FLOATING_PILL,
+    -> requested.takeIf { !appIconUrl.isNullOrBlank() } ?: VideoChromeStyle.CORNER_CTA
+    VideoChromeStyle.BOTTOM_CARD,
+    VideoChromeStyle.FEED_CARD,
+    -> requested.takeIf { !appIconUrl.isNullOrBlank() && !appName.isNullOrBlank() }
+        ?: VideoChromeStyle.CORNER_CTA
+    VideoChromeStyle.CORNER_CTA,
+    -> requested
+}
+
+internal enum class VideoSequenceAdvance { MANUAL, WAIT_FOR_BLOCKER, ADVANCE }
+
+internal fun videoSequenceAdvance(
+    videoPlanV2: Boolean,
+    currentType: CreativeType,
+    terminal: Boolean,
+    clickHandoffPending: Boolean,
+    storeVisitPending: Boolean,
+): VideoSequenceAdvance {
+    if (!videoPlanV2 || currentType != CreativeType.VIDEO || !terminal) return VideoSequenceAdvance.MANUAL
+    return if (clickHandoffPending || storeVisitPending) {
+        VideoSequenceAdvance.WAIT_FOR_BLOCKER
+    } else {
+        VideoSequenceAdvance.ADVANCE
+    }
+}
+
+internal const val VIDEO_STALL_BUDGET_MS = 8_000L
+
+/** Counts eligible foreground playback/waiting time without media or download progress. */
+internal class VideoStallBudget(
+    private val budgetMs: Long = VIDEO_STALL_BUDGET_MS,
+) {
+    private var remainingMs = budgetMs.coerceAtLeast(0L)
+    private var lastEligibleMs: Long? = null
+
+    fun observe(
+        nowMs: Long,
+        eligible: Boolean,
+        healthyProgress: Boolean,
+    ): Boolean {
+        if (healthyProgress) {
+            reset()
+            if (eligible) lastEligibleMs = nowMs
+            return false
+        }
+        if (!eligible) {
+            lastEligibleMs = null
+            return false
+        }
+        val previous = lastEligibleMs
+        lastEligibleMs = nowMs
+        if (previous != null) remainingMs = (remainingMs - (nowMs - previous).coerceAtLeast(0L)).coerceAtLeast(0L)
+        return remainingMs == 0L
+    }
+
+    fun reset() {
+        remainingMs = budgetMs.coerceAtLeast(0L)
+        lastEligibleMs = null
+    }
+
+    fun remainingMs(): Long = remainingMs
+}
+
+internal class VideoQuartileTracker {
+    private val emitted = mutableSetOf<Int>()
+
+    fun crossed(positionMs: Long, durationMs: Long): List<Int> {
+        if (positionMs < 0L || durationMs <= 0L) return emptyList()
+        val percent = (positionMs.coerceAtMost(durationMs) * 100L / durationMs).toInt()
+        return listOf(25, 50, 75).filter { percent >= it && emitted.add(it) }
+    }
+}
+
+internal data class VideoAudioWatchTotals(
+    val mutedMs: Long,
+    val unmutedMs: Long,
+)
+
+internal class VideoAudioWatchAccounting {
+    private var mutedMs = 0L
+    private var unmutedMs = 0L
+
+    fun add(advancedMs: Long, muted: Boolean): VideoAudioWatchTotals {
+        val delta = advancedMs.coerceAtLeast(0L)
+        if (muted) mutedMs += delta else unmutedMs += delta
+        return totals()
+    }
+
+    fun totals(): VideoAudioWatchTotals = VideoAudioWatchTotals(mutedMs, unmutedMs)
+}
+
+internal fun effectiveVideoMuted(desiredMuted: Boolean, audioFocusHeld: Boolean): Boolean =
+    desiredMuted || !audioFocusHeld
+
+/** Presentation-owned user preference. Effective muting remains player/audio-focus owned. */
+internal class VideoAudioSessionState(videoPlanV2: Boolean) {
+    var desiredMuted: Boolean = !videoPlanV2
+        private set
+    private var preferenceChanged = false
+
+    @Synchronized
+    fun updateFromTap(value: Boolean) {
+        desiredMuted = value
+        preferenceChanged = true
+    }
+
+    @Synchronized
+    fun activateVideoPlanV2() {
+        if (!preferenceChanged) desiredMuted = false
+    }
+}
+
+internal class VideoInstallOverlayClock {
+    private var delayMs = 0L
+    private var elapsedMs = 0L
+    private var lastEligibleMs: Long? = null
+    var started = false
+        private set
+    var ready = false
+        private set
+
+    fun start(delaySeconds: Int, nowMs: Long, eligible: Boolean) {
+        if (started || ready) return
+        started = true
+        delayMs = delaySeconds.coerceIn(0, 60) * 1_000L
+        update(nowMs, eligible)
+    }
+
+    fun update(nowMs: Long, eligible: Boolean): Boolean {
+        if (!started || ready) return ready
+        val previous = lastEligibleMs
+        if (eligible && previous != null) elapsedMs += (nowMs - previous).coerceAtLeast(0L)
+        lastEligibleMs = nowMs.takeIf { eligible }
+        if (elapsedMs >= delayMs) ready = true
+        return ready
+    }
+
+    fun remainingMs(): Long = (delayMs - elapsedMs).coerceAtLeast(0L)
+}
+
 internal fun videoCtaInteractionAllowed(firstFrameRendered: Boolean): Boolean = firstFrameRendered
 
 internal fun videoMuteInteractionAllowed(

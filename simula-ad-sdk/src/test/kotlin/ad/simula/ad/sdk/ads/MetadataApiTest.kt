@@ -97,6 +97,7 @@ class MetadataApiTest {
         val rewarded = RewardedPresentation(
             renderedHtml = "<html></html>",
             creative = Creative(),
+            adUnitId = "rewarded-unit",
             impressionId = "rewarded-impression",
             apiKey = "test-key",
             callbacks = object : RewardedCallbacks {
@@ -120,5 +121,6 @@ class MetadataApiTest {
 
         assertEquals(snapshot, interstitial.metadata)
         assertEquals(snapshot, rewarded.metadata)
+        assertEquals("rewarded-unit", rewarded.adUnitId)
     }
 }

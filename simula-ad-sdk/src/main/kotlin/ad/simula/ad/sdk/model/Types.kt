@@ -374,6 +374,35 @@ internal data class Creative(
     val url: String? = null,
     val posterUrl: String? = null,
     val adUnitType: AdUnitType = AdUnitType.INTERSTITIAL,
+    val cta: String? = null,
+    val appIconUrl: String? = null,
+    val appName: String? = null,
+    val subtitle: String? = null,
+    val videoPool: String? = null,
+    val clipIndex: Int? = null,
+    val planVersion: String? = null,
+)
+
+internal val Creative.isVideoPlanV2: Boolean
+    get() = planVersion == "video_plan_v2" ||
+        (type == CreativeType.VIDEO && clipIndex?.let { it in 0..2 } == true)
+
+internal enum class VideoChromeStyle(val wire: String) {
+    BOTTOM_BAR("bottom_bar"),
+    FLOATING_PILL("floating_pill"),
+    BOTTOM_CARD("bottom_card"),
+    CORNER_CTA("corner_cta"),
+    FEED_CARD("feed_card");
+
+    companion object {
+        fun from(raw: String?): VideoChromeStyle = entries.firstOrNull {
+            it.wire == normalizeBehaviorToken(raw)
+        } ?: CORNER_CTA
+    }
+}
+
+internal data class VideoBehavior(
+    val style: VideoChromeStyle = VideoChromeStyle.CORNER_CTA,
 )
 
 /** Accept only network video assets. Invalid or opaque values are rejected before MediaPlayer sees them. */
@@ -383,6 +412,8 @@ internal fun admittedVideoUrl(raw: String?): String? {
     val networkScheme = uri.scheme.equals("http", true) || uri.scheme.equals("https", true)
     return value.takeIf { networkScheme && !uri.host.isNullOrBlank() }
 }
+
+internal fun admittedRemoteAssetUrl(raw: String?): String? = admittedVideoUrl(raw)
 
 internal fun Creative.isRenderable(renderedHtml: String?): Boolean = when (type) {
     CreativeType.PLAYABLE -> !renderedHtml.isNullOrBlank()
@@ -407,6 +438,21 @@ internal fun rewardedVideoDurationGateReached(
 
 internal fun closeGateSecondsLeft(elapsedMs: Long, requiredMs: Long): Int =
     ceil((requiredMs - elapsedMs).coerceAtLeast(0L) / 1000.0).toInt()
+
+internal fun storePromptHalfGateReached(elapsedMs: Long, effectiveGateMs: Long): Boolean =
+    effectiveGateMs > 0L && elapsedMs.coerceAtLeast(0L) >= effectiveGateMs / 2L
+
+internal fun videoStorePromptReached(
+    videoPlanV2: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    gateElapsedMs: Long,
+    effectiveGateMs: Long,
+): Boolean = if (videoPlanV2) {
+    storePromptHalfGateReached(gateElapsedMs, effectiveGateMs)
+} else {
+    videoReachedMidpoint(positionMs, durationMs)
+}
 
 /** Experiment-assignment metadata (`experiment` node), carried for telemetry only. */
 internal data class Experiment(
@@ -464,7 +510,20 @@ internal data class AdBehavior(
     val storePrompt: StorePrompt? = null,
     val skoverlay: SkOverlayConfig? = null,
     val autoStoreRedirect: AutoStoreRedirect? = null,
+    val video: VideoBehavior? = null,
 )
+
+internal fun AdBehavior?.effectiveSkOverlayConfig(videoPlanV2: Boolean): SkOverlayConfig? {
+    if (!videoPlanV2) return this?.skoverlay
+    val config = this?.skoverlay
+    return SkOverlayConfig(
+        enabled = config?.enabled ?: true,
+        timing = OverlayTiming.DELAYED,
+        delaySeconds = (config?.delaySeconds ?: 3).coerceIn(0, 60),
+        position = config?.position ?: OverlayPosition.BOTTOM,
+        dismissible = config?.dismissible ?: true,
+    )
+}
 
 /** User-selectable reasons for the in-ad report flow (the "i" → report sheet). [flag] is the wire
  * value posted to `POST /impressions/{adId}/report`; [label] is the user-facing copy. */
