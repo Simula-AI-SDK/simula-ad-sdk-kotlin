@@ -98,6 +98,7 @@ import ad.simula.ad.sdk.ads.FALLBACK_RENDER_TIMEOUT_MS
 import ad.simula.ad.sdk.ads.nextFallbackVideoUrl
 import ad.simula.ad.sdk.ads.nextVideoPlanV2Url
 import ad.simula.ad.sdk.ads.VideoPlanPresentationState
+import ad.simula.ad.sdk.ads.VideoPlaybackSlotIdentity
 import ad.simula.ad.sdk.ads.VideoPlanOverlayClockEffect
 import ad.simula.ad.sdk.ads.StoreExitTracker
 import ad.simula.ad.sdk.ads.smoothVideoProgress
@@ -1261,7 +1262,9 @@ private fun MiniGameFallbackOverlay(
                             subtitle = ad.subtitle,
                             chromeStyle = ad.videoBehavior?.style ?: VideoChromeStyle.CORNER_CTA,
                             effectiveClosePosition = closeBehavior.position,
+                            bottomProgressBarObstructed = false,
                             videoPool = ad.videoPool,
+                            playbackSlotIdentity = VideoPlaybackSlotIdentity.Fallback(ad.sourceIndex),
                             clipIndex = ad.clipIndex,
                             skoverlayEnabled = ad.skoverlay?.enabled,
                             skoverlayDelaySeconds = ad.skoverlay?.delaySeconds,

@@ -25,6 +25,7 @@ import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.videoAspectFitTransform
 import ad.simula.ad.sdk.model.videoAudioFocusLossPolicy
 import ad.simula.ad.sdk.model.videoCtaInteractionAllowed
+import ad.simula.ad.sdk.model.videoChromeObstructionClearance
 import ad.simula.ad.sdk.model.videoMuteInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteActionLabel
 import ad.simula.ad.sdk.model.videoMuteControlVisible
@@ -138,6 +139,7 @@ internal const val VIDEO_STAGE_HANDOFF = "video_handoff"
 private const val VIDEO_PREPARED_RETENTION_MS = 5 * 60_000L
 private const val VIDEO_POSITION_POLL_MS = 100L
 private const val VIDEO_UI_PROGRESS_INTERVAL_MS = 250L
+private const val VIDEO_CHROME_OUTER_PADDING_DP = 16
 
 internal fun canonicalFullscreenAdFormat(adFormat: String): String = when (adFormat) {
     "interstitial_fallback" -> "interstitial"
@@ -302,7 +304,9 @@ internal fun FullscreenVideo(
     subtitle: String? = null,
     chromeStyle: VideoChromeStyle = VideoChromeStyle.CORNER_CTA,
     effectiveClosePosition: ClosePosition = ClosePosition.TOP_RIGHT,
+    bottomProgressBarObstructed: Boolean,
     videoPool: String? = null,
+    playbackSlotIdentity: VideoPlaybackSlotIdentity,
     clipIndex: Int? = null,
     skoverlayEnabled: Boolean? = null,
     skoverlayDelaySeconds: Int? = null,
@@ -326,14 +330,16 @@ internal fun FullscreenVideo(
     val currentOnCompleted by rememberUpdatedState(onCompleted)
     val currentOnError by rememberUpdatedState(onError)
     val currentWillHandoff by rememberUpdatedState(willHandoff)
-    var firstFrameRendered by remember(url, clipIndex) { mutableStateOf(false) }
-    var completed by remember(url, clipIndex) { mutableStateOf(false) }
+    var firstFrameRendered by remember(url, playbackSlotIdentity) { mutableStateOf(false) }
+    var completed by remember(url, playbackSlotIdentity) { mutableStateOf(false) }
     val initialDesiredMuted = initialVideoDesiredMuted(videoPlanV2, videoPlanState.audio.desiredMuted)
-    var muted by remember(url, clipIndex, videoPlanV2, videoPlanState) { mutableStateOf(initialDesiredMuted) }
+    var muted by remember(url, playbackSlotIdentity, videoPlanV2, videoPlanState) {
+        mutableStateOf(initialDesiredMuted)
+    }
     val resolvedStyle = remember(chromeStyle, appName, appIconUrl) {
         resolvedVideoChromeStyle(chromeStyle, appName, appIconUrl)
     }
-    val controller = remember(url, clipIndex, videoPlanV2, videoPlanState) {
+    val controller = remember(url, playbackSlotIdentity, videoPlanV2, videoPlanState) {
         NativeVideoController(
             context = context,
             telemetry = VideoTelemetryContext(
@@ -352,6 +358,7 @@ internal fun FullscreenVideo(
             initialPlayedMs = initialPlayedMs,
             videoPlanV2 = videoPlanV2,
             videoPlanState = videoPlanState,
+            playbackSlotIdentity = playbackSlotIdentity,
             desiredMuted = initialDesiredMuted,
             hasNextStep = { currentWillHandoff() },
         )
@@ -456,6 +463,17 @@ internal fun FullscreenVideo(
         }
         Box(Modifier.fillMaxSize().then(ctaModifier))
         if (videoPlanV2 && ctaEnabled && firstFrameRendered && !completed) {
+            val obstructionClearance = videoChromeObstructionClearance(
+                effectiveClosePosition = effectiveClosePosition,
+                resolvedStyle = resolvedStyle,
+                bottomProgressBarObstructed = bottomProgressBarObstructed,
+            )
+            val additionalStartPadding = (
+                obstructionClearance.minimumStartFromSafeEdgeDp - VIDEO_CHROME_OUTER_PADDING_DP
+            ).coerceAtLeast(0)
+            val additionalBottomPadding = (
+                obstructionClearance.minimumBottomFromSafeEdgeDp - VIDEO_CHROME_OUTER_PADDING_DP
+            ).coerceAtLeast(0)
             VideoCtaChrome(
                 style = resolvedStyle,
                 cta = ctaLabel?.takeIf { it.isNotBlank() } ?: "Install",
@@ -463,7 +481,11 @@ internal fun FullscreenVideo(
                 appName = appName,
                 subtitle = subtitle,
                 onClick = guardedOnCta,
-                modifier = Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(16.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .safeDrawingPadding()
+                    .padding(start = additionalStartPadding.dp, bottom = additionalBottomPadding.dp)
+                    .padding(VIDEO_CHROME_OUTER_PADDING_DP.dp),
             )
         }
         if (videoMuteControlVisible(completed)) {
@@ -729,6 +751,7 @@ private class NativeVideoController(
     initialPlayedMs: Long,
     private val videoPlanV2: Boolean,
     private val videoPlanState: VideoPlanPresentationState,
+    private val playbackSlotIdentity: VideoPlaybackSlotIdentity,
     desiredMuted: Boolean,
     private val hasNextStep: () -> Boolean,
 ) {
@@ -888,7 +911,7 @@ private class NativeVideoController(
     fun registerPlaybackGeneration(): Boolean {
         if (!videoPlanV2) return !released
         if (released || playbackGeneration != null) return false
-        val registration = videoPlanState.registerPlaybackGeneration(telemetry.clipIndex)
+        val registration = videoPlanState.registerPlaybackGeneration(playbackSlotIdentity)
         playbackGeneration = registration.generation
         when (videoPlaybackReplayAction(registration.retainedTerminalOutcome)) {
             VideoPlaybackReplayAction.PREPARE -> return true

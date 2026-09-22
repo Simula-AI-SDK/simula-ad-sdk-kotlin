@@ -91,6 +91,11 @@ internal enum class VideoPlaybackTerminalOutcome { COMPLETED, FAILED, USER }
 
 internal enum class VideoPlaybackReplayAction { PREPARE, COMPLETE, FAIL, STAY_STOPPED }
 
+internal sealed class VideoPlaybackSlotIdentity {
+    data object Primary : VideoPlaybackSlotIdentity()
+    data class Fallback(val sourceIndex: Int) : VideoPlaybackSlotIdentity()
+}
+
 internal fun videoPlaybackReplayAction(
     outcome: VideoPlaybackTerminalOutcome?,
 ): VideoPlaybackReplayAction = when (outcome) {
@@ -140,7 +145,7 @@ internal class VideoPlanPresentationState(
     private var currentVideoStartedAtMs: Long? = null
     private var playbackGeneration = 0L
     private var currentPlaybackGeneration: Long? = null
-    private var currentClipIndex: Int? = null
+    private var currentPlaybackSlotIdentity: VideoPlaybackSlotIdentity? = null
     private var terminalOutcome: VideoPlaybackTerminalOutcome? = null
 
     @Synchronized
@@ -150,13 +155,15 @@ internal class VideoPlanPresentationState(
     }
 
     @Synchronized
-    fun registerPlaybackGeneration(clipIndex: Int?): VideoPlaybackRegistration {
-        val replacingCurrentClip = clipIndex != null &&
-            currentPlaybackGeneration != null && currentClipIndex == clipIndex
+    fun registerPlaybackGeneration(
+        playbackSlotIdentity: VideoPlaybackSlotIdentity,
+    ): VideoPlaybackRegistration {
+        val replacingCurrentSlot = currentPlaybackGeneration != null &&
+            currentPlaybackSlotIdentity == playbackSlotIdentity
         playbackGeneration += 1L
         currentPlaybackGeneration = playbackGeneration
-        currentClipIndex = clipIndex
-        if (!replacingCurrentClip) {
+        currentPlaybackSlotIdentity = playbackSlotIdentity
+        if (!replacingCurrentSlot) {
             terminalOutcome = null
             currentTelemetry = null
             currentVideoStartedAtMs = null

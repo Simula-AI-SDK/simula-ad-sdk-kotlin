@@ -26,6 +26,8 @@ import ad.simula.ad.sdk.model.videoDesiredMutedAfterLifecycleDeactivation
 import ad.simula.ad.sdk.model.videoMuteControlPlacement
 import ad.simula.ad.sdk.model.videoPreFirstFrameFailureAction
 import ad.simula.ad.sdk.model.videoAudioFocusLossPolicy
+import ad.simula.ad.sdk.model.VideoChromeObstructionClearance
+import ad.simula.ad.sdk.model.videoChromeObstructionClearance
 import ad.simula.ad.sdk.network.SimulaApiClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -130,6 +132,52 @@ class VideoPlanV2PolicyTest {
             assertEquals(style, resolvedVideoChromeStyle(style, "Game", "https://cdn/icon.png"))
         }
         assertEquals(VideoChromeStyle.CORNER_CTA, resolvedVideoChromeStyle(VideoChromeStyle.CORNER_CTA, null, null))
+    }
+
+    @Test
+    fun `video chrome clearance covers every style position and bottom obstruction combination`() {
+        for (position in ClosePosition.entries) {
+            for (style in VideoChromeStyle.entries) {
+                for (bottomProgressBarObstructed in listOf(false, true)) {
+                    val expected = VideoChromeObstructionClearance(
+                        minimumStartFromSafeEdgeDp = if (
+                            position == ClosePosition.BOTTOM_LEFT && style != VideoChromeStyle.CORNER_CTA
+                        ) 112 else 0,
+                        minimumBottomFromSafeEdgeDp = if (bottomProgressBarObstructed) 38 else 0,
+                    )
+                    assertEquals(
+                        "position=$position style=$style obstructed=$bottomProgressBarObstructed",
+                        expected,
+                        videoChromeObstructionClearance(position, style, bottomProgressBarObstructed),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `wide bottom left close exclusion covers fallback inset and touch target`() {
+        val clearance = videoChromeObstructionClearance(
+            effectiveClosePosition = ClosePosition.BOTTOM_LEFT,
+            resolvedStyle = VideoChromeStyle.FLOATING_PILL,
+            bottomProgressBarObstructed = false,
+        )
+
+        assertEquals(112, clearance.minimumStartFromSafeEdgeDp)
+        assertTrue(clearance.minimumStartFromSafeEdgeDp >= 18 + 8 + 48)
+        assertEquals(0, clearance.minimumBottomFromSafeEdgeDp)
+    }
+
+    @Test
+    fun `relocated progress close applies only bottom bar obstruction clearance`() {
+        val clearance = videoChromeObstructionClearance(
+            effectiveClosePosition = ClosePosition.TOP_RIGHT,
+            resolvedStyle = VideoChromeStyle.BOTTOM_BAR,
+            bottomProgressBarObstructed = true,
+        )
+
+        assertEquals(0, clearance.minimumStartFromSafeEdgeDp)
+        assertEquals(38, clearance.minimumBottomFromSafeEdgeDp)
     }
 
     @Test
@@ -246,7 +294,7 @@ class VideoPlanV2PolicyTest {
 
         assertFalse(state.closeCurrent(VideoLifecycleReason.USER))
 
-        val generation = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val generation = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary).generation
         assertTrue(state.isPlaybackGenerationOpen(generation))
     }
 
@@ -268,16 +316,17 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `same clip replacement preserves retained telemetry and rejects stale token`() {
+    fun `same slot replacement preserves retained telemetry and rejects stale token`() {
         val recordedPositions = mutableListOf<Double>()
         val state = VideoPlanPresentationState(
             videoPlanV2 = true,
             terminalRecorder = { telemetry, _, _, _ -> recordedPositions += telemetry.videoPositionS },
         )
-        val staleGeneration = state.registerPlaybackGeneration(clipIndex = 4).generation
+        val slot = VideoPlaybackSlotIdentity.Fallback(sourceIndex = 4)
+        val staleGeneration = state.registerPlaybackGeneration(slot).generation
         state.retainCurrentTelemetry(staleGeneration, playbackTelemetry(4, 3.5, 3.5, 0.0))
 
-        val replacementGeneration = state.registerPlaybackGeneration(clipIndex = 4).generation
+        val replacementGeneration = state.registerPlaybackGeneration(slot).generation
 
         assertFalse(state.claimPlaybackTerminal(staleGeneration, VideoPlaybackTerminalOutcome.COMPLETED))
         assertTrue(state.isPlaybackGenerationOpen(replacementGeneration))
@@ -286,14 +335,15 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `same clip replacement preserves original video start time`() {
+    fun `same slot replacement preserves original video start time`() {
         var now = 1_000L
         val state = VideoPlanPresentationState(videoPlanV2 = true, clockMs = { now })
-        state.registerPlaybackGeneration(clipIndex = 2)
+        val slot = VideoPlaybackSlotIdentity.Fallback(sourceIndex = 2)
+        state.registerPlaybackGeneration(slot)
         state.firstVideoFrame(config = null)
 
         now = 2_000L
-        val replacementGeneration = state.registerPlaybackGeneration(clipIndex = 2).generation
+        val replacementGeneration = state.registerPlaybackGeneration(slot).generation
         assertTrue(
             state.claimPlaybackTerminal(replacementGeneration, VideoPlaybackTerminalOutcome.COMPLETED),
         )
@@ -304,18 +354,19 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `completed same clip recreation returns outcome without duplicate terminal telemetry`() {
+    fun `completed same slot recreation returns outcome without duplicate terminal telemetry`() {
         val terminalStages = mutableListOf<String>()
         val state = VideoPlanPresentationState(
             videoPlanV2 = true,
             terminalRecorder = { _, stage, _, _ -> terminalStages += stage },
         )
         val telemetry = playbackTelemetry(0, 1.0, 1.0, 0.0)
-        val settledGeneration = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val slot = VideoPlaybackSlotIdentity.Primary
+        val settledGeneration = state.registerPlaybackGeneration(slot).generation
         assertTrue(state.claimPlaybackTerminal(settledGeneration, VideoPlaybackTerminalOutcome.COMPLETED))
         state.close(telemetry, VideoLifecycleReason.COMPLETED)
 
-        val replacement = state.registerPlaybackGeneration(clipIndex = 0)
+        val replacement = state.registerPlaybackGeneration(slot)
 
         assertEquals(VideoPlaybackTerminalOutcome.COMPLETED, replacement.retainedTerminalOutcome)
         assertFalse(state.isPlaybackGenerationOpen(replacement.generation))
@@ -326,18 +377,19 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `failed same clip recreation returns outcome without duplicate terminal telemetry`() {
+    fun `failed same slot recreation returns outcome without duplicate terminal telemetry`() {
         val terminalStages = mutableListOf<String>()
         val state = VideoPlanPresentationState(
             videoPlanV2 = true,
             terminalRecorder = { _, stage, _, _ -> terminalStages += stage },
         )
         val telemetry = playbackTelemetry(0, 1.0, 1.0, 0.0)
-        val settledGeneration = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val slot = VideoPlaybackSlotIdentity.Fallback(sourceIndex = 0)
+        val settledGeneration = state.registerPlaybackGeneration(slot).generation
         assertTrue(state.claimPlaybackTerminal(settledGeneration, VideoPlaybackTerminalOutcome.FAILED))
         state.close(telemetry, VideoLifecycleReason.FAILED)
 
-        val replacement = state.registerPlaybackGeneration(clipIndex = 0)
+        val replacement = state.registerPlaybackGeneration(slot)
 
         assertEquals(VideoPlaybackTerminalOutcome.FAILED, replacement.retainedTerminalOutcome)
         assertFalse(state.isPlaybackGenerationOpen(replacement.generation))
@@ -345,17 +397,18 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `user terminal same clip recreation remains stopped without duplicate telemetry`() {
+    fun `user terminal same slot recreation remains stopped without duplicate telemetry`() {
         val terminalStages = mutableListOf<String>()
         val state = VideoPlanPresentationState(
             videoPlanV2 = true,
             terminalRecorder = { _, stage, _, _ -> terminalStages += stage },
         )
-        val first = state.registerPlaybackGeneration(clipIndex = 0)
+        val slot = VideoPlaybackSlotIdentity.Fallback(sourceIndex = 0)
+        val first = state.registerPlaybackGeneration(slot)
         state.retainCurrentTelemetry(first.generation, playbackTelemetry(0, 1.0, 1.0, 0.0))
         assertTrue(state.closeCurrent(VideoLifecycleReason.USER))
 
-        val replacement = state.registerPlaybackGeneration(clipIndex = 0)
+        val replacement = state.registerPlaybackGeneration(slot)
 
         assertEquals(VideoPlaybackTerminalOutcome.USER, replacement.retainedTerminalOutcome)
         assertFalse(state.isPlaybackGenerationOpen(replacement.generation))
@@ -363,16 +416,33 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `null clip identities always register distinct open clips`() {
+    fun `different slots with duplicate clip index prepare independently`() {
         val state = VideoPlanPresentationState(videoPlanV2 = true)
-        val first = state.registerPlaybackGeneration(clipIndex = null)
+        val duplicateClipIndex = 1
+        val first = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary)
+        state.retainCurrentTelemetry(first.generation, playbackTelemetry(duplicateClipIndex, 1.0, 1.0, 0.0))
         assertTrue(state.claimPlaybackTerminal(first.generation, VideoPlaybackTerminalOutcome.COMPLETED))
 
-        val second = state.registerPlaybackGeneration(clipIndex = null)
+        val second = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Fallback(sourceIndex = 0))
 
         assertNull(second.retainedTerminalOutcome)
+        assertEquals(VideoPlaybackReplayAction.PREPARE, videoPlaybackReplayAction(second.retainedTerminalOutcome))
         assertTrue(state.isPlaybackGenerationOpen(second.generation))
         assertFalse(state.claimPlaybackTerminal(first.generation, VideoPlaybackTerminalOutcome.FAILED))
+    }
+
+    @Test
+    fun `null clip telemetry still replays a valid same slot terminal outcome`() {
+        val state = VideoPlanPresentationState(videoPlanV2 = true)
+        val slot = VideoPlaybackSlotIdentity.Fallback(sourceIndex = 3)
+        val first = state.registerPlaybackGeneration(slot)
+        state.retainCurrentTelemetry(first.generation, playbackTelemetry(null, 1.0, 1.0, 0.0))
+        assertTrue(state.claimPlaybackTerminal(first.generation, VideoPlaybackTerminalOutcome.FAILED))
+
+        val replacement = state.registerPlaybackGeneration(slot)
+
+        assertEquals(VideoPlaybackTerminalOutcome.FAILED, replacement.retainedTerminalOutcome)
+        assertEquals(VideoPlaybackReplayAction.FAIL, videoPlaybackReplayAction(replacement.retainedTerminalOutcome))
     }
 
     @Test
@@ -382,7 +452,7 @@ class VideoPlanV2PolicyTest {
             videoPlanV2 = true,
             terminalRecorder = { _, stage, reason, _ -> terminalEvents += stage to reason },
         )
-        val generation = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val generation = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary).generation
         state.retainCurrentTelemetry(generation, playbackTelemetry(0, 1.0, 1.0, 0.0))
 
         assertTrue(state.closeCurrent(VideoLifecycleReason.USER))
@@ -397,7 +467,7 @@ class VideoPlanV2PolicyTest {
             videoPlanV2 = true,
             terminalRecorder = { _, stage, reason, _ -> terminalEvents += stage to reason },
         )
-        val generation = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val generation = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary).generation
         state.retainCurrentTelemetry(generation, playbackTelemetry(0, 1.0, 1.0, 0.0))
 
         assertTrue(state.closeCurrent(VideoLifecycleReason.USER))
@@ -413,7 +483,7 @@ class VideoPlanV2PolicyTest {
             terminalRecorder = { _, stage, reason, _ -> terminalEvents += stage to reason },
         )
         val telemetry = playbackTelemetry(0, 1.0, 1.0, 0.0)
-        val generation = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val generation = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary).generation
         state.retainCurrentTelemetry(generation, telemetry)
 
         assertTrue(state.claimPlaybackTerminal(generation, VideoPlaybackTerminalOutcome.COMPLETED))
@@ -423,22 +493,25 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `stale generation cannot claim the current clip`() {
+    fun `stale generation cannot claim the current slot`() {
         val state = VideoPlanPresentationState(videoPlanV2 = true)
-        val staleGeneration = state.registerPlaybackGeneration(clipIndex = 0).generation
-        val currentGeneration = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val slot = VideoPlaybackSlotIdentity.Primary
+        val staleGeneration = state.registerPlaybackGeneration(slot).generation
+        val currentGeneration = state.registerPlaybackGeneration(slot).generation
 
         assertFalse(state.claimPlaybackTerminal(staleGeneration, VideoPlaybackTerminalOutcome.FAILED))
         assertTrue(state.claimPlaybackTerminal(currentGeneration, VideoPlaybackTerminalOutcome.FAILED))
     }
 
     @Test
-    fun `next clip terminal claim is independent`() {
+    fun `next slot terminal claim is independent`() {
         val state = VideoPlanPresentationState(videoPlanV2 = true)
-        val firstGeneration = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val firstGeneration = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary).generation
         assertTrue(state.claimPlaybackTerminal(firstGeneration, VideoPlaybackTerminalOutcome.COMPLETED))
 
-        val secondGeneration = state.registerPlaybackGeneration(clipIndex = 1).generation
+        val secondGeneration = state.registerPlaybackGeneration(
+            VideoPlaybackSlotIdentity.Fallback(sourceIndex = 0),
+        ).generation
         assertTrue(state.isPlaybackGenerationOpen(secondGeneration))
         assertTrue(state.claimPlaybackTerminal(secondGeneration, VideoPlaybackTerminalOutcome.FAILED))
     }
@@ -450,7 +523,7 @@ class VideoPlanV2PolicyTest {
             videoPlanV2 = true,
             terminalRecorder = { telemetry, _, _, _ -> recordedClipIndices += telemetry.context.clipIndex },
         )
-        val generation = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val generation = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary).generation
         state.retainCurrentTelemetry(generation, playbackTelemetry(0, 1.0, 1.0, 0.0))
 
         assertTrue(state.closeCurrent(VideoLifecycleReason.USER))
@@ -468,11 +541,13 @@ class VideoPlanV2PolicyTest {
             clockMs = { 0L },
             terminalRecorder = { _, stage, _, _ -> terminalStages += stage },
         )
-        val firstGeneration = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val firstGeneration = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary).generation
         assertTrue(state.claimPlaybackTerminal(firstGeneration, VideoPlaybackTerminalOutcome.COMPLETED))
         state.beginHandoff(playbackTelemetry(0, 1.0, 1.0, 0.0), VideoLifecycleReason.COMPLETED)
 
-        val secondGeneration = state.registerPlaybackGeneration(clipIndex = 1).generation
+        val secondGeneration = state.registerPlaybackGeneration(
+            VideoPlaybackSlotIdentity.Fallback(sourceIndex = 1),
+        ).generation
 
         assertTrue(state.isPlaybackGenerationOpen(secondGeneration))
         assertTrue(state.nextStepReady() != null)
@@ -491,7 +566,9 @@ class VideoPlanV2PolicyTest {
         )
         val firstClip = playbackTelemetry(clipIndex = 0, watchedS = 1.25, unmutedS = 1.0, mutedS = 0.25)
         val secondClip = playbackTelemetry(clipIndex = 1, watchedS = 1.25, unmutedS = 0.75, mutedS = 0.5)
-        val firstGeneration = state.registerPlaybackGeneration(clipIndex = 0).generation
+        val firstGeneration = state.registerPlaybackGeneration(
+            VideoPlaybackSlotIdentity.Fallback(sourceIndex = 0),
+        ).generation
 
         state.addEligibleMediaDelta(videoPlanV2 = true, advancedMs = 1_000L, muted = false)
         state.addEligibleMediaDelta(videoPlanV2 = true, advancedMs = 250L, muted = true)
@@ -500,7 +577,9 @@ class VideoPlanV2PolicyTest {
         state.beginHandoff(firstClip, VideoLifecycleReason.COMPLETED)
         state.retainCurrentTelemetry(firstGeneration, firstClip)
 
-        val secondGeneration = state.registerPlaybackGeneration(clipIndex = 1).generation
+        val secondGeneration = state.registerPlaybackGeneration(
+            VideoPlaybackSlotIdentity.Fallback(sourceIndex = 1),
+        ).generation
         state.addEligibleMediaDelta(videoPlanV2 = true, advancedMs = 500L, muted = true)
         state.addEligibleMediaDelta(videoPlanV2 = true, advancedMs = 750L, muted = false)
         state.nextStepReady()
@@ -838,7 +917,7 @@ class VideoPlanV2PolicyTest {
     }
 
     private fun playbackTelemetry(
-        clipIndex: Int,
+        clipIndex: Int?,
         watchedS: Double,
         unmutedS: Double,
         mutedS: Double,

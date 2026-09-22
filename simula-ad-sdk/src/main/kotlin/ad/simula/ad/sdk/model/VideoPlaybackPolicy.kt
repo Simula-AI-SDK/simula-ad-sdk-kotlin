@@ -140,6 +140,23 @@ internal fun resolvedVideoChromeStyle(
     -> requested
 }
 
+internal data class VideoChromeObstructionClearance(
+    val minimumStartFromSafeEdgeDp: Int,
+    val minimumBottomFromSafeEdgeDp: Int,
+)
+
+internal fun videoChromeObstructionClearance(
+    effectiveClosePosition: ClosePosition,
+    resolvedStyle: VideoChromeStyle,
+    bottomProgressBarObstructed: Boolean,
+): VideoChromeObstructionClearance = VideoChromeObstructionClearance(
+    minimumStartFromSafeEdgeDp = if (
+        effectiveClosePosition == ClosePosition.BOTTOM_LEFT &&
+        resolvedStyle != VideoChromeStyle.CORNER_CTA
+    ) 112 else 0,
+    minimumBottomFromSafeEdgeDp = if (bottomProgressBarObstructed) 26 + 4 + 8 else 0,
+)
+
 internal enum class VideoSequenceAdvance { MANUAL, WAIT_FOR_BLOCKER, ADVANCE }
 
 internal enum class VideoPreFirstFrameFailureAction { PRESERVE_PENDING_HANDOFF, FAIL_EXPECTED_NEXT_STEP }
