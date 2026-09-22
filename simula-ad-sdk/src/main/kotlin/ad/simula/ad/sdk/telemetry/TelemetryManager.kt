@@ -261,6 +261,10 @@ internal class TelemetryManager(
         clickSource: String? = null,
         critical: Boolean = false,
         onPersisted: (() -> Unit)? = null,
+        endEvent: String? = null,
+        opens: Int? = null,
+        contaminated: Boolean? = null,
+        freeSpaceDeltaBytes: Long? = null,
     ) {
         accumulate(stage, adFormat, cacheSource, errorCode)
         enqueuePerf(
@@ -276,6 +280,10 @@ internal class TelemetryManager(
                 breadcrumb = breadcrumb,
                 interactionId = interactionId,
                 clickSource = clickSource,
+                endEvent = endEvent,
+                opens = opens?.coerceIn(1, MAX_STORE_OPENS),
+                contaminated = contaminated,
+                freeSpaceDeltaBytes = freeSpaceDeltaBytes,
                 // Critical lifecycle events are admitted independently of session perf sampling.
                 sampleRate = if (critical) 1.0 else effectiveSampleRate,
             ),
@@ -659,6 +667,7 @@ internal class TelemetryManager(
         const val FLUSH_INTERVAL_MS = 30_000L
         const val MAX_ERROR_SIGNATURES = 50
         const val MAX_META_COUNT = 1_000_000
+        const val MAX_STORE_OPENS = 1_000
         const val MAX_MESSAGE_LEN = 300
 
         // Redaction patterns for free-text error messages.

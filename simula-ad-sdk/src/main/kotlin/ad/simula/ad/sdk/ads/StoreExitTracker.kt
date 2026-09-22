@@ -10,9 +10,14 @@ import ad.simula.ad.sdk.network.ClickRouteStart
 import ad.simula.ad.sdk.network.PresentationRouteResult
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.telemetry.Telemetry
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import androidx.core.content.ContextCompat
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -278,44 +283,81 @@ internal fun shouldExitUnavailableCreative(
 
 internal enum class StoreVisitPhase { NONE, LAUNCHING, AWAY }
 
-internal data class ResolvedStoreVisit(val trigger: String, val openedAtMs: Long)
+internal data class ResolvedStoreVisit(
+    val trigger: String,
+    val openedAtMs: Long,
+    val opens: Int,
+    val contaminated: Boolean?,
+)
 
 internal class StoreVisitLifecycle {
     var phase: StoreVisitPhase = StoreVisitPhase.NONE
         private set
     private var trigger: String? = null
     private var openedAtMs = 0L
+    private var openCount = 0
+    private var contaminated: Boolean? = null
 
-    fun open(trigger: String, openedAtMs: Long): ResolvedStoreVisit? {
-        val replaced = abandon()
+    fun open(trigger: String, openedAtMs: Long): Boolean {
+        if (phase != StoreVisitPhase.NONE) return false
         this.trigger = trigger
         this.openedAtMs = openedAtMs
+        contaminated = null
         phase = StoreVisitPhase.LAUNCHING
-        return replaced
+        return true
     }
 
-    fun pause(): Boolean {
-        if (phase != StoreVisitPhase.LAUNCHING) return false
+    fun observeContamination() {
+        if (phase != StoreVisitPhase.NONE && contaminated == null) contaminated = false
+    }
+
+    fun contaminate() {
+        if (phase != StoreVisitPhase.NONE) contaminated = true
+    }
+
+    fun pause(): ResolvedStoreVisit? {
+        if (phase != StoreVisitPhase.LAUNCHING) return null
+        openCount = (openCount + 1).coerceAtMost(MAX_STORE_OPENS)
         phase = StoreVisitPhase.AWAY
-        return true
+        return snapshot()
     }
 
     fun resume(): ResolvedStoreVisit? =
         if (phase == StoreVisitPhase.AWAY) resolve() else null
 
-    fun launchTimedOut(): ResolvedStoreVisit? =
-        if (phase == StoreVisitPhase.LAUNCHING) resolve() else null
+    fun launchTimedOut(): Boolean {
+        if (phase != StoreVisitPhase.LAUNCHING) return false
+        clear()
+        return true
+    }
 
     fun abandon(): ResolvedStoreVisit? =
-        if (phase == StoreVisitPhase.NONE) null else resolve()
+        when (phase) {
+            StoreVisitPhase.AWAY -> resolve()
+            StoreVisitPhase.LAUNCHING -> null.also { clear() }
+            StoreVisitPhase.NONE -> null
+        }
+
+    private fun snapshot(): ResolvedStoreVisit? {
+        val currentTrigger = trigger ?: return null
+        return ResolvedStoreVisit(currentTrigger, openedAtMs, openCount, contaminated)
+    }
 
     private fun resolve(): ResolvedStoreVisit? {
-        val currentTrigger = trigger ?: return null
-        val resolved = ResolvedStoreVisit(currentTrigger, openedAtMs)
+        val resolved = snapshot() ?: return null
+        clear()
+        return resolved
+    }
+
+    private fun clear() {
         trigger = null
         openedAtMs = 0L
+        contaminated = null
         phase = StoreVisitPhase.NONE
-        return resolved
+    }
+
+    private companion object {
+        const val MAX_STORE_OPENS = 1_000
     }
 }
 
@@ -338,9 +380,17 @@ internal class StoreExitTracker(
 ) {
     private val mainHandler by lazy(LazyThreadSafetyMode.NONE) { Handler(Looper.getMainLooper()) }
     private val visit = StoreVisitLifecycle()
+    private var appContext: Context? = null
+    private var screenReceiverRegistered = false
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) visit.contaminate()
+        }
+    }
     private val launchTimeout = Runnable {
         val timedOut = visit.launchTimedOut()
-        if (timedOut != null) {
+        if (timedOut) {
+            unregisterScreenOffReceiver()
             Telemetry.recordError(
                 signature = "store:launch_no_pause",
                 breadcrumb = "surface=fullscreen",
@@ -351,10 +401,17 @@ internal class StoreExitTracker(
     private var foregroundMs: Long = 0L
     private var resumedAt: Long = SystemClock.elapsedRealtime()
     private var inForeground: Boolean = true
+    private var pendingDwellMs: Long = 0L
 
     private var storeVisitPending by mutableStateOf(false)
 
     fun hasPendingStoreVisit(): Boolean = storeVisitPending
+
+    /** Retains only the application context so screen-off can be observed while Play owns foreground. */
+    fun attach(context: Context) {
+        appContext = context.applicationContext
+        if (visit.phase != StoreVisitPhase.NONE) registerScreenOffReceiver()
+    }
 
     /** Activity resumed. A resume while a store visit is outstanding is the return from the store. */
     fun onResume() {
@@ -365,6 +422,7 @@ internal class StoreExitTracker(
         }
         val resolved = visit.resume() ?: return
         mainHandler.removeCallbacks(launchTimeout)
+        unregisterScreenOffReceiver()
         storeVisitPending = false
         Telemetry.recordLifecycle(
             stage = "store_returned",
@@ -375,6 +433,9 @@ internal class StoreExitTracker(
             durationMs = (now - resolved.openedAtMs).coerceAtLeast(0L), // time away
             errorCode = null,
             trigger = resolved.trigger,
+            endEvent = "activity_resumed",
+            opens = resolved.opens,
+            contaminated = resolved.contaminated,
         )
     }
 
@@ -384,7 +445,19 @@ internal class StoreExitTracker(
             foregroundMs += (SystemClock.elapsedRealtime() - resumedAt).coerceAtLeast(0L)
             inForeground = false
         }
-        if (visit.pause()) mainHandler.removeCallbacks(launchTimeout)
+        val confirmed = visit.pause() ?: return
+        mainHandler.removeCallbacks(launchTimeout)
+        Telemetry.recordLifecycle(
+            stage = "store_opened",
+            adFormat = adFormat,
+            adUnitId = adUnitId,
+            adId = adId,
+            serveId = adId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
+            durationMs = pendingDwellMs,
+            errorCode = null,
+            trigger = confirmed.trigger,
+            opens = confirmed.opens,
+        )
     }
 
     /**
@@ -395,31 +468,24 @@ internal class StoreExitTracker(
         val now = SystemClock.elapsedRealtime()
         val dwellMs = foregroundMs + if (inForeground) (now - resumedAt).coerceAtLeast(0L) else 0L
         val storeExitTrigger = ClickSources.storeExitTrigger(trigger)
-        visit.open(storeExitTrigger, now)?.let(::recordAbandoned)
+        if (!visit.open(storeExitTrigger, now)) return
+        pendingDwellMs = dwellMs
         storeVisitPending = true
+        registerScreenOffReceiver()
         mainHandler.removeCallbacks(launchTimeout)
         mainHandler.postDelayed(launchTimeout, STORE_LAUNCH_SETTLE_MS)
-        Telemetry.recordLifecycle(
-            stage = "store_opened",
-            adFormat = adFormat,
-            adUnitId = adUnitId,
-            adId = adId,
-            serveId = adId.takeIf { adFormat == "interstitial" || adFormat == "rewarded" },
-            durationMs = dwellMs, // foreground time before leaving
-            errorCode = null,
-            trigger = storeExitTrigger,
-        )
     }
 
     /** The ad closed / tore down. If a store visit never resolved with a return, it's an abandon. */
     fun onAdClosed() {
         mainHandler.removeCallbacks(launchTimeout)
-        val resolved = visit.abandon() ?: return
+        val resolved = visit.abandon()
+        unregisterScreenOffReceiver()
         storeVisitPending = false
-        recordAbandoned(resolved)
+        if (resolved != null) recordAbandoned(resolved, endEvent = "ad_closed")
     }
 
-    private fun recordAbandoned(resolved: ResolvedStoreVisit) {
+    private fun recordAbandoned(resolved: ResolvedStoreVisit, endEvent: String?) {
         Telemetry.recordLifecycle(
             stage = "store_abandoned",
             adFormat = adFormat,
@@ -429,6 +495,36 @@ internal class StoreExitTracker(
             durationMs = null,
             errorCode = null,
             trigger = resolved.trigger,
+            endEvent = endEvent,
+            opens = resolved.opens,
+            contaminated = resolved.contaminated,
         )
+    }
+
+    private fun registerScreenOffReceiver() {
+        val context = appContext ?: return
+        if (screenReceiverRegistered) return
+        screenReceiverRegistered = runCatching {
+            ContextCompat.registerReceiver(
+                context,
+                screenOffReceiver,
+                IntentFilter(Intent.ACTION_SCREEN_OFF),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            visit.observeContamination()
+            true
+        }.onFailure {
+            Telemetry.recordError(
+                signature = "store:screen_observer_unavailable",
+                breadcrumb = "surface=fullscreen",
+            )
+        }.getOrDefault(false)
+    }
+
+    private fun unregisterScreenOffReceiver() {
+        if (!screenReceiverRegistered) return
+        val context = appContext
+        screenReceiverRegistered = false
+        if (context != null) runCatching { context.unregisterReceiver(screenOffReceiver) }
     }
 }
