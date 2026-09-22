@@ -326,14 +326,14 @@ internal fun FullscreenVideo(
     val currentOnCompleted by rememberUpdatedState(onCompleted)
     val currentOnError by rememberUpdatedState(onError)
     val currentWillHandoff by rememberUpdatedState(willHandoff)
-    var firstFrameRendered by remember(url) { mutableStateOf(false) }
-    var completed by remember(url) { mutableStateOf(false) }
+    var firstFrameRendered by remember(url, clipIndex) { mutableStateOf(false) }
+    var completed by remember(url, clipIndex) { mutableStateOf(false) }
     val initialDesiredMuted = initialVideoDesiredMuted(videoPlanV2, videoPlanState.audio.desiredMuted)
-    var muted by remember(url, videoPlanV2, videoPlanState) { mutableStateOf(initialDesiredMuted) }
+    var muted by remember(url, clipIndex, videoPlanV2, videoPlanState) { mutableStateOf(initialDesiredMuted) }
     val resolvedStyle = remember(chromeStyle, appName, appIconUrl) {
         resolvedVideoChromeStyle(chromeStyle, appName, appIconUrl)
     }
-    val controller = remember(url, videoPlanV2, videoPlanState) {
+    val controller = remember(url, clipIndex, videoPlanV2, videoPlanState) {
         NativeVideoController(
             context = context,
             telemetry = VideoTelemetryContext(
@@ -381,12 +381,14 @@ internal fun FullscreenVideo(
     controller.onError = currentOnError
     controller.setPresentationBlocked(presentationBlocked)
     val guardedOnCta = {
-        if (videoCtaInteractionAllowed(firstFrameRendered, completed)) onCta()
+        if (videoCtaInteractionAllowed(videoPlanV2, firstFrameRendered, completed)) onCta()
     }
 
     DisposableEffect(controller, url) {
-        controller.setLifecycleActive(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
-        controller.prepare(url)
+        if (controller.registerPlaybackGeneration()) {
+            controller.setLifecycleActive(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+            controller.prepare(url)
+        }
         if (!videoPlanV2) FullscreenVideoPreparer.prepare(prewarmNextUrl)
         onDispose { controller.release() }
     }
@@ -445,7 +447,9 @@ internal fun FullscreenVideo(
                 contentScale = ContentScale.Fit,
             )
         }
-        val ctaModifier = if (ctaEnabled && videoCtaInteractionAllowed(firstFrameRendered, completed)) {
+        val ctaModifier = if (ctaEnabled &&
+            videoCtaInteractionAllowed(videoPlanV2, firstFrameRendered, completed)
+        ) {
             Modifier.clickable(onClick = guardedOnCta)
         } else {
             Modifier.consumeVideoTouches()
@@ -746,6 +750,7 @@ private class NativeVideoController(
     private val clipAudioWatch = VideoAudioWatchAccounting()
     private val quartiles = VideoQuartileTracker()
     private val configuredGateMs = configuredGateSeconds.coerceAtLeast(0) * 1_000L
+    private var playbackGeneration: Long? = null
     private var renderToken = 0L
     private var player: MediaPlayer? = null
     private var textureView: TextureView? = null
@@ -774,6 +779,7 @@ private class NativeVideoController(
     private var audioFocusHeld = false
     private var pausedAtMs: Long? = null
     private var startedAtMs: Long? = null
+    private var terminalClaimOwned = false
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
             AudioManager.AUDIOFOCUS_GAIN -> {
@@ -799,6 +805,10 @@ private class NativeVideoController(
     private val positionPoll = object : Runnable {
         override fun run() {
             if (!lifecycleActive || released || failed || !firstFrameRendered) return
+            if (!ownsPresentationWork()) {
+                releaseAfterLostTerminalClaim()
+                return
+            }
             val continuePolling = continueAfterVideoPositionPoll(
                 read = { emitProgress(force = false) },
                 onReadFailure = {
@@ -875,8 +885,33 @@ private class NativeVideoController(
         }
     }
 
+    fun registerPlaybackGeneration(): Boolean {
+        if (!videoPlanV2) return !released
+        if (released || playbackGeneration != null) return false
+        val registration = videoPlanState.registerPlaybackGeneration(telemetry.clipIndex)
+        playbackGeneration = registration.generation
+        when (videoPlaybackReplayAction(registration.retainedTerminalOutcome)) {
+            VideoPlaybackReplayAction.PREPARE -> return true
+            VideoPlaybackReplayAction.COMPLETE -> {
+                completed = true
+                runCatching(onCompleted)
+            }
+            VideoPlaybackReplayAction.FAIL -> {
+                failed = true
+                runCatching(onError)
+            }
+            VideoPlaybackReplayAction.STAY_STOPPED -> failed = true
+        }
+        return false
+    }
+
     fun prepare(rawUrl: String) {
         if (released || player != null) return
+        if (videoPlanV2 && playbackGeneration == null) return
+        if (!ownsPresentationWork()) {
+            releaseAfterLostTerminalClaim()
+            return
+        }
         val url = admittedVideoUrl(rawUrl)
         if (url == null) {
             fail(VideoFailureCode.PREPARE_FAILED)
@@ -919,7 +954,7 @@ private class NativeVideoController(
             completePlayback(token)
         }
         mediaPlayer.setOnErrorListener { _, _, _ ->
-            if (ownsCallback(token)) {
+            if (token == renderToken && !released && !failed) {
                 fail(videoMediaErrorCode(prepared))
             }
             true
@@ -1042,7 +1077,7 @@ private class NativeVideoController(
 
     fun release() {
         if (released) return
-        if (!failed && !completed && firstFrameRendered) emitProgress(force = true)
+        if (!failed && !completed && firstFrameRendered && ownsPresentationWork()) emitProgress(force = true)
         released = true
         failed = true
         renderGate.fail(renderToken)
@@ -1065,7 +1100,24 @@ private class NativeVideoController(
         if (detachedPlayer != null) releasePlayerOffMain(detachedPlayer)
     }
 
-    private fun ownsCallback(token: Long): Boolean = token == renderToken && !released && !failed
+    private fun ownsCallback(token: Long): Boolean =
+        token == renderToken && !released && !failed && ownsPresentationWork()
+
+    private fun ownsPresentationWork(): Boolean =
+        !videoPlanV2 || terminalClaimOwned || playbackGeneration?.let(videoPlanState::isPlaybackGenerationOpen) == true
+
+    private fun claimPresentationTerminal(outcome: VideoPlaybackTerminalOutcome): Boolean {
+        if (!videoPlanV2) return true
+        val generation = playbackGeneration ?: return false
+        if (!videoPlanState.claimPlaybackTerminal(generation, outcome)) return false
+        terminalClaimOwned = true
+        return true
+    }
+
+    private fun releaseAfterLostTerminalClaim() {
+        failed = true
+        release()
+    }
 
     private fun scheduleReadinessTimeout(nowMs: Long) {
         if (!lifecycleActive || firstFrameRendered || released || failed) return
@@ -1108,13 +1160,17 @@ private class NativeVideoController(
     }
 
     private fun completePlayback(token: Long) {
-        if (!ownsCallback(token)) return
+        if (token != renderToken || released || failed) return
         if (!firstFrameRendered) {
             fail(VideoFailureCode.FIRST_FRAME_TIMEOUT)
             return
         }
         val transition = completionGate.complete()
         if (!transition.accepted) return
+        if (!claimPresentationTerminal(VideoPlaybackTerminalOutcome.COMPLETED)) {
+            releaseAfterLostTerminalClaim()
+            return
+        }
         completed = true
         dispatchNaturalVideoCompletion(
             onCompleted = onCompleted,
@@ -1178,7 +1234,7 @@ private class NativeVideoController(
             quartiles.crossed(sample.positionMs, durationMs).forEach { quartile ->
                 recordLifecycle(VIDEO_STAGE_DURATION, quartile = quartile)
             }
-            videoPlanState.retainCurrentTelemetry(telemetrySnapshot())
+            playbackGeneration?.let { videoPlanState.retainCurrentTelemetry(it, telemetrySnapshot()) }
         }
         if (sample.advancedMs > 0L) resetPlaybackTimeout()
         val gateDurationMs = if (durationMs > 0L) minOf(configuredGateMs, durationMs) else configuredGateMs
@@ -1332,6 +1388,10 @@ private class NativeVideoController(
 
     private fun fail(code: VideoFailureCode) {
         if (failed || released) return
+        if (!claimPresentationTerminal(VideoPlaybackTerminalOutcome.FAILED)) {
+            releaseAfterLostTerminalClaim()
+            return
+        }
         if (firstFrameRendered) emitProgress(force = true)
         failed = true
         renderGate.fail(renderToken)

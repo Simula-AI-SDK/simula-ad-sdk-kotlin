@@ -307,9 +307,10 @@ internal class VideoInstallOverlayClock {
 }
 
 internal fun videoCtaInteractionAllowed(
+    videoPlanV2: Boolean,
     firstFrameRendered: Boolean,
     completed: Boolean,
-): Boolean = firstFrameRendered && !completed
+): Boolean = firstFrameRendered && (!videoPlanV2 || !completed)
 
 internal fun videoMuteInteractionAllowed(
     firstFrameRendered: Boolean,

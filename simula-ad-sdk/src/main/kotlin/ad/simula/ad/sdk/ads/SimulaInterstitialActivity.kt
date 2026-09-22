@@ -753,9 +753,9 @@ private fun CreativeInterstitial(
     // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
     BackHandler(enabled = true) {
         if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked)) {
-            if (ad.creative?.isVideoPlanV2 == true && !videoTerminal) {
+            val closeClaimed = ad.creative?.isVideoPlanV2 != true || videoTerminal ||
                 presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
-            }
+            if (!closeClaimed) return@BackHandler
             presentation.automaticNavigationGate.clear()
             onFinish()
         }
@@ -982,11 +982,12 @@ private fun CreativeInterstitial(
             progress = if (isVideo) smoothVideoCloseProgress else closeProgress.value,
             onClose = {
                 if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked)) {
-                    if (ad.creative?.isVideoPlanV2 == true && !videoTerminal) {
+                    val closeClaimed = ad.creative?.isVideoPlanV2 != true || videoTerminal ||
                         presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
+                    if (closeClaimed) {
+                        presentation.automaticNavigationGate.clear()
+                        onFinish()
                     }
-                    presentation.automaticNavigationGate.clear()
-                    onFinish()
                 }
             },
         )

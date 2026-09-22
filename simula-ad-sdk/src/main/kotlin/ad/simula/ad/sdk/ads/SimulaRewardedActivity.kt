@@ -868,9 +868,9 @@ private fun RewardedMinigame(
                 storeVisitBlocked,
             )
         ) {
-            if (presentation.creative.isVideoPlanV2 && !videoTerminal) {
+            val closeClaimed = !presentation.creative.isVideoPlanV2 || videoTerminal ||
                 presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
-            }
+            if (!closeClaimed) return@BackHandler
             presentation.automaticNavigationGate.clear()
             onFinish(true)
         }
@@ -1369,11 +1369,12 @@ private fun RewardedMinigame(
                         storeVisitBlocked,
                     )
                 ) {
-                    if (presentation.creative.isVideoPlanV2 && !videoTerminal) {
+                    val closeClaimed = !presentation.creative.isVideoPlanV2 || videoTerminal ||
                         presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
+                    if (closeClaimed) {
+                        presentation.automaticNavigationGate.clear()
+                        onFinish(true)
                     }
-                    presentation.automaticNavigationGate.clear()
-                    onFinish(true)
                 }
             },
         )

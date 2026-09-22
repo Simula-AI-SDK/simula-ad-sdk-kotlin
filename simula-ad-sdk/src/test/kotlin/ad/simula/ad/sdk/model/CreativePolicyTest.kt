@@ -242,11 +242,19 @@ class CreativePolicyTest {
     }
 
     @Test
-    fun `video interactions stay consumed until first frame`() {
-        assertFalse(videoCtaInteractionAllowed(firstFrameRendered = false, completed = false))
+    fun `video cta interaction matrix preserves completed v1 and disables terminal v2`() {
+        for (videoPlanV2 in listOf(false, true)) {
+            assertFalse(videoCtaInteractionAllowed(videoPlanV2, firstFrameRendered = false, completed = false))
+            assertFalse(videoCtaInteractionAllowed(videoPlanV2, firstFrameRendered = false, completed = true))
+            assertTrue(videoCtaInteractionAllowed(videoPlanV2, firstFrameRendered = true, completed = false))
+        }
+        assertTrue(videoCtaInteractionAllowed(videoPlanV2 = false, firstFrameRendered = true, completed = true))
+        assertFalse(videoCtaInteractionAllowed(videoPlanV2 = true, firstFrameRendered = true, completed = true))
+    }
+
+    @Test
+    fun `video mute interactions stay consumed until first frame`() {
         assertFalse(videoMuteInteractionAllowed(firstFrameRendered = false, playerActive = true))
-        assertTrue(videoCtaInteractionAllowed(firstFrameRendered = true, completed = false))
-        assertFalse(videoCtaInteractionAllowed(firstFrameRendered = true, completed = true))
         assertTrue(videoMuteInteractionAllowed(firstFrameRendered = true, playerActive = true))
         assertFalse(videoMuteInteractionAllowed(firstFrameRendered = true, playerActive = false))
         assertEquals("Unmute video", videoMuteActionLabel(muted = true))

@@ -87,6 +87,24 @@ internal data class VideoHandoffTiming(
     val on: String = "next_step",
 )
 
+internal enum class VideoPlaybackTerminalOutcome { COMPLETED, FAILED, USER }
+
+internal enum class VideoPlaybackReplayAction { PREPARE, COMPLETE, FAIL, STAY_STOPPED }
+
+internal fun videoPlaybackReplayAction(
+    outcome: VideoPlaybackTerminalOutcome?,
+): VideoPlaybackReplayAction = when (outcome) {
+    VideoPlaybackTerminalOutcome.COMPLETED -> VideoPlaybackReplayAction.COMPLETE
+    VideoPlaybackTerminalOutcome.FAILED -> VideoPlaybackReplayAction.FAIL
+    VideoPlaybackTerminalOutcome.USER -> VideoPlaybackReplayAction.STAY_STOPPED
+    null -> VideoPlaybackReplayAction.PREPARE
+}
+
+internal data class VideoPlaybackRegistration(
+    val generation: Long,
+    val retainedTerminalOutcome: VideoPlaybackTerminalOutcome?,
+)
+
 /** State shared by every slot in one resolved V2 presentation. */
 internal class VideoPlanPresentationState(
     videoPlanV2: Boolean = false,
@@ -120,12 +138,42 @@ internal class VideoPlanPresentationState(
     private var pendingHandoff: PendingHandoff? = null
     private var currentTelemetry: VideoPlaybackTelemetry? = null
     private var currentVideoStartedAtMs: Long? = null
+    private var playbackGeneration = 0L
+    private var currentPlaybackGeneration: Long? = null
+    private var currentClipIndex: Int? = null
+    private var terminalOutcome: VideoPlaybackTerminalOutcome? = null
 
     @Synchronized
     fun activateVideoPlanV2() {
         active = true
         audio.activateVideoPlanV2()
     }
+
+    @Synchronized
+    fun registerPlaybackGeneration(clipIndex: Int?): VideoPlaybackRegistration {
+        val replacingCurrentClip = clipIndex != null &&
+            currentPlaybackGeneration != null && currentClipIndex == clipIndex
+        playbackGeneration += 1L
+        currentPlaybackGeneration = playbackGeneration
+        currentClipIndex = clipIndex
+        if (!replacingCurrentClip) {
+            terminalOutcome = null
+            currentTelemetry = null
+            currentVideoStartedAtMs = null
+        }
+        return VideoPlaybackRegistration(playbackGeneration, terminalOutcome)
+    }
+
+    @Synchronized
+    fun claimPlaybackTerminal(generation: Long, outcome: VideoPlaybackTerminalOutcome): Boolean {
+        if (currentPlaybackGeneration != generation || terminalOutcome != null) return false
+        terminalOutcome = outcome
+        return true
+    }
+
+    @Synchronized
+    fun isPlaybackGenerationOpen(generation: Long): Boolean =
+        currentPlaybackGeneration == generation && terminalOutcome == null
 
     @Synchronized
     fun addEligibleMediaDelta(videoPlanV2: Boolean, advancedMs: Long, muted: Boolean) {
@@ -176,8 +224,10 @@ internal class VideoPlanPresentationState(
     }
 
     @Synchronized
-    fun retainCurrentTelemetry(telemetry: VideoPlaybackTelemetry) {
-        if (active) currentTelemetry = telemetry
+    fun retainCurrentTelemetry(generation: Long, telemetry: VideoPlaybackTelemetry) {
+        if (active && currentPlaybackGeneration == generation && terminalOutcome == null) {
+            currentTelemetry = telemetry
+        }
     }
 
     fun nextStepReady(): VideoHandoffTiming? {
@@ -220,14 +270,18 @@ internal class VideoPlanPresentationState(
         recordTerminal(telemetry, VIDEO_STAGE_CLOSE, reason = reason)
     }
 
-    fun closeCurrent(reason: VideoLifecycleReason) {
+    fun closeCurrent(reason: VideoLifecycleReason): Boolean {
         val telemetry = synchronized(this) {
-            val retained = currentTelemetry ?: return
+            val generation = currentPlaybackGeneration ?: return false
+            if (terminalOutcome != null) return true
+            if (!claimPlaybackTerminal(generation, VideoPlaybackTerminalOutcome.USER)) return false
+            val retained = currentTelemetry
             currentTelemetry = null
             currentVideoStartedAtMs = null
             retained
         }
-        recordTerminal(telemetry, VIDEO_STAGE_CLOSE, reason = reason)
+        if (telemetry != null) recordTerminal(telemetry, VIDEO_STAGE_CLOSE, reason = reason)
+        return true
     }
 
     private fun recordTerminal(

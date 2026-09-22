@@ -105,6 +105,8 @@ import ad.simula.ad.sdk.ads.FallbackHtmlFailureAction
 import ad.simula.ad.sdk.ads.fallbackHtmlFailureAction
 import ad.simula.ad.sdk.ads.fallbackCloseGateUsesPresentedTime
 import ad.simula.ad.sdk.ads.fallbackFailureAutoAdvances
+import ad.simula.ad.sdk.ads.videoOverlayCloseAllowed
+import ad.simula.ad.sdk.ads.VideoOverlayCloseOrigin
 import ad.simula.ad.sdk.ads.resolveFallbackVideoRouting
 import ad.simula.ad.sdk.ads.prepareDeferredCtaRoute
 import ad.simula.ad.sdk.ads.AutomaticNavigationOutcome
@@ -987,10 +989,13 @@ private fun MiniGameFallbackOverlay(
         }
     }
 
-    fun closeOverlay() {
+    fun closeOverlay(origin: VideoOverlayCloseOrigin) {
         if (closeIssued) return
+        if (!videoOverlayCloseAllowed(origin, ad.isVideoPlanV2, videoTerminal) {
+                videoPlan.closeCurrent(VideoLifecycleReason.USER)
+            }
+        ) return
         closeIssued = true
-        if (ad.isVideoPlanV2 && !videoTerminal) videoPlan.closeCurrent(VideoLifecycleReason.USER)
         clickOwner.cancel()
         onClose()
     }
@@ -1134,7 +1139,7 @@ private fun MiniGameFallbackOverlay(
     LaunchedEffect(adPageFailed, clickHandoffPending, storeVisitPending) {
         if (adPageFailed && fallbackFailureAutoAdvances(ad.type) &&
             !clickHandoffPending && !storeVisitPending
-        ) closeOverlay()
+        ) closeOverlay(VideoOverlayCloseOrigin.AUTOMATIC)
     }
     LaunchedEffect(videoTerminal, clickHandoffPending, storeVisitPending) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -1148,7 +1153,7 @@ private fun MiniGameFallbackOverlay(
                     lifecycleResumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
                     framePresented = true,
                 )
-            ) closeOverlay()
+            ) closeOverlay(VideoOverlayCloseOrigin.AUTOMATIC)
         }
     }
     LaunchedEffect(isVideo, renderToken, adPageLoaded, adPageFailed) {
@@ -1186,7 +1191,9 @@ private fun MiniGameFallbackOverlay(
     }
 
     BackHandler(enabled = true) {
-        if (adCountdown <= 0 && !clickHandoffPending && !storeVisitPending) closeOverlay()
+        if (adCountdown <= 0 && !clickHandoffPending && !storeVisitPending) {
+            closeOverlay(VideoOverlayCloseOrigin.USER)
+        }
     }
 
     Box(
@@ -1446,7 +1453,7 @@ private fun MiniGameFallbackOverlay(
                 }
                 if (closeReady) {
                     CloseButton(
-                        onClick = ::closeOverlay,
+                        onClick = { closeOverlay(VideoOverlayCloseOrigin.USER) },
                         action = closeBehavior.action,
                         modifier = Modifier
                             .align(closeAlignment)

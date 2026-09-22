@@ -111,6 +111,16 @@ internal fun fallbackHtmlFailureAction(
 
 internal fun fallbackFailureAutoAdvances(type: CreativeType): Boolean = type == CreativeType.VIDEO
 
+internal enum class VideoOverlayCloseOrigin { USER, AUTOMATIC }
+
+internal fun videoOverlayCloseAllowed(
+    origin: VideoOverlayCloseOrigin,
+    videoPlanV2: Boolean,
+    videoTerminal: Boolean,
+    claimUserClose: () -> Boolean,
+): Boolean = origin == VideoOverlayCloseOrigin.AUTOMATIC ||
+    !videoPlanV2 || videoTerminal || claimUserClose()
+
 internal fun fallbackCloseGateUsesPresentedTime(type: CreativeType): Boolean = type != CreativeType.VIDEO
 
 internal fun shouldEnterFallbackVideoUnavailable(
@@ -949,12 +959,13 @@ private fun FallbackAdOverlay(
         if (renderGate.fail(token)) pageLoadFailed = true
     }
     var unavailableExitIssued by remember { mutableStateOf(false) }
-    fun closeOnce() {
+    fun closeOnce(origin: VideoOverlayCloseOrigin) {
         if (unavailableExitIssued) return
+        if (!videoOverlayCloseAllowed(origin, ad.isVideoPlanV2, videoTerminal) {
+                presentationState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
+            }
+        ) return
         unavailableExitIssued = true
-        if (ad.isVideoPlanV2 && !videoTerminal) {
-            presentationState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
-        }
         runCatching(onClose)
     }
     LaunchedEffect(isVideo, videoUrl, rendererGone) {
@@ -972,7 +983,7 @@ private fun FallbackAdOverlay(
                     storeVisitPending = storeVisitPending(),
                 ) && !unavailableExitIssued
             ) {
-                closeOnce()
+                closeOnce(VideoOverlayCloseOrigin.AUTOMATIC)
             }
         }
     }
@@ -987,7 +998,7 @@ private fun FallbackAdOverlay(
                     clickHandoffPending = presentationState.clickHandoffPending,
                     storeVisitPending = storeVisitPending(),
                 ) == VideoSequenceAdvance.ADVANCE
-            ) closeOnce()
+            ) closeOnce(VideoOverlayCloseOrigin.AUTOMATIC)
         }
     }
     val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
@@ -1048,7 +1059,9 @@ private fun FallbackAdOverlay(
     }
     // Back can only close once the countdown elapses (parity with the creative's gated close).
     BackHandler(enabled = true) {
-        if (countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitBlocked) closeOnce()
+        if (countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitBlocked) {
+            closeOnce(VideoOverlayCloseOrigin.USER)
+        }
     }
 
     Box(
@@ -1457,7 +1470,7 @@ private fun FallbackAdOverlay(
                                 "Close ad"
                             }
                         }
-                        .clickable(onClick = ::closeOnce),
+                        .clickable(onClick = { closeOnce(VideoOverlayCloseOrigin.USER) }),
                     contentAlignment = Alignment.Center,
                 ) {
                     Box(
