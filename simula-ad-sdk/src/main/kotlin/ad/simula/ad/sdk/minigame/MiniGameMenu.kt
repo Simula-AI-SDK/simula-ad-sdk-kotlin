@@ -1253,6 +1253,7 @@ private fun MiniGameFallbackOverlay(
                             appName = ad.appName,
                             subtitle = ad.subtitle,
                             chromeStyle = ad.videoBehavior?.style ?: VideoChromeStyle.CORNER_CTA,
+                            effectiveClosePosition = closeBehavior.position,
                             videoPool = ad.videoPool,
                             clipIndex = ad.clipIndex,
                             skoverlayEnabled = ad.skoverlay?.enabled,

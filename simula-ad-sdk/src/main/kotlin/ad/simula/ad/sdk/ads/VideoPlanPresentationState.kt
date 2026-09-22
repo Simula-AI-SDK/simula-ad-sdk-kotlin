@@ -208,6 +208,10 @@ internal class VideoPlanPresentationState(
         )
     }
 
+    fun resolvePendingHandoffForFailedNextStep() {
+        closePendingHandoff(VideoLifecycleReason.NEXT_STEP_FAILED)
+    }
+
     fun close(telemetry: VideoPlaybackTelemetry, reason: VideoLifecycleReason) {
         synchronized(this) {
             currentTelemetry = null

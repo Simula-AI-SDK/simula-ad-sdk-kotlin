@@ -16,6 +16,9 @@ import ad.simula.ad.sdk.model.VideoReadinessDeadline
 import ad.simula.ad.sdk.model.VideoUiProgressCoalescer
 import ad.simula.ad.sdk.model.VideoAudioWatchAccounting
 import ad.simula.ad.sdk.model.VideoChromeStyle
+import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.VideoMuteControlPlacement
+import ad.simula.ad.sdk.model.VideoPreFirstFrameFailureAction
 import ad.simula.ad.sdk.model.VideoQuartileTracker
 import ad.simula.ad.sdk.model.VideoStallBudget
 import ad.simula.ad.sdk.model.admittedVideoUrl
@@ -25,6 +28,8 @@ import ad.simula.ad.sdk.model.videoCtaInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteActionLabel
 import ad.simula.ad.sdk.model.videoMuteControlVisible
+import ad.simula.ad.sdk.model.videoMuteControlPlacement
+import ad.simula.ad.sdk.model.videoPreFirstFrameFailureAction
 import ad.simula.ad.sdk.model.videoDesiredMutedAfterTap
 import ad.simula.ad.sdk.model.videoDesiredMutedAfterLifecycleDeactivation
 import ad.simula.ad.sdk.model.videoPreparationClaimPolicy
@@ -296,6 +301,7 @@ internal fun FullscreenVideo(
     appName: String? = null,
     subtitle: String? = null,
     chromeStyle: VideoChromeStyle = VideoChromeStyle.CORNER_CTA,
+    effectiveClosePosition: ClosePosition = ClosePosition.TOP_RIGHT,
     videoPool: String? = null,
     clipIndex: Int? = null,
     skoverlayEnabled: Boolean? = null,
@@ -374,6 +380,9 @@ internal fun FullscreenVideo(
     }
     controller.onError = currentOnError
     controller.setPresentationBlocked(presentationBlocked)
+    val guardedOnCta = {
+        if (videoCtaInteractionAllowed(firstFrameRendered, completed)) onCta()
+    }
 
     DisposableEffect(controller, url) {
         controller.setLifecycleActive(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
@@ -436,8 +445,8 @@ internal fun FullscreenVideo(
                 contentScale = ContentScale.Fit,
             )
         }
-        val ctaModifier = if (ctaEnabled && videoCtaInteractionAllowed(firstFrameRendered)) {
-            Modifier.clickable(onClick = onCta)
+        val ctaModifier = if (ctaEnabled && videoCtaInteractionAllowed(firstFrameRendered, completed)) {
+            Modifier.clickable(onClick = guardedOnCta)
         } else {
             Modifier.consumeVideoTouches()
         }
@@ -449,15 +458,18 @@ internal fun FullscreenVideo(
                 appIconUrl = appIconUrl,
                 appName = appName,
                 subtitle = subtitle,
-                onClick = onCta,
+                onClick = guardedOnCta,
                 modifier = Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(16.dp),
             )
         }
         if (videoMuteControlVisible(completed)) {
-            val muteModifier = if (videoPlanV2 && ctaEnabled) {
-                Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(16.dp)
-            } else {
-                Modifier.align(Alignment.BottomEnd).safeDrawingPadding().padding(16.dp)
+            val muteModifier = when (videoMuteControlPlacement(videoPlanV2, ctaEnabled, effectiveClosePosition)) {
+                VideoMuteControlPlacement.TOP_LEFT ->
+                    Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(16.dp)
+                VideoMuteControlPlacement.TOP_RIGHT ->
+                    Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(16.dp)
+                VideoMuteControlPlacement.BOTTOM_RIGHT ->
+                    Modifier.align(Alignment.BottomEnd).safeDrawingPadding().padding(16.dp)
             }
             VideoMuteControl(
                 muted = muted,
@@ -747,7 +759,7 @@ private class NativeVideoController(
     private var effectiveMuted = desiredMuted
     private var presentationBlocked = false
     private var bufferingProgressSincePoll = false
-    private var lastBufferingPercent = -1
+    private var lastBufferingPercent = 0
     private var released = false
     private var failed = false
     private var videoDimensions = VideoDimensions()
@@ -917,14 +929,10 @@ private class NativeVideoController(
             when (what) {
                 MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START -> admitFirstFrame(token)
                 MediaPlayer.MEDIA_INFO_BUFFERING_START -> {
-                    lastBufferingPercent = -1
-                    stallBudget.reset()
-                    resetPlaybackTimeout()
+                    if (!videoPlanV2) resetPlaybackTimeout()
                 }
                 MediaPlayer.MEDIA_INFO_BUFFERING_END -> {
-                    bufferingProgressSincePoll = true
-                    stallBudget.reset()
-                    resetPlaybackTimeout()
+                    if (!videoPlanV2) resetPlaybackTimeout()
                 }
             }
             false
@@ -1332,7 +1340,14 @@ private class NativeVideoController(
         recordLifecycle(VIDEO_STAGE_FAIL, errorCode = code.wire)
         if (videoPlanV2) {
             val snapshot = telemetrySnapshot()
-            if (shouldBeginVideoHandoff(videoPlanV2, hasNextStep)) {
+            val willHandoff = shouldBeginVideoHandoff(videoPlanV2, hasNextStep)
+            if (!firstFrameRendered) {
+                if (videoPreFirstFrameFailureAction(willHandoff) ==
+                    VideoPreFirstFrameFailureAction.FAIL_EXPECTED_NEXT_STEP
+                ) {
+                    videoPlanState.resolvePendingHandoffForFailedNextStep()
+                }
+            } else if (willHandoff) {
                 videoPlanState.beginHandoff(snapshot, VideoLifecycleReason.FAILED)
             } else {
                 videoPlanState.close(snapshot, reason = VideoLifecycleReason.FAILED)

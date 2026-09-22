@@ -179,7 +179,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                     onClickHandoffFinished = p::clearClickHandoff,
                     autoRedirectCoordinator = p.autoRedirectCoordinator,
                     pendingClickHandoff = p::pendingClickHandoff,
-                    storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
+                    storeVisitPending = { storeExit?.hasPendingStoreVisit() == true },
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = { canOpen, completion, registerCancellation ->
                         val job = CreativeCtaRouter.prepareInBackground(
@@ -250,7 +250,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
                         presentation = p,
                         nextVideoUrl = nextVideoUrl,
                         hasNextStep = hasNextStep,
-                        storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
+                        storeVisitPending = { storeExit?.hasPendingStoreVisit() == true },
                         recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
                         onFinish = { earned ->
                             p.rewardEarned = monotonicRewardEarned(earned, p.rewardEarned)
@@ -439,7 +439,7 @@ private fun RewardedMinigame(
     presentation: RewardedPresentation,
     nextVideoUrl: String?,
     hasNextStep: () -> Boolean,
-    storeVisitPending: Boolean,
+    storeVisitPending: () -> Boolean,
     recordStoreOpen: (String) -> Unit,
     onFinish: (earned: Boolean) -> Unit,
 ) {
@@ -449,6 +449,7 @@ private fun RewardedMinigame(
     // Play-to-earn gate length, in seconds — sourced from `ad_behavior.close.delay_seconds` (the
     // same value that ungates the close button). No `ad_behavior` → 0 → instantly earned.
     val gateSeconds = presentation.adBehavior?.close?.delaySeconds ?: 0
+    val close = presentation.adBehavior?.close ?: CloseBehavior()
 
     // Earned immediately when there is no gate; otherwise resolved by the timer below.
     // A gate that already elapsed in a prior Activity instance (config-change recreation)
@@ -605,14 +606,15 @@ private fun RewardedMinigame(
         bridgeUnavailable = true
     }
     var unavailableExitIssued by remember(presentation) { mutableStateOf(false) }
-    LaunchedEffect(bridgeUnavailable, clickHandoffPending, storeVisitPending) {
+    val storeVisitBlocked = storeVisitPending()
+    LaunchedEffect(bridgeUnavailable, clickHandoffPending, storeVisitBlocked) {
         if (!bridgeUnavailable || clickHandoffPending) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
             if (!shouldExitUnavailableCreative(
                     creativeUnavailable = bridgeUnavailable,
-                    clickHandoffPending = clickHandoffPending,
-                    storeVisitPending = storeVisitPending,
+                    clickHandoffPending = presentation.pendingClickHandoff() != null,
+                    storeVisitPending = storeVisitPending(),
                 )
             ) return@repeatOnLifecycle
             if (unavailableExitIssued) return@repeatOnLifecycle
@@ -622,18 +624,18 @@ private fun RewardedMinigame(
             onFinish(earned)
         }
     }
-    LaunchedEffect(videoTerminal, clickHandoffPending, storeVisitPending) {
-        if (videoSequenceAdvance(
-                videoPlanV2 = presentation.creative.isVideoPlanV2,
-                currentType = presentation.creative.type,
-                terminal = videoTerminal,
-                clickHandoffPending = clickHandoffPending,
-                storeVisitPending = storeVisitPending,
-            ) != VideoSequenceAdvance.ADVANCE
-        ) return@LaunchedEffect
+    LaunchedEffect(videoTerminal, clickHandoffPending, storeVisitBlocked) {
+        if (!presentation.creative.isVideoPlanV2 || !videoTerminal) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
-            onFinish(true)
+            if (videoSequenceAdvance(
+                    videoPlanV2 = true,
+                    currentType = presentation.creative.type,
+                    terminal = videoTerminal,
+                    clickHandoffPending = presentation.pendingClickHandoff() != null,
+                    storeVisitPending = storeVisitPending(),
+                ) == VideoSequenceAdvance.ADVANCE
+            ) onFinish(true)
         }
     }
     val primaryCtaNavigation = presentation.primaryCtaNavigation
@@ -863,7 +865,7 @@ private fun RewardedMinigame(
                 rewardEarned,
                 clickHandoffPending,
                 rewardedDismissalDisplayAdmitted(displayAdmitted, presentation.displayedReported),
-                storeVisitPending,
+                storeVisitBlocked,
             )
         ) {
             if (presentation.creative.isVideoPlanV2 && !videoTerminal) {
@@ -1029,6 +1031,7 @@ private fun RewardedMinigame(
                     adFormat = "rewarded",
                     adUnitId = presentation.adUnitId,
                     adId = presentation.impressionId.takeIf { it.isNotBlank() },
+                    serveId = presentation.impressionId.takeIf { it.isNotBlank() },
                     prewarmNextUrl = nextVideoUrl,
                     configuredGateSeconds = gateSeconds,
                     initialPlayedMs = presentation.accumulatedPlayTimeMs,
@@ -1042,13 +1045,14 @@ private fun RewardedMinigame(
                     appName = presentation.creative.appName,
                     subtitle = presentation.creative.subtitle,
                     chromeStyle = presentation.adBehavior?.video?.style ?: VideoChromeStyle.CORNER_CTA,
+                    effectiveClosePosition = effectiveClosePosition(close.treatment, close.position),
                     videoPool = presentation.creative.videoPool,
                     clipIndex = presentation.creative.clipIndex,
                     skoverlayEnabled = videoSkOverlay?.enabled,
                     skoverlayDelaySeconds = videoSkOverlay?.delaySeconds,
                     videoPlanV2 = presentation.creative.isVideoPlanV2,
                     videoPlanState = presentation.fallbackState.videoPlan,
-                    presentationBlocked = clickHandoffPending || storeVisitPending,
+                    presentationBlocked = clickHandoffPending || storeVisitBlocked,
                     willHandoff = hasNextStep,
                     modifier = Modifier
                         .fillMaxSize()
@@ -1343,7 +1347,6 @@ private fun RewardedMinigame(
         // Close button — honors the server `ad_behavior.close` treatment (hidden / countdown ring /
         // progress bar / reward-or-close label) exactly like the interstitial, but gated on the
         // play-to-earn progress: the ✕ unlocks only once the reward is earned.
-        val close = presentation.adBehavior?.close ?: CloseBehavior()
         AdCloseButton(
             treatment = close.treatment,
             position = close.position,
@@ -1354,7 +1357,7 @@ private fun RewardedMinigame(
                 rewardEarned,
                 clickHandoffPending,
                 rewardedDismissalDisplayAdmitted(displayAdmitted, presentation.displayedReported),
-                storeVisitPending,
+                storeVisitBlocked,
             ),
             remaining = secondsLeft,
             progress = if (isVideo) smoothVideoCloseProgress else closeProgress.value,
@@ -1363,7 +1366,7 @@ private fun RewardedMinigame(
                         rewardEarned,
                         clickHandoffPending,
                         rewardedDismissalDisplayAdmitted(displayAdmitted, presentation.displayedReported),
-                        storeVisitPending,
+                        storeVisitBlocked,
                     )
                 ) {
                     if (presentation.creative.isVideoPlanV2 && !videoTerminal) {

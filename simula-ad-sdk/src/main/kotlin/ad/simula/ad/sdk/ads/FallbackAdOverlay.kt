@@ -576,7 +576,7 @@ internal fun FallbackAdHost(
     onClickHandoffFinished: (ClickPersistenceHandoff) -> Unit = {},
     autoRedirectCoordinator: AutoRedirectCoordinator? = null,
     pendingClickHandoff: () -> ClickPersistenceHandoff? = { null },
-    storeVisitPending: Boolean = false,
+    storeVisitPending: () -> Boolean = { false },
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
     // through the shared router (direct resolved Play URL, raw store link as deterministic fallback).
     // Defaults preserve today's behavior when no context is available.
@@ -612,7 +612,7 @@ internal fun FallbackAdHost(
     val localAutoRedirectCoordinator = remember(impressionId) { AutoRedirectCoordinator() }
     val redirects = autoRedirectCoordinator ?: localAutoRedirectCoordinator
     VideoPlanOverlayClockEffect(presentationState.videoPlan) {
-        presentationState.clickHandoffPending || pendingClickHandoff() != null || storeVisitPending
+        presentationState.clickHandoffPending || pendingClickHandoff() != null || storeVisitPending()
     }
     DisposableEffect(localAutoRedirectCoordinator, autoRedirectCoordinator) {
         onDispose {
@@ -871,7 +871,7 @@ private fun FallbackAdOverlay(
     ctaStoreUrl: String? = null,
     onAutomaticNavigation: () -> Unit,
     onRendererUnavailable: () -> Unit,
-    storeVisitPending: Boolean,
+    storeVisitPending: () -> Boolean,
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -904,6 +904,7 @@ private fun FallbackAdOverlay(
     var pageCommitted by remember { mutableStateOf(false) }
     var pageLoadFailed by remember { mutableStateOf(false) }
     var videoTerminal by remember(presentationState, fallbackIndex) { mutableStateOf(false) }
+    val storeVisitBlocked = storeVisitPending()
     DisposableEffect(presentationState, navigationOwner, fallbackWebView) {
         val webView = fallbackWebView ?: return@DisposableEffect onDispose {}
         val webViewRef = WeakReference(webView)
@@ -961,32 +962,32 @@ private fun FallbackAdOverlay(
             applyRendererUnavailable()
         }
     }
-    LaunchedEffect(rendererGone, rendererOwnsPhase, presentationState.clickHandoffPending, storeVisitPending) {
+    LaunchedEffect(rendererGone, rendererOwnsPhase, presentationState.clickHandoffPending, storeVisitBlocked) {
         if (!rendererGone || !rendererOwnsPhase || presentationState.clickHandoffPending) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
             if (shouldExitUnavailableCreative(
                     creativeUnavailable = rendererGone,
                     clickHandoffPending = presentationState.clickHandoffPending,
-                    storeVisitPending = storeVisitPending,
+                    storeVisitPending = storeVisitPending(),
                 ) && !unavailableExitIssued
             ) {
                 closeOnce()
             }
         }
     }
-    LaunchedEffect(videoTerminal, presentationState.clickHandoffPending, storeVisitPending) {
-        if (videoSequenceAdvance(
-                videoPlanV2 = ad.isVideoPlanV2,
-                currentType = ad.type,
-                terminal = videoTerminal,
-                clickHandoffPending = presentationState.clickHandoffPending,
-                storeVisitPending = storeVisitPending,
-            ) != VideoSequenceAdvance.ADVANCE
-        ) return@LaunchedEffect
+    LaunchedEffect(videoTerminal, presentationState.clickHandoffPending, storeVisitBlocked) {
+        if (!ad.isVideoPlanV2 || !videoTerminal) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
-            closeOnce()
+            if (videoSequenceAdvance(
+                    videoPlanV2 = true,
+                    currentType = ad.type,
+                    terminal = videoTerminal,
+                    clickHandoffPending = presentationState.clickHandoffPending,
+                    storeVisitPending = storeVisitPending(),
+                ) == VideoSequenceAdvance.ADVANCE
+            ) closeOnce()
         }
     }
     val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
@@ -1047,7 +1048,7 @@ private fun FallbackAdOverlay(
     }
     // Back can only close once the countdown elapses (parity with the creative's gated close).
     BackHandler(enabled = true) {
-        if (countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitPending) closeOnce()
+        if (countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitBlocked) closeOnce()
     }
 
     Box(
@@ -1073,13 +1074,14 @@ private fun FallbackAdOverlay(
                     appName = ad.appName,
                     subtitle = ad.subtitle,
                     chromeStyle = ad.videoBehavior?.style ?: VideoChromeStyle.CORNER_CTA,
+                    effectiveClosePosition = closeBehavior.position,
                     videoPool = ad.videoPool,
                     clipIndex = ad.clipIndex,
                     skoverlayEnabled = ad.skoverlay?.enabled,
                     skoverlayDelaySeconds = ad.skoverlay?.delaySeconds,
                     videoPlanV2 = ad.isVideoPlanV2,
                     videoPlanState = presentationState.videoPlan,
-                    presentationBlocked = presentationState.clickHandoffPending || storeVisitPending,
+                    presentationBlocked = presentationState.clickHandoffPending || storeVisitBlocked,
                     willHandoff = { hasNextStep },
                     modifier = Modifier
                         .fillMaxSize()
@@ -1428,7 +1430,7 @@ private fun FallbackAdOverlay(
             )
         }
 
-        val closeReady = countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitPending
+        val closeReady = countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitBlocked
         val closeAlignment = when (closeBehavior.position) {
             ClosePosition.TOP_RIGHT -> Alignment.TopEnd
             ClosePosition.TOP_LEFT -> Alignment.TopStart

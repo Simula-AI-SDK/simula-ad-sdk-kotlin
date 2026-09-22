@@ -45,7 +45,7 @@ internal class AdUnitNotFoundException(message: String) : Exception(message)
 private val sessionBodyJson = Json { encodeDefaults = true }
 
 internal fun canonicalVideoPlanV2Marker(value: String?): Boolean =
-    value?.trim()?.lowercase() == "video_plan_v2"
+    value?.trim() == "video_plan_v2"
 
 internal fun sessionCreateBody(
     privacy: JsonObject,

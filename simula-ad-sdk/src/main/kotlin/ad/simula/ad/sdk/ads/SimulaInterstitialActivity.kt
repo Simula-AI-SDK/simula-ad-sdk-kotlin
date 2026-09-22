@@ -212,7 +212,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     onClickHandoffFinished = p::clearClickHandoff,
                     autoRedirectCoordinator = p.autoRedirectCoordinator,
                     pendingClickHandoff = p::pendingClickHandoff,
-                    storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
+                    storeVisitPending = { storeExit?.hasPendingStoreVisit() == true },
                     // END_SCREEN_N opens the primary ad's store (the same path as a CTA / PLAYABLE_END).
                     onAutoStoreRedirect = { canOpen, completion, registerCancellation ->
                         val job = CreativeCtaRouter.prepareInBackground(
@@ -283,7 +283,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                         presentation = p,
                         nextVideoUrl = nextVideoUrl,
                         hasNextStep = hasNextStep,
-                        storeVisitPending = storeExit?.hasPendingStoreVisit() == true,
+                        storeVisitPending = { storeExit?.hasPendingStoreVisit() == true },
                         onFinish = {
                             // CLOSED is deferred to finishAd (after the last fallback screen), so
                             // closing the playable alone doesn't fire the publisher close callback.
@@ -408,7 +408,7 @@ private fun CreativeInterstitial(
     presentation: InterstitialPresentation,
     nextVideoUrl: String?,
     hasNextStep: () -> Boolean,
-    storeVisitPending: Boolean,
+    storeVisitPending: () -> Boolean,
     onFinish: () -> Unit,
     recordStoreOpen: (String) -> Unit,
 ) {
@@ -417,6 +417,7 @@ private fun CreativeInterstitial(
 
     // Server-driven render config (null → render today's literal close button / store path).
     val behavior = ad.adBehavior
+    val close = behavior?.close ?: CloseBehavior()
     val isVideo = ad.creative?.type == CreativeType.VIDEO
     val treatment = behavior?.close?.treatment ?: CloseTreatment.HIDDEN
     // "Reward in X" vs "Close in X" copy for the reward_or_close_label treatment.
@@ -485,6 +486,7 @@ private fun CreativeInterstitial(
         mutableStateOf(presentation.primaryCreativeUnavailable)
     }
     var videoTerminal by remember(presentation) { mutableStateOf(false) }
+    val storeVisitBlocked = storeVisitPending()
     DisposableEffect(presentation) {
         val subscription = presentation.pendingClickHandoff()?.addResultListener {
             clickHandoffPending = false
@@ -506,14 +508,14 @@ private fun CreativeInterstitial(
         bridgeUnavailable = true
     }
     var unavailableExitIssued by remember(presentation) { mutableStateOf(false) }
-    LaunchedEffect(bridgeUnavailable, clickHandoffPending, storeVisitPending) {
+    LaunchedEffect(bridgeUnavailable, clickHandoffPending, storeVisitBlocked) {
         if (!bridgeUnavailable || clickHandoffPending) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
             if (shouldExitUnavailableCreative(
                     creativeUnavailable = bridgeUnavailable,
-                    clickHandoffPending = clickHandoffPending,
-                    storeVisitPending = storeVisitPending,
+                    clickHandoffPending = presentation.pendingClickHandoff() != null,
+                    storeVisitPending = storeVisitPending(),
                 ) && !unavailableExitIssued
             ) {
                 unavailableExitIssued = true
@@ -521,18 +523,18 @@ private fun CreativeInterstitial(
             }
         }
     }
-    LaunchedEffect(videoTerminal, clickHandoffPending, storeVisitPending) {
-        if (videoSequenceAdvance(
-                videoPlanV2 = ad.creative?.isVideoPlanV2 == true,
-                currentType = ad.creative?.type ?: CreativeType.PLAYABLE,
-                terminal = videoTerminal,
-                clickHandoffPending = clickHandoffPending,
-                storeVisitPending = storeVisitPending,
-            ) != VideoSequenceAdvance.ADVANCE
-        ) return@LaunchedEffect
+    LaunchedEffect(videoTerminal, clickHandoffPending, storeVisitBlocked) {
+        if (ad.creative?.isVideoPlanV2 != true || !videoTerminal) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
-            runCatching(onFinish)
+            if (videoSequenceAdvance(
+                    videoPlanV2 = true,
+                    currentType = ad.creative.type,
+                    terminal = videoTerminal,
+                    clickHandoffPending = presentation.pendingClickHandoff() != null,
+                    storeVisitPending = storeVisitPending(),
+                ) == VideoSequenceAdvance.ADVANCE
+            ) runCatching(onFinish)
         }
     }
     // auto_store_redirect: open the advertiser store once (no user tap). PLAYABLE_END fires when the
@@ -750,7 +752,7 @@ private fun CreativeInterstitial(
     // FallbackAdOverlay; this one is only composed during the primary creative.) Mirrors
     // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
     BackHandler(enabled = true) {
-        if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending)) {
+        if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked)) {
             if (ad.creative?.isVideoPlanV2 == true && !videoTerminal) {
                 presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
             }
@@ -857,13 +859,14 @@ private fun CreativeInterstitial(
                     appName = ad.creative.appName,
                     subtitle = ad.creative.subtitle,
                     chromeStyle = behavior?.video?.style ?: VideoChromeStyle.CORNER_CTA,
+                    effectiveClosePosition = effectiveClosePosition(close.treatment, close.position),
                     videoPool = ad.creative.videoPool,
                     clipIndex = ad.creative.clipIndex,
                     skoverlayEnabled = videoSkOverlay?.enabled,
                     skoverlayDelaySeconds = videoSkOverlay?.delaySeconds,
                     videoPlanV2 = ad.creative.isVideoPlanV2,
                     videoPlanState = presentation.fallbackState.videoPlan,
-                    presentationBlocked = clickHandoffPending || storeVisitPending,
+                    presentationBlocked = clickHandoffPending || storeVisitBlocked,
                     willHandoff = hasNextStep,
                     modifier = Modifier
                         .fillMaxSize()
@@ -967,7 +970,6 @@ private fun CreativeInterstitial(
         // Close button — always shown with the compact chrome. Driven by
         // `ad_behavior.close` when present; otherwise a default (top-right, always available) so ads
         // with no `ad_behavior` still get the small close, not a big one.
-        val close = behavior?.close ?: CloseBehavior()
         val barAtBottom = closeBarAtBottom(close.treatment, close.position)
         AdCloseButton(
             treatment = close.treatment,
@@ -975,11 +977,11 @@ private fun CreativeInterstitial(
             action = close.action,
             progressBarColor = close.progressBarColor,
             isRewardCopy = isRewardCopy,
-            enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending),
+            enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked),
             remaining = closeRemaining,
             progress = if (isVideo) smoothVideoCloseProgress else closeProgress.value,
             onClose = {
-                if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending)) {
+                if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked)) {
                     if (ad.creative?.isVideoPlanV2 == true && !videoTerminal) {
                         presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
                     }
@@ -1354,6 +1356,9 @@ private const val CLOSE_BOTTOM_BAR_LIFT_DP = 26
 internal fun closeBarAtBottom(treatment: CloseTreatment, position: ClosePosition): Boolean =
     treatment == CloseTreatment.PROGRESS_BAR && position == ClosePosition.BOTTOM_LEFT
 
+internal fun effectiveClosePosition(treatment: CloseTreatment, position: ClosePosition): ClosePosition =
+    if (closeBarAtBottom(treatment, position)) ClosePosition.TOP_RIGHT else position
+
 /**
  * The `ad_behavior`-driven close button. Renders the assigned [treatment] at the configured corner:
  * `HIDDEN` shows nothing until the gate unlocks, `COUNTDOWN_CIRCLE` draws a ring, `PROGRESS_BAR` a
@@ -1384,13 +1389,10 @@ internal fun BoxScope.AdCloseButton(
     // for any bottom_left close — diagonally opposite a bottom-left ✕, or sharing the top-right with
     // the relocated one.)
     val barAtBottom = closeBarAtBottom(treatment, position)
-    val alignment = when {
-        barAtBottom -> Alignment.TopEnd
-        else -> when (position) {
-            ClosePosition.TOP_RIGHT -> Alignment.TopEnd
-            ClosePosition.TOP_LEFT -> Alignment.TopStart
-            ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
-        }
+    val alignment = when (effectiveClosePosition(treatment, position)) {
+        ClosePosition.TOP_RIGHT -> Alignment.TopEnd
+        ClosePosition.TOP_LEFT -> Alignment.TopStart
+        ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
     }
 
     // `progress_bar`: a full-width bar tinted by color, shown during the delay. Pinned just inside the

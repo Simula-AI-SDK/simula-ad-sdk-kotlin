@@ -142,6 +142,15 @@ internal fun resolvedVideoChromeStyle(
 
 internal enum class VideoSequenceAdvance { MANUAL, WAIT_FOR_BLOCKER, ADVANCE }
 
+internal enum class VideoPreFirstFrameFailureAction { PRESERVE_PENDING_HANDOFF, FAIL_EXPECTED_NEXT_STEP }
+
+internal fun videoPreFirstFrameFailureAction(hasNextStep: Boolean): VideoPreFirstFrameFailureAction =
+    if (hasNextStep) {
+        VideoPreFirstFrameFailureAction.PRESERVE_PENDING_HANDOFF
+    } else {
+        VideoPreFirstFrameFailureAction.FAIL_EXPECTED_NEXT_STEP
+    }
+
 internal fun videoSequenceAdvance(
     videoPlanV2: Boolean,
     currentType: CreativeType,
@@ -297,7 +306,10 @@ internal class VideoInstallOverlayClock {
     fun remainingMs(): Long = (delayMs - elapsedMs).coerceAtLeast(0L)
 }
 
-internal fun videoCtaInteractionAllowed(firstFrameRendered: Boolean): Boolean = firstFrameRendered
+internal fun videoCtaInteractionAllowed(
+    firstFrameRendered: Boolean,
+    completed: Boolean,
+): Boolean = firstFrameRendered && !completed
 
 internal fun videoMuteInteractionAllowed(
     firstFrameRendered: Boolean,
@@ -307,6 +319,18 @@ internal fun videoMuteInteractionAllowed(
 internal fun videoMuteActionLabel(muted: Boolean): String = if (muted) "Unmute video" else "Mute video"
 
 internal fun videoMuteControlVisible(completed: Boolean): Boolean = !completed
+
+internal enum class VideoMuteControlPlacement { TOP_LEFT, TOP_RIGHT, BOTTOM_RIGHT }
+
+internal fun videoMuteControlPlacement(
+    videoPlanV2: Boolean,
+    ctaEnabled: Boolean,
+    effectiveClosePosition: ClosePosition,
+): VideoMuteControlPlacement = when {
+    !videoPlanV2 || !ctaEnabled -> VideoMuteControlPlacement.BOTTOM_RIGHT
+    effectiveClosePosition == ClosePosition.TOP_LEFT -> VideoMuteControlPlacement.TOP_RIGHT
+    else -> VideoMuteControlPlacement.TOP_LEFT
+}
 
 internal const val VIDEO_NEAR_END_MAX_TOLERANCE_MS = 150L
 

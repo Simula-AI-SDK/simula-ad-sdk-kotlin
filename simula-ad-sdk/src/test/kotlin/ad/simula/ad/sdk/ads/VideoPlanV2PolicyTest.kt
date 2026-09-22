@@ -1,10 +1,14 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.CreativeType
+import ad.simula.ad.sdk.model.ClosePosition
+import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.VideoAudioSessionState
 import ad.simula.ad.sdk.model.VideoChromeStyle
 import ad.simula.ad.sdk.model.VideoSequenceAdvance
 import ad.simula.ad.sdk.model.VideoStallBudget
+import ad.simula.ad.sdk.model.VideoMuteControlPlacement
+import ad.simula.ad.sdk.model.VideoPreFirstFrameFailureAction
 import ad.simula.ad.sdk.model.VideoAudioWatchAccounting
 import ad.simula.ad.sdk.model.VideoInstallOverlayClock
 import ad.simula.ad.sdk.model.VideoLifecycleReason
@@ -19,6 +23,8 @@ import ad.simula.ad.sdk.model.effectiveVideoMuted
 import ad.simula.ad.sdk.model.initialVideoDesiredMuted
 import ad.simula.ad.sdk.model.videoDesiredMutedAfterTap
 import ad.simula.ad.sdk.model.videoDesiredMutedAfterLifecycleDeactivation
+import ad.simula.ad.sdk.model.videoMuteControlPlacement
+import ad.simula.ad.sdk.model.videoPreFirstFrameFailureAction
 import ad.simula.ad.sdk.model.videoAudioFocusLossPolicy
 import ad.simula.ad.sdk.network.SimulaApiClient
 import org.junit.Assert.assertEquals
@@ -124,6 +130,30 @@ class VideoPlanV2PolicyTest {
             assertEquals(style, resolvedVideoChromeStyle(style, "Game", "https://cdn/icon.png"))
         }
         assertEquals(VideoChromeStyle.CORNER_CTA, resolvedVideoChromeStyle(VideoChromeStyle.CORNER_CTA, null, null))
+    }
+
+    @Test
+    fun `v2 mute avoids effective top left close while v1 and no cta keep legacy placement`() {
+        assertEquals(
+            VideoMuteControlPlacement.TOP_RIGHT,
+            videoMuteControlPlacement(true, ctaEnabled = true, ClosePosition.TOP_LEFT),
+        )
+        assertEquals(
+            VideoMuteControlPlacement.TOP_LEFT,
+            videoMuteControlPlacement(true, ctaEnabled = true, ClosePosition.TOP_RIGHT),
+        )
+        assertEquals(
+            VideoMuteControlPlacement.BOTTOM_RIGHT,
+            videoMuteControlPlacement(false, ctaEnabled = true, ClosePosition.TOP_RIGHT),
+        )
+        assertEquals(
+            VideoMuteControlPlacement.BOTTOM_RIGHT,
+            videoMuteControlPlacement(true, ctaEnabled = false, ClosePosition.TOP_RIGHT),
+        )
+        assertEquals(
+            ClosePosition.TOP_RIGHT,
+            effectiveClosePosition(CloseTreatment.PROGRESS_BAR, ClosePosition.BOTTOM_LEFT),
+        )
     }
 
     @Test
@@ -301,6 +331,54 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
+    fun `pre first frame failure preserves predecessor handoff for the next viable step`() {
+        assertEquals(
+            VideoPreFirstFrameFailureAction.PRESERVE_PENDING_HANDOFF,
+            videoPreFirstFrameFailureAction(hasNextStep = true),
+        )
+        val terminalEvents = mutableListOf<Triple<Int?, String, VideoLifecycleReason?>>()
+        val state = VideoPlanPresentationState(
+            videoPlanV2 = true,
+            clockMs = { 0L },
+            terminalRecorder = { telemetry, stage, reason, _ ->
+                terminalEvents += Triple(telemetry.context.clipIndex, stage, reason)
+            },
+        )
+
+        state.beginHandoff(playbackTelemetry(0, 1.0, 1.0, 0.0), VideoLifecycleReason.COMPLETED)
+        state.nextStepReady()
+
+        assertEquals(
+            listOf(Triple(0, VIDEO_STAGE_HANDOFF, VideoLifecycleReason.COMPLETED)),
+            terminalEvents,
+        )
+    }
+
+    @Test
+    fun `final pre first frame failure closes predecessor as next step failed`() {
+        assertEquals(
+            VideoPreFirstFrameFailureAction.FAIL_EXPECTED_NEXT_STEP,
+            videoPreFirstFrameFailureAction(hasNextStep = false),
+        )
+        val terminalEvents = mutableListOf<Triple<Int?, String, VideoLifecycleReason?>>()
+        val state = VideoPlanPresentationState(
+            videoPlanV2 = true,
+            clockMs = { 0L },
+            terminalRecorder = { telemetry, stage, reason, _ ->
+                terminalEvents += Triple(telemetry.context.clipIndex, stage, reason)
+            },
+        )
+
+        state.beginHandoff(playbackTelemetry(0, 1.0, 1.0, 0.0), VideoLifecycleReason.COMPLETED)
+        state.resolvePendingHandoffForFailedNextStep()
+
+        assertEquals(
+            listOf(Triple(0, VIDEO_STAGE_CLOSE, VideoLifecycleReason.NEXT_STEP_FAILED)),
+            terminalEvents,
+        )
+    }
+
+    @Test
     fun `focus denial mute tap retries unmute without storing mute`() {
         val audio = VideoAudioSessionState(videoPlanV2 = true)
         val effectiveMuted = effectiveVideoMuted(audio.desiredMuted, audioFocusHeld = false)
@@ -326,6 +404,19 @@ class VideoPlanV2PolicyTest {
         assertEquals(8_000L, budget.remainingMs())
         assertFalse(budget.observe(22_000L, eligible = true, healthyProgress = false))
         assertTrue(budget.observe(30_000L, eligible = true, healthyProgress = false))
+    }
+
+    @Test
+    fun `repeated non progress buffering observations do not reset v2 stall budget`() {
+        val budget = VideoStallBudget(8_000L)
+
+        assertFalse(budget.observe(0L, eligible = true, healthyProgress = false))
+        assertFalse(budget.observe(3_000L, eligible = true, healthyProgress = false))
+        assertFalse(budget.observe(6_000L, eligible = true, healthyProgress = false))
+        assertTrue(budget.observe(8_000L, eligible = true, healthyProgress = false))
+
+        assertFalse(budget.observe(9_000L, eligible = true, healthyProgress = true))
+        assertEquals(8_000L, budget.remainingMs())
     }
 
     @Test

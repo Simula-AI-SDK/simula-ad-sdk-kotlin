@@ -243,9 +243,10 @@ class CreativePolicyTest {
 
     @Test
     fun `video interactions stay consumed until first frame`() {
-        assertFalse(videoCtaInteractionAllowed(firstFrameRendered = false))
+        assertFalse(videoCtaInteractionAllowed(firstFrameRendered = false, completed = false))
         assertFalse(videoMuteInteractionAllowed(firstFrameRendered = false, playerActive = true))
-        assertTrue(videoCtaInteractionAllowed(firstFrameRendered = true))
+        assertTrue(videoCtaInteractionAllowed(firstFrameRendered = true, completed = false))
+        assertFalse(videoCtaInteractionAllowed(firstFrameRendered = true, completed = true))
         assertTrue(videoMuteInteractionAllowed(firstFrameRendered = true, playerActive = true))
         assertFalse(videoMuteInteractionAllowed(firstFrameRendered = true, playerActive = false))
         assertEquals("Unmute video", videoMuteActionLabel(muted = true))

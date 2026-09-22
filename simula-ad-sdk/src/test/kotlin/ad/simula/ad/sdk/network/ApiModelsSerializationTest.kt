@@ -232,6 +232,36 @@ class ApiModelsSerializationTest {
     }
 
     @Test
+    fun `v2 marker accepts only the exact trimmed backend literal`() {
+        assertTrue(canonicalVideoPlanV2Marker(" video_plan_v2 "))
+        assertFalse(canonicalVideoPlanV2Marker("VIDEO_PLAN_V2"))
+        assertFalse(canonicalVideoPlanV2Marker("Video_Plan_V2"))
+
+        val trimmed = SimulaApiClient.adLoadResultFromResponse(
+            json.decodeFromString(
+                """{"video_plan_version":" video_plan_v2 ","creative":{"type":"video","url":"https://cdn.example/v.mp4","clip_index":0}}""",
+            ),
+        )
+        val primary = SimulaApiClient.adLoadResultFromResponse(
+            json.decodeFromString(
+                """{"video_plan_version":"VIDEO_PLAN_V2","creative":{"type":"video","url":"https://cdn.example/v.mp4","clip_index":0}}""",
+            ),
+        )
+        val fallback = SimulaApiClient.fallbackAdsFromResponse(
+            json.decodeFromString(
+                """{"video_plan_version":"VIDEO_PLAN_V2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
+            ),
+        ).single()
+
+        assertTrue(trimmed.videoPlanV2)
+        assertTrue(requireNotNull(trimmed.creative).isVideoPlanV2)
+        assertFalse(primary.videoPlanV2)
+        assertFalse(requireNotNull(primary.creative).isVideoPlanV2)
+        assertFalse(fallback.videoPlanV2)
+        assertFalse(fallback.isVideoPlanV2)
+    }
+
+    @Test
     fun `clip and alias markers cannot activate fallback v2 slots`() {
         val payloads = listOf(
             """{"ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
