@@ -7,6 +7,8 @@ import ad.simula.ad.sdk.model.VideoSequenceAdvance
 import ad.simula.ad.sdk.model.VideoStallBudget
 import ad.simula.ad.sdk.model.VideoAudioWatchAccounting
 import ad.simula.ad.sdk.model.VideoInstallOverlayClock
+import ad.simula.ad.sdk.model.VideoLifecycleReason
+import ad.simula.ad.sdk.model.VideoPositionAccumulator
 import ad.simula.ad.sdk.model.VideoQuartileTracker
 import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.resolvedVideoChromeStyle
@@ -17,6 +19,7 @@ import ad.simula.ad.sdk.model.effectiveVideoMuted
 import ad.simula.ad.sdk.model.initialVideoDesiredMuted
 import ad.simula.ad.sdk.model.videoDesiredMutedAfterTap
 import ad.simula.ad.sdk.model.videoDesiredMutedAfterLifecycleDeactivation
+import ad.simula.ad.sdk.model.videoAudioFocusLossPolicy
 import ad.simula.ad.sdk.network.SimulaApiClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -39,6 +42,7 @@ class VideoPlanV2PolicyTest {
         url = "https://cdn.example/$sourceIndex.mp4",
         videoPool = "ugc".takeIf { v2 },
         clipIndex = sourceIndex.takeIf { v2 },
+        videoPlanV2 = v2,
     )
 
     @Test
@@ -164,6 +168,139 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
+    fun `v1 focus loss permanently remutes and gain cannot restore audio`() {
+        val loss = videoAudioFocusLossPolicy(videoPlanV2 = false, desiredMuted = false)
+
+        assertTrue(loss.desiredMuted)
+        assertTrue(loss.abandonFocus)
+        assertTrue(effectiveVideoMuted(loss.desiredMuted, audioFocusHeld = false))
+        assertTrue(effectiveVideoMuted(loss.desiredMuted, audioFocusHeld = true))
+    }
+
+    @Test
+    fun `v2 focus loss preserves preference and gain restores audio`() {
+        val loss = videoAudioFocusLossPolicy(videoPlanV2 = true, desiredMuted = false)
+
+        assertFalse(loss.desiredMuted)
+        assertFalse(loss.abandonFocus)
+        assertTrue(effectiveVideoMuted(loss.desiredMuted, audioFocusHeld = false))
+        assertFalse(effectiveVideoMuted(loss.desiredMuted, audioFocusHeld = true))
+    }
+
+    @Test
+    fun `v1 media deltas do not mutate presentation watch accounting`() {
+        val state = VideoPlanPresentationState(videoPlanV2 = true)
+        state.addEligibleMediaDelta(videoPlanV2 = false, advancedMs = 1_000L, muted = false)
+
+        assertEquals(0L, state.audioWatchTotals().mutedMs)
+        assertEquals(0L, state.audioWatchTotals().unmutedMs)
+    }
+
+    @Test
+    fun `recreated v2 controller contributes only newly advanced media`() {
+        val state = VideoPlanPresentationState(videoPlanV2 = true)
+        val firstController = VideoPositionAccumulator()
+        val recreatedController = VideoPositionAccumulator(initialPlayedMs = 1_000L)
+
+        state.addEligibleMediaDelta(true, firstController.sample(1_000L).advancedMs, muted = false)
+        state.addEligibleMediaDelta(true, recreatedController.sample(0L).advancedMs, muted = true)
+        state.addEligibleMediaDelta(true, recreatedController.sample(500L).advancedMs, muted = true)
+
+        assertEquals(1_000L, state.audioWatchTotals().unmutedMs)
+        assertEquals(500L, state.audioWatchTotals().mutedMs)
+    }
+
+    @Test
+    fun `two clips aggregate mixed audio into final handoff and close`() {
+        val terminalEvents = mutableListOf<Triple<String, VideoLifecycleReason?, VideoPlaybackTelemetry>>()
+        val state = VideoPlanPresentationState(
+            videoPlanV2 = true,
+            clockMs = { 0L },
+            terminalRecorder = { telemetry, stage, reason, _ ->
+                terminalEvents += Triple(stage, reason, telemetry)
+            },
+        )
+        val firstClip = playbackTelemetry(clipIndex = 0, watchedS = 1.25, unmutedS = 1.0, mutedS = 0.25)
+        val secondClip = playbackTelemetry(clipIndex = 1, watchedS = 1.25, unmutedS = 0.75, mutedS = 0.5)
+
+        state.addEligibleMediaDelta(videoPlanV2 = true, advancedMs = 1_000L, muted = false)
+        state.addEligibleMediaDelta(videoPlanV2 = true, advancedMs = 250L, muted = true)
+        state.beginHandoff(firstClip, VideoLifecycleReason.COMPLETED)
+        state.retainCurrentTelemetry(firstClip)
+        state.retainCurrentTelemetry(firstClip)
+
+        state.addEligibleMediaDelta(videoPlanV2 = true, advancedMs = 500L, muted = true)
+        state.addEligibleMediaDelta(videoPlanV2 = true, advancedMs = 750L, muted = false)
+        state.nextStepReady()
+        assertNull(state.nextStepReady())
+        state.close(secondClip, reason = VideoLifecycleReason.COMPLETED)
+
+        assertEquals(listOf(VIDEO_STAGE_HANDOFF, VIDEO_STAGE_CLOSE), terminalEvents.map { it.first })
+        assertEquals(listOf(VideoLifecycleReason.COMPLETED, VideoLifecycleReason.COMPLETED), terminalEvents.map { it.second })
+        terminalEvents.forEach { (_, _, telemetry) ->
+            assertEquals(2.5, telemetry.watchedS, 0.0)
+            assertEquals(1.75, telemetry.secondsUnmuted, 0.0)
+            assertEquals(0.75, telemetry.secondsMuted, 0.0)
+        }
+    }
+
+    @Test
+    fun `final completed video close preserves completed origin`() {
+        val reasons = mutableListOf<VideoLifecycleReason?>()
+        val fallback = FallbackPresentationState(clockMs = { 0L }, videoPlanV2 = true)
+        val state = VideoPlanPresentationState(
+            videoPlanV2 = true,
+            clockMs = { 0L },
+            terminalRecorder = { _, stage, reason, _ ->
+                if (stage == VIDEO_STAGE_CLOSE) reasons += reason
+            },
+        )
+
+        state.beginHandoff(playbackTelemetry(0, 1.0, 1.0, 0.0), VideoLifecycleReason.COMPLETED)
+        fallback.retainFetchedAds(emptyList())
+        assertNull(fallback.fallbackResolutionReasonOverride())
+        state.closePendingHandoff(fallback.fallbackResolutionReasonOverride())
+
+        assertEquals(listOf(VideoLifecycleReason.COMPLETED), reasons)
+    }
+
+    @Test
+    fun `final failed video close preserves failed origin`() {
+        val reasons = mutableListOf<VideoLifecycleReason?>()
+        val state = VideoPlanPresentationState(
+            videoPlanV2 = true,
+            clockMs = { 0L },
+            terminalRecorder = { _, stage, reason, _ ->
+                if (stage == VIDEO_STAGE_CLOSE) reasons += reason
+            },
+        )
+
+        state.beginHandoff(playbackTelemetry(0, 1.0, 1.0, 0.0), VideoLifecycleReason.FAILED)
+        state.closePendingHandoff()
+
+        assertEquals(listOf(VideoLifecycleReason.FAILED), reasons)
+    }
+
+    @Test
+    fun `expected next step infrastructure failure explicitly overrides origin`() {
+        val reasons = mutableListOf<VideoLifecycleReason?>()
+        val state = FallbackPresentationState(clockMs = { 0L }, videoPlanV2 = true)
+        val videoPlan = VideoPlanPresentationState(
+            videoPlanV2 = true,
+            clockMs = { 0L },
+            terminalRecorder = { _, stage, reason, _ ->
+                if (stage == VIDEO_STAGE_CLOSE) reasons += reason
+            },
+        )
+
+        videoPlan.beginHandoff(playbackTelemetry(0, 1.0, 1.0, 0.0), VideoLifecycleReason.COMPLETED)
+        state.terminalizeInitialFetchFailure()
+        videoPlan.closePendingHandoff(state.fallbackResolutionReasonOverride())
+
+        assertEquals(listOf(VideoLifecycleReason.NEXT_STEP_FAILED), reasons)
+    }
+
+    @Test
     fun `focus denial mute tap retries unmute without storing mute`() {
         val audio = VideoAudioSessionState(videoPlanV2 = true)
         val effectiveMuted = effectiveVideoMuted(audio.desiredMuted, audioFocusHeld = false)
@@ -214,7 +351,12 @@ class VideoPlanV2PolicyTest {
     @Test
     fun `handoff retains originating first frame time and targets next step`() {
         var now = 1_000L
-        val state = VideoPlanPresentationState(videoPlanV2 = true, clockMs = { now })
+        var recordedReason: VideoLifecycleReason? = null
+        val state = VideoPlanPresentationState(
+            videoPlanV2 = true,
+            clockMs = { now },
+            terminalRecorder = { _, _, reason, _ -> recordedReason = reason },
+        )
         val telemetry = VideoPlaybackTelemetry(
             context = VideoTelemetryContext(
                 adFormat = "rewarded",
@@ -237,13 +379,14 @@ class VideoPlanV2PolicyTest {
         )
         state.firstVideoFrame(SkOverlayConfig(enabled = false, delaySeconds = 3))
         now = 5_000L
-        state.beginHandoff(telemetry)
+        state.beginHandoff(telemetry, VideoLifecycleReason.FAILED)
         now = 5_300L
 
         val timing = requireNotNull(state.nextStepReady())
         assertEquals(300.0, timing.msToNextStepReady, 0.0)
         assertEquals(4.3, timing.secondsSinceVideoStart, 0.0)
         assertEquals("next_step", timing.on)
+        assertEquals(VideoLifecycleReason.FAILED, recordedReason)
         assertTrue(state.overlayReady())
     }
 
@@ -355,7 +498,61 @@ class VideoPlanV2PolicyTest {
                 secondsUnmuted = 1.0,
                 secondsMuted = 0.0,
             ),
+            VideoLifecycleReason.COMPLETED,
         )
         return state
+    }
+
+    private fun playbackTelemetry(
+        clipIndex: Int,
+        watchedS: Double,
+        unmutedS: Double,
+        mutedS: Double,
+    ) = VideoPlaybackTelemetry(
+        context = VideoTelemetryContext(
+            adFormat = "interstitial",
+            adUnitId = "unit",
+            adId = "ad",
+            serveId = "serve",
+            impressionId = "serve",
+            style = "corner_cta",
+            skoverlayEnabled = false,
+            skoverlayDelaySeconds = 3,
+            clipIndex = clipIndex,
+            pool = "ugc",
+        ),
+        videoPositionS = watchedS,
+        muted = mutedS > 0.0,
+        durationS = 10.0,
+        watchedS = watchedS,
+        secondsUnmuted = unmutedS,
+        secondsMuted = mutedS,
+    )
+
+    @Test
+    fun `video lifecycle reasons exactly match the canonical contract`() {
+        assertEquals(
+            listOf(
+                "completed",
+                "failed",
+                "user",
+                "no_next_step",
+                "next_step_failed",
+                "next_step_timeout",
+                "backgrounded",
+                "store_presented",
+                "audio_interruption",
+                "playback",
+            ),
+            VideoLifecycleReason.entries.map { it.wire },
+        )
+    }
+
+    @Test
+    fun `fallback ad formats normalize to base fullscreen labels`() {
+        assertEquals("interstitial", canonicalFullscreenAdFormat("interstitial_fallback"))
+        assertEquals("rewarded", canonicalFullscreenAdFormat("rewarded_fallback"))
+        assertFalse(canonicalFullscreenAdFormat("interstitial_fallback").endsWith("_fallback"))
+        assertFalse(canonicalFullscreenAdFormat("rewarded_fallback").endsWith("_fallback"))
     }
 }

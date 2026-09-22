@@ -576,9 +576,6 @@ internal fun ApiCreative?.toDomain(): Creative? {
         subtitle = subtitle?.trim()?.takeIf { it.isNotEmpty() },
         videoPool = (videoPool ?: pool)?.trim()?.takeIf { it.isNotEmpty() },
         clipIndex = clipIndex?.takeIf { it in 0..2 },
-        planVersion = "video_plan_v2".takeIf {
-            videoPlanV2 == true || (videoPlanVersion ?: planVersion) == "video_plan_v2"
-        },
     )
 }
 
@@ -608,7 +605,7 @@ internal fun fallbackSkOverlayConfig(adBehavior: JsonElement?, videoPlanV2: Bool
     val enabled = (overlay?.get("enabled") as? JsonPrimitive)
         ?.takeUnless(JsonPrimitive::isString)
         ?.booleanOrNull
-        ?: videoPlanV2
+        ?: false
     val delay = (overlay?.get("delay_seconds") as? JsonPrimitive)
         ?.takeUnless(JsonPrimitive::isString)
         ?.intOrNull
@@ -644,7 +641,7 @@ internal fun ApiStorePrompt?.toDomain(): StorePrompt? {
 internal fun ApiSkOverlay?.toDomain(videoPlanV2: Boolean = false): SkOverlayConfig? {
     if (this == null) return null
     return SkOverlayConfig(
-        enabled = enabled ?: videoPlanV2,
+        enabled = enabled ?: false,
         timing = OverlayTiming.from(timing),
         delaySeconds = if (videoPlanV2) {
             (delaySeconds ?: 3).coerceIn(0, 60)

@@ -44,6 +44,19 @@ internal enum class VideoFailureCode(val wire: String) {
     FIRST_FRAME_TIMEOUT("first_frame_timeout"),
 }
 
+internal enum class VideoLifecycleReason(val wire: String) {
+    COMPLETED("completed"),
+    FAILED("failed"),
+    USER("user"),
+    NO_NEXT_STEP("no_next_step"),
+    NEXT_STEP_FAILED("next_step_failed"),
+    NEXT_STEP_TIMEOUT("next_step_timeout"),
+    BACKGROUNDED("backgrounded"),
+    STORE_PRESENTED("store_presented"),
+    AUDIO_INTERRUPTION("audio_interruption"),
+    PLAYBACK("playback"),
+}
+
 internal fun videoReadinessTimeoutCode(prepared: Boolean): VideoFailureCode =
     if (prepared) VideoFailureCode.FIRST_FRAME_TIMEOUT else VideoFailureCode.PREPARE_TIMEOUT
 
@@ -211,6 +224,19 @@ internal class VideoAudioWatchAccounting {
 
 internal fun effectiveVideoMuted(desiredMuted: Boolean, audioFocusHeld: Boolean): Boolean =
     desiredMuted || !audioFocusHeld
+
+internal data class VideoAudioFocusLossPolicy(
+    val desiredMuted: Boolean,
+    val abandonFocus: Boolean,
+)
+
+internal fun videoAudioFocusLossPolicy(
+    videoPlanV2: Boolean,
+    desiredMuted: Boolean,
+): VideoAudioFocusLossPolicy = VideoAudioFocusLossPolicy(
+    desiredMuted = if (videoPlanV2) desiredMuted else true,
+    abandonFocus = !videoPlanV2,
+)
 
 internal fun videoDesiredMutedAfterTap(effectiveMuted: Boolean): Boolean = !effectiveMuted
 

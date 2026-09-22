@@ -384,8 +384,9 @@ internal data class Creative(
 )
 
 internal val Creative.isVideoPlanV2: Boolean
-    get() = planVersion == "video_plan_v2" ||
-        (type == CreativeType.VIDEO && clipIndex?.let { it in 0..2 } == true)
+    get() = planVersion == "video_plan_v2" &&
+        type == CreativeType.VIDEO &&
+        clipIndex?.let { it in 0..2 } == true
 
 internal enum class VideoChromeStyle(val wire: String) {
     BOTTOM_BAR("bottom_bar"),
@@ -471,8 +472,8 @@ internal data class StorePrompt(
     val platform: StorePromptPlatform = StorePromptPlatform.ANDROID,
 )
 
-/** Play Install Prompt (Android) / SKOverlay (iOS) config (`skoverlay` node): a native,
- * SDK-presented install banner, independent of the creative click handler. */
+/** Play Install Prompt (Android) / SKOverlay (iOS) wire config. V2 SKOverlay presentation is iOS-only;
+ * Android decodes it for parity but keeps the effective V2 policy disabled. */
 internal data class SkOverlayConfig(
     val enabled: Boolean = false,
     val timing: OverlayTiming = OverlayTiming.ON_CLICK,
@@ -517,7 +518,7 @@ internal fun AdBehavior?.effectiveSkOverlayConfig(videoPlanV2: Boolean): SkOverl
     if (!videoPlanV2) return this?.skoverlay
     val config = this?.skoverlay
     return SkOverlayConfig(
-        enabled = config?.enabled ?: true,
+        enabled = false,
         timing = OverlayTiming.DELAYED,
         delaySeconds = (config?.delaySeconds ?: 3).coerceIn(0, 60),
         position = config?.position ?: OverlayPosition.BOTTOM,

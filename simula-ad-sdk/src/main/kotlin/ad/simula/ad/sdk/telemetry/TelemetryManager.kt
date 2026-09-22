@@ -311,6 +311,7 @@ internal class TelemetryManager(
         visibleS: Double?,
         error: String?,
     ) {
+        // Video lifecycle is session-sampled perf telemetry; newEvent carries the effective sample_rate.
         enqueuePerf(
             newEvent(TYPE_LIFECYCLE, name = stage).copy(
                 adFormat = adFormat,

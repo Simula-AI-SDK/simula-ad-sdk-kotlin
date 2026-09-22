@@ -3,6 +3,7 @@ package ad.simula.ad.sdk.network
 import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
+import ad.simula.ad.sdk.model.isVideoPlanV2
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -198,7 +199,7 @@ class ApiModelsSerializationTest {
     @Test
     fun `v2 fallback supports nested creative metadata and retains raw source index after dead clip`() {
         val payload = """
-            {"ads":[
+            {"video_plan_version":"video_plan_v2","ads":[
               {"ad_id":"dead","creative":{"type":"video","url":"not-a-url","clip_index":0}},
               {"ad_id":"live","creative":{"type":"video","url":"https://cdn.example/live.mp4",
                 "cta":"Install","app_name":"Game","app_icon_url":"https://cdn.example/icon.png",
@@ -217,17 +218,88 @@ class ApiModelsSerializationTest {
     }
 
     @Test
-    fun `explicit fallback plan marker activates v2 without clip inference`() {
+    fun `canonical fallback marker activates presentation but missing clip remains v1 slot`() {
         val response = json.decodeFromString<FallbackAdsApiResponse>(
-            """{"plan_version":"video_plan_v2","ads":[
+            """{"video_plan_version":"video_plan_v2","ads":[
                 {"ad_id":"v","type":"video","url":"https://cdn.example/video.mp4"}
             ]}""",
         )
         val ad = SimulaApiClient.fallbackAdsFromResponse(response).single()
 
         assertTrue(ad.videoPlanV2)
-        assertTrue(ad.isVideoPlanV2)
+        assertFalse(ad.isVideoPlanV2)
         assertNull(ad.clipIndex)
+    }
+
+    @Test
+    fun `clip and alias markers cannot activate fallback v2 slots`() {
+        val payloads = listOf(
+            """{"ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
+            """{"plan_version":"video_plan_v2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
+            """{"creative_plan_version":"video_plan_v2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
+            """{"video_plan_v2":true,"ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
+        )
+
+        payloads.forEach { payload ->
+            val ad = SimulaApiClient.fallbackAdsFromResponse(
+                json.decodeFromString<FallbackAdsApiResponse>(payload),
+            ).single()
+            assertFalse(ad.videoPlanV2)
+            assertFalse(ad.isVideoPlanV2)
+        }
+    }
+
+    @Test
+    fun `primary playable keeps presentation v2 scope for a valid v2 fallback without becoming a video slot`() {
+        val primary = SimulaApiClient.adLoadResultFromResponse(
+            json.decodeFromString(
+                """{"video_plan_version":"video_plan_v2","creative":{"type":"playable","clip_index":0},"rendered_html":"<html/>"}""",
+            ),
+        )
+        val fallback = SimulaApiClient.fallbackAdsFromResponse(
+            json.decodeFromString(
+                """{"video_plan_version":"video_plan_v2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
+            ),
+        ).single()
+
+        assertTrue(primary.videoPlanV2)
+        assertFalse(requireNotNull(primary.creative).isVideoPlanV2)
+        assertNull(primary.creative?.planVersion)
+        assertTrue(fallback.videoPlanV2)
+        assertTrue(fallback.isVideoPlanV2)
+    }
+
+    @Test
+    fun `malformed canonical marker and index degrade primary and fallback slots to v1`() {
+        val primary = SimulaApiClient.adLoadResultFromResponse(
+            json.decodeFromString(
+                """{"video_plan_version":{},"creative":{"type":"video","url":"https://cdn.example/v.mp4","clip_index":"bad"}}""",
+            ),
+        )
+        val fallback = SimulaApiClient.fallbackAdsFromResponse(
+            json.decodeFromString(
+                """{"video_plan_version":"video_plan_v2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":"bad"}]}""",
+            ),
+        ).single()
+
+        assertFalse(primary.videoPlanV2)
+        assertFalse(requireNotNull(primary.creative).isVideoPlanV2)
+        assertFalse(fallback.isVideoPlanV2)
+    }
+
+    @Test
+    fun `Android v2 fallback skoverlay defaults disabled but explicit true decodes`() {
+        fun overlay(adBehavior: String?): ad.simula.ad.sdk.model.SkOverlayConfig? {
+            val behavior = adBehavior?.let { ",\"ad_behavior\":$it" }.orEmpty()
+            val response = json.decodeFromString<FallbackAdsApiResponse>(
+                """{"video_plan_version":"video_plan_v2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0$behavior}]}""",
+            )
+            return SimulaApiClient.fallbackAdsFromResponse(response).single().skoverlay
+        }
+
+        assertFalse(requireNotNull(overlay(null)).enabled)
+        assertFalse(requireNotNull(overlay("{\"skoverlay\":{\"delay_seconds\":5}}")).enabled)
+        assertTrue(requireNotNull(overlay("{\"skoverlay\":{\"enabled\":true}}")).enabled)
     }
 
     @Test

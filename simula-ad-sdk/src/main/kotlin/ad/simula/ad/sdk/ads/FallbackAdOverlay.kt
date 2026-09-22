@@ -15,6 +15,7 @@ import ad.simula.ad.sdk.model.videoCloseGateMs
 import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.RenderAttemptGate
 import ad.simula.ad.sdk.model.VideoChromeStyle
+import ad.simula.ad.sdk.model.VideoLifecycleReason
 import ad.simula.ad.sdk.model.VideoSequenceAdvance
 import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
@@ -240,6 +241,7 @@ internal class FallbackPresentationState(
     private var cleared = false
     private var fetchWaitGeneration = 0L
     private var fetchWaitDeadlineMs = 0L
+    private var fallbackResolutionFailed = false
     private val closeGateState = FallbackCloseGateState()
     private val automaticNavigationGates = LinkedHashMap<Int, AutomaticNavigationGate>()
     private val rendererAbandonedIndices = mutableSetOf<Int>()
@@ -267,6 +269,7 @@ internal class FallbackPresentationState(
     }
     fun retainFetchedAds(ads: List<SimulaApiClient.FallbackAd>) {
         fetchedAds = ads
+        fallbackResolutionFailed = false
         if (ads.any { it.videoPlanV2 }) videoPlan.activateVideoPlanV2()
     }
     fun notifyFirstResolvedStepReady(ads: List<SimulaApiClient.FallbackAd>) {
@@ -276,7 +279,14 @@ internal class FallbackPresentationState(
     fun terminalizeInitialFetchFailure(): List<SimulaApiClient.FallbackAd> {
         val retained = fetchedAds
         if (retained != null) return retained
-        return emptyList<SimulaApiClient.FallbackAd>().also(::retainFetchedAds)
+        fallbackResolutionFailed = true
+        return emptyList<SimulaApiClient.FallbackAd>().also { fetchedAds = it }
+    }
+    internal fun fallbackResolutionReasonOverride(): VideoLifecycleReason? =
+        VideoLifecycleReason.NEXT_STEP_FAILED.takeIf { fallbackResolutionFailed }
+
+    fun closePendingAfterFallbackResolution() {
+        videoPlan.closePendingHandoff(fallbackResolutionReasonOverride())
     }
     fun retainAutomaticNavigation(
         index: Int,
@@ -576,6 +586,7 @@ internal fun FallbackAdHost(
     videoPlanV2: Boolean = false,
     content: @Composable (onClose: () -> Unit, nextVideoUrl: String?, hasNextStep: () -> Boolean) -> Unit,
 ) {
+    val canonicalAdFormat = canonicalFullscreenAdFormat(adFormat)
     var phase by remember(presentationState) {
         mutableStateOf<FallbackPhase>(
             when (presentationState.stage) {
@@ -632,8 +643,8 @@ internal fun FallbackAdHost(
                 if (attempt + 1 < FALLBACK_FETCH_ATTEMPTS) delay(FALLBACK_FETCH_RETRY_MS)
             }
             if (presentationState.stage == FallbackStage.DONE) return@LaunchedEffect
-            val resolved = fetched ?: presentationState.terminalizeInitialFetchFailure()
-            presentationState.retainFetchedAds(resolved)
+            val resolved = fetched?.also(presentationState::retainFetchedAds)
+                ?: presentationState.terminalizeInitialFetchFailure()
             if (resolved.none { it.isVideoPlanV2 }) {
                 FullscreenVideoPreparer.prepare(nextFallbackVideoUrl(resolved, afterDisplayIndex = -1))
             }
@@ -649,7 +660,7 @@ internal fun FallbackAdHost(
             ads == null -> FallbackPhase.Fetching(presentationState.startPostCloseFetchWait())
             ads.isNotEmpty() -> FallbackPhase.Showing(ads, index = 0).also { presentationState.showing(0) }
             else -> FallbackPhase.Done.also {
-                presentationState.videoPlan.closePendingHandoff("no_next_step")
+                presentationState.closePendingAfterFallbackResolution()
                 presentationState.done()
             }
         }
@@ -675,13 +686,15 @@ internal fun FallbackAdHost(
                         ?: return@LaunchedEffect
                     if (remainingMs > 0L) delay(remainingMs)
                     if (presentationState.timeoutPostCloseFetchWait(p.generation)) {
-                        presentationState.videoPlan.closePendingHandoff("next_step_timeout")
+                        presentationState.videoPlan.closePendingHandoff(VideoLifecycleReason.NEXT_STEP_TIMEOUT)
                         phase = FallbackPhase.Done
                     }
                 }
                 LaunchedEffect(prefetched, p.generation) {
                     val ads = prefetched ?: return@LaunchedEffect
-                    if (ads.isEmpty()) presentationState.videoPlan.closePendingHandoff("no_next_step")
+                    if (ads.isEmpty()) {
+                        presentationState.closePendingAfterFallbackResolution()
+                    }
                     if (!presentationState.resolvePostCloseFetchWait(p.generation, ads)) {
                         return@LaunchedEffect
                     }
@@ -770,7 +783,7 @@ internal fun FallbackAdHost(
                         persistClick = persistClick,
                         claimClick = clickClaim,
                         impressionId = impressionId,
-                        adFormat = adFormat,
+                        adFormat = canonicalAdFormat,
                         adUnitId = adUnitId,
                         routeClick = routeClick,
                         presentationState = presentationState,
@@ -811,7 +824,7 @@ internal fun FallbackAdHost(
                                     ?.let { presentationState.videoPlan.nextStepReady() }
                                 p.copy(index = presentationState.index)
                             } else {
-                                presentationState.videoPlan.closePendingHandoff("next_step_failed")
+                                presentationState.videoPlan.closePendingHandoff()
                                 FallbackPhase.Done
                             }
                         },
@@ -938,7 +951,9 @@ private fun FallbackAdOverlay(
     fun closeOnce() {
         if (unavailableExitIssued) return
         unavailableExitIssued = true
-        if (ad.isVideoPlanV2 && !videoTerminal) presentationState.videoPlan.closeCurrent("user")
+        if (ad.isVideoPlanV2 && !videoTerminal) {
+            presentationState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
+        }
         runCatching(onClose)
     }
     LaunchedEffect(isVideo, videoUrl, rendererGone) {

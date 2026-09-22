@@ -22,6 +22,7 @@ import ad.simula.ad.sdk.model.rewardedVideoDurationGateReached
 import ad.simula.ad.sdk.model.isVideoPlanV2
 import ad.simula.ad.sdk.model.videoStorePromptReached
 import ad.simula.ad.sdk.model.VideoChromeStyle
+import ad.simula.ad.sdk.model.VideoLifecycleReason
 import ad.simula.ad.sdk.model.VideoSequenceAdvance
 import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.model.effectiveSkOverlayConfig
@@ -866,7 +867,7 @@ private fun RewardedMinigame(
             )
         ) {
             if (presentation.creative.isVideoPlanV2 && !videoTerminal) {
-                presentation.fallbackState.videoPlan.closeCurrent("user")
+                presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
             }
             presentation.automaticNavigationGate.clear()
             onFinish(true)
@@ -1366,7 +1367,7 @@ private fun RewardedMinigame(
                     )
                 ) {
                     if (presentation.creative.isVideoPlanV2 && !videoTerminal) {
-                        presentation.fallbackState.videoPlan.closeCurrent("user")
+                        presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
                     }
                     presentation.automaticNavigationGate.clear()
                     onFinish(true)

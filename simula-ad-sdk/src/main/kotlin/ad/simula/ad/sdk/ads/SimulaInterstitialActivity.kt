@@ -25,6 +25,7 @@ import ad.simula.ad.sdk.model.retainVideoMaxPosition
 import ad.simula.ad.sdk.model.isVideoPlanV2
 import ad.simula.ad.sdk.model.videoStorePromptReached
 import ad.simula.ad.sdk.model.VideoChromeStyle
+import ad.simula.ad.sdk.model.VideoLifecycleReason
 import ad.simula.ad.sdk.model.VideoSequenceAdvance
 import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.model.effectiveSkOverlayConfig
@@ -678,12 +679,11 @@ private fun CreativeInterstitial(
         }
     }
 
-    // Play Install Prompt (`skoverlay`) — an SDK-presented bottom install banner. Gated to API 21+.
+    // Android's custom Play banner remains V1-only; V2 `skoverlay` is an iOS-only presentation policy.
     val videoSkOverlay = behavior.effectiveSkOverlayConfig(ad.creative?.isVideoPlanV2 == true)
-    val skoverlay = behavior?.skoverlay.takeUnless { ad.creative?.isVideoPlanV2 == true }
+    val skoverlay = behavior?.skoverlay.takeUnless { ad.videoPlanV2 }
     if (skoverlay != null && skoverlay.enabled && Build.VERSION.SDK_INT >= 21) {
         LaunchedEffect(presentation.installBannerState, bridgeReady) {
-            if (ad.creative?.isVideoPlanV2 == true && !bridgeReady) return@LaunchedEffect
             presentation.installBannerState.start()
             while (true) {
                 val remainingMs = presentation.installBannerState.delayedRemainingMs() ?: break
@@ -752,7 +752,7 @@ private fun CreativeInterstitial(
     BackHandler(enabled = true) {
         if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending)) {
             if (ad.creative?.isVideoPlanV2 == true && !videoTerminal) {
-                presentation.fallbackState.videoPlan.closeCurrent("user")
+                presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
             }
             presentation.automaticNavigationGate.clear()
             onFinish()
@@ -981,7 +981,7 @@ private fun CreativeInterstitial(
             onClose = {
                 if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitPending)) {
                     if (ad.creative?.isVideoPlanV2 == true && !videoTerminal) {
-                        presentation.fallbackState.videoPlan.closeCurrent("user")
+                        presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
                     }
                     presentation.automaticNavigationGate.clear()
                     onFinish()

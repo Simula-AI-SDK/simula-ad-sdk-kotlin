@@ -129,6 +129,7 @@ import ad.simula.ad.sdk.model.MiniGameTheme
 import ad.simula.ad.sdk.model.resolve
 import ad.simula.ad.sdk.model.videoCloseGateMs
 import ad.simula.ad.sdk.model.VideoChromeStyle
+import ad.simula.ad.sdk.model.VideoLifecycleReason
 import ad.simula.ad.sdk.model.VideoSequenceAdvance
 import ad.simula.ad.sdk.model.RenderAttemptGate
 import ad.simula.ad.sdk.model.admittedVideoUrl
@@ -381,7 +382,7 @@ fun MiniGameMenu(
                 ?.takeIf { it.type == CreativeType.PLAYABLE }
                 ?.let { fallbackVideoPlan.nextStepReady() }
         } else {
-            fallbackVideoPlan.closePendingHandoff("next_step_failed")
+            fallbackVideoPlan.closePendingHandoff()
             fallbackStoreExit.onAdClosed()
             fallbackAds = emptyList()
             fallbackAdIndex = 0
@@ -989,7 +990,7 @@ private fun MiniGameFallbackOverlay(
     fun closeOverlay() {
         if (closeIssued) return
         closeIssued = true
-        if (ad.isVideoPlanV2 && !videoTerminal) videoPlan.closeCurrent("user")
+        if (ad.isVideoPlanV2 && !videoTerminal) videoPlan.closeCurrent(VideoLifecycleReason.USER)
         clickOwner.cancel()
         onClose()
     }

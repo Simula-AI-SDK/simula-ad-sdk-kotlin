@@ -1,8 +1,11 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.SkOverlayConfig
+import ad.simula.ad.sdk.model.VideoAudioWatchAccounting
+import ad.simula.ad.sdk.model.VideoAudioWatchTotals
 import ad.simula.ad.sdk.model.VideoAudioSessionState
 import ad.simula.ad.sdk.model.VideoInstallOverlayClock
+import ad.simula.ad.sdk.model.VideoLifecycleReason
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.os.SystemClock
 import androidx.compose.runtime.Composable
@@ -40,7 +43,7 @@ internal data class VideoPlaybackTelemetry(
     fun record(
         stage: String,
         quartile: Int? = null,
-        reason: String? = null,
+        reason: VideoLifecycleReason? = null,
         pausedMs: Double? = null,
         msToNextStepReady: Double? = null,
         secondsSinceVideoStart: Double? = null,
@@ -64,7 +67,7 @@ internal data class VideoPlaybackTelemetry(
             pool = context.pool,
             durationS = durationS,
             quartile = quartile,
-            reason = reason,
+            reason = reason?.wire,
             pausedMs = pausedMs,
             watchedS = watchedS,
             secondsUnmuted = secondsUnmuted,
@@ -88,8 +91,23 @@ internal data class VideoHandoffTiming(
 internal class VideoPlanPresentationState(
     videoPlanV2: Boolean = false,
     private val clockMs: () -> Long = SystemClock::elapsedRealtime,
+    private val terminalRecorder: (
+        VideoPlaybackTelemetry,
+        String,
+        VideoLifecycleReason?,
+        VideoHandoffTiming?,
+    ) -> Unit = { telemetry, stage, reason, timing ->
+        telemetry.record(
+            stage = stage,
+            reason = reason,
+            msToNextStepReady = timing?.msToNextStepReady,
+            secondsSinceVideoStart = timing?.secondsSinceVideoStart,
+            on = timing?.on,
+        )
+    },
 ) {
     val audio = VideoAudioSessionState(videoPlanV2)
+    private val audioWatch = VideoAudioWatchAccounting()
     private val overlayClock = VideoInstallOverlayClock()
     var active by mutableStateOf(videoPlanV2)
         private set
@@ -108,6 +126,14 @@ internal class VideoPlanPresentationState(
         active = true
         audio.activateVideoPlanV2()
     }
+
+    @Synchronized
+    fun addEligibleMediaDelta(videoPlanV2: Boolean, advancedMs: Long, muted: Boolean) {
+        if (videoPlanV2) audioWatch.add(advancedMs, muted)
+    }
+
+    @Synchronized
+    fun audioWatchTotals(): VideoAudioWatchTotals = audioWatch.totals()
 
     @Synchronized
     fun firstVideoFrame(config: SkOverlayConfig?) {
@@ -137,11 +163,12 @@ internal class VideoPlanPresentationState(
     fun overlayRemainingMs(): Long? = overlayClock.remainingMs().takeIf { overlayClock.started && !overlayClock.ready }
 
     @Synchronized
-    fun beginHandoff(telemetry: VideoPlaybackTelemetry) {
+    fun beginHandoff(telemetry: VideoPlaybackTelemetry, reason: VideoLifecycleReason) {
         if (!active || pendingHandoff != null) return
         currentTelemetry = null
         pendingHandoff = PendingHandoff(
             telemetry = telemetry,
+            reason = reason,
             startedAtMs = clockMs(),
             videoStartedAtMs = currentVideoStartedAtMs ?: clockMs(),
         )
@@ -164,44 +191,63 @@ internal class VideoPlanPresentationState(
             msToNextStepReady = (nowMs - pending.startedAtMs).coerceAtLeast(0L).toDouble(),
             secondsSinceVideoStart = (nowMs - pending.videoStartedAtMs).coerceAtLeast(0L) / 1_000.0,
         )
-        pending.telemetry.record(
-            stage = VIDEO_STAGE_HANDOFF,
-            msToNextStepReady = timing.msToNextStepReady,
-            secondsSinceVideoStart = timing.secondsSinceVideoStart,
-            on = timing.on,
-        )
+        recordTerminal(pending.telemetry, VIDEO_STAGE_HANDOFF, reason = pending.reason, timing = timing)
         return timing
     }
 
-    fun closePendingHandoff(reason: String) {
+    fun closePendingHandoff(reasonOverride: VideoLifecycleReason? = null) {
         val pending = synchronized(this) {
             val retained = pendingHandoff ?: return
             pendingHandoff = null
             retained
         }
-        pending.telemetry.record(stage = VIDEO_STAGE_CLOSE, reason = reason)
+        recordTerminal(
+            pending.telemetry,
+            VIDEO_STAGE_CLOSE,
+            reason = reasonOverride ?: pending.reason,
+        )
     }
 
-    fun close(telemetry: VideoPlaybackTelemetry, reason: String) {
+    fun close(telemetry: VideoPlaybackTelemetry, reason: VideoLifecycleReason) {
         synchronized(this) {
             currentTelemetry = null
             currentVideoStartedAtMs = null
         }
-        telemetry.record(stage = VIDEO_STAGE_CLOSE, reason = reason)
+        recordTerminal(telemetry, VIDEO_STAGE_CLOSE, reason = reason)
     }
 
-    fun closeCurrent(reason: String) {
+    fun closeCurrent(reason: VideoLifecycleReason) {
         val telemetry = synchronized(this) {
             val retained = currentTelemetry ?: return
             currentTelemetry = null
             currentVideoStartedAtMs = null
             retained
         }
-        telemetry.record(stage = VIDEO_STAGE_CLOSE, reason = reason)
+        recordTerminal(telemetry, VIDEO_STAGE_CLOSE, reason = reason)
+    }
+
+    private fun recordTerminal(
+        telemetry: VideoPlaybackTelemetry,
+        stage: String,
+        reason: VideoLifecycleReason? = null,
+        timing: VideoHandoffTiming? = null,
+    ) {
+        val totals = audioWatchTotals()
+        terminalRecorder(
+            telemetry.copy(
+                watchedS = (totals.mutedMs + totals.unmutedMs) / 1_000.0,
+                secondsUnmuted = totals.unmutedMs / 1_000.0,
+                secondsMuted = totals.mutedMs / 1_000.0,
+            ),
+            stage,
+            reason,
+            timing,
+        )
     }
 
     private data class PendingHandoff(
         val telemetry: VideoPlaybackTelemetry,
+        val reason: VideoLifecycleReason,
         val startedAtMs: Long,
         val videoStartedAtMs: Long,
     )

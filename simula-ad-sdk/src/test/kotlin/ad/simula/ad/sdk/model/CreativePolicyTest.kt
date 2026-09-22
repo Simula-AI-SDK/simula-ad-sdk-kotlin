@@ -182,6 +182,42 @@ class CreativePolicyTest {
     }
 
     @Test
+    fun `repeated v2 null position reads consume eligible stall budget and retain near end evidence`() {
+        val budget = VideoStallBudget(8_000L)
+        val detector = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        var nowMs = 0L
+
+        assertFalse(detector.observe(10_000L, 9_700L, true, true, isPlaying = true))
+        assertFalse(detector.observe(10_000L, 9_900L, true, true, isPlaying = true))
+        repeat(2) {
+            assertTrue(
+                continueAfterVideoPositionPoll(
+                    read = { null as Long? },
+                    onReadFailure = { !budget.observe(nowMs, eligible = true, healthyProgress = false) },
+                ) { true },
+            )
+            nowMs += 4_000L
+        }
+        assertFalse(
+            continueAfterVideoPositionPoll(
+                read = { null as Long? },
+                onReadFailure = { !budget.observe(nowMs, eligible = true, healthyProgress = false) },
+            ) { true },
+        )
+        assertEquals(0L, budget.remainingMs())
+        assertTrue(detector.onPlaybackTimeout(10_000L, 9_900L, true, true))
+    }
+
+    @Test
+    fun `v1 null position reads keep polling without consuming v2 budget`() {
+        val budget = VideoStallBudget(8_000L)
+
+        assertTrue(continueAfterVideoPositionPoll(read = { null as Long? }) { true })
+        assertTrue(continueAfterVideoPositionPoll(read = { throw IllegalStateException("transient") }) { true })
+        assertEquals(8_000L, budget.remainingMs())
+    }
+
+    @Test
     fun `natural completion callback precedes forced final progress`() {
         val callbacks = mutableListOf<String>()
 

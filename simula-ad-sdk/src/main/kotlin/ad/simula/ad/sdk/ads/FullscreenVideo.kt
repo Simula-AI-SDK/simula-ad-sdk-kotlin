@@ -5,6 +5,7 @@ import ad.simula.ad.sdk.image.CachedAsyncImage
 import ad.simula.ad.sdk.model.RenderAttemptGate
 import ad.simula.ad.sdk.model.VideoAspectFitTransform
 import ad.simula.ad.sdk.model.VideoFailureCode
+import ad.simula.ad.sdk.model.VideoLifecycleReason
 import ad.simula.ad.sdk.model.VideoCompletionGate
 import ad.simula.ad.sdk.model.VideoNearEndCompletionDetector
 import ad.simula.ad.sdk.model.VideoDimensions
@@ -19,6 +20,7 @@ import ad.simula.ad.sdk.model.VideoQuartileTracker
 import ad.simula.ad.sdk.model.VideoStallBudget
 import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.videoAspectFitTransform
+import ad.simula.ad.sdk.model.videoAudioFocusLossPolicy
 import ad.simula.ad.sdk.model.videoCtaInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteInteractionAllowed
 import ad.simula.ad.sdk.model.videoMuteActionLabel
@@ -132,11 +134,19 @@ private const val VIDEO_PREPARED_RETENTION_MS = 5 * 60_000L
 private const val VIDEO_POSITION_POLL_MS = 100L
 private const val VIDEO_UI_PROGRESS_INTERVAL_MS = 250L
 
+internal fun canonicalFullscreenAdFormat(adFormat: String): String = when (adFormat) {
+    "interstitial_fallback" -> "interstitial"
+    "rewarded_fallback" -> "rewarded"
+    else -> adFormat
+}
+
 internal fun <T> continueAfterVideoPositionPoll(
     read: () -> T?,
+    onReadFailure: () -> Boolean = { true },
     consume: (T) -> Boolean,
 ): Boolean {
-    val value = runCatching(read).getOrNull() ?: return true
+    val value = runCatching(read).getOrNull()
+        ?: return runCatching(onReadFailure).getOrDefault(false)
     return runCatching { consume(value) }.getOrDefault(false)
 }
 
@@ -321,7 +331,7 @@ internal fun FullscreenVideo(
         NativeVideoController(
             context = context,
             telemetry = VideoTelemetryContext(
-                adFormat = adFormat,
+                adFormat = canonicalFullscreenAdFormat(adFormat),
                 adUnitId = adUnitId,
                 adId = adId,
                 serveId = serveId,
@@ -721,7 +731,7 @@ private class NativeVideoController(
     private val nearEndCompletion = VideoNearEndCompletionDetector()
     private val completionGate = VideoCompletionGate()
     private val stallBudget = VideoStallBudget()
-    private val audioWatch = VideoAudioWatchAccounting()
+    private val clipAudioWatch = VideoAudioWatchAccounting()
     private val quartiles = VideoQuartileTracker()
     private val configuredGateMs = configuredGateSeconds.coerceAtLeast(0) * 1_000L
     private var renderToken = 0L
@@ -747,6 +757,7 @@ private class NativeVideoController(
     private var lastDeliveredTotalMs = initialPlayedMs.coerceAtLeast(0L)
     private var lastDeliveredPositionMs = 0L
     private var lastVideoPositionMs = 0L
+    private var lastVideoDurationMs = 0L
     private var focusRequest: AudioFocusRequest? = null
     private var audioFocusHeld = false
     private var pausedAtMs: Long? = null
@@ -761,8 +772,11 @@ private class NativeVideoController(
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
             -> {
+                val policy = videoAudioFocusLossPolicy(videoPlanV2, this.desiredMuted)
+                this.desiredMuted = policy.desiredMuted
                 audioFocusHeld = false
                 applyEffectiveMuted(true)
+                if (policy.abandonFocus) abandonAudioFocus()
             }
         }
     }
@@ -775,6 +789,32 @@ private class NativeVideoController(
             if (!lifecycleActive || released || failed || !firstFrameRendered) return
             val continuePolling = continueAfterVideoPositionPoll(
                 read = { emitProgress(force = false) },
+                onReadFailure = {
+                    if (!videoPlanV2) {
+                        true
+                    } else {
+                        bufferingProgressSincePoll = false
+                        val expired = stallBudget.observe(
+                            nowMs = SystemClock.elapsedRealtime(),
+                            eligible = lifecycleActive && !presentationBlocked,
+                            healthyProgress = false,
+                        )
+                        if (expired) {
+                            if (nearEndCompletion.onPlaybackTimeout(
+                                    durationMs = lastVideoDurationMs,
+                                    positionMs = lastVideoPositionMs,
+                                    firstFrameRendered = firstFrameRendered,
+                                    playerActive = player != null && lifecycleActive && !released && !failed,
+                                )
+                            ) {
+                                completePlayback(renderToken)
+                            } else {
+                                fail(VideoFailureCode.PLAYBACK_TIMEOUT)
+                            }
+                        }
+                        !expired && !completed && !released && !failed
+                    }
+                },
                 consume = { progress ->
                     val isPlaying = runCatching { player?.isPlaying == true }.getOrElse {
                         fail(VideoFailureCode.PLAYBACK_ERROR)
@@ -963,7 +1003,7 @@ private class NativeVideoController(
             stallBudget.observe(nowMs, eligible = false, healthyProgress = false)
             if (videoPlanV2 && firstFrameRendered && pausedAtMs == null && !completed && !failed) {
                 pausedAtMs = nowMs
-                recordLifecycle(VIDEO_STAGE_PAUSE, reason = "backgrounded")
+                recordLifecycle(VIDEO_STAGE_PAUSE, reason = VideoLifecycleReason.BACKGROUNDED)
             }
             desiredMuted = videoDesiredMutedAfterLifecycleDeactivation(videoPlanV2, desiredMuted)
             applyEffectiveMuted(true)
@@ -1030,6 +1070,7 @@ private class NativeVideoController(
         if (!prepared || !lifecycleActive || surface == null || released || failed) return
         runCatching {
             val mediaPlayer = player ?: return
+            // Acquire focus before the first rendered frame so V2 starts audibly without a late volume jump.
             val focusHeld = !desiredMuted && requestAudioFocus()
             applyEffectiveMuted(effectiveVideoMuted(desiredMuted, focusHeld))
             mediaPlayer.start()
@@ -1075,8 +1116,11 @@ private class NativeVideoController(
         recordLifecycle(VIDEO_STAGE_COMPLETE)
         if (videoPlanV2) {
             val snapshot = telemetrySnapshot()
-            if (shouldBeginVideoHandoff(videoPlanV2, hasNextStep)) videoPlanState.beginHandoff(snapshot)
-            else videoPlanState.close(snapshot, reason = "completed")
+            if (shouldBeginVideoHandoff(videoPlanV2, hasNextStep)) {
+                videoPlanState.beginHandoff(snapshot, VideoLifecycleReason.COMPLETED)
+            } else {
+                videoPlanState.close(snapshot, reason = VideoLifecycleReason.COMPLETED)
+            }
         }
         release()
     }
@@ -1106,17 +1150,22 @@ private class NativeVideoController(
         val mediaPlayer = player ?: return null
         val durationMs = durationMs()
         val sample = if (completed) {
-            val current = runCatching { mediaPlayer.currentPosition.toLong() }.getOrDefault(0L)
-            val currentSample = position.sample(current)
+            val currentAdvancedMs = runCatching { mediaPlayer.currentPosition.toLong() }
+                .getOrNull()
+                ?.let(position::sample)
+                ?.advancedMs
+                ?: 0L
             val completedSample = position.complete(durationMs)
-            completedSample.copy(advancedMs = currentSample.advancedMs + completedSample.advancedMs)
+            completedSample.copy(advancedMs = currentAdvancedMs + completedSample.advancedMs)
         } else {
             val current = runCatching { mediaPlayer.currentPosition.toLong() }.getOrNull() ?: return null
             position.sample(current)
         }
         pendingAdvancedMs += sample.advancedMs
         lastVideoPositionMs = maxOf(lastVideoPositionMs, sample.positionMs)
-        audioWatch.add(sample.advancedMs, effectiveMuted)
+        if (durationMs > 0L) lastVideoDurationMs = durationMs
+        videoPlanState.addEligibleMediaDelta(videoPlanV2, sample.advancedMs, effectiveMuted)
+        clipAudioWatch.add(sample.advancedMs, effectiveMuted)
         if (videoPlanV2) {
             quartiles.crossed(sample.positionMs, durationMs).forEach { quartile ->
                 recordLifecycle(VIDEO_STAGE_DURATION, quartile = quartile)
@@ -1233,7 +1282,7 @@ private class NativeVideoController(
     private fun recordLifecycle(
         stage: String,
         quartile: Int? = null,
-        reason: String? = null,
+        reason: VideoLifecycleReason? = null,
         pausedMs: Double? = null,
         errorCode: String? = null,
     ) {
@@ -1261,12 +1310,12 @@ private class NativeVideoController(
     }
 
     private fun telemetrySnapshot(): VideoPlaybackTelemetry {
-        val totals = audioWatch.totals()
+        val totals = clipAudioWatch.totals()
         return VideoPlaybackTelemetry(
             context = telemetry,
             videoPositionS = lastVideoPositionMs / 1_000.0,
             muted = effectiveMuted,
-            durationS = durationMs().takeIf { it > 0L }?.div(1_000.0),
+            durationS = maxOf(durationMs(), lastVideoDurationMs).takeIf { it > 0L }?.div(1_000.0),
             watchedS = (totals.mutedMs + totals.unmutedMs) / 1_000.0,
             secondsUnmuted = totals.unmutedMs / 1_000.0,
             secondsMuted = totals.mutedMs / 1_000.0,
@@ -1283,8 +1332,11 @@ private class NativeVideoController(
         recordLifecycle(VIDEO_STAGE_FAIL, errorCode = code.wire)
         if (videoPlanV2) {
             val snapshot = telemetrySnapshot()
-            if (shouldBeginVideoHandoff(videoPlanV2, hasNextStep)) videoPlanState.beginHandoff(snapshot)
-            else videoPlanState.close(snapshot, reason = "failed")
+            if (shouldBeginVideoHandoff(videoPlanV2, hasNextStep)) {
+                videoPlanState.beginHandoff(snapshot, VideoLifecycleReason.FAILED)
+            } else {
+                videoPlanState.close(snapshot, reason = VideoLifecycleReason.FAILED)
+            }
         }
         Telemetry.recordError(
             signature = "video:playback_failed",
