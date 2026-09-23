@@ -123,6 +123,13 @@ internal fun fallbackPreparationWindow(
 
 internal enum class VideoOverlayCloseOrigin { USER, AUTOMATIC }
 
+internal enum class FallbackUnavailableExitCause { USER_ESCAPE, RENDERER_FAILURE }
+
+internal fun fallbackUnavailableExitReportsAuthority(
+    cause: FallbackUnavailableExitCause,
+    rendererClaimAccepted: Boolean,
+): Boolean = cause == FallbackUnavailableExitCause.RENDERER_FAILURE && rendererClaimAccepted
+
 internal fun videoOverlayCloseAllowed(
     origin: VideoOverlayCloseOrigin,
     videoPlanV2: Boolean,
@@ -142,7 +149,7 @@ internal fun fallbackReachedAuthoritativeGate(
     countdown: Int,
     videoTerminal: Boolean,
 ): Boolean = if (isVideo) {
-    countdown <= 0 || videoTerminal
+    videoTerminal || (renderAdmitted && countdown <= 0)
 } else {
     renderAdmitted && countdown <= 0
 }
@@ -1269,15 +1276,26 @@ private fun FallbackAdOverlay(
             }
         ) return
         unavailableExitIssued = true
-        if (origin == VideoOverlayCloseOrigin.AUTOMATIC) reportAuthoritativeEnd()
         runCatching(onClose)
+    }
+    fun finishUnavailableExit(cause: FallbackUnavailableExitCause) {
+        if (fallbackUnavailableExitReportsAuthority(cause, rendererOwnsPhase)) {
+            reportAuthoritativeEnd()
+        }
+        closeOnce(
+            if (cause == FallbackUnavailableExitCause.USER_ESCAPE) {
+                VideoOverlayCloseOrigin.USER
+            } else {
+                VideoOverlayCloseOrigin.AUTOMATIC
+            },
+        )
     }
     fun escapePreFirstFrameVideo() {
         if (!videoPreFirstFrameEscapeAvailable(isVideo, videoFirstFrameAdmitted) ||
             presentationState.clickHandoffPending || storeVisitPending()
         ) return
         applyRendererUnavailable()
-        closeOnce(VideoOverlayCloseOrigin.AUTOMATIC)
+        finishUnavailableExit(FallbackUnavailableExitCause.USER_ESCAPE)
     }
     LaunchedEffect(isVideo, videoUrl, rendererGone) {
         if (shouldEnterFallbackVideoUnavailable(ad.type, videoUrl, rendererGone)) {
@@ -1294,7 +1312,7 @@ private fun FallbackAdOverlay(
                     storeVisitPending = storeVisitPending(),
                 ) && !unavailableExitIssued
             ) {
-                closeOnce(VideoOverlayCloseOrigin.AUTOMATIC)
+                finishUnavailableExit(FallbackUnavailableExitCause.RENDERER_FAILURE)
             }
         }
     }
@@ -1394,8 +1412,9 @@ private fun FallbackAdOverlay(
             closeOnce(VideoOverlayCloseOrigin.USER)
         }
     }
-    LaunchedEffect(countdown, isVideo, pageCommitted, videoTerminal) {
-        if (fallbackReachedAuthoritativeGate(isVideo, isVideo || pageCommitted, countdown, videoTerminal)) {
+    LaunchedEffect(countdown, isVideo, pageCommitted, videoFirstFrameAdmitted, videoTerminal) {
+        val renderAdmitted = if (isVideo) videoFirstFrameAdmitted else pageCommitted
+        if (fallbackReachedAuthoritativeGate(isVideo, renderAdmitted, countdown, videoTerminal)) {
             reportAuthoritativeEnd()
         }
     }

@@ -35,6 +35,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -90,6 +91,33 @@ internal class VideoAssetLease internal constructor(
     }
 }
 
+internal suspend fun acquireVideoAssetLeaseWithOwnership(
+    timeoutMs: Long,
+    ioDispatcher: CoroutineDispatcher,
+    afterAcquire: suspend () -> Unit = {},
+    acquire: suspend () -> VideoAssetLease?,
+): VideoAssetLease? {
+    var acquired: VideoAssetLease? = null
+    var delivered = false
+    try {
+        val lease = withTimeoutOrNull(timeoutMs) {
+            withContext(ioDispatcher) {
+                val result = acquire()
+                acquired = result
+                if (result != null) afterAcquire()
+                result
+            }
+        }
+        if (lease != null) delivered = true
+        return lease
+    } finally {
+        val abandoned = acquired.takeIf { !delivered }
+        if (abandoned != null) {
+            withContext(NonCancellable + ioDispatcher) { abandoned.release() }
+        }
+    }
+}
+
 /** Process-wide local-only video downloader used by every native fullscreen video surface. */
 internal object VideoAssetCache {
     private val gate = Any()
@@ -97,19 +125,17 @@ internal object VideoAssetCache {
 
     suspend fun acquire(context: Context, rawUrl: String?): VideoAssetLease? {
         val deadlineMs = saturatingAdd(SystemClock.elapsedRealtime(), VIDEO_DOWNLOAD_TIMEOUT_MS)
-        return withTimeoutOrNull(VIDEO_DOWNLOAD_TIMEOUT_MS) {
-            withContext(Dispatchers.IO) {
-                val url = rawUrl?.takeIf { it.length <= VIDEO_URL_MAX_LENGTH }
-                    ?.let(::admittedVideoUrl)
-                    ?: return@withContext null
-                val processIdentifier = videoCacheProcessIdentifier(currentVideoCacheProcessName(context))
-                val cacheDirectory = videoCacheProcessDirectory(context.applicationContext.cacheDir, processIdentifier)
-                val active = synchronized(gate) {
-                    manager ?: VideoAssetCacheManager(cacheDirectory, processPartId = processIdentifier)
-                        .also { manager = it }
-                }
-                active.acquire(url, deadlineMs)
+        return acquireVideoAssetLeaseWithOwnership(VIDEO_DOWNLOAD_TIMEOUT_MS, Dispatchers.IO) {
+            val url = rawUrl?.takeIf { it.length <= VIDEO_URL_MAX_LENGTH }
+                ?.let(::admittedVideoUrl)
+                ?: return@acquireVideoAssetLeaseWithOwnership null
+            val processIdentifier = videoCacheProcessIdentifier(currentVideoCacheProcessName(context))
+            val cacheDirectory = videoCacheProcessDirectory(context.applicationContext.cacheDir, processIdentifier)
+            val active = synchronized(gate) {
+                manager ?: VideoAssetCacheManager(cacheDirectory, processPartId = processIdentifier)
+                    .also { manager = it }
             }
+            active.acquire(url, deadlineMs)
         }
     }
 }

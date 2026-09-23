@@ -164,6 +164,18 @@ internal fun dispatchNaturalVideoCompletion(
     runCatching(emitFinalProgress)
 }
 
+internal fun detachVideoSurfaceInOrder(
+    pausePlayback: () -> Unit,
+    detachPlayerSurface: () -> Unit,
+    clearSurfaceOwnership: () -> Unit,
+    releaseSurface: () -> Unit,
+) {
+    runCatching(pausePlayback)
+    runCatching(detachPlayerSurface)
+    runCatching(clearSurfaceOwnership)
+    runCatching(releaseSurface)
+}
+
 internal fun videoScreenAwakeEligible(
     firstFrameRendered: Boolean,
     terminal: Boolean,
@@ -982,15 +994,20 @@ private class NativeVideoController(
 
     fun detachSurface(texture: TextureView) {
         if (textureView !== texture) return
-        runCatching { surface?.release() }
-        surface = null
-        textureView = null
-        surfaceWidth = 0
-        surfaceHeight = 0
-        playing = false
-        publishPlaybackEligibility()
-        pause()
-        runCatching { player?.setSurface(null) }
+        val detachedSurface = surface
+        detachVideoSurfaceInOrder(
+            pausePlayback = ::pause,
+            detachPlayerSurface = { player?.setSurface(null) },
+            clearSurfaceOwnership = {
+                surface = null
+                textureView = null
+                surfaceWidth = 0
+                surfaceHeight = 0
+                updatePlaying(false)
+                publishPlaybackEligibility()
+            },
+            releaseSurface = { detachedSurface?.release() },
+        )
     }
 
     fun setLifecycleActive(active: Boolean) {

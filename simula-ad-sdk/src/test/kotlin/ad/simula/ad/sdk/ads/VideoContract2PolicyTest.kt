@@ -87,17 +87,66 @@ class VideoContract2PolicyTest {
     }
 
     @Test
-    fun `fallback pre frame failure and escape share exactly once advance authority`() {
+    fun `final fallback pre frame user escape advances without unit end authority`() {
+        val presentation = unitEndPresentation()
+        val fallback = FallbackPresentationState(clockMs = { 0L }, videoPlanV2 = true)
+        fallback.showing(0)
+        val owner = Any()
+        presentation.markPrimaryProgressionAllowed()
+
+        val rendererClaim = fallback.abandonRenderer(0, owner)
+        assertFalse(
+            fallbackReachedAuthoritativeGate(
+                isVideo = true,
+                renderAdmitted = false,
+                countdown = 0,
+                videoTerminal = false,
+            ),
+        )
+        assertFalse(
+            fallbackUnavailableExitReportsAuthority(
+                FallbackUnavailableExitCause.USER_ESCAPE,
+                rendererClaim,
+            ),
+        )
+        assertTrue(fallback.advance(total = 1))
+        assertEquals(FallbackStage.DONE, fallback.stage)
+        assertFalse(presentation.rewardEarned)
+        assertFalse(presentation.hasAuthoritativeEndReached())
+        assertEquals(RewardCompletionClaim(false, null), presentation.claimRewardCompletion())
+    }
+
+    @Test
+    fun `accepted renderer failure retains exact once fail open authority`() {
+        val presentation = unitEndPresentation()
         val fallback = FallbackPresentationState(clockMs = { 0L }, videoPlanV2 = true)
         fallback.showing(0)
         val owner = Any()
         var authorityReports = 0
+        presentation.markPrimaryProgressionAllowed()
 
-        assertTrue(fallback.abandonRenderer(0, owner))
-        assertFalse(fallback.abandonRenderer(0, owner))
-        assertTrue(fallback.reportAuthoritativeEnd { authorityReports++ })
-        assertFalse(fallback.reportAuthoritativeEnd { authorityReports++ })
+        val firstClaim = fallback.abandonRenderer(0, owner)
+        if (fallbackUnavailableExitReportsAuthority(
+                FallbackUnavailableExitCause.RENDERER_FAILURE,
+                firstClaim,
+            )
+        ) {
+            fallback.reportAuthoritativeEnd {
+                authorityReports++
+                presentation.markAuthoritativeEndReached()
+            }
+        }
+        val duplicateClaim = fallback.abandonRenderer(0, owner)
+        assertFalse(
+            fallbackUnavailableExitReportsAuthority(
+                FallbackUnavailableExitCause.RENDERER_FAILURE,
+                duplicateClaim,
+            ),
+        )
+
         assertEquals(1, authorityReports)
+        assertTrue(presentation.rewardEarned)
+        assertEquals(RewardCompletionReason.UNIT_END, presentation.claimRewardCompletion()?.reason)
     }
 
     @Test
@@ -428,6 +477,30 @@ class VideoContract2PolicyTest {
         assertFalse(videoScreenAwakeEligible(true, false, true, false, prepared = false))
         assertFalse(videoScreenAwakeEligible(true, false, true, false, surfaceAttached = false))
         assertFalse(videoScreenAwakeEligible(true, false, true, false, playing = false))
+    }
+
+    @Test
+    fun `surface detach pauses and detaches player before releasing output`() {
+        val events = mutableListOf<String>()
+
+        detachVideoSurfaceInOrder(
+            pausePlayback = { events += "pause" },
+            detachPlayerSurface = { events += "detach" },
+            clearSurfaceOwnership = { events += "clear" },
+            releaseSurface = { events += "release" },
+        )
+
+        assertEquals(listOf("pause", "detach", "clear", "release"), events)
+        assertFalse(
+            videoScreenAwakeEligible(
+                firstFrameRendered = true,
+                terminal = false,
+                foreground = true,
+                presentationBlocked = false,
+                surfaceAttached = false,
+                playing = false,
+            ),
+        )
     }
 
     @Test

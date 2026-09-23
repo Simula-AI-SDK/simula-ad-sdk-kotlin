@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
@@ -343,6 +344,102 @@ class VideoAssetCacheTest {
         assertTrue(entered.await(1L, TimeUnit.SECONDS))
         assertNull(lease)
         assertTrue("elapsed=$elapsedMs", elapsedMs < 1_000L)
+    }
+
+    @Test
+    fun `outer timeout releases lease acquired before delivery`() = runTest {
+        val directory = temporaryFolder.newFolder("lease-delivery-timeout")
+        val url = "https://cdn.example/timeout.mp4"
+        val file = sparseAsset(directory, url, size = 3L, modified = 1L)
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            elapsedRealtimeMs = { testScheduler.currentTime },
+            ioDispatcher = dispatcher,
+            scope = this,
+        )
+        val acquired = CompletableDeferred<Unit>()
+        val holdDelivery = CompletableDeferred<Unit>()
+        val result = async {
+            acquireVideoAssetLeaseWithOwnership(
+                timeoutMs = 100L,
+                ioDispatcher = dispatcher,
+                acquire = { manager.acquire(url) },
+                afterAcquire = {
+                    acquired.complete(Unit)
+                    holdDelivery.await()
+                },
+            )
+        }
+        runCurrent()
+        acquired.await()
+
+        advanceTimeBy(100L)
+        runCurrent()
+
+        assertNull(result.await())
+        advanceUntilIdle()
+        assertFalse(file.exists())
+    }
+
+    @Test
+    fun `parent cancellation releases lease acquired before delivery`() = runTest {
+        val directory = temporaryFolder.newFolder("lease-delivery-cancel")
+        val url = "https://cdn.example/cancel-delivery.mp4"
+        val file = sparseAsset(directory, url, size = 3L, modified = 1L)
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            elapsedRealtimeMs = { testScheduler.currentTime },
+            ioDispatcher = dispatcher,
+            scope = this,
+        )
+        val acquired = CompletableDeferred<Unit>()
+        val holdDelivery = CompletableDeferred<Unit>()
+        val result = async {
+            acquireVideoAssetLeaseWithOwnership(
+                timeoutMs = 1_000L,
+                ioDispatcher = dispatcher,
+                acquire = { manager.acquire(url) },
+                afterAcquire = {
+                    acquired.complete(Unit)
+                    holdDelivery.await()
+                },
+            )
+        }
+        runCurrent()
+        acquired.await()
+
+        result.cancelAndJoin()
+
+        advanceUntilIdle()
+        assertFalse(file.exists())
+    }
+
+    @Test
+    fun `successful ownership handoff returns retained lease`() = runTest {
+        val directory = temporaryFolder.newFolder("lease-delivery-success")
+        val url = "https://cdn.example/success.mp4"
+        val file = sparseAsset(directory, url, size = 3L, modified = 1L)
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            elapsedRealtimeMs = { testScheduler.currentTime },
+            ioDispatcher = dispatcher,
+            scope = this,
+        )
+
+        val lease = acquireVideoAssetLeaseWithOwnership(
+            timeoutMs = 100L,
+            ioDispatcher = dispatcher,
+            acquire = { manager.acquire(url) },
+        )
+
+        assertTrue(lease != null)
+        assertTrue(file.exists())
+        lease?.release()
+        advanceUntilIdle()
+        assertFalse(file.exists())
     }
 
     @Test
