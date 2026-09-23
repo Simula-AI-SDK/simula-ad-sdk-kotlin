@@ -38,6 +38,24 @@ class ApiModelsSerializationTest {
     // ── Session ─────────────────────────────────────────────────────────────
 
     @Test
+    fun `contract 2 ES1 video retains segments and progress treatment while ES2 video is rejected`() {
+        val response = json.decodeFromString<FallbackAdsApiResponse>(
+            """{"video_contract":2,"ads":[
+              {"type":"video","url":"https://cdn.example/es1.mp4",
+               "creative":{"type":"video","url":"https://cdn.example/es1.mp4",
+                 "segments":[{"clip_index":0,"video_pool":"trailer","start_seconds":0,"end_seconds":10}]},
+               "ad_behavior":{"progress_bar":{"style":"two_tone"}}},
+              {"type":"video","url":"https://cdn.example/es2.mp4"}
+            ]}""",
+        )
+        val fallback = SimulaApiClient.fallbackAdsFromResponse(response).single()
+        assertEquals(0, fallback.sourceIndex)
+        assertEquals(1, fallback.segments.size)
+        assertEquals("trailer", fallback.segments.single().videoPool)
+        assertEquals(ad.simula.ad.sdk.model.ProgressBarStyle.TWO_TONE, fallback.progressBarStyle)
+    }
+
+    @Test
     fun `session response decodes sessionId`() {
         val r = json.decodeFromString<SessionResponse>("""{"sessionId":"abc-123"}""")
         assertEquals("abc-123", r.sessionId)
@@ -180,7 +198,7 @@ class ApiModelsSerializationTest {
     }
 
     @Test
-    fun `contract 2 fallback drops videos lossily and preserves playable source index`() {
+    fun `contract 2 accepts ES1 video and preserves playable source index`() {
         val response = json.decodeFromString<FallbackAdsApiResponse>(
             """{"video_contract":2,"ads":[
                 {"ad_id":"video","type":"video","url":"https://cdn.example/video.mp4"},
@@ -191,9 +209,9 @@ class ApiModelsSerializationTest {
         val ads = SimulaApiClient.fallbackAdsFromResponse(response)
 
         assertEquals(listOf(0, 2), response.ads.map { it.sourceIndex })
-        assertEquals(1, ads.size)
-        assertEquals("playable", ads.single().adId)
-        assertEquals(2, ads.single().sourceIndex)
+        assertEquals(listOf("video", "playable"), ads.map { it.adId })
+        assertEquals(listOf(0, 2), ads.map { it.sourceIndex })
+        assertTrue(ads.first().videoContract2)
     }
 
     @Test

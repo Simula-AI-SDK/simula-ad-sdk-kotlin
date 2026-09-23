@@ -5,6 +5,7 @@ import ad.simula.ad.sdk.model.AdUnitType
 import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.CharacterData
 import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.ProgressBarStyle
 import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.GameData
@@ -818,6 +819,8 @@ internal object SimulaApiClient {
         val videoBehavior: ad.simula.ad.sdk.model.VideoBehavior? = null,
         val skoverlay: ad.simula.ad.sdk.model.SkOverlayConfig? = null,
         val videoContract2: Boolean = false,
+        val segments: List<ad.simula.ad.sdk.model.VideoSegment> = emptyList(),
+        val progressBarStyle: ad.simula.ad.sdk.model.ProgressBarStyle = ad.simula.ad.sdk.model.ProgressBarStyle.SINGLE,
         val destination: String? = null,
         val trackingUrl: String? = null,
         val androidStoreUrl: String? = null,
@@ -860,6 +863,12 @@ internal object SimulaApiClient {
             videoBehavior = fallbackVideoBehavior(ad.adBehavior).takeIf { responseVideoContract2 },
             skoverlay = fallbackSkOverlayConfig(ad.adBehavior, responseVideoContract2),
             videoContract2 = responseVideoContract2,
+            segments = creative?.toDomain()?.segments.takeIf { responseVideoContract2 }.orEmpty(),
+            progressBarStyle = ProgressBarStyle.from(
+                (((ad.adBehavior as? kotlinx.serialization.json.JsonObject)?.get("progress_bar")
+                    as? kotlinx.serialization.json.JsonObject)?.get("style") as? kotlinx.serialization.json.JsonPrimitive)
+                    ?.takeIf { it.isString }?.content.takeIf { responseVideoContract2 },
+            ),
             destination = ad.destination?.trim()?.takeIf { it.isNotEmpty() },
             trackingUrl = ad.trackingUrl?.trim()?.takeIf { it.isNotEmpty() },
             androidStoreUrl = ad.androidStoreUrl?.trim()?.takeIf { it.isNotEmpty() },
@@ -877,7 +886,7 @@ internal object SimulaApiClient {
                 ad,
                 data.nativeClickBeaconV1Enabled == true,
                 data.videoContract == 2,
-            )?.takeUnless { data.videoContract == 2 && it.type == CreativeType.VIDEO }
+            )?.takeUnless { data.videoContract == 2 && it.type == CreativeType.VIDEO && it.sourceIndex != 0 }
         }.take(2).toList()
 
     /**

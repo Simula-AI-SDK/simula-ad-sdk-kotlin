@@ -703,20 +703,8 @@ private fun RewardedMinigame(
             onFinish(earned)
         }
     }
-    LaunchedEffect(videoTerminal, clickHandoffPending, storeVisitBlocked) {
-        if (!presentation.videoContract2 || !videoTerminal) return@LaunchedEffect
-        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            withFrameNanos { }
-            if (videoSequenceAdvance(
-                    videoPlanV2 = true,
-                    currentType = presentation.creative.type,
-                    terminal = videoTerminal,
-                    clickHandoffPending = presentation.pendingClickHandoff() != null,
-                    storeVisitPending = storeVisitPending(),
-                ) == VideoSequenceAdvance.ADVANCE
-            ) onFinish(true)
-        }
-    }
+    // Completion unlocks the gate; a user close tap reveals the next screen.
+
     val primaryCtaNavigation = presentation.primaryCtaNavigation
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaRewardedActivity
@@ -968,7 +956,7 @@ private fun RewardedMinigame(
                 presentation.videoContract2,
                 presentation.creative.type,
                 videoTerminal,
-            ) { presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER) }
+            ) { presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER, hasNextStep()) }
             if (!closeClaimed) return@BackHandler
             presentation.automaticNavigationGate.clear()
             onFinish(true)
@@ -1542,7 +1530,7 @@ private fun RewardedMinigame(
                             presentation.videoContract2,
                             presentation.creative.type,
                             videoTerminal,
-                        ) { presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER) }
+                        ) { presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER, hasNextStep()) }
                         if (closeClaimed) {
                             presentation.automaticNavigationGate.clear()
                             onFinish(true)

@@ -37,7 +37,12 @@ bounded post-close fetch timeout resolve that authority once and fail open to un
 than exposing or blocking the host app. Teardown does not salvage an unearned unit-end reward.
 Verification uses `completion_reason: "unit_end"`.
 
-Fallback ads remain ordinary end screens. They are not interpreted as consecutive primary clips.
+ES1 can be an interactive game or card after a video primary, or a video or card after a playable
+primary. ES2 remains the Get the App card. Every slot advances on the close tap; natural completion
+unlocks the close gate and stays on the completed video. ES1 video keeps its segment metadata and
+progress-bar style, uses the same bounded cache, and retains playback position across recreation.
+It is independent of the stitched primary clips. Handoff telemetry measures from the close tap to
+the next screen's readiness, excluding time spent waiting on the completed frame.
 
 ## Measurement And Interaction
 

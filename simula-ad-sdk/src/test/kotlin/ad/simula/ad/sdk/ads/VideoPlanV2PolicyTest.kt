@@ -54,6 +54,46 @@ class VideoPlanV2PolicyTest {
     )
 
     @Test
+    fun `early user close hands video off instead of recording a unit close`() {
+        var now = 1_000L
+        val stages = mutableListOf<String>()
+        val state = VideoPlanPresentationState(true, { now }) { _, stage, _, _ -> stages += stage }
+        val generation = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary).generation
+        state.firstVideoFrame(null)
+        state.retainCurrentTelemetry(generation, playbackTelemetry(0, 4.0, 4.0, 0.0))
+        now = 5_000L
+        assertTrue(state.closeCurrent(VideoLifecycleReason.USER, willHandoff = true))
+        assertTrue(stages.isEmpty())
+        now = 5_200L
+        val handoff = requireNotNull(state.nextStepReady())
+        assertEquals(200.0, handoff.msToNextStepReady, 0.0)
+        assertEquals(listOf(VIDEO_STAGE_HANDOFF), stages)
+        assertNull(state.nextStepReady())
+    }
+
+    @Test
+    fun `completed primary waits for close tap and handoff excludes time waiting on final frame`() {
+        var now = 1_000L
+        val stages = mutableListOf<String>()
+        val video = VideoPlanPresentationState(true, { now }) { _, stage, _, _ -> stages += stage }
+        val presentation = FallbackPresentationState(clockMs = { now }, videoPlanState = video)
+        video.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary)
+        video.firstVideoFrame(null)
+        now = 11_000L
+        video.beginHandoff(playbackTelemetry(0, 10.0, 10.0, 0.0), VideoLifecycleReason.COMPLETED)
+        assertEquals(FallbackStage.CONTENT, presentation.stage)
+        assertTrue(presentation.primaryHasNextStep())
+        assertTrue(stages.isEmpty())
+        now = 15_000L
+        video.handoffPresentationBegan()
+        now = 15_100L
+        val timing = requireNotNull(video.nextStepReady())
+        assertEquals(100.0, timing.msToNextStepReady, 0.0)
+        assertEquals(14.1, timing.secondsSinceVideoStart, 0.0)
+        assertEquals(listOf(VIDEO_STAGE_HANDOFF), stages)
+    }
+
+    @Test
     fun `all playable golden progression remains manual and preserves source indices`() {
         var primaryClosed = false
         val ads = listOf(playable(0), playable(1))

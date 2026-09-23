@@ -207,6 +207,7 @@ internal fun closeGateSecondsRemaining(elapsedMs: Long, durationMs: Long): Int =
 internal class FallbackCloseGateState {
     private val elapsedByIndex = LinkedHashMap<Int, Long>()
     private val videoDurationByIndex = LinkedHashMap<Int, Long>()
+    private val videoPositionByIndex = LinkedHashMap<Int, Long>()
 
     @Synchronized
     fun elapsedMs(index: Int): Long = elapsedByIndex[index.coerceAtLeast(0)] ?: 0L
@@ -249,7 +250,17 @@ internal class FallbackCloseGateState {
     }
 
     @Synchronized
+    fun videoPositionMs(index: Int): Long = videoPositionByIndex[index.coerceAtLeast(0)] ?: 0L
+
+    @Synchronized
+    fun retainVideoPositionMs(index: Int, positionMs: Long) {
+        val key = index.coerceAtLeast(0)
+        videoPositionByIndex[key] = maxOf(videoPositionByIndex[key] ?: 0L, positionMs.coerceAtLeast(0L))
+    }
+
+    @Synchronized
     fun clear() {
+        videoPositionByIndex.clear()
         elapsedByIndex.clear()
         videoDurationByIndex.clear()
     }
@@ -396,6 +407,7 @@ internal class FallbackPresentationState(
     fun markPrimaryEndReached() {
         primaryEndReached = true
     }
+    fun primaryHasNextStep(): Boolean = fetchedAds?.isNotEmpty() ?: true
     fun fetchFailed() = Unit
     fun terminalizeInitialFetchFailure(): List<SimulaApiClient.FallbackAd> {
         val retained = fetchedAds
@@ -523,6 +535,8 @@ internal class FallbackPresentationState(
         storeVisitPending,
     )
 
+    fun videoPositionMs(index: Int): Long = closeGateState.videoPositionMs(index)
+    fun retainVideoPositionMs(index: Int, positionMs: Long) = closeGateState.retainVideoPositionMs(index, positionMs)
     fun videoDurationMs(index: Int): Long = closeGateState.videoDurationMs(index)
 
     fun retainVideoDurationMs(index: Int, durationMs: Long) =
@@ -869,6 +883,7 @@ internal fun FallbackAdHost(
     // Primary creative closed → present the prefetched screens immediately. If the prefetch is
     // somehow still in flight (user closed very fast), wait briefly in [FallbackPhase.Fetching].
     fun onPrimaryClosed() {
+        presentationState.videoPlan.handoffPresentationBegan()
         val ads = prefetched
         phase = when {
             ads == null -> FallbackPhase.Fetching(presentationState.startPostCloseFetchWait())
@@ -890,7 +905,7 @@ internal fun FallbackAdHost(
                 null,
                 {
                     presentationState.markPrimaryEndReached()
-                    false
+                    presentationState.primaryHasNextStep()
                 },
             )
             // Prefetch wasn't ready at close — hold on the black backdrop and advance when it lands.
@@ -1037,6 +1052,7 @@ internal fun FallbackAdHost(
                         },
                         storeVisitPending = storeVisitPending,
                         onClose = {
+                            presentationState.videoPlan.handoffPresentationBegan()
                             val latest = presentationState.displayablePreparedAds()
                             presentationState.retainFetchedAds(latest)
                             val currentIndex = latest.indexOfFirst { it.sourceIndex == ad.sourceIndex }
@@ -1113,12 +1129,15 @@ private fun FallbackAdOverlay(
 ) {
     val context = LocalContext.current
     val adId = ad.adId
-    val nativeClickBeaconV1Enabled = ad.nativeClickBeaconV1Enabled
+    val nativeClickBeaconV1Enabled = ad.videoContract2 || ad.nativeClickBeaconV1Enabled
     val lifecycleOwner = LocalLifecycleOwner.current
     val clickHandler = remember { Handler(Looper.getMainLooper()) }
     val inlineHtml = ad.renderedHtml?.takeIf { it.isNotBlank() }
     val isVideo = ad.type == CreativeType.VIDEO
     val videoUrl = remember(ad.url) { admittedVideoUrl(ad.url) }
+    var videoPositionMs by remember(presentationState, fallbackIndex) {
+        mutableStateOf(presentationState.videoPositionMs(fallbackIndex))
+    }
     var videoDurationMs by remember(presentationState, fallbackIndex) {
         mutableStateOf(presentationState.videoDurationMs(fallbackIndex))
     }
@@ -1280,8 +1299,8 @@ private fun FallbackAdOverlay(
     var unavailableExitIssued by remember { mutableStateOf(false) }
     fun closeOnce(origin: VideoOverlayCloseOrigin) {
         if (unavailableExitIssued) return
-        if (!videoOverlayCloseAllowed(origin, false, videoTerminal) {
-                presentationState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
+        if (!videoOverlayCloseAllowed(origin, ad.videoContract2, videoTerminal) {
+                presentationState.videoPlan.closeCurrent(VideoLifecycleReason.USER, hasNextStep)
             }
         ) return
         unavailableExitIssued = true
@@ -1444,20 +1463,26 @@ private fun FallbackAdOverlay(
                     serveId = impressionId.takeIf { it.isNotBlank() },
                     configuredGateSeconds = closeBehavior.delaySeconds,
                     initialPlayedMs = presentationState.closeGateElapsedMs(fallbackIndex),
+                    initialPositionMs = presentationState.videoPositionMs(fallbackIndex),
                     ctaEnabled = videoRouting != null,
                     ctaLabel = ad.cta,
                     appIconUrl = ad.appIconUrl,
                     appName = ad.appName,
                     subtitle = ad.subtitle,
                     chromeStyle = ad.videoBehavior?.style ?: VideoChromeStyle.CORNER_CTA,
-                    effectiveClosePosition = closeBehavior.position,
-                    bottomProgressBarObstructed = false,
+                    effectiveClosePosition = effectiveClosePosition(
+                        closeBehavior.treatment, closeBehavior.position, ad.progressBarStyle,
+                    ),
+                    bottomProgressBarObstructed = ad.videoContract2 && progressBarAtBottom(
+                        closeBehavior.treatment, closeBehavior.position, ad.progressBarStyle,
+                    ),
                     videoPool = ad.videoPool,
                     playbackSlotIdentity = VideoPlaybackSlotIdentity.Fallback(ad.sourceIndex),
                     clipIndex = ad.clipIndex,
                     skoverlayEnabled = ad.skoverlay?.enabled,
                     skoverlayDelaySeconds = ad.skoverlay?.delaySeconds,
-                    videoPlanV2 = false,
+                    videoPlanV2 = ad.videoContract2,
+                    segments = ad.segments,
                     videoPlanState = presentationState.videoPlan,
                     presentationBlocked = presentationState.clickHandoffPending || storeVisitBlocked,
                     willHandoff = { hasNextStep },
@@ -1473,7 +1498,9 @@ private fun FallbackAdOverlay(
                         countdown = closeGateSecondsRemaining(accumulated, gateMs)
                         videoRingProgress = closeGateProgress(accumulated, gateMs)
                     },
-                    onProgress = { _, durationMs, advancedMs ->
+                    onProgress = { positionMs, durationMs, advancedMs ->
+                        presentationState.retainVideoPositionMs(fallbackIndex, positionMs)
+                        videoPositionMs = positionMs
                         videoDurationMs = durationMs
                         presentationState.retainVideoDurationMs(fallbackIndex, durationMs)
                         gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
@@ -1486,6 +1513,8 @@ private fun FallbackAdOverlay(
                         videoRingProgress = closeGateProgress(accumulated, gateMs)
                     },
                     onCompleted = {
+                        presentationState.retainVideoPositionMs(fallbackIndex, videoDurationMs)
+                        videoPositionMs = videoDurationMs
                         presentationState.addCloseGateElapsedMs(fallbackIndex, gateMs, gateMs)
                         countdown = 0
                         videoRingProgress = 1f
@@ -1839,6 +1868,21 @@ private fun FallbackAdOverlay(
         }
         if (preFirstFrameEscape) {
             VideoPreFirstFrameEscapeButton("Skip unavailable ad", ::escapePreFirstFrameVideo)
+        } else if (isVideo && ad.videoContract2) {
+            AdCloseButton(
+                treatment = closeBehavior.treatment,
+                position = closeBehavior.position,
+                action = closeBehavior.action,
+                progressBarColor = closeBehavior.progressBarColor,
+                isRewardCopy = adFormat == "rewarded",
+                enabled = closeReady,
+                remaining = countdown,
+                progress = smoothVideoRingProgress,
+                progressBarStyle = ad.progressBarStyle,
+                videoProgress = if (videoDurationMs > 0L) videoPositionMs.toFloat() / videoDurationMs else 0f,
+                gateFraction = twoToneGateFraction(closeBehavior.delaySeconds, videoDurationMs),
+                onClose = { closeOnce(VideoOverlayCloseOrigin.USER) },
+            )
         } else if (closeReady || closeBehavior.treatment == CloseTreatment.COUNTDOWN_CIRCLE) Box(
             modifier = Modifier
                 .align(closeAlignment)

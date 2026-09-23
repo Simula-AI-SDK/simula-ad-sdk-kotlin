@@ -585,20 +585,8 @@ private fun CreativeInterstitial(
             }
         }
     }
-    LaunchedEffect(videoTerminal, clickHandoffPending, storeVisitBlocked) {
-        if (!ad.videoContract2 || !videoTerminal) return@LaunchedEffect
-        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            withFrameNanos { }
-            if (videoSequenceAdvance(
-                    videoPlanV2 = true,
-                    currentType = ad.creative?.type ?: CreativeType.PLAYABLE,
-                    terminal = videoTerminal,
-                    clickHandoffPending = presentation.pendingClickHandoff() != null,
-                    storeVisitPending = storeVisitPending(),
-                ) == VideoSequenceAdvance.ADVANCE
-            ) runCatching(onFinish)
-        }
-    }
+    // Completion unlocks the gate; a user close tap reveals the next screen.
+
     // auto_store_redirect: open the advertiser store once (no user tap). PLAYABLE_END fires when the
     // close button appears (below); END_SCREEN_1/2_OPEN fire when the creative navigates to the
     // matching end-screen marker (handled in the WebView client). A disabled/missing config no-ops.
@@ -824,7 +812,7 @@ private fun CreativeInterstitial(
                 ad.videoContract2,
                 ad.creative?.type ?: CreativeType.PLAYABLE,
                 videoTerminal,
-            ) { presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER) }
+            ) { presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER, hasNextStep()) }
             if (!closeClaimed) return@BackHandler
             presentation.automaticNavigationGate.clear()
             onFinish()
@@ -1091,7 +1079,7 @@ private fun CreativeInterstitial(
                             ad.videoContract2,
                             ad.creative?.type ?: CreativeType.PLAYABLE,
                             videoTerminal,
-                        ) { presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER) }
+                        ) { presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER, hasNextStep()) }
                         if (closeClaimed) {
                             presentation.automaticNavigationGate.clear()
                             onFinish()

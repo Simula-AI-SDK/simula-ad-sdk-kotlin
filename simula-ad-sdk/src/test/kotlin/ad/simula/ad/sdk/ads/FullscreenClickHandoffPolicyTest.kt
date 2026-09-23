@@ -23,6 +23,19 @@ import org.junit.Test
 
 class FullscreenClickHandoffPolicyTest {
     @Test
+    fun `fallback recreation retains playback position separately from close gate`() {
+        val state = FallbackCloseGateState()
+        state.addElapsedMs(0, 5_000L, 5_000L)
+        state.retainVideoPositionMs(0, 8_500L)
+        state.retainVideoPositionMs(0, 8_000L)
+        assertEquals(8_500L, state.videoPositionMs(0))
+        assertEquals(5_000L, state.elapsedMs(0))
+        assertEquals(0L, state.videoPositionMs(1))
+        state.clear()
+        assertEquals(0L, state.videoPositionMs(0))
+    }
+
+    @Test
     fun `invalid internal fallback video enters unavailable path once`() {
         assertTrue(
             shouldEnterFallbackVideoUnavailable(

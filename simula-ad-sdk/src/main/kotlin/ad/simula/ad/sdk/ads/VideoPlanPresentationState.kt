@@ -259,6 +259,12 @@ internal class VideoPlanPresentationState(
         this.midpointEmitted = this.midpointEmitted || midpointEmitted
     }
 
+    /** Natural completion can precede the user's close tap; measure transition time from that tap. */
+    @Synchronized
+    fun handoffPresentationBegan() {
+        pendingHandoff = pendingHandoff?.copy(startedAtMs = clockMs())
+    }
+
     fun nextStepReady(): VideoHandoffTiming? {
         val pending = synchronized(this) {
             val retained = pendingHandoff ?: return null
@@ -299,17 +305,20 @@ internal class VideoPlanPresentationState(
         recordTerminal(telemetry, VIDEO_STAGE_CLOSE, reason = reason)
     }
 
-    fun closeCurrent(reason: VideoLifecycleReason): Boolean {
+    fun closeCurrent(reason: VideoLifecycleReason, willHandoff: Boolean = false): Boolean {
         val telemetry = synchronized(this) {
             val generation = currentPlaybackGeneration ?: return false
             if (terminalOutcome != null) return true
             if (!claimPlaybackTerminal(generation, VideoPlaybackTerminalOutcome.USER)) return false
             val retained = currentTelemetry
             currentTelemetry = null
-            currentVideoStartedAtMs = null
+            if (!willHandoff) currentVideoStartedAtMs = null
             retained
         }
-        if (telemetry != null) recordTerminal(telemetry, VIDEO_STAGE_CLOSE, reason = reason)
+        if (telemetry != null) {
+            if (willHandoff) beginHandoff(telemetry, reason)
+            else recordTerminal(telemetry, VIDEO_STAGE_CLOSE, reason = reason)
+        }
         return true
     }
 

@@ -257,7 +257,7 @@ internal fun trustedCtaRelaySource(
         var anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
         if (!anchor || String(anchor.target).toLowerCase() !== '_blank') { return; }
         if (forwardTrustedCta(anchor.href, anchor)) { event.preventDefault(); }
-    }, true);
+    }, false);
 """.trimIndent()
 
 /**
