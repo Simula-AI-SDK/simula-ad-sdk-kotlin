@@ -132,11 +132,12 @@ internal fun fallbackUnavailableExitReportsAuthority(
 
 internal fun videoOverlayCloseAllowed(
     origin: VideoOverlayCloseOrigin,
+    isVideo: Boolean,
     videoPlanV2: Boolean,
     videoTerminal: Boolean,
     claimUserClose: () -> Boolean,
 ): Boolean = origin == VideoOverlayCloseOrigin.AUTOMATIC ||
-    !videoPlanV2 || videoTerminal || claimUserClose()
+    !isVideo || !videoPlanV2 || videoTerminal || claimUserClose()
 
 internal fun fallbackCloseGateUsesPresentedTime(type: CreativeType): Boolean = type != CreativeType.VIDEO
 
@@ -400,6 +401,15 @@ internal class FallbackPresentationState(
         }
         return displayable
     }
+    @Synchronized
+    fun hasNextStepAfter(sourceIndex: Int): Boolean {
+        val current = serverCandidates.indexOfFirst { it.sourceIndex == sourceIndex }
+        if (current < 0) return false
+        return serverCandidates.drop(current + 1).any { ad ->
+            ad.type != CreativeType.VIDEO || ad.sourceIndex !in unavailableVideoIndices
+        }
+    }
+
     fun videoFile(sourceIndex: Int): java.io.File? = videoLeases[sourceIndex]?.file
     fun notifyFirstResolvedStepReady(ads: List<SimulaApiClient.FallbackAd>) {
         if (ads.firstOrNull()?.type == CreativeType.PLAYABLE) videoPlan.nextStepReady()
@@ -1028,7 +1038,7 @@ internal fun FallbackAdHost(
                         fallbackIndex = p.index,
                         sourceIndex = ad.sourceIndex,
                         nextVideoUrl = null,
-                        hasNextStep = p.index + 1 < p.ads.size,
+                        hasNextStep = { presentationState.hasNextStepAfter(ad.sourceIndex) },
                         closeBehavior = resolvedClose,
                         onClickHandoffCreated = { handoff ->
                             presentationState.abandonAutomaticNavigation(p.index)
@@ -1045,7 +1055,7 @@ internal fun FallbackAdHost(
                         onAutomaticNavigation = ::dispatchAutomaticNavigation,
                         onRendererUnavailable = { redirects.deactivate(autoRedirectScope) },
                         onAuthoritativeEndReached = {
-                            if (fallbackScreenIsAuthoritative(p.index, p.ads.size)) reportAuthoritativeEnd()
+                            if (!presentationState.hasNextStepAfter(ad.sourceIndex)) reportAuthoritativeEnd()
                         },
                         storeVisitPending = storeVisitPending,
                         onClose = {
@@ -1111,7 +1121,7 @@ private fun FallbackAdOverlay(
     fallbackIndex: Int,
     sourceIndex: Int,
     nextVideoUrl: String?,
-    hasNextStep: Boolean,
+    hasNextStep: () -> Boolean,
     closeBehavior: CloseBehavior,
     onClickHandoffCreated: (ClickPersistenceHandoff) -> Unit,
     onClickHandoffFinished: (ClickPersistenceHandoff) -> Unit,
@@ -1296,8 +1306,8 @@ private fun FallbackAdOverlay(
     var unavailableExitIssued by remember { mutableStateOf(false) }
     fun closeOnce(origin: VideoOverlayCloseOrigin) {
         if (unavailableExitIssued) return
-        if (!videoOverlayCloseAllowed(origin, ad.videoContract2, videoTerminal) {
-                presentationState.videoPlan.closeCurrent(VideoLifecycleReason.USER, hasNextStep)
+        if (!videoOverlayCloseAllowed(origin, isVideo, ad.videoContract2, videoTerminal) {
+                presentationState.videoPlan.closeCurrent(VideoLifecycleReason.USER, hasNextStep())
             }
         ) return
         unavailableExitIssued = true
@@ -1482,7 +1492,7 @@ private fun FallbackAdOverlay(
                     segments = ad.segments,
                     videoPlanState = presentationState.videoPlan,
                     presentationBlocked = presentationState.clickHandoffPending || storeVisitBlocked,
-                    willHandoff = { hasNextStep },
+                    willHandoff = hasNextStep,
                     modifier = Modifier
                         .fillMaxSize()
                         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),

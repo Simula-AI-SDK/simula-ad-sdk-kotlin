@@ -1059,7 +1059,7 @@ private fun MiniGameFallbackOverlay(
 
     fun closeOverlay(origin: VideoOverlayCloseOrigin) {
         if (closeIssued) return
-        if (!videoOverlayCloseAllowed(origin, false, videoTerminal) {
+        if (!videoOverlayCloseAllowed(origin, isVideo, false, videoTerminal) {
             videoPlan.closeCurrent(VideoLifecycleReason.USER)
         }) return
         closeIssued = true

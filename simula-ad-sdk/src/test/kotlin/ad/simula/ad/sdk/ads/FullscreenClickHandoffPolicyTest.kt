@@ -103,6 +103,7 @@ class FullscreenClickHandoffPolicyTest {
         assertTrue(
             videoOverlayCloseAllowed(
                 origin = VideoOverlayCloseOrigin.AUTOMATIC,
+                isVideo = true,
                 videoPlanV2 = true,
                 videoTerminal = false,
                 claimUserClose = {
@@ -115,6 +116,7 @@ class FullscreenClickHandoffPolicyTest {
         assertFalse(
             videoOverlayCloseAllowed(
                 origin = VideoOverlayCloseOrigin.USER,
+                isVideo = true,
                 videoPlanV2 = true,
                 videoTerminal = false,
                 claimUserClose = {
@@ -124,6 +126,19 @@ class FullscreenClickHandoffPolicyTest {
             ),
         )
         assertEquals(1, claimAttempts)
+    }
+
+    @Test
+    fun `contract 2 HTML close does not require a video playback generation`() {
+        val presentation = VideoPlanPresentationState(videoPlanV2 = true)
+        assertTrue(videoOverlayCloseAllowed(
+            origin = VideoOverlayCloseOrigin.USER,
+            isVideo = false,
+            videoPlanV2 = true,
+            videoTerminal = false,
+            claimUserClose = { error("HTML must not claim a video terminal") },
+        ))
+        assertFalse(presentation.closeCurrent(ad.simula.ad.sdk.model.VideoLifecycleReason.USER))
     }
 
     @Test

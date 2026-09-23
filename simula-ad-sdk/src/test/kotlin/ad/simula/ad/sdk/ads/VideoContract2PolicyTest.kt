@@ -468,11 +468,15 @@ class VideoContract2PolicyTest {
 
         assertEquals(listOf(playable), state.displayablePreparedAds())
         assertTrue(state.hasPendingVideoPreparation())
+        val hasNextStep = { state.hasNextStepAfter(playable.sourceIndex) }
+        assertTrue("pending video must retain handoff and prevent early unit-end authority", hasNextStep())
+        assertFalse(state.hasNextStepAfter(video.sourceIndex))
 
         val file = temporaryFolder.newFile("prepared.video").apply { writeBytes(byteArrayOf(1)) }
         state.settleVideoPreparation(1, VideoAssetLease(file) {})
 
         assertEquals(listOf(playable, video), state.displayablePreparedAds())
+        assertTrue(hasNextStep())
     }
 
     @Test
@@ -493,7 +497,10 @@ class VideoContract2PolicyTest {
         state.retainServerCandidates(listOf(playable, video))
         state.showing(0)
         val generation = state.startPostCloseFetchWait(targetIndex = 1)
+        val hasNextStep = { state.hasNextStepAfter(playable.sourceIndex) }
+        assertTrue(hasNextStep())
         state.settleVideoPreparation(1, null)
+        assertFalse("the live decision must discard a next video only once it fails", hasNextStep())
         val displayable = state.displayablePreparedAds()
 
         assertEquals(listOf(playable), displayable)
