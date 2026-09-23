@@ -519,6 +519,25 @@ class RewardVerificationQueueTest {
     }
 
     @Test
+    fun `unverified 2xx failure keeps queue row and never reports verified`() = runTest {
+        val store = FakeStore()
+        val verifier = FakeVerifier().apply { errors["A"] = RewardNotVerifiedException() }
+        val engine = RewardVerificationQueue(store, verifier, clock = { 1_000L }, scope = this)
+        var verifiedCount = 0
+        var failureCount = 0
+
+        engine.queue("A", "sess", 5.0) { result ->
+            if (result.isSuccess) verifiedCount++ else failureCount++
+        }
+        advanceUntilIdle()
+
+        assertEquals(0, verifiedCount)
+        assertEquals(1, failureCount)
+        assertEquals(1, verifier.callCounts["A"])
+        assertEquals(1, store.data.single().retryCount)
+    }
+
+    @Test
     fun `retry preserves original completion reason`() = runTest {
         var now = 1_000L
         val store = FakeStore()

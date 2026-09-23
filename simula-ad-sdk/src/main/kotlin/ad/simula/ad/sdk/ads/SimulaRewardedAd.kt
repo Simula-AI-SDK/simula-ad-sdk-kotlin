@@ -25,6 +25,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
@@ -55,6 +56,7 @@ class SimulaRewardedAd(val adUnitId: String) {
         /** [loadedAtMs] is `elapsedRealtime()` at the moment the ad became ready (for staleness). */
         class Ready(
             val ad: SimulaApiClient.RewardedInitResult,
+            val videoLease: VideoAssetLease?,
             val metadata: Map<String, String>?,
             val loadedAtMs: Long,
         ) : State
@@ -87,6 +89,7 @@ class SimulaRewardedAd(val adUnitId: String) {
     // matches has been superseded (a newer load replaced it) and is dropped.
     @Volatile
     private var loadGeneration: Int = 0
+    private var loadJob: Job? = null
 
     // Monotonic stage markers for telemetry latencies (0 = not yet started).
     private var loadStartNanos = 0L
@@ -166,12 +169,14 @@ class SimulaRewardedAd(val adUnitId: String) {
         }
 
         // Supersede any in-flight load / discard any ready ad, then start fresh.
+        loadJob?.cancel()
+        (state as? State.Ready)?.videoLease?.release()
         val generation = ++loadGeneration
         currentKey = key
         currentKeyAtMs = now
         loadStartNanos = System.nanoTime()
         state = State.Loading
-        SimulaScope.launch {
+        loadJob = SimulaScope.launch {
             try {
                 val session = SimulaAds.store.ensureSession()
                 if (generation != loadGeneration) return@launch // superseded
@@ -205,30 +210,25 @@ class SimulaRewardedAd(val adUnitId: String) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
-                withContext(Dispatchers.Main) {
-                    if (generation != loadGeneration) return@withContext // superseded
-                    recordAcceptedLoadTelemetry(
-                        experiment = ad.experiment,
-                        applyExperiment = Telemetry::setExperiment,
-                    ) {
-                        Telemetry.recordLifecycle(
-                            stage = "load_success",
-                            adFormat = AD_FORMAT,
-                            adUnitId = adUnitId,
-                            adId = ad.impressionId,
-                            serveId = ad.impressionId,
-                            durationMs = elapsedSinceLoad(),
-                            errorCode = null,
-                        )
+                val published = if (ad.creative.type == CreativeType.VIDEO) {
+                    when (acquireVideoLeaseForReady(
+                        acquire = { VideoAssetCache.acquire(SimulaAds.appContext, ad.creative.url) },
+                        isCurrent = { generation == loadGeneration },
+                        publishReady = { ownership ->
+                            publishReadyOnMain(generation, ad, metadata, session, ownership)
+                        },
+                    )) {
+                        VideoReadyLeaseResult.READY -> true
+                        VideoReadyLeaseResult.STALE -> false
+                        VideoReadyLeaseResult.UNAVAILABLE -> {
+                            failLoadOnMain(generation, SimulaAdError.NoFill)
+                            false
+                        }
                     }
-                    sessionId = session
-                    impressionId = ad.impressionId
-                    state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
-                    if (ad.creative.type == CreativeType.VIDEO) {
-                        FullscreenVideoPreparer.prepare(ad.creative.url)
-                    }
-                    runCatching { listener?.onAdLoaded(this@SimulaRewardedAd) }
+                } else {
+                    publishReadyOnMain(generation, ad, metadata, session, videoOwnership = null)
                 }
+                if (!published) return@launch
                 scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
                 if (generation != loadGeneration) return@launch
@@ -339,9 +339,7 @@ class SimulaRewardedAd(val adUnitId: String) {
         }
 
         val token = UUID.randomUUID().toString()
-        RewardedHandoff.put(
-            token,
-            RewardedPresentation(
+        val presentation = RewardedPresentation(
                 renderedHtml = PREVIEW_MINIGAME_HTML,
                 creative = Creative(type = CreativeType.PLAYABLE),
                 impressionId = "", // empty → no impression tracked
@@ -368,8 +366,10 @@ class SimulaRewardedAd(val adUnitId: String) {
                         onTelemetryPersisted()
                     }
 
-                    override fun notifyClicked() {
-                        notifyPublisherClick { listener?.onAdClicked(this@SimulaRewardedAd) }
+                    override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) {
+                        notifyPublisherClick {
+                            listener?.onAdClicked(this@SimulaRewardedAd)
+                        }
                     }
 
                     override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
@@ -390,10 +390,13 @@ class SimulaRewardedAd(val adUnitId: String) {
                 adBehavior = behavior,
                 trackingUrl = PREVIEW_TRACKING_URL,
                 destination = "appstore",
-            ),
-        )
-        if (!launchActivity(token, activity)) {
-            RewardedHandoff.remove(token)
+            )
+        if (!launchWithHandoff(
+                publish = { RewardedHandoff.put(token, presentation) },
+                launch = { launchActivity(token, activity) },
+                rollback = { RewardedHandoff.remove(token) },
+            )
+        ) {
             failShow(SimulaAdError.NoPresentationContext)
             return
         }
@@ -416,6 +419,7 @@ class SimulaRewardedAd(val adUnitId: String) {
                 // A loaded ad expires after 1 hour. Drop it (back to Idle so the host
                 // can load() again — the dedup window is long gone) and report Stale.
                 if (SystemClock.elapsedRealtime() - current.loadedAtMs > STALE_AFTER_MS) {
+                    current.videoLease?.release()
                     state = State.Idle
                     failShow(SimulaAdError.Stale)
                     return
@@ -431,27 +435,30 @@ class SimulaRewardedAd(val adUnitId: String) {
 
         val token = UUID.randomUUID().toString()
         showStartNanos = System.nanoTime()
-        RewardedHandoff.put(
-            token,
-            RewardedPresentation(
+        val presentation = RewardedPresentation(
                 renderedHtml = ad.renderedHtml,
                 creative = ad.creative,
-                videoPlanV2 = ad.videoPlanV2,
+                videoContract2 = ad.videoContract2,
                 adUnitId = ad.adUnitId.takeIf { it.isNotBlank() } ?: adUnitId,
                 impressionId = ad.impressionId,
                 apiKey = SimulaAds.apiKey,
                 callbacks = bridge(ad.impressionId),
                 adBehavior = ad.adBehavior,
                 trackingUrl = ad.trackingUrl,
+                impressionUrl = ad.impressionUrl,
                 destination = ad.destination,
                 androidStoreUrl = ad.androidStoreUrl,
                 adValue = ad.adValue,
                 metadata = ready.metadata,
-            ),
-        )
+                videoLease = ready.videoLease,
+            )
 
-        if (!launchActivity(token, activity)) {
-            RewardedHandoff.remove(token)
+        if (!launchWithHandoff(
+                publish = { RewardedHandoff.put(token, presentation) },
+                launch = { launchActivity(token, activity) },
+                rollback = { RewardedHandoff.recoverAfterLaunchFailure(token) },
+            )
+        ) {
             failShow(SimulaAdError.NoPresentationContext)
             return
         }
@@ -510,19 +517,55 @@ class SimulaRewardedAd(val adUnitId: String) {
             )
         }
 
-        override fun notifyClicked() {
-            notifyPublisherClick { listener?.onAdClicked(this@SimulaRewardedAd) }
+        override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) {
+            notifyPublisherClick {
+                listener?.onAdClicked(this@SimulaRewardedAd)
+            }
+        }
+
+        override fun onDisplayFailed(error: SimulaAdError) {
+            state = State.Idle
+            failShow(error)
+            load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
         }
 
         override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) {
             state = State.Idle
             // CLOSE = the playable was dismissed. The reward is NOT verified here — that's deferred to
             // onRewardCompleted (after every post-game fallback ad screen), so verifying is contingent
-            // on completing the whole unit. Closed bookkeeping + auto-preload still happen now.
+            // on completing the whole unit. Auto-preload is owned by onWholeUnitCompleted so it cannot
+            // race ahead of reward delivery and durable verification enqueue.
             Telemetry.recordLifecycle("closed", AD_FORMAT, adUnitId, adId, adId, null, null)
             runCatching { listener?.onAdClosed(this@SimulaRewardedAd) }
-            // Auto-preload the next ad (iOS parity), reusing the last character context.
-            load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
+        }
+
+        override fun onPresentationAborted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+            onClose(earned, elapsedPlayTimeSeconds)
+            if (state == State.Idle) {
+                load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
+            }
+        }
+
+        override fun onWholeUnitCompleted(
+            earned: Boolean,
+            elapsedPlayTimeSeconds: Double,
+            completionReason: RewardCompletionReason?,
+        ) {
+            dispatchRewardedWholeUnitCompletion(
+                earned = earned,
+                completionReason = completionReason,
+                onClosed = { onClose(earned, elapsedPlayTimeSeconds) },
+                onRewardCompleted = { reason ->
+                    onRewardCompleted(earned, elapsedPlayTimeSeconds, reason)
+                },
+                onAutoPreload = {
+                    // A publisher may synchronously call load() from onAdClosed. Do not collide with
+                    // that load, and never start the SDK preload before reward delivery/enqueue.
+                    if (state == State.Idle) {
+                        load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
+                    }
+                },
+            )
         }
 
         override fun onRewardCompleted(
@@ -611,15 +654,40 @@ class SimulaRewardedAd(val adUnitId: String) {
         }
     }
 
-    private fun launchActivity(token: String, activity: Activity): Boolean {
-        return try {
-            val intent = Intent(activity, SimulaRewardedActivity::class.java)
-                .putExtra(SimulaRewardedActivity.EXTRA_TOKEN, token)
-            activity.startActivity(intent)
-            true
-        } catch (e: Exception) {
-            false
+    private fun launchActivity(token: String, activity: Activity) {
+        val intent = Intent(activity, SimulaRewardedActivity::class.java)
+            .putExtra(SimulaRewardedActivity.EXTRA_TOKEN, token)
+        activity.startActivity(intent)
+    }
+
+    private suspend fun publishReadyOnMain(
+        generation: Int,
+        ad: SimulaApiClient.RewardedInitResult,
+        metadata: Map<String, String>?,
+        loadedSessionId: String,
+        videoOwnership: VideoReadyLeaseOwnership?,
+    ): Boolean = withContext(Dispatchers.Main) {
+        if (generation != loadGeneration) return@withContext false
+        recordAcceptedLoadTelemetry(
+            experiment = ad.experiment,
+            applyExperiment = Telemetry::setExperiment,
+        ) {
+            Telemetry.recordLifecycle(
+                stage = "load_success",
+                adFormat = AD_FORMAT,
+                adUnitId = adUnitId,
+                adId = ad.impressionId,
+                serveId = ad.impressionId,
+                durationMs = elapsedSinceLoad(),
+                errorCode = null,
+            )
         }
+        sessionId = loadedSessionId
+        impressionId = ad.impressionId
+        state = State.Ready(ad, videoOwnership?.lease, metadata, SystemClock.elapsedRealtime())
+        videoOwnership?.transferToReady()
+        runCatching { listener?.onAdLoaded(this@SimulaRewardedAd) }
+        true
     }
 
     private fun failLoad(error: SimulaAdError) {
@@ -677,6 +745,12 @@ class SimulaRewardedAd(val adUnitId: String) {
         return false
     }
 
+    @Suppress("deprecation")
+    protected fun finalize() {
+        runCatching { loadJob?.cancel() }
+        runCatching { (state as? State.Ready)?.videoLease?.release() }
+    }
+
     private companion object {
         /** A loaded ad expires this long after it became ready (staleness). */
         const val STALE_AFTER_MS = 60 * 60 * 1000L // 1 hour
@@ -684,6 +758,20 @@ class SimulaRewardedAd(val adUnitId: String) {
         /** Re-loads of the same dedup key are blocked for this long. */
         const val DEDUP_WINDOW_MS = 5 * 60 * 1000L // 5 minutes
     }
+}
+
+internal fun dispatchRewardedWholeUnitCompletion(
+    earned: Boolean,
+    completionReason: RewardCompletionReason?,
+    onClosed: () -> Unit,
+    onRewardCompleted: (RewardCompletionReason) -> Unit,
+    onAutoPreload: () -> Unit,
+) {
+    runCatching(onClosed)
+    if (earned && completionReason != null) {
+        runCatching { onRewardCompleted(completionReason) }
+    }
+    runCatching(onAutoPreload)
 }
 
 internal fun recordAcceptedLoadTelemetry(

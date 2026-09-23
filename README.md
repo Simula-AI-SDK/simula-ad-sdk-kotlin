@@ -66,6 +66,13 @@ start with `$`, and must not contain `.`. Values are limited to 256 Unicode code
 over-limit entries are ignored safely and reported in Logcat and SDK telemetry. Do not include PII,
 credentials, tokens, or other secrets.
 
+## Video Contract
+
+Imperative interstitial and rewarded video use the stitched-asset video contract 2. A video is Ready
+only after its bounded local download completes; playback never streams the remote URL. See
+[`docs/VIDEO_CONTRACT_2.md`](docs/VIDEO_CONTRACT_2.md) for the wire, reward, click, impression, cache,
+telemetry, and progress-bar contract.
+
 ## Staging Environment
 
 Staging is restricted to exact `X.Y.Z-dev.N` SDK artifacts and is selected directly by an explicit

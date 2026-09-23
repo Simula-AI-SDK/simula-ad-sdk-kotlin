@@ -17,16 +17,17 @@ import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.OverlayPosition
+import ad.simula.ad.sdk.model.ProgressBarStyle
 import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
 import ad.simula.ad.sdk.model.videoCloseGateMs
 import ad.simula.ad.sdk.model.retainVideoMaxPosition
-import ad.simula.ad.sdk.model.isVideoPlanV2
 import ad.simula.ad.sdk.model.videoStorePromptReached
 import ad.simula.ad.sdk.model.VideoChromeStyle
 import ad.simula.ad.sdk.model.VideoLifecycleReason
 import ad.simula.ad.sdk.model.VideoSequenceAdvance
+import ad.simula.ad.sdk.model.primaryCreativeCloseAllowed
 import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.model.effectiveSkOverlayConfig
 import ad.simula.ad.sdk.network.AdBeaconManager
@@ -38,7 +39,9 @@ import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.PresentationRouteResult
 import ad.simula.ad.sdk.network.PrimaryCtaRoute
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.network.SimulaHttp
 import ad.simula.ad.sdk.provider.ProvideSimulaContext
+import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.util.ColorUtil
 import android.app.Activity
 import android.graphics.Bitmap
@@ -143,6 +146,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
     private var presentation: InterstitialPresentation? = null
     private var token: String? = null
     private var closed = false
+    private var displayFailed = false
     // Store-exit funnel tracker for this presentation (store_opened/returned/abandoned). Main-thread only.
     private var storeExit: StoreExitTracker? = null
 
@@ -181,7 +185,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     presentationState = p.fallbackState,
                     onFullyClosed = ::finishAd,
                     autoStoreRedirect = p.ad.adBehavior?.autoStoreRedirect,
-                    onAdClick = { p.callbacks.notifyClicked() },
+                    onAdClick = { p.callbacks.notifyClicked(it) },
                     onStoreOpen = { interaction -> p.storeExit.recordStoreOpen(interaction.source) },
                     persistClick = { fallbackAdId, interaction, completion ->
                         p.callbacks.persistFallbackClick(
@@ -192,6 +196,8 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                         )
                     },
                     claimClick = p::claimClick,
+                    claimTrustedClick = p::claimTrustedClick,
+                    claimWebClick = p::claimWebClick,
                     routeClick = { route, completion ->
                         val result = p.routeClick(
                             route = { activity ->
@@ -277,7 +283,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                     ctaTrackingUrl = p.ad.trackingUrl,
                     ctaDestination = p.ad.destination,
                     ctaStoreUrl = p.ad.androidStoreUrl,
-                    videoPlanV2 = p.ad.videoPlanV2,
+                    videoPlanV2 = p.ad.videoContract2,
                 ) { onClose, nextVideoUrl, hasNextStep ->
                     CreativeInterstitial(
                         presentation = p,
@@ -290,6 +296,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
                             onClose()
                         },
                         recordStoreOpen = { trigger -> storeExit?.recordStoreOpen(trigger) },
+                        onPreFirstFrameEscape = ::failBeforeDisplayAdmission,
                     )
                 }
             }
@@ -300,7 +307,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
      * post-close fallback ad screen. Driven from [finishAd] (the fallback host's fully-closed
      * callback), with [onDestroy] as a teardown safety net. */
     private fun reportClosed() {
-        if (closed) return
+        if (closed || displayFailed) return
         closed = true
         runCatching { storeExit?.onAdClosed() } // resolve any outstanding store visit as an abandon
         runCatching { presentation?.callbacks?.onClosed() }
@@ -322,6 +329,15 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
     private fun finishAd() {
         reportClosed() // CLOSED fires once the whole unit (creative + all fallback screens) is done
         finish() // isFinishing becomes true → onDestroy drops the handoff entry
+        @Suppress("DEPRECATION")
+        overridePendingTransition(0, 0)
+    }
+
+    private fun failBeforeDisplayAdmission() {
+        if (displayFailed || presentation?.displayedReported == true) return
+        displayFailed = true
+        runCatching { presentation?.callbacks?.onDisplayFailed(SimulaAdError.NoFill) }
+        finish()
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
     }
@@ -363,6 +379,32 @@ internal fun canRouteFromCurrentFullscreenActivity(
     isDestroyed: Boolean,
 ): Boolean = !isFinishing && !isDestroyed
 
+internal fun videoPreFirstFrameEscapeAvailable(
+    isVideo: Boolean,
+    displayAdmitted: Boolean,
+): Boolean = isVideo && !displayAdmitted
+
+@Composable
+internal fun BoxScope.VideoPreFirstFrameEscapeButton(
+    accessibilityLabel: String,
+    onClose: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .align(Alignment.TopEnd)
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))
+            .padding(8.dp)
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.72f))
+            .semantics { contentDescription = accessibilityLabel }
+            .clickable(onClick = onClose),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("×", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Normal)
+    }
+}
+
 /**
  * Foreground on-screen time after begin-to-render before the billable IMPRESSION + PAID fire for a
  * full-screen ad. The PRD's OMID rule: "fire IMPRESSION + PAID at begin-to-render after 2 seconds"
@@ -395,12 +437,20 @@ internal fun commitFullscreenImpression(
     notifyImpression: () -> Unit,
     notifyPaid: () -> Unit,
     enqueueSeen: () -> Unit,
+    impressionUrl: String? = null,
 ) {
     if (alreadyReported) return
     markReported()
     runCatching(notifyImpression)
     runCatching(notifyPaid)
     runCatching(enqueueSeen)
+    impressionUrl?.let { url ->
+        SimulaScope.launch {
+            if (!SimulaHttp.requestPlainGet(url)) {
+                Telemetry.recordError(signature = "impression_url:get_failed")
+            }
+        }
+    }
 }
 
 @Composable
@@ -411,6 +461,7 @@ private fun CreativeInterstitial(
     storeVisitPending: () -> Boolean,
     onFinish: () -> Unit,
     recordStoreOpen: (String) -> Unit,
+    onPreFirstFrameEscape: () -> Unit,
 ) {
     val ad = presentation.ad
     val html = remember(ad) { ad.renderedHtml?.takeIf { it.isNotBlank() } }
@@ -459,7 +510,7 @@ private fun CreativeInterstitial(
     var storePromptVisible by remember {
         mutableStateOf(
             isVideo && videoStorePromptReached(
-                videoPlanV2 = ad.creative?.isVideoPlanV2 == true,
+                videoPlanV2 = ad.videoContract2,
                 positionMs = presentation.videoPositionMs,
                 durationMs = presentation.videoDurationMs,
                 gateElapsedMs = presentation.accumulatedGateTimeMs,
@@ -471,6 +522,13 @@ private fun CreativeInterstitial(
         )
     }
     var videoDurationMs by remember(presentation) { mutableStateOf(presentation.videoDurationMs) }
+    var videoPlaybackProgress by remember(presentation) {
+        mutableFloatStateOf(
+            if (presentation.videoDurationMs > 0L) {
+                (presentation.videoPositionMs.toFloat() / presentation.videoDurationMs).coerceIn(0f, 1f)
+            } else 0f,
+        )
+    }
 
     // WebView ↔ SDK bridge (PRD §3). AD_EARLY_COMPLETE unlocks the close button immediately,
     // bypassing the close-delay gate.
@@ -510,6 +568,7 @@ private fun CreativeInterstitial(
     var unavailableExitIssued by remember(presentation) { mutableStateOf(false) }
     LaunchedEffect(bridgeUnavailable, clickHandoffPending, storeVisitBlocked) {
         if (!bridgeUnavailable || clickHandoffPending) return@LaunchedEffect
+        if (videoPreFirstFrameEscapeAvailable(isVideo, displayAdmitted)) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
             if (shouldExitUnavailableCreative(
@@ -524,12 +583,12 @@ private fun CreativeInterstitial(
         }
     }
     LaunchedEffect(videoTerminal, clickHandoffPending, storeVisitBlocked) {
-        if (ad.creative?.isVideoPlanV2 != true || !videoTerminal) return@LaunchedEffect
+        if (!ad.videoContract2 || !videoTerminal) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
             if (videoSequenceAdvance(
                     videoPlanV2 = true,
-                    currentType = ad.creative.type,
+                    currentType = ad.creative?.type ?: CreativeType.PLAYABLE,
                     terminal = videoTerminal,
                     clickHandoffPending = presentation.pendingClickHandoff() != null,
                     storeVisitPending = storeVisitPending(),
@@ -681,9 +740,9 @@ private fun CreativeInterstitial(
         }
     }
 
-    // Android's custom Play banner remains V1-only; V2 `skoverlay` is an iOS-only presentation policy.
-    val videoSkOverlay = behavior.effectiveSkOverlayConfig(ad.creative?.isVideoPlanV2 == true)
-    val skoverlay = behavior?.skoverlay.takeUnless { ad.videoPlanV2 }
+    // Android's custom Play banner remains legacy-only; contract-2 `skoverlay` is iOS presentation policy.
+    val videoSkOverlay = behavior.effectiveSkOverlayConfig(ad.videoContract2)
+    val skoverlay = behavior?.skoverlay.takeUnless { ad.videoContract2 }
     if (skoverlay != null && skoverlay.enabled && Build.VERSION.SDK_INT >= 21) {
         LaunchedEffect(presentation.installBannerState, bridgeReady) {
             presentation.installBannerState.start()
@@ -721,6 +780,7 @@ private fun CreativeInterstitial(
                         metadata = presentation.metadata,
                     )
                 },
+                impressionUrl = ad.impressionUrl,
             )
         }
 
@@ -752,19 +812,38 @@ private fun CreativeInterstitial(
     // FallbackAdOverlay; this one is only composed during the primary creative.) Mirrors
     // SimulaRewardedActivity's `BackHandler { if (rewardEarned) onFinish(true) }`.
     BackHandler(enabled = true) {
+        if (videoPreFirstFrameEscapeAvailable(isVideo, displayAdmitted)) {
+            onPreFirstFrameEscape()
+            return@BackHandler
+        }
         if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked)) {
-            val closeClaimed = ad.creative?.isVideoPlanV2 != true || videoTerminal ||
-                presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
+            val closeClaimed = primaryCreativeCloseAllowed(
+                ad.videoContract2,
+                ad.creative?.type ?: CreativeType.PLAYABLE,
+                videoTerminal,
+            ) { presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER) }
             if (!closeClaimed) return@BackHandler
             presentation.automaticNavigationGate.clear()
             onFinish()
         }
     }
 
-    fun beginPrimaryCta(route: PrimaryCtaRoute): Boolean {
-        val claim = presentation.claimClick(ClickSources.PRIMARY_CTA) ?: return false
+    fun beginPrimaryCta(
+        route: PrimaryCtaRoute,
+        trusted: ad.simula.ad.sdk.bridge.TrustedCtaOpen? = null,
+    ): Boolean {
+        val claim = (if (trusted == null) {
+            presentation.claimClick(ClickSources.PRIMARY_CTA)
+        } else if (trusted.interactionId == null) {
+            presentation.claimWebClick(trusted.clickSource ?: ClickSources.PRIMARY_UNKNOWN)
+        } else {
+            presentation.claimTrustedClick(
+                trusted.interactionId,
+                trusted.clickSource ?: ClickSources.PRIMARY_UNKNOWN,
+            )
+        }) ?: return false
         if (Build.VERSION.SDK_INT >= 21) presentation.installBannerState.onPrimaryCtaAdmitted()
-        notifyPublisherClick { presentation.callbacks.notifyClicked() }
+        notifyPublisherClick { presentation.callbacks.notifyClicked(claim.interaction) }
         val interaction = claim.interaction
         val routeStartedAtNanos = System.nanoTime()
         coordinateDeferredClickPersistence(
@@ -842,15 +921,14 @@ private fun CreativeInterstitial(
             .background(Color.Black),
     ) {
         if (isVideo && !bridgeUnavailable) {
-            ad.creative?.url?.let { videoUrl ->
+            presentation.videoLease?.file?.let { videoFile ->
                 FullscreenVideo(
-                    url = videoUrl,
+                    file = videoFile,
                     posterUrl = ad.creative.posterUrl,
                     adFormat = "interstitial",
                     adUnitId = ad.adUnitId,
                     adId = ad.impressionId.takeIf { it.isNotBlank() },
                     serveId = ad.impressionId.takeIf { it.isNotBlank() },
-                    prewarmNextUrl = nextVideoUrl,
                     configuredGateSeconds = behavior?.close?.delaySeconds ?: 0,
                     initialPlayedMs = presentation.accumulatedGateTimeMs,
                     ctaEnabled = videoCtaRoute(ad.trackingUrl, ad.androidStoreUrl, ad.destination) != null,
@@ -866,7 +944,8 @@ private fun CreativeInterstitial(
                     clipIndex = ad.creative.clipIndex,
                     skoverlayEnabled = videoSkOverlay?.enabled,
                     skoverlayDelaySeconds = videoSkOverlay?.delaySeconds,
-                    videoPlanV2 = ad.creative.isVideoPlanV2,
+                    videoPlanV2 = ad.videoContract2,
+                    segments = ad.creative.segments,
                     videoPlanState = presentation.fallbackState.videoPlan,
                     presentationBlocked = clickHandoffPending || storeVisitBlocked,
                     willHandoff = hasNextStep,
@@ -900,6 +979,9 @@ private fun CreativeInterstitial(
                             presentation.videoPositionMs,
                             positionMs,
                         )
+                        videoPlaybackProgress = if (durationMs > 0L) {
+                            (presentation.videoPositionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+                        } else 0f
                         val totalMs = videoCloseGateMs(behavior?.close?.delaySeconds ?: 0, durationMs)
                         presentation.accumulatedGateTimeMs =
                             (presentation.accumulatedGateTimeMs + advancedMs).coerceAtMost(totalMs)
@@ -910,7 +992,7 @@ private fun CreativeInterstitial(
                         } else 1f
                         if (accumulated >= totalMs) closeEnabled = true
                         val promptReached = videoStorePromptReached(
-                            videoPlanV2 = ad.creative.isVideoPlanV2,
+                            videoPlanV2 = ad.videoContract2,
                             positionMs = presentation.videoPositionMs,
                             durationMs = durationMs,
                             gateElapsedMs = accumulated,
@@ -927,7 +1009,7 @@ private fun CreativeInterstitial(
                         )
                         closeRemaining = 0
                         closeEnabled = true
-                        if (ad.creative.isVideoPlanV2) videoTerminal = true
+                        if (ad.videoContract2) videoTerminal = true
                     },
                     onError = ::markBridgeUnavailable,
                     onCta = ::beginVideoCta,
@@ -973,26 +1055,37 @@ private fun CreativeInterstitial(
         // `ad_behavior.close` when present; otherwise a default (top-right, always available) so ads
         // with no `ad_behavior` still get the small close, not a big one.
         val barAtBottom = closeBarAtBottom(close.treatment, close.position)
-        AdCloseButton(
-            treatment = close.treatment,
-            position = close.position,
-            action = close.action,
-            progressBarColor = close.progressBarColor,
-            isRewardCopy = isRewardCopy,
-            enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked),
-            remaining = closeRemaining,
-            progress = if (isVideo) smoothVideoCloseProgress else closeProgress.value,
-            onClose = {
-                if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked)) {
-                    val closeClaimed = ad.creative?.isVideoPlanV2 != true || videoTerminal ||
-                        presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER)
-                    if (closeClaimed) {
-                        presentation.automaticNavigationGate.clear()
-                        onFinish()
+        if (videoPreFirstFrameEscapeAvailable(isVideo, displayAdmitted)) {
+            VideoPreFirstFrameEscapeButton("Cancel ad", onPreFirstFrameEscape)
+        } else {
+            AdCloseButton(
+                treatment = close.treatment,
+                position = close.position,
+                action = close.action,
+                progressBarColor = close.progressBarColor,
+                isRewardCopy = isRewardCopy,
+                enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked),
+                remaining = closeRemaining,
+                progress = if (isVideo) smoothVideoCloseProgress else closeProgress.value,
+                progressBarStyle = behavior?.progressBar?.style
+                    ?.takeIf { isVideo } ?: ProgressBarStyle.SINGLE,
+                videoProgress = videoPlaybackProgress,
+                gateFraction = twoToneGateFraction(behavior?.close?.delaySeconds ?: 0, videoDurationMs),
+                onClose = {
+                    if (canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked)) {
+                        val closeClaimed = primaryCreativeCloseAllowed(
+                            ad.videoContract2,
+                            ad.creative?.type ?: CreativeType.PLAYABLE,
+                            videoTerminal,
+                        ) { presentation.fallbackState.videoPlan.closeCurrent(VideoLifecycleReason.USER) }
+                        if (closeClaimed) {
+                            presentation.automaticNavigationGate.clear()
+                            onFinish()
+                        }
                     }
-                }
-            },
-        )
+                },
+            )
+        }
 
         // Mid-ad store prompt — pinned to the corner opposite the close button (the SDK mirrors the
         // close position horizontally) during the [closeTime/2, closeTime) window. `!closeEnabled`
@@ -1008,7 +1101,7 @@ private fun CreativeInterstitial(
                     // The click signal lives on the badge; automatic redirects bypass this path.
                     val claim = notifyPublisherClickForClaim(
                         presentation.claimClick(ClickSources.STORE_PROMPT),
-                        { presentation.callbacks.notifyClicked() },
+                        { presentation.callbacks.notifyClicked(it) },
                     ) ?: return@StorePromptBadge
                     val interaction = claim.interaction
                     val routeStartedAtNanos = System.nanoTime()
@@ -1077,7 +1170,7 @@ private fun CreativeInterstitial(
                     // A user tap notifies once at admission; persistence still precedes routing.
                     val claim = notifyPublisherClickForClaim(
                         presentation.claimClick(ClickSources.INSTALL_BANNER),
-                        { presentation.callbacks.notifyClicked() },
+                        { presentation.callbacks.notifyClicked(it) },
                     ) ?: return@PlayInstallBanner
                     val interaction = claim.interaction
                     val routeStartedAtNanos = System.nanoTime()
@@ -1167,7 +1260,7 @@ private fun CreativeHtml(
     onBridgeReady: () -> Unit,
     onAutomaticCta: (PendingAutomaticNavigation) -> Unit,
     onAutomaticNavigationReady: () -> Unit,
-    onPrimaryCta: (PrimaryCtaRoute) -> Boolean,
+    onPrimaryCta: (PrimaryCtaRoute, ad.simula.ad.sdk.bridge.TrustedCtaOpen?) -> Boolean,
     modifier: Modifier = Modifier,
 ) {
     var creativeWebView by remember { mutableStateOf<WebView?>(null) }
@@ -1176,7 +1269,11 @@ private fun CreativeHtml(
     val fallbackOwner = remember(presentation) { Any() }
     val fallbackActivity = LocalContext.current as? SimulaInterstitialActivity
     val lifecycleOwner = LocalLifecycleOwner.current
-    fun handlePrimaryCta(url: String, webView: WebView?): Boolean {
+    fun handlePrimaryCta(
+        url: String,
+        webView: WebView?,
+        trusted: ad.simula.ad.sdk.bridge.TrustedCtaOpen? = null,
+    ): Boolean {
         return when (val plan = CreativeCtaRouter.primaryCtaTapPlan(
             tappedUrl = url,
             creativeBaseUrl = CreativeCtaRouter.admittedHttpUrl(webView?.url),
@@ -1186,7 +1283,12 @@ private fun CreativeHtml(
             CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView -> false
             CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick -> true
             is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> {
-                onPrimaryCta(plan.route)
+                val interaction = trusted ?: ad.simula.ad.sdk.bridge.TrustedCtaOpen(
+                    url = url,
+                    interactionId = null,
+                    clickSource = ClickSources.PRIMARY_UNKNOWN,
+                )
+                onPrimaryCta(plan.route, interaction)
                 true
             }
         }
@@ -1311,7 +1413,7 @@ private fun CreativeHtml(
                 val injectionMode = BridgeWebViewInstaller.install(
                     webView = this,
                     bridge = bridge,
-                    onTrustedCtaOpen = { url -> handlePrimaryCta(url, this) },
+                    onTrustedCtaOpen = { request -> handlePrimaryCta(request.url, this, request) },
                 )
                 if (injectionMode == BridgeInjectionMode.UNAVAILABLE) {
                     post { if (creativeWebView === this) onBridgeUnavailable() }
@@ -1362,6 +1464,27 @@ internal fun closeBarAtBottom(treatment: CloseTreatment, position: ClosePosition
 internal fun effectiveClosePosition(treatment: CloseTreatment, position: ClosePosition): ClosePosition =
     if (closeBarAtBottom(treatment, position)) ClosePosition.TOP_RIGHT else position
 
+internal const val TWO_TONE_PROGRESS_BACKGROUND_ARGB = 0xFF3A3A40L
+internal const val TWO_TONE_PROGRESS_BRIGHT_ARGB = 0xFF1186F2L
+internal const val TWO_TONE_PROGRESS_DARK_ARGB = 0xFF1156B6L
+
+internal data class TwoToneProgressFractions(val bright: Float, val dark: Float)
+
+internal fun twoToneProgressFractions(videoProgress: Float, gateFraction: Float): TwoToneProgressFractions {
+    val played = videoProgress.coerceIn(0f, 1f)
+    val gate = gateFraction.coerceIn(0f, 1f)
+    return TwoToneProgressFractions(
+        bright = minOf(played, gate),
+        dark = (played - gate).coerceAtLeast(0f),
+    )
+}
+
+internal fun progressBarVisible(
+    enabled: Boolean,
+    treatment: CloseTreatment,
+    style: ProgressBarStyle,
+): Boolean = treatment == CloseTreatment.PROGRESS_BAR && (!enabled || style == ProgressBarStyle.TWO_TONE)
+
 /**
  * The `ad_behavior`-driven close button. Renders the assigned [treatment] at the configured corner:
  * `HIDDEN` shows nothing until the gate unlocks, `COUNTDOWN_CIRCLE` draws a ring, `PROGRESS_BAR` a
@@ -1378,6 +1501,9 @@ internal fun BoxScope.AdCloseButton(
     enabled: Boolean,
     remaining: Int,
     progress: Float,
+    progressBarStyle: ProgressBarStyle = ProgressBarStyle.SINGLE,
+    videoProgress: Float = progress,
+    gateFraction: Float = 1f,
     onClose: () -> Unit,
 ) {
     val tint = remember(progressBarColor) { ColorUtil.parseColor(progressBarColor) }
@@ -1401,7 +1527,7 @@ internal fun BoxScope.AdCloseButton(
     // `progress_bar`: a full-width bar tinted by color, shown during the delay. Pinned just inside the
     // top safe-area inset by default (clearing the notch); at bottom_left it sits near the bottom,
     // raised just above the info "i" so the two don't overlap (the "i" keeps its corner spot).
-    if (!enabled && treatment == CloseTreatment.PROGRESS_BAR) {
+    if (progressBarVisible(enabled, treatment, progressBarStyle)) {
         Box(
             modifier = Modifier
                 .align(if (barAtBottom) Alignment.BottomCenter else Alignment.TopCenter)
@@ -1413,14 +1539,35 @@ internal fun BoxScope.AdCloseButton(
                 .padding(bottom = if (barAtBottom) CLOSE_BOTTOM_BAR_LIFT_DP.dp else 0.dp)
                 .fillMaxWidth()
                 .height(CLOSE_PROGRESS_BAR_HEIGHT_DP.dp)
-                .background(Color(0x40FFFFFF)),
+                .background(
+                    if (progressBarStyle == ProgressBarStyle.TWO_TONE) {
+                        Color(TWO_TONE_PROGRESS_BACKGROUND_ARGB)
+                    } else Color(0x40FFFFFF),
+                ),
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(animatedProgress)
-                    .height(CLOSE_PROGRESS_BAR_HEIGHT_DP.dp)
-                    .background(tint),
-            )
+            if (progressBarStyle == ProgressBarStyle.TWO_TONE) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val fractions = twoToneProgressFractions(videoProgress, gateFraction)
+                    drawRect(
+                        Color(TWO_TONE_PROGRESS_BRIGHT_ARGB),
+                        size = Size(size.width * fractions.bright, size.height),
+                    )
+                    if (fractions.dark > 0f) {
+                        drawRect(
+                            Color(TWO_TONE_PROGRESS_DARK_ARGB),
+                            topLeft = Offset(size.width * fractions.bright, 0f),
+                            size = Size(size.width * fractions.dark, size.height),
+                        )
+                    }
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(animatedProgress)
+                        .height(CLOSE_PROGRESS_BAR_HEIGHT_DP.dp)
+                        .background(tint),
+                )
+            }
         }
     }
 
@@ -1478,6 +1625,12 @@ internal fun BoxScope.AdCloseButton(
             }
         }
     }
+}
+
+internal fun twoToneGateFraction(gateSeconds: Int, durationMs: Long): Float {
+    val gateMs = gateSeconds.coerceAtLeast(0) * 1_000L
+    if (durationMs <= 0L || gateMs <= 0L || gateMs >= durationMs) return 1f
+    return (gateMs.toFloat() / durationMs).coerceIn(0f, 1f)
 }
 
 /** White circular control at the standard size; tappable only when [onClick] is non-null. When

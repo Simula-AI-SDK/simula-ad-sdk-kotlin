@@ -182,12 +182,37 @@ class CreativeBridgeTest {
 
     @Test
     fun trustedCtaMessageRequiresThePresentationNonce() {
-        val message = """{"type":"SIMULA_CTA_OPEN","url":"https://tracker.example/click","activation_nonce":"nonce-1"}"""
+        val interactionId = "123e4567-e89b-42d3-a456-426614174000"
+        val message = """{"type":"SIMULA_CTA_OPEN","url":"https://tracker.example/click","activation_nonce":"nonce-1","interaction_id":"$interactionId","click_source":"hero_cta"}"""
 
-        assertEquals("https://tracker.example/click", trustedCtaUrl(message, "nonce-1"))
-        assertNull(trustedCtaUrl(message, "other-presentation"))
-        assertNull(trustedCtaUrl(message, null))
-        assertNull("disabled installation rejects an already queued message", trustedCtaUrl(message, "nonce-1", false))
+        val request = trustedCtaOpen(message, "nonce-1")
+        assertEquals("https://tracker.example/click", request?.url)
+        assertEquals(interactionId, request?.interactionId)
+        assertEquals("hero_cta", request?.clickSource)
+        assertNull(trustedCtaOpen(message, "other-presentation"))
+        assertNull(trustedCtaOpen(message, null))
+        assertNull("disabled installation rejects an already queued message", trustedCtaOpen(message, "nonce-1", false))
+    }
+
+    @Test
+    fun trustedCtaWithoutServerIdentityDefersUuidMintingToNative() {
+        val request = trustedCtaOpen(
+            """{"type":"SIMULA_CTA_OPEN","url":"https://tracker.example/click","activation_nonce":"nonce","interaction_id":null,"click_source":"primary_unknown"}""",
+            "nonce",
+        )
+
+        assertNull(request?.interactionId)
+        assertEquals("primary_unknown", request?.clickSource)
+    }
+
+    @Test
+    fun trustedCtaWithNonUuidIdentityFallsBackToNativeMinting() {
+        val request = trustedCtaOpen(
+            """{"type":"SIMULA_CTA_OPEN","url":"https://tracker.example/click","activation_nonce":"nonce","interaction_id":"web-time-random","click_source":"hero_cta"}""",
+            "nonce",
+        )
+        assertNull(request?.interactionId)
+        assertEquals("hero_cta", request?.clickSource)
     }
 
     @Test
@@ -294,6 +319,8 @@ class CreativeBridgeTest {
 
         assertTrue(source.contains("SIMULA_CTA_OPEN"))
         assertTrue(source.contains("window.open ="))
+        assertTrue(source.contains("Object.defineProperty(simulaAdAPI, 'openCTA'"))
+        assertTrue(source.contains("Object.defineProperty(window, 'SimulaAd'"))
         assertTrue(source.contains("activation_nonce"))
         assertTrue(source.contains("'use strict';"))
         assertTrue(source.contains("if (window === window.top) { return true; }"))
@@ -324,10 +351,10 @@ class CreativeBridgeTest {
 
     @Test
     fun trustedCtaMessageRejectsMalformedOrNonStringFields() {
-        assertNull(trustedCtaUrl("malformed", "nonce"))
-        assertNull(trustedCtaUrl("""{"type":"SIMULA_CTA_OPEN","url":7,"activation_nonce":"nonce"}""", "nonce"))
-        assertNull(trustedCtaUrl("""{"type":"SIMULA_CTA_OPEN","url":"","activation_nonce":"nonce"}""", "nonce"))
-        assertNull(trustedCtaUrl("""{"type":"AD_EARLY_COMPLETE","url":"https://x","activation_nonce":"nonce"}""", "nonce"))
+        assertNull(trustedCtaOpen("malformed", "nonce"))
+        assertNull(trustedCtaOpen("""{"type":"SIMULA_CTA_OPEN","url":7,"activation_nonce":"nonce"}""", "nonce"))
+        assertNull(trustedCtaOpen("""{"type":"SIMULA_CTA_OPEN","url":"","activation_nonce":"nonce"}""", "nonce"))
+        assertNull(trustedCtaOpen("""{"type":"AD_EARLY_COMPLETE","url":"https://x","activation_nonce":"nonce"}""", "nonce"))
     }
 
     @Test
@@ -337,20 +364,20 @@ class CreativeBridgeTest {
 
         assertEquals(
             acceptedUrl,
-            trustedCtaUrl(
-                """{"type":"SIMULA_CTA_OPEN","url":"$acceptedUrl","activation_nonce":"nonce"}""",
+            trustedCtaOpen(
+                """{"type":"SIMULA_CTA_OPEN","url":"$acceptedUrl","activation_nonce":"nonce","interaction_id":"web-1"}""",
+                "nonce",
+            )?.url,
+        )
+        assertNull(
+            trustedCtaOpen(
+                """{"type":"SIMULA_CTA_OPEN","url":"$oversizedUrl","activation_nonce":"nonce","interaction_id":"web-1"}""",
                 "nonce",
             ),
         )
         assertNull(
-            trustedCtaUrl(
-                """{"type":"SIMULA_CTA_OPEN","url":"$oversizedUrl","activation_nonce":"nonce"}""",
-                "nonce",
-            ),
-        )
-        assertNull(
-            trustedCtaUrl(
-                """{"type":"SIMULA_CTA_OPEN","url":"https://x","activation_nonce":"nonce","padding":"${"x".repeat(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS)}"}""",
+            trustedCtaOpen(
+                """{"type":"SIMULA_CTA_OPEN","url":"https://x","activation_nonce":"nonce","interaction_id":"web-1","padding":"${"x".repeat(CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS)}"}""",
                 "nonce",
             ),
         )
@@ -374,6 +401,13 @@ class CreativeBridgeTest {
         assertTrue(source.contains("return routedWindow;"))
         assertFalse(source.contains("forwardTrustedCta(arguments[0])) { return null;"))
         assertEquals(1, source.split("\"nonce\"").size - 1)
+        assertTrue(source.contains("window.simulaClickInteraction(slotSource, true)"))
+        assertTrue(source.contains("function openCTA(url)"))
+        assertTrue(source.contains("return forwardTrustedCta(url, document.activeElement)"))
+        assertFalse(source.contains("__simulaMintClickIdentity"))
+        assertTrue(source.contains("interactionId: null"))
+        assertFalse(source.contains("Math.random"))
+        assertFalse(source.contains("'web-' + Date.now"))
         val duplicateCheck = requireNotNull(source.indexOf("if (claimedGesture === gestureSequence) { return true; }")
             .takeIf { it >= 0 })
         val activeCheck = requireNotNull(source.indexOf("if (!hasActiveUserGesture()) { return false; }")

@@ -93,10 +93,9 @@ import androidx.core.view.WindowInsetsControllerCompat
 import ad.simula.ad.sdk.ads.AdInfoReportOverlay
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.ads.FullscreenVideo
-import ad.simula.ad.sdk.ads.FullscreenVideoPreparer
+import ad.simula.ad.sdk.ads.VideoAssetCache
 import ad.simula.ad.sdk.ads.FALLBACK_RENDER_TIMEOUT_MS
-import ad.simula.ad.sdk.ads.nextFallbackVideoUrl
-import ad.simula.ad.sdk.ads.nextVideoPlanV2Url
+import ad.simula.ad.sdk.ads.FALLBACK_POST_CLOSE_WAIT_MS
 import ad.simula.ad.sdk.ads.VideoPlanPresentationState
 import ad.simula.ad.sdk.ads.VideoPlaybackSlotIdentity
 import ad.simula.ad.sdk.ads.VideoPlanOverlayClockEffect
@@ -106,6 +105,7 @@ import ad.simula.ad.sdk.ads.FallbackHtmlFailureAction
 import ad.simula.ad.sdk.ads.fallbackHtmlFailureAction
 import ad.simula.ad.sdk.ads.fallbackCloseGateUsesPresentedTime
 import ad.simula.ad.sdk.ads.fallbackFailureAutoAdvances
+import ad.simula.ad.sdk.ads.fallbackPreparationWindow
 import ad.simula.ad.sdk.ads.videoOverlayCloseAllowed
 import ad.simula.ad.sdk.ads.VideoOverlayCloseOrigin
 import ad.simula.ad.sdk.ads.resolveFallbackVideoRouting
@@ -114,10 +114,12 @@ import ad.simula.ad.sdk.ads.AutomaticNavigationOutcome
 import ad.simula.ad.sdk.ads.canRouteFromCurrentFullscreenActivity
 import ad.simula.ad.sdk.ads.shouldEnterFallbackVideoUnavailable
 import ad.simula.ad.sdk.ads.FallbackCloseGateState
+import ad.simula.ad.sdk.ads.FallbackPresentationState
 import ad.simula.ad.sdk.ads.closeGateProgress
 import ad.simula.ad.sdk.ads.closeGateSecondsRemaining
 import ad.simula.ad.sdk.ads.coordinateDeferredClickPersistence
 import ad.simula.ad.sdk.ads.enqueueOwnedFallbackClickBeacon
+import java.io.File
 import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.image.BundledResourceImage
 import ad.simula.ad.sdk.image.CachedAsyncImage
@@ -151,7 +153,9 @@ import ad.simula.ad.sdk.network.ResumedPresentationRoute
 import ad.simula.ad.sdk.provider.useSimula
 import ad.simula.ad.sdk.util.ColorUtil
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
@@ -242,11 +246,18 @@ fun MiniGameMenu(
     // Post-game ad screens (`GET /load/fallbacks/{serveId}`), revealed one per close tap.
     var fallbackAds by remember { mutableStateOf<List<SimulaApiClient.FallbackAd>>(emptyList()) }
     var fallbackAdIndex by remember { mutableStateOf(0) }
+    var fallbackAdvancePending by remember { mutableStateOf(false) }
     var currentServeId by remember { mutableStateOf<String?>(null) }
     var lastGameHeightDp by remember { mutableStateOf<Float?>(null) }
     var lastGameWasBottomSheet by remember { mutableStateOf(false) }
     val fallbackCloseGates = remember(currentServeId) { FallbackCloseGateState() }
     val fallbackVideoPlan = remember(currentServeId) { VideoPlanPresentationState(videoPlanV2 = false) }
+    val fallbackPreparation = remember(currentServeId) { FallbackPresentationState() }
+    DisposableEffect(fallbackPreparation) {
+        onDispose {
+            fallbackPreparation.clear()
+        }
+    }
     val fallbackStoreExit = remember(currentServeId) {
         StoreExitTracker(
             adId = currentServeId,
@@ -332,6 +343,7 @@ fun MiniGameMenu(
         adFetched = false
         fallbackAds = emptyList()
         fallbackAdIndex = 0
+        fallbackAdvancePending = false
         currentServeId = null
     }
 
@@ -349,14 +361,43 @@ fun MiniGameMenu(
             val sid = currentServeId
             if (sid != null) {
                 scope.launch {
-                    val ads = SimulaApiClient.fetchFallbacks(sid)
-                    if (ads.isNotEmpty()) {
-                        if (ads.any { it.isVideoPlanV2 }) {
-                            fallbackVideoPlan.activateVideoPlanV2()
-                        } else {
-                            FullscreenVideoPreparer.prepare(nextFallbackVideoUrl(ads, afterDisplayIndex = -1))
+                    val ads = SimulaApiClient.fetchFallbacks(sid).take(2)
+                    fallbackPreparation.retainServerCandidates(ads)
+                    fun publishPreparedFallbacks() {
+                        val resolved = fallbackPreparation.displayablePreparedAds()
+                        fallbackAds = resolved
+                        if (resolved.isNotEmpty()) {
+                            fallbackAdIndex = fallbackAdIndex.coerceIn(0, resolved.lastIndex)
+                            adFetched = true
                         }
-                        fallbackAds = ads
+                    }
+                    publishPreparedFallbacks()
+                    val preparationJobs = LinkedHashMap<Int, Job>()
+                    fallbackPreparationWindow(ads, 0)
+                        .filter { it.type == CreativeType.VIDEO && admittedVideoUrl(it.url) != null }
+                        .forEach { ad ->
+                            val job = scope.launch {
+                                val lease = VideoAssetCache.acquire(context.applicationContext, ad.url)
+                                fallbackPreparation.settleVideoPreparation(ad.sourceIndex, lease)
+                                publishPreparedFallbacks()
+                            }
+                            preparationJobs[ad.sourceIndex] = job
+                            if (!fallbackPreparation.registerVideoPreparation(ad.sourceIndex, job::cancel)) {
+                                job.cancel()
+                            }
+                        }
+                    val currentVideo = ads.firstOrNull()?.takeIf { it.type == CreativeType.VIDEO }
+                    if (currentVideo != null) {
+                        withTimeoutOrNull(FALLBACK_POST_CLOSE_WAIT_MS) {
+                            preparationJobs[currentVideo.sourceIndex]?.join()
+                        }
+                        if (fallbackPreparation.hasPendingVideoPreparation()) {
+                            fallbackPreparation.markPendingVideosUnavailable()
+                        }
+                    }
+                    val resolved = fallbackPreparation.displayablePreparedAds()
+                    if (resolved.isNotEmpty()) {
+                        fallbackAds = resolved
                         fallbackAdIndex = 0
                         adFetched = true
                     }
@@ -374,19 +415,43 @@ fun MiniGameMenu(
         // Reveal the next fetched ad screen on each close tap; after the last one,
         // return to the catalog menu (isOpen stays true) instead of dismissing —
         // the menu is dismissed only by an explicit close/back action.
-        if (fallbackAdIndex + 1 < fallbackAds.size) {
+        if (fallbackAdvancePending) return
+        val latest = fallbackPreparation.displayablePreparedAds()
+        fallbackAds = latest
+        if (fallbackAdIndex + 1 < latest.size) {
             fallbackAdIndex += 1
-            if (fallbackAds.none { it.isVideoPlanV2 }) {
-                FullscreenVideoPreparer.prepare(
-                    fallbackAds.getOrNull(fallbackAdIndex)?.takeIf { it.type == CreativeType.VIDEO }?.url,
-                )
-            }
-            fallbackAds.getOrNull(fallbackAdIndex)
+            latest.getOrNull(fallbackAdIndex)
                 ?.takeIf { it.type == CreativeType.PLAYABLE }
                 ?.let { fallbackVideoPlan.nextStepReady() }
+        } else if (fallbackPreparation.hasPendingVideoPreparation()) {
+            fallbackAdvancePending = true
+            scope.launch {
+                withTimeoutOrNull(FALLBACK_POST_CLOSE_WAIT_MS) {
+                    while (fallbackPreparation.hasPendingVideoPreparation() &&
+                        fallbackPreparation.displayablePreparedAds().size <= fallbackAdIndex + 1
+                    ) delay(16L)
+                }
+                fallbackPreparation.markPendingVideosUnavailable()
+                val reconciled = fallbackPreparation.displayablePreparedAds()
+                fallbackAds = reconciled
+                fallbackAdvancePending = false
+                if (fallbackAdIndex + 1 < reconciled.size) {
+                    fallbackAdIndex += 1
+                    reconciled.getOrNull(fallbackAdIndex)
+                        ?.takeIf { it.type == CreativeType.PLAYABLE }
+                        ?.let { fallbackVideoPlan.nextStepReady() }
+                } else {
+                    fallbackVideoPlan.closePendingHandoff(VideoLifecycleReason.NEXT_STEP_FAILED)
+                    fallbackStoreExit.onAdClosed()
+                    fallbackPreparation.clear()
+                    fallbackAds = emptyList()
+                    fallbackAdIndex = 0
+                }
+            }
         } else {
             fallbackVideoPlan.closePendingHandoff()
             fallbackStoreExit.onAdClosed()
+            fallbackPreparation.clear()
             fallbackAds = emptyList()
             fallbackAdIndex = 0
         }
@@ -780,11 +845,8 @@ fun MiniGameMenu(
                     )
                     MiniGameFallbackOverlay(
                         ad = currentFallbackAd,
-                        nextVideoUrl = if (currentFallbackAd.isVideoPlanV2) {
-                            nextVideoPlanV2Url(fallbackAds, fallbackAdIndex)
-                        } else {
-                            nextFallbackVideoUrl(fallbackAds, fallbackAdIndex)
-                        },
+                        videoFile = fallbackPreparation.videoFile(currentFallbackAd.sourceIndex),
+                        nextVideoUrl = null,
                         hasNextStep = fallbackAdIndex + 1 < fallbackAds.size,
                         onClose = { handleFallbackClose() },
                         playableHeightDp = fallbackPlayableHeightDp,
@@ -878,6 +940,7 @@ private fun FullscreenDialogWindowConfig(opaqueBackground: Boolean = false) {
 @Composable
 private fun MiniGameFallbackOverlay(
     ad: SimulaApiClient.FallbackAd,
+    videoFile: File?,
     nextVideoUrl: String?,
     hasNextStep: Boolean,
     onClose: () -> Unit,
@@ -897,7 +960,7 @@ private fun MiniGameFallbackOverlay(
     val nativeClickBeaconV1Enabled = ad.nativeClickBeaconV1Enabled
     val inlineHtml = ad.renderedHtml?.takeIf { it.isNotBlank() }
     val isVideo = ad.type == CreativeType.VIDEO
-    val videoUrl = remember(ad.url) { admittedVideoUrl(ad.url) }
+    val videoUrl = remember(ad.url, videoFile) { admittedVideoUrl(ad.url).takeIf { videoFile != null } }
     var videoDurationMs by remember(closeGateState, fallbackIndex) {
         mutableStateOf(closeGateState.videoDurationMs(fallbackIndex))
     }
@@ -992,10 +1055,9 @@ private fun MiniGameFallbackOverlay(
 
     fun closeOverlay(origin: VideoOverlayCloseOrigin) {
         if (closeIssued) return
-        if (!videoOverlayCloseAllowed(origin, ad.isVideoPlanV2, videoTerminal) {
-                videoPlan.closeCurrent(VideoLifecycleReason.USER)
-            }
-        ) return
+        if (!videoOverlayCloseAllowed(origin, false, videoTerminal) {
+            videoPlan.closeCurrent(VideoLifecycleReason.USER)
+        }) return
         closeIssued = true
         clickOwner.cancel()
         onClose()
@@ -1146,7 +1208,7 @@ private fun MiniGameFallbackOverlay(
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
             if (miniGameVideoAutoAdvanceReady(
-                    videoPlanV2 = ad.isVideoPlanV2,
+                    videoPlanV2 = false,
                     currentType = ad.type,
                     terminal = videoTerminal,
                     clickHandoffPending = clickHandoffPending,
@@ -1245,14 +1307,13 @@ private fun MiniGameFallbackOverlay(
 
             Box(modifier = Modifier.fillMaxSize().weight(1f)) {
                 if (isVideo) {
-                    videoUrl?.let { videoUrl ->
+                    videoFile?.let { localVideoFile ->
                         FullscreenVideo(
-                            url = videoUrl,
+                            file = localVideoFile,
                             posterUrl = ad.posterUrl,
                             adFormat = "interstitial",
                             adId = adId.takeIf { it.isNotBlank() },
                             serveId = parentServeId?.takeIf { it.isNotBlank() },
-                            prewarmNextUrl = nextVideoUrl,
                             configuredGateSeconds = closeBehavior.delaySeconds,
                             initialPlayedMs = closeGateState.elapsedMs(fallbackIndex),
                             ctaEnabled = videoRouting != null,
@@ -1268,7 +1329,7 @@ private fun MiniGameFallbackOverlay(
                             clipIndex = ad.clipIndex,
                             skoverlayEnabled = ad.skoverlay?.enabled,
                             skoverlayDelaySeconds = ad.skoverlay?.delaySeconds,
-                            videoPlanV2 = ad.isVideoPlanV2,
+                            videoPlanV2 = false,
                             videoPlanState = videoPlan,
                             presentationBlocked = clickHandoffPending || storeVisitPending,
                             willHandoff = { hasNextStep },
@@ -1293,7 +1354,7 @@ private fun MiniGameFallbackOverlay(
                                 closeGateState.addElapsedMs(fallbackIndex, gateMs, gateMs)
                                 adCountdown = 0
                                 videoRingProgress = 1f
-                                if (ad.isVideoPlanV2) videoTerminal = true
+                                videoTerminal = true
                             },
                             onError = ::applyPageFailure,
                             onCta = {

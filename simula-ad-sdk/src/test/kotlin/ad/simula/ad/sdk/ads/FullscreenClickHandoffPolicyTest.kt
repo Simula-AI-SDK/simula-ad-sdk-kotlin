@@ -340,18 +340,6 @@ class FullscreenClickHandoffPolicyTest {
         )
     }
 
-    @Test
-    fun `upcoming fallback video selection supports consecutive videos with one next owner`() {
-        val ads = listOf(
-            SimulaApiClient.FallbackAd("one", type = ad.simula.ad.sdk.model.CreativeType.VIDEO, url = "https://cdn/1"),
-            SimulaApiClient.FallbackAd("two", type = ad.simula.ad.sdk.model.CreativeType.VIDEO, url = "https://cdn/2"),
-            SimulaApiClient.FallbackAd("html", renderedHtml = "<html/>"),
-        )
-
-        assertEquals("https://cdn/1", nextFallbackVideoUrl(ads, -1))
-        assertEquals("https://cdn/2", nextFallbackVideoUrl(ads, 0))
-        assertNull(nextFallbackVideoUrl(ads, 1))
-    }
     private class TestScheduler : ClickHandoffScheduler {
         private val ready = ArrayDeque<Runnable>()
         private val delayed = LinkedHashSet<Runnable>()

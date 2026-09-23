@@ -10,6 +10,9 @@ internal object ClickSources {
     const val INSTALL_BANNER = "install_banner"
     const val FALLBACK_CTA = "fallback_cta"
     const val AUTO_REDIRECT = "auto_redirect"
+    const val PRIMARY_UNKNOWN = "primary_unknown"
+    const val END_SCREEN_1_UNKNOWN = "end_screen_1_unknown"
+    const val END_SCREEN_2_UNKNOWN = "end_screen_2_unknown"
 
     fun normalize(source: String): String = when (source) {
         PRIMARY_CTA, "cta" -> PRIMARY_CTA
@@ -17,7 +20,7 @@ internal object ClickSources {
         INSTALL_BANNER -> INSTALL_BANNER
         FALLBACK_CTA -> FALLBACK_CTA
         AUTO_REDIRECT, "auto_store_redirect" -> AUTO_REDIRECT
-        else -> PRIMARY_CTA
+        else -> source.takeIf(::isValidIdentityPart) ?: PRIMARY_UNKNOWN
     }
 
     fun storeExitTrigger(source: String): String = when (val normalized = normalize(source)) {
@@ -25,6 +28,14 @@ internal object ClickSources {
         else -> normalized
     }
 }
+
+internal fun isValidIdentityPart(value: String): Boolean =
+    value.length in 1..64 && value.all { it.isLetterOrDigit() || it in "._:-" }
+
+internal fun isRfc4122Uuid(value: String): Boolean = runCatching {
+    val uuid = UUID.fromString(value)
+    uuid.variant() == 2 && uuid.version() in 1..5 && uuid.toString().equals(value, ignoreCase = true)
+}.getOrDefault(false)
 
 internal data class ClickInteraction(
     val id: String,
@@ -797,19 +808,27 @@ internal class ClickInteractionGate(
     private var nextToken = 0L
 
     @Synchronized
-    fun claim(source: String): ClickInteractionClaim? {
+    fun claim(source: String, interactionId: String? = null): ClickInteractionClaim? {
         val now = clockMs()
         if (pendingToken != null) return null
         if (lastCommittedAtMs != Long.MIN_VALUE && now - lastCommittedAtMs < duplicateWindowMs) return null
         val token = ++nextToken
         pendingToken = token
         // UUIDs stay well within the backend's 64-character click-event-id bound.
+        val id = interactionId?.takeIf(::isValidIdentityPart) ?: idFactory().take(64)
         return ClickInteractionClaim(
-            interaction = ClickInteraction(id = idFactory().take(64), source = ClickSources.normalize(source)),
+            interaction = ClickInteraction(id = id, source = ClickSources.normalize(source)),
             gate = this,
             token = token,
         )
     }
+
+    fun claimTrusted(interactionId: String, source: String): ClickInteractionClaim? =
+        interactionId.takeIf(::isRfc4122Uuid)?.let { claim(source, it) }
+
+    /** Platform fallback for HTML gestures when document-start interception is unavailable. */
+    fun claimWeb(source: String): ClickInteractionClaim? =
+        claim(source)
 
     /** Immediate admission for taps whose action cannot fail after admission. */
     fun admit(source: String): ClickInteraction? {

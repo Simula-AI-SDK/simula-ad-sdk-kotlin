@@ -3,12 +3,13 @@ package ad.simula.ad.sdk.network
 import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
-import ad.simula.ad.sdk.model.isVideoPlanV2
+import ad.simula.ad.sdk.model.ProgressBarStyle
+import ad.simula.ad.sdk.model.RewardEarnAt
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -47,54 +48,34 @@ class ApiModelsSerializationTest {
     }
 
     @Test
-    fun `session create advertises native click beacon capability`() {
+    fun `session advertises native click support but no retired video capabilities`() {
         val root = json.parseToJsonElement(
             sessionCreateBody(
                 privacy = buildJsonObject { put("hasPrivacyConsent", true) },
-                capabilities = ApiDeviceCapabilities(videoV1 = true, videoPlanV2 = true),
+                capabilities = ApiDeviceCapabilities(),
             ),
         ).jsonObject
 
-        assertTrue(root.getValue("capabilities").jsonObject
-            .getValue("native_click_beacon_v1").jsonPrimitive.boolean)
-        assertTrue(root.getValue("capabilities").jsonObject
-            .getValue("video_v1").jsonPrimitive.boolean)
-        assertTrue(root.getValue("capabilities").jsonObject
-            .getValue("video_plan_v2").jsonPrimitive.boolean)
+        val capabilities = root.getValue("capabilities").jsonObject
+        assertTrue(capabilities.containsKey("native_click_beacon_v1"))
+        assertFalse(capabilities.containsKey("video_v1"))
+        assertFalse(capabilities.containsKey("video_plan_v2"))
+        assertFalse(root.containsKey("contracts"))
         assertTrue(root.containsKey("privacy"))
     }
 
     @Test
-    fun `load request preserves native click beacon capability`() {
-        val root = json.parseToJsonElement(
-            json.encodeToString(
-                AdLoadRequestBody(
-                    adUnitId = "unit",
-                    capabilities = ApiDeviceCapabilities(videoV1 = true, videoPlanV2 = true),
-                ),
-            ),
+    fun `imperative load requests advertise only numeric video contract 2`() {
+        val interstitial = json.parseToJsonElement(
+            json.encodeToString(AdLoadRequestBody(adUnitId = "unit")),
         ).jsonObject
-
-        assertTrue(root.getValue("capabilities").jsonObject
-            .getValue("native_click_beacon_v1").jsonPrimitive.boolean)
-        assertTrue(root.getValue("capabilities").jsonObject
-            .getValue("video_v1").jsonPrimitive.boolean)
-        assertTrue(root.getValue("capabilities").jsonObject
-            .getValue("video_plan_v2").jsonPrimitive.boolean)
-    }
-
-    @Test
-    fun `neutral capabilities do not advertise video support`() {
-        assertFalse(ApiDeviceCapabilities().videoV1)
-        assertFalse(ApiDeviceCapabilities().videoPlanV2)
-    }
-
-    @Test
-    fun `fully wired capabilities advertise both video versions`() {
-        val capabilities = ApiDeviceCapabilities(videoV1 = true, videoPlanV2 = true)
-        val root = json.parseToJsonElement(json.encodeToString(capabilities)).jsonObject
-        assertTrue(root.getValue("video_v1").jsonPrimitive.boolean)
-        assertTrue(root.getValue("video_plan_v2").jsonPrimitive.boolean)
+        val rewarded = json.parseToJsonElement(
+            json.encodeToString(RewardedInitRequestBody(adUnitId = "unit")),
+        ).jsonObject
+        assertEquals(2, interstitial.getValue("contracts").jsonObject.getValue("video").jsonPrimitive.int)
+        assertEquals(2, rewarded.getValue("contracts").jsonObject.getValue("video").jsonPrimitive.int)
+        assertFalse(interstitial.toString().contains("video_plan_v2"))
+        assertFalse(interstitial.toString().contains("video_v1"))
     }
 
     // ── Error body (4xx {code, message}) ─────────────────────────────────────
@@ -197,152 +178,108 @@ class ApiModelsSerializationTest {
     }
 
     @Test
-    fun `v2 fallback supports nested creative metadata and retains raw source index after dead clip`() {
-        val payload = """
-            {"video_plan_version":"video_plan_v2","ads":[
-              {"ad_id":"dead","creative":{"type":"video","url":"not-a-url","clip_index":0}},
-              {"ad_id":"live","creative":{"type":"video","url":"https://cdn.example/live.mp4",
-                "cta":"Install","app_name":"Game","app_icon_url":"https://cdn.example/icon.png",
-                "video_pool":"ugc","clip_index":1},"ad_behavior":{"video":{"style":"bottom_card"}}}
-            ]}
-        """.trimIndent()
-        val response = json.decodeFromString<FallbackAdsApiResponse>(payload)
+    fun `contract 2 fallback drops videos lossily and preserves playable source index`() {
+        val response = json.decodeFromString<FallbackAdsApiResponse>(
+            """{"video_contract":2,"ads":[
+                {"ad_id":"video","type":"video","url":"https://cdn.example/video.mp4"},
+                42,
+                {"ad_id":"playable","rendered_html":"<html/>"}
+            ]}""",
+        )
         val ads = SimulaApiClient.fallbackAdsFromResponse(response)
 
+        assertEquals(listOf(0, 2), response.ads.map { it.sourceIndex })
         assertEquals(1, ads.size)
-        assertEquals(1, ads.single().sourceIndex)
-        assertEquals(1, ads.single().clipIndex)
-        assertEquals("ugc", ads.single().videoPool)
-        assertEquals("Install", ads.single().cta)
-        assertTrue(ads.single().isVideoPlanV2)
+        assertEquals("playable", ads.single().adId)
+        assertEquals(2, ads.single().sourceIndex)
     }
 
     @Test
-    fun `canonical fallback marker activates presentation but missing clip remains v1 slot`() {
-        val response = json.decodeFromString<FallbackAdsApiResponse>(
-            """{"video_plan_version":"video_plan_v2","ads":[
-                {"ad_id":"v","type":"video","url":"https://cdn.example/video.mp4"}
-            ]}""",
+    fun `only exact numeric response contract activates`() {
+        fun result(marker: String) = SimulaApiClient.adLoadResultFromResponse(
+            json.decodeFromString(
+                """{"video_contract":$marker,"creative":{"type":"video","url":"https://cdn.example/v.mp4"}}""",
+            ),
         )
-        val ad = SimulaApiClient.fallbackAdsFromResponse(response).single()
-
-        assertTrue(ad.videoPlanV2)
-        assertFalse(ad.isVideoPlanV2)
-        assertNull(ad.clipIndex)
+        assertTrue(result("2").videoContract2)
+        assertFalse(result("\"2\"").videoContract2)
+        assertFalse(result("2.0").videoContract2)
+        assertFalse(
+            SimulaApiClient.adLoadResultFromResponse(
+                json.decodeFromString(
+                    """{"video_plan_version":"video_plan_v2","creative":{"type":"video","url":"https://cdn.example/v.mp4"}}""",
+                ),
+            ).videoContract2,
+        )
     }
 
     @Test
-    fun `v2 marker accepts only the exact trimmed backend literal`() {
-        assertTrue(canonicalVideoPlanV2Marker(" video_plan_v2 "))
-        assertFalse(canonicalVideoPlanV2Marker("VIDEO_PLAN_V2"))
-        assertFalse(canonicalVideoPlanV2Marker("Video_Plan_V2"))
-
-        val trimmed = SimulaApiClient.adLoadResultFromResponse(
-            json.decodeFromString(
-                """{"video_plan_version":" video_plan_v2 ","creative":{"type":"video","url":"https://cdn.example/v.mp4","clip_index":0}}""",
+    fun `stitched segment boundaries preserve canonical values with one millisecond tolerance`() {
+        val accepted = validatedVideoSegments(
+            listOf(
+                ApiVideoSegment(0, "ugc", 0.0, 2.5),
+                ApiVideoSegment(1, "brand", 2.501, 5.0),
             ),
         )
-        val primary = SimulaApiClient.adLoadResultFromResponse(
-            json.decodeFromString(
-                """{"video_plan_version":"VIDEO_PLAN_V2","creative":{"type":"video","url":"https://cdn.example/v.mp4","clip_index":0}}""",
-            ),
+        assertEquals(2.5, accepted[1].startSeconds, 0.0)
+        assertTrue(
+            validatedVideoSegments(
+                listOf(
+                    ApiVideoSegment(0, "ugc", 0.0, 2.0),
+                    ApiVideoSegment(1, "brand", 2.0011, 3.0),
+                ),
+            ).isEmpty(),
         )
-        val fallback = SimulaApiClient.fallbackAdsFromResponse(
-            json.decodeFromString(
-                """{"video_plan_version":"VIDEO_PLAN_V2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
-            ),
-        ).single()
-
-        assertTrue(trimmed.videoPlanV2)
-        assertTrue(requireNotNull(trimmed.creative).isVideoPlanV2)
-        assertFalse(primary.videoPlanV2)
-        assertFalse(requireNotNull(primary.creative).isVideoPlanV2)
-        assertFalse(fallback.videoPlanV2)
-        assertFalse(fallback.isVideoPlanV2)
+        assertTrue(
+            validatedVideoSegments(listOf(ApiVideoSegment(0, "x".repeat(65), 0.0, 1.0))).isEmpty(),
+        )
+        assertTrue(
+            "end must exceed the supplied start before canonicalization",
+            validatedVideoSegments(
+                listOf(
+                    ApiVideoSegment(0, "ugc", 0.0, 2.5),
+                    ApiVideoSegment(1, "brand", 2.5009, 2.5008),
+                ),
+            ).isEmpty(),
+        )
     }
 
     @Test
-    fun `clip and alias markers cannot activate fallback v2 slots`() {
-        val payloads = listOf(
-            """{"ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
-            """{"plan_version":"video_plan_v2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
-            """{"creative_plan_version":"video_plan_v2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
-            """{"video_plan_v2":true,"ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
+    fun `unit end two tone and contract overlay defaults decode canonically`() {
+        val response = json.decodeFromString<RewardedInitApiResponse>(
+            """{"video_contract":2,"ad_behavior":{
+                "reward":{"earn_at":"unit_end"},
+                "progress_bar":{"style":"two_tone"},
+                "skoverlay":{"delay_seconds":99}
+            }}""",
         )
+        val behavior = response.adBehavior.toDomain(videoContract2 = true)
+        assertEquals(RewardEarnAt.UNIT_END, behavior?.reward?.earnAt)
+        assertEquals(ProgressBarStyle.TWO_TONE, behavior?.progressBar?.style)
+        assertEquals(3, behavior?.skoverlay?.delaySeconds)
 
-        payloads.forEach { payload ->
-            val ad = SimulaApiClient.fallbackAdsFromResponse(
-                json.decodeFromString<FallbackAdsApiResponse>(payload),
-            ).single()
-            assertFalse(ad.videoPlanV2)
-            assertFalse(ad.isVideoPlanV2)
-        }
-    }
+        val legacy = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"skoverlay":{"delay_seconds":300}}}""",
+        ).adBehavior.toDomain(videoContract2 = false)
+        assertEquals(300, legacy?.skoverlay?.delaySeconds)
 
-    @Test
-    fun `primary playable keeps presentation v2 scope for a valid v2 fallback without becoming a video slot`() {
-        val primary = SimulaApiClient.adLoadResultFromResponse(
-            json.decodeFromString(
-                """{"video_plan_version":"video_plan_v2","creative":{"type":"playable","clip_index":0},"rendered_html":"<html/>"}""",
-            ),
-        )
-        val fallback = SimulaApiClient.fallbackAdsFromResponse(
-            json.decodeFromString(
-                """{"video_plan_version":"video_plan_v2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0}]}""",
-            ),
-        ).single()
-
-        assertTrue(primary.videoPlanV2)
-        assertFalse(requireNotNull(primary.creative).isVideoPlanV2)
-        assertNull(primary.creative?.planVersion)
-        assertTrue(fallback.videoPlanV2)
-        assertTrue(fallback.isVideoPlanV2)
-    }
-
-    @Test
-    fun `malformed canonical marker and index degrade primary and fallback slots to v1`() {
-        val primary = SimulaApiClient.adLoadResultFromResponse(
-            json.decodeFromString(
-                """{"video_plan_version":{},"creative":{"type":"video","url":"https://cdn.example/v.mp4","clip_index":"bad"}}""",
-            ),
-        )
-        val fallback = SimulaApiClient.fallbackAdsFromResponse(
-            json.decodeFromString(
-                """{"video_plan_version":"video_plan_v2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":"bad"}]}""",
-            ),
-        ).single()
-
-        assertFalse(primary.videoPlanV2)
-        assertFalse(requireNotNull(primary.creative).isVideoPlanV2)
-        assertFalse(fallback.isVideoPlanV2)
-    }
-
-    @Test
-    fun `Android v2 fallback skoverlay defaults disabled but explicit true decodes`() {
-        fun overlay(adBehavior: String?): ad.simula.ad.sdk.model.SkOverlayConfig? {
-            val behavior = adBehavior?.let { ",\"ad_behavior\":$it" }.orEmpty()
-            val response = json.decodeFromString<FallbackAdsApiResponse>(
-                """{"video_plan_version":"video_plan_v2","ads":[{"ad_id":"v","type":"video","url":"https://cdn.example/v.mp4","clip_index":0$behavior}]}""",
+        listOf("-1", "61", "\"7\"", "{}", "null").forEach { value ->
+            val primary = json.decodeFromString<AdLoadApiResponse>(
+                """{"video_contract":2,"ad_behavior":{"skoverlay":{"delay_seconds":$value}}}""",
+            ).adBehavior.toDomain(videoContract2 = true)
+            val fallback = fallbackSkOverlayConfig(
+                json.parseToJsonElement("""{"skoverlay":{"delay_seconds":$value}}"""),
+                videoContract2 = true,
             )
-            return SimulaApiClient.fallbackAdsFromResponse(response).single().skoverlay
+            assertEquals(3, primary?.skoverlay?.delaySeconds)
+            assertEquals(3, fallback?.delaySeconds)
         }
-
-        assertFalse(requireNotNull(overlay(null)).enabled)
-        assertFalse(requireNotNull(overlay("{\"skoverlay\":{\"delay_seconds\":5}}")).enabled)
-        assertTrue(requireNotNull(overlay("{\"skoverlay\":{\"enabled\":true}}")).enabled)
-    }
-
-    @Test
-    fun `clip index is bounded to backend ordinals`() {
-        val response = json.decodeFromString<FallbackAdsApiResponse>(
-            """{"ads":[
-                {"ad_id":"v","type":"video","url":"https://cdn.example/video.mp4","clip_index":3}
-            ]}""",
-        )
-        val ad = SimulaApiClient.fallbackAdsFromResponse(response).single()
-
-        assertNull(ad.clipIndex)
-        assertFalse(ad.isVideoPlanV2)
+        listOf(0, 60).forEach { value ->
+            val valid = json.decodeFromString<AdLoadApiResponse>(
+                """{"video_contract":2,"ad_behavior":{"skoverlay":{"delay_seconds":$value}}}""",
+            ).adBehavior.toDomain(videoContract2 = true)
+            assertEquals(value, valid?.skoverlay?.delaySeconds)
+        }
     }
 
     @Test
@@ -592,8 +529,22 @@ class ApiModelsSerializationTest {
         val ads = SimulaApiClient.fallbackAdsFromResponse(response)
 
         assertEquals(listOf(0, 2, 3), response.ads.map { it.sourceIndex })
-        assertEquals(listOf("first", "bad", "later"), ads.map { it.adId })
-        assertEquals(listOf(0, 2, 3), ads.map { it.sourceIndex })
+        assertEquals(listOf("first", "bad"), ads.map { it.adId })
+        assertEquals(listOf(0, 2), ads.map { it.sourceIndex })
+    }
+
+    @Test
+    fun `fourth video segment invalidates before segment mapping`() {
+        val creative = json.decodeFromString<ApiCreative>(
+            """{"segments":[
+                {"clip_index":0,"video_pool":"a","start_seconds":0.0,"end_seconds":1.0},
+                {"clip_index":1,"video_pool":"b","start_seconds":1.0,"end_seconds":2.0},
+                {"clip_index":2,"video_pool":"c","start_seconds":2.0,"end_seconds":3.0},
+                {"clip_index":3,"video_pool":"d","start_seconds":3.0,"end_seconds":4.0}
+            ]}""",
+        )
+
+        assertTrue(creative.segments.isEmpty())
     }
 
     @Test

@@ -190,7 +190,7 @@ class RewardedNavigationPolicyTest {
             interaction: ad.simula.ad.sdk.network.ClickInteraction,
             onTelemetryPersisted: () -> Unit,
         ) = onTelemetryPersisted()
-        override fun notifyClicked() = Unit
+        override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) = Unit
         override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
         override fun onRewardCompleted(
             earned: Boolean,
@@ -204,6 +204,113 @@ class RewardedNavigationPolicyTest {
         assertEquals(false, rewardedDismissalDisplayAdmitted(false, previouslyDisplayed = false))
         assertEquals(true, rewardedDismissalDisplayAdmitted(false, previouslyDisplayed = true))
         assertEquals(true, rewardedDismissalDisplayAdmitted(true, previouslyDisplayed = false))
+    }
+
+    @Test
+    fun `recreated displayed video failure exits unavailable content instead of dead black state`() {
+        val presentation = RewardedPresentation(
+            creative = ad.simula.ad.sdk.model.Creative(type = ad.simula.ad.sdk.model.CreativeType.VIDEO),
+            impressionId = "serve",
+            apiKey = "key",
+            callbacks = NoOpRewardedCallbacks,
+        ).also { it.displayedReported = true }
+        val recreatedDisplayAdmitted = presentation.displayedReported
+
+        assertFalse(videoPreFirstFrameEscapeAvailable(isVideo = true, recreatedDisplayAdmitted))
+        assertEquals(
+            RewardedUnavailableCreativeAction.EXIT,
+            rewardedUnavailableCreativeAction(
+                isVideo = true,
+                displayAdmitted = recreatedDisplayAdmitted,
+                creativeUnavailable = true,
+                clickHandoffPending = false,
+                storeVisitPending = false,
+            ),
+        )
+        assertTrue(rewardedDismissalDisplayAdmitted(recreatedDisplayAdmitted, presentation.displayedReported))
+    }
+
+    @Test
+    fun `fresh pre frame rewarded failure keeps back and close escape actionable`() {
+        assertEquals(
+            RewardedUnavailableCreativeAction.ESCAPE,
+            rewardedUnavailableCreativeAction(
+                isVideo = true,
+                displayAdmitted = false,
+                creativeUnavailable = true,
+                clickHandoffPending = false,
+                storeVisitPending = false,
+            ),
+        )
+        assertEquals(
+            RewardedUnavailableCreativeAction.WAIT,
+            rewardedUnavailableCreativeAction(
+                isVideo = true,
+                displayAdmitted = false,
+                creativeUnavailable = true,
+                clickHandoffPending = true,
+                storeVisitPending = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `whole unit callbacks close earn enqueue then preload`() {
+        val events = mutableListOf<String>()
+
+        dispatchRewardedWholeUnitCompletion(
+            earned = true,
+            completionReason = RewardCompletionReason.VIDEO_COMPLETED,
+            onClosed = { events += "closed" },
+            onRewardCompleted = {
+                events += "earned"
+                events += "durable_enqueue"
+            },
+            onAutoPreload = { events += "auto_preload" },
+        )
+
+        assertEquals(listOf("closed", "earned", "durable_enqueue", "auto_preload"), events)
+    }
+
+    @Test
+    fun `publisher load from close suppresses colliding sdk auto preload until after earned`() {
+        var publisherLoadStarted = false
+        val events = mutableListOf<String>()
+
+        dispatchRewardedWholeUnitCompletion(
+            earned = true,
+            completionReason = RewardCompletionReason.DURATION_ELAPSED,
+            onClosed = {
+                events += "closed"
+                // Models a publisher synchronously calling ad.load() from onAdClosed.
+                publisherLoadStarted = true
+                events += "publisher_load"
+            },
+            onRewardCompleted = {
+                events += "earned"
+                events += "durable_enqueue"
+            },
+            onAutoPreload = {
+                if (!publisherLoadStarted) events += "auto_preload"
+            },
+        )
+
+        assertEquals(listOf("closed", "publisher_load", "earned", "durable_enqueue"), events)
+    }
+
+    @Test
+    fun `nonrewarded whole unit still closes then auto preloads`() {
+        val events = mutableListOf<String>()
+
+        dispatchRewardedWholeUnitCompletion(
+            earned = false,
+            completionReason = null,
+            onClosed = { events += "closed" },
+            onRewardCompleted = { events += "unexpected_reward" },
+            onAutoPreload = { events += "auto_preload" },
+        )
+
+        assertEquals(listOf("closed", "auto_preload"), events)
     }
 
     @Test

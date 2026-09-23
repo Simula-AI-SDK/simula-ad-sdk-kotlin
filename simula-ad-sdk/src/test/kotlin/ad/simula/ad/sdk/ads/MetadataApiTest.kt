@@ -89,7 +89,7 @@ class MetadataApiTest {
                     interaction: ad.simula.ad.sdk.network.ClickInteraction,
                     onTelemetryPersisted: () -> Unit,
                 ) = Unit
-                override fun notifyClicked() = Unit
+                override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) = Unit
                 override fun onClosed() = Unit
             },
             metadata = snapshot,
@@ -108,7 +108,7 @@ class MetadataApiTest {
                     interaction: ad.simula.ad.sdk.network.ClickInteraction,
                     onTelemetryPersisted: () -> Unit,
                 ) = Unit
-                override fun notifyClicked() = Unit
+                override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) = Unit
                 override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
                 override fun onRewardCompleted(
                     earned: Boolean,

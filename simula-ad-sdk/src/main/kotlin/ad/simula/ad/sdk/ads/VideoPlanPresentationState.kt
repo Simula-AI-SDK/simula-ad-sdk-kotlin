@@ -110,7 +110,7 @@ internal data class VideoPlaybackRegistration(
     val retainedTerminalOutcome: VideoPlaybackTerminalOutcome?,
 )
 
-/** State shared by every slot in one resolved V2 presentation. */
+/** State shared by the primary contract-2 playback and its ordinary end-screen presentation. */
 internal class VideoPlanPresentationState(
     videoPlanV2: Boolean = false,
     private val clockMs: () -> Long = SystemClock::elapsedRealtime,
@@ -147,12 +147,6 @@ internal class VideoPlanPresentationState(
     private var currentPlaybackGeneration: Long? = null
     private var currentPlaybackSlotIdentity: VideoPlaybackSlotIdentity? = null
     private var terminalOutcome: VideoPlaybackTerminalOutcome? = null
-
-    @Synchronized
-    fun activateVideoPlanV2() {
-        active = true
-        audio.activateVideoPlanV2()
-    }
 
     @Synchronized
     fun registerPlaybackGeneration(
