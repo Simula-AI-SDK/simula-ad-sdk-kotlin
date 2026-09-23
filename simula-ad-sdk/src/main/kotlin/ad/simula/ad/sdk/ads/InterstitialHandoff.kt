@@ -49,7 +49,20 @@ internal fun notifyPublisherClick(callback: () -> Unit) {
     runCatching(callback)
 }
 
-internal fun invalidateReadyLeaseAfterLaunch(launched: Boolean): Boolean = !launched
+internal inline fun launchWithHandoff(
+    publish: () -> Unit,
+    launch: () -> Unit,
+    rollback: () -> Unit,
+): Boolean {
+    publish()
+    return try {
+        launch()
+        true
+    } catch (_: Exception) {
+        runCatching(rollback)
+        false
+    }
+}
 
 internal fun notifyPublisherClickForClaim(
     claim: ClickInteractionClaim?,
@@ -216,5 +229,10 @@ internal object InterstitialHandoff {
     fun remove(token: String) {
         pending.remove(token)?.cancelPendingClickHandoff()
         FullscreenPresentationRegistry.release("interstitial:$token")
+    }
+
+    fun recoverAfterLaunchFailure(token: String): InterstitialPresentation? {
+        FullscreenPresentationRegistry.release("interstitial:$token")
+        return pending.remove(token)
     }
 }

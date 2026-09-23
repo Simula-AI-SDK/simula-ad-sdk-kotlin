@@ -208,12 +208,6 @@ class VideoContract2PolicyTest {
     }
 
     @Test
-    fun `failed activity launch invalidates ready lease ownership`() {
-        assertTrue(invalidateReadyLeaseAfterLaunch(launched = false))
-        assertFalse(invalidateReadyLeaseAfterLaunch(launched = true))
-    }
-
-    @Test
     fun `unit end authority survives two activity generations and claims once`() {
         val presentation = unitEndPresentation()
 

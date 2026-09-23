@@ -330,4 +330,9 @@ internal object RewardedHandoff {
         pending.remove(token)?.cancelPendingClickHandoff()
         FullscreenPresentationRegistry.release("rewarded:$token")
     }
+
+    fun recoverAfterLaunchFailure(token: String): RewardedPresentation? {
+        FullscreenPresentationRegistry.release("rewarded:$token")
+        return pending.remove(token)
+    }
 }

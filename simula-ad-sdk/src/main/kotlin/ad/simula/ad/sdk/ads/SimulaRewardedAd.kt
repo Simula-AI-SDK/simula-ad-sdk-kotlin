@@ -210,41 +210,25 @@ class SimulaRewardedAd(val adUnitId: String) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
-                val videoLease = if (ad.creative.type == CreativeType.VIDEO) {
-                    VideoAssetCache.acquire(SimulaAds.appContext, ad.creative.url)
-                        ?: run {
+                val published = if (ad.creative.type == CreativeType.VIDEO) {
+                    when (acquireVideoLeaseForReady(
+                        acquire = { VideoAssetCache.acquire(SimulaAds.appContext, ad.creative.url) },
+                        isCurrent = { generation == loadGeneration },
+                        publishReady = { ownership ->
+                            publishReadyOnMain(generation, ad, metadata, session, ownership)
+                        },
+                    )) {
+                        VideoReadyLeaseResult.READY -> true
+                        VideoReadyLeaseResult.STALE -> false
+                        VideoReadyLeaseResult.UNAVAILABLE -> {
                             failLoadOnMain(generation, SimulaAdError.NoFill)
-                            return@launch
+                            false
                         }
-                } else null
-                if (generation != loadGeneration) {
-                    videoLease?.release()
-                    return@launch
-                }
-                withContext(Dispatchers.Main) {
-                    if (generation != loadGeneration) {
-                        videoLease?.release()
-                        return@withContext
                     }
-                    recordAcceptedLoadTelemetry(
-                        experiment = ad.experiment,
-                        applyExperiment = Telemetry::setExperiment,
-                    ) {
-                        Telemetry.recordLifecycle(
-                            stage = "load_success",
-                            adFormat = AD_FORMAT,
-                            adUnitId = adUnitId,
-                            adId = ad.impressionId,
-                            serveId = ad.impressionId,
-                            durationMs = elapsedSinceLoad(),
-                            errorCode = null,
-                        )
-                    }
-                    sessionId = session
-                    impressionId = ad.impressionId
-                    state = State.Ready(ad, videoLease, metadata, SystemClock.elapsedRealtime())
-                    runCatching { listener?.onAdLoaded(this@SimulaRewardedAd) }
+                } else {
+                    publishReadyOnMain(generation, ad, metadata, session, videoOwnership = null)
                 }
+                if (!published) return@launch
                 scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
                 if (generation != loadGeneration) return@launch
@@ -355,9 +339,7 @@ class SimulaRewardedAd(val adUnitId: String) {
         }
 
         val token = UUID.randomUUID().toString()
-        RewardedHandoff.put(
-            token,
-            RewardedPresentation(
+        val presentation = RewardedPresentation(
                 renderedHtml = PREVIEW_MINIGAME_HTML,
                 creative = Creative(type = CreativeType.PLAYABLE),
                 impressionId = "", // empty → no impression tracked
@@ -408,10 +390,13 @@ class SimulaRewardedAd(val adUnitId: String) {
                 adBehavior = behavior,
                 trackingUrl = PREVIEW_TRACKING_URL,
                 destination = "appstore",
-            ),
-        )
-        if (!launchActivity(token, activity)) {
-            RewardedHandoff.remove(token)
+            )
+        if (!launchWithHandoff(
+                publish = { RewardedHandoff.put(token, presentation) },
+                launch = { launchActivity(token, activity) },
+                rollback = { RewardedHandoff.remove(token) },
+            )
+        ) {
             failShow(SimulaAdError.NoPresentationContext)
             return
         }
@@ -450,9 +435,7 @@ class SimulaRewardedAd(val adUnitId: String) {
 
         val token = UUID.randomUUID().toString()
         showStartNanos = System.nanoTime()
-        RewardedHandoff.put(
-            token,
-            RewardedPresentation(
+        val presentation = RewardedPresentation(
                 renderedHtml = ad.renderedHtml,
                 creative = ad.creative,
                 videoContract2 = ad.videoContract2,
@@ -468,13 +451,14 @@ class SimulaRewardedAd(val adUnitId: String) {
                 adValue = ad.adValue,
                 metadata = ready.metadata,
                 videoLease = ready.videoLease,
-            ),
-        )
+            )
 
-        val launched = launchActivity(token, activity)
-        if (invalidateReadyLeaseAfterLaunch(launched)) {
-            RewardedHandoff.remove(token)
-            state = State.Idle
+        if (!launchWithHandoff(
+                publish = { RewardedHandoff.put(token, presentation) },
+                launch = { launchActivity(token, activity) },
+                rollback = { RewardedHandoff.recoverAfterLaunchFailure(token) },
+            )
+        ) {
             failShow(SimulaAdError.NoPresentationContext)
             return
         }
@@ -670,15 +654,40 @@ class SimulaRewardedAd(val adUnitId: String) {
         }
     }
 
-    private fun launchActivity(token: String, activity: Activity): Boolean {
-        return try {
-            val intent = Intent(activity, SimulaRewardedActivity::class.java)
-                .putExtra(SimulaRewardedActivity.EXTRA_TOKEN, token)
-            activity.startActivity(intent)
-            true
-        } catch (e: Exception) {
-            false
+    private fun launchActivity(token: String, activity: Activity) {
+        val intent = Intent(activity, SimulaRewardedActivity::class.java)
+            .putExtra(SimulaRewardedActivity.EXTRA_TOKEN, token)
+        activity.startActivity(intent)
+    }
+
+    private suspend fun publishReadyOnMain(
+        generation: Int,
+        ad: SimulaApiClient.RewardedInitResult,
+        metadata: Map<String, String>?,
+        loadedSessionId: String,
+        videoOwnership: VideoReadyLeaseOwnership?,
+    ): Boolean = withContext(Dispatchers.Main) {
+        if (generation != loadGeneration) return@withContext false
+        recordAcceptedLoadTelemetry(
+            experiment = ad.experiment,
+            applyExperiment = Telemetry::setExperiment,
+        ) {
+            Telemetry.recordLifecycle(
+                stage = "load_success",
+                adFormat = AD_FORMAT,
+                adUnitId = adUnitId,
+                adId = ad.impressionId,
+                serveId = ad.impressionId,
+                durationMs = elapsedSinceLoad(),
+                errorCode = null,
+            )
         }
+        sessionId = loadedSessionId
+        impressionId = ad.impressionId
+        state = State.Ready(ad, videoOwnership?.lease, metadata, SystemClock.elapsedRealtime())
+        videoOwnership?.transferToReady()
+        runCatching { listener?.onAdLoaded(this@SimulaRewardedAd) }
+        true
     }
 
     private fun failLoad(error: SimulaAdError) {

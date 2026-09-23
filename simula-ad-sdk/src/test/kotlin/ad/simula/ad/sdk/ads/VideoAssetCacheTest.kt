@@ -24,6 +24,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.job
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.advanceTimeBy
@@ -443,6 +445,124 @@ class VideoAssetCacheTest {
     }
 
     @Test
+    fun `load cancellation immediately after acquire releases its owned lease once`() = runTest {
+        val releases = AtomicInteger()
+        val published = AtomicBoolean(false)
+        val result = async {
+            acquireVideoLeaseForReady(
+                acquire = {
+                    VideoAssetLease(temporaryFolder.newFile("cancelled-ready.mp4")) {
+                        releases.incrementAndGet()
+                    }
+                },
+                afterAcquire = { currentCoroutineContext().job.cancel() },
+                isCurrent = { true },
+                publishReady = {
+                    published.set(true)
+                },
+            )
+        }
+
+        runCurrent()
+        result.join()
+
+        assertEquals(1, releases.get())
+        assertFalse(published.get())
+    }
+
+    @Test
+    fun `stale load generation releases acquired ready lease once`() = runTest {
+        val releases = AtomicInteger()
+        var current = true
+
+        val result = acquireVideoLeaseForReady(
+            acquire = {
+                VideoAssetLease(temporaryFolder.newFile("stale-ready.mp4")) {
+                    releases.incrementAndGet()
+                }.also { current = false }
+            },
+            isCurrent = { current },
+            publishReady = { error("stale generation must not publish Ready") },
+        )
+
+        assertEquals(VideoReadyLeaseResult.STALE, result)
+        assertEquals(1, releases.get())
+    }
+
+    @Test
+    fun `Ready publication failure releases acquired lease once`() = runTest {
+        val releases = AtomicInteger()
+
+        val failure = runCatching {
+            acquireVideoLeaseForReady(
+                acquire = {
+                    VideoAssetLease(temporaryFolder.newFile("rejected-ready.mp4")) {
+                        releases.incrementAndGet()
+                    }
+                },
+                isCurrent = { true },
+                publishReady = { error("Ready publication failed") },
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals(1, releases.get())
+    }
+
+    @Test
+    fun `successful Ready publication owns lease until Ready releases it`() = runTest {
+        val releases = AtomicInteger()
+        var readyLease: VideoAssetLease? = null
+
+        val result = acquireVideoLeaseForReady(
+            acquire = {
+                VideoAssetLease(temporaryFolder.newFile("published-ready.mp4")) {
+                    releases.incrementAndGet()
+                }
+            },
+            isCurrent = { true },
+            publishReady = { ownership ->
+                readyLease = ownership.lease
+                ownership.transferToReady()
+            },
+        )
+
+        assertEquals(VideoReadyLeaseResult.READY, result)
+        assertEquals(0, releases.get())
+        readyLease?.release()
+        readyLease?.release()
+        assertEquals(1, releases.get())
+    }
+
+    @Test
+    fun `cancellation after Ready transfer leaves lease owned by Ready`() = runTest {
+        val releases = AtomicInteger()
+        var readyLease: VideoAssetLease? = null
+        val result = async {
+            acquireVideoLeaseForReady(
+                acquire = {
+                    VideoAssetLease(temporaryFolder.newFile("cancelled-after-ready.mp4")) {
+                        releases.incrementAndGet()
+                    }
+                },
+                isCurrent = { true },
+                publishReady = { ownership ->
+                    readyLease = ownership.lease
+                    ownership.transferToReady()
+                    currentCoroutineContext().job.cancel()
+                },
+            )
+        }
+
+        runCurrent()
+        result.join()
+
+        assertEquals(0, releases.get())
+        readyLease?.release()
+        assertEquals(1, releases.get())
+    }
+
+    @Test
     fun `buffer reads reserve capacity once instead of rescanning`() = runTest {
         val capacityChecks = AtomicInteger()
         val bytes = DEFAULT_BUFFER_SIZE * 3L
@@ -521,6 +641,143 @@ class VideoAssetCacheTest {
         activeLease.release()
         downloaded?.release()
         advanceUntilIdle()
+    }
+
+    @Test
+    fun `same URL auto preload before final delete claim rescues canonical lease`() = runBlocking {
+        val directory = temporaryFolder.newFolder("reacquire-before-delete-claim")
+        val url = "https://cdn.example/reacquire-before.mp4"
+        sparseAsset(directory, url, 3L, modified = 1L)
+        val beforeClaim = CountDownLatch(1)
+        val allowClaim = CountDownLatch(1)
+        val holdFirstClaim = AtomicBoolean(true)
+        val opens = AtomicInteger()
+        val dispatcher = Executors.newFixedThreadPool(2).asCoroutineDispatcher()
+        val managerScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            elapsedRealtimeMs = { System.nanoTime() / 1_000_000L },
+            ioDispatcher = dispatcher,
+            scope = managerScope,
+            resolveHost = publicDns,
+            openConnection = {
+                opens.incrementAndGet()
+                FakeConnection(ByteArrayInputStream(byteArrayOf(1, 2, 3)), 3L)
+            },
+            beforeFinalLeaseDeleteClaim = {
+                if (holdFirstClaim.compareAndSet(true, false)) {
+                    beforeClaim.countDown()
+                    allowClaim.await(5, TimeUnit.SECONDS)
+                }
+            },
+        )
+        try {
+            val initial = requireNotNull(manager.acquire(url))
+            initial.release()
+            assertTrue(beforeClaim.await(2, TimeUnit.SECONDS))
+
+            val preload = async(Dispatchers.Default) { manager.acquire(url) }
+            val replacement = requireNotNull(preload.await())
+            assertEquals(2, manager.activeLeaseCount(url))
+            allowClaim.countDown()
+
+            val releaseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (manager.activeLeaseCount(url) != 1 && System.nanoTime() < releaseDeadline) Thread.yield()
+            assertTrue(replacement.file.exists())
+            assertEquals(1, manager.activeLeaseCount(url))
+            assertEquals(0, opens.get())
+            replacement.release()
+        } finally {
+            allowClaim.countDown()
+            managerScope.cancel()
+            dispatcher.close()
+        }
+    }
+
+    @Test
+    fun `same URL auto preload after final delete claim waits for healthy replacement`() = runBlocking {
+        val directory = temporaryFolder.newFolder("reacquire-after-delete-claim")
+        val url = "https://cdn.example/reacquire-after.mp4"
+        sparseAsset(directory, url, 3L, modified = 1L)
+        val afterClaim = CountDownLatch(1)
+        val allowDelete = CountDownLatch(1)
+        val holdFirstDelete = AtomicBoolean(true)
+        val opens = AtomicInteger()
+        val dispatcher = Executors.newFixedThreadPool(2).asCoroutineDispatcher()
+        val managerScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            elapsedRealtimeMs = { System.nanoTime() / 1_000_000L },
+            ioDispatcher = dispatcher,
+            scope = managerScope,
+            resolveHost = publicDns,
+            openConnection = {
+                opens.incrementAndGet()
+                FakeConnection(ByteArrayInputStream(byteArrayOf(4, 5, 6)), 3L)
+            },
+            afterFinalLeaseDeleteClaim = {
+                if (holdFirstDelete.compareAndSet(true, false)) {
+                    afterClaim.countDown()
+                    allowDelete.await(5, TimeUnit.SECONDS)
+                }
+            },
+        )
+        try {
+            val initial = requireNotNull(manager.acquire(url))
+            initial.release()
+            assertTrue(afterClaim.await(2, TimeUnit.SECONDS))
+
+            val preload = async(Dispatchers.Default) { manager.acquire(url) }
+            val waiterDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (manager.waiterCount(url) == 0 && System.nanoTime() < waiterDeadline) Thread.yield()
+            assertEquals(1, manager.waiterCount(url))
+            allowDelete.countDown()
+
+            val replacement = requireNotNull(preload.await())
+            assertTrue(replacement.file.exists())
+            assertEquals(1, manager.activeLeaseCount(url))
+            assertEquals(1, opens.get())
+            replacement.release()
+        } finally {
+            allowDelete.countDown()
+            managerScope.cancel()
+            dispatcher.close()
+        }
+    }
+
+    @Test
+    fun `close and same URL auto preload stress keeps exactly one valid lease`() = runBlocking {
+        val directory = temporaryFolder.newFolder("reacquire-stress")
+        val url = "https://cdn.example/reacquire-stress.mp4"
+        sparseAsset(directory, url, 3L, modified = 1L)
+        val dispatcher = Executors.newFixedThreadPool(4).asCoroutineDispatcher()
+        val managerScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            elapsedRealtimeMs = { System.nanoTime() / 1_000_000L },
+            ioDispatcher = dispatcher,
+            scope = managerScope,
+            resolveHost = publicDns,
+            openConnection = {
+                FakeConnection(ByteArrayInputStream(byteArrayOf(7, 8, 9)), 3L)
+            },
+        )
+        try {
+            var lease = requireNotNull(manager.acquire(url))
+            repeat(100) {
+                val preload = async(Dispatchers.Default) { manager.acquire(url) }
+                lease.release()
+                lease = requireNotNull(preload.await())
+                assertTrue(lease.file.exists())
+                val releaseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                while (manager.activeLeaseCount(url) != 1 && System.nanoTime() < releaseDeadline) Thread.yield()
+                assertEquals(1, manager.activeLeaseCount(url))
+            }
+            lease.release()
+        } finally {
+            managerScope.cancel()
+            dispatcher.close()
+        }
     }
 
     @Test

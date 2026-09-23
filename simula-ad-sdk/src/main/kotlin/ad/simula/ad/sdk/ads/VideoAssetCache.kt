@@ -37,7 +37,9 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -118,6 +120,52 @@ internal suspend fun acquireVideoAssetLeaseWithOwnership(
     }
 }
 
+internal enum class VideoReadyLeaseResult {
+    READY,
+    UNAVAILABLE,
+    STALE,
+}
+
+internal class VideoReadyLeaseOwnership internal constructor(
+    val lease: VideoAssetLease,
+) {
+    private val owned = AtomicBoolean(true)
+
+    fun transferToReady() {
+        owned.set(false)
+    }
+
+    internal val transferred: Boolean
+        get() = !owned.get()
+
+    internal fun releaseIfOwned() {
+        if (owned.compareAndSet(true, false)) lease.release()
+    }
+}
+
+internal suspend fun acquireVideoLeaseForReady(
+    acquire: suspend () -> VideoAssetLease?,
+    afterAcquire: suspend (VideoAssetLease) -> Unit = {},
+    isCurrent: () -> Boolean,
+    publishReady: suspend (VideoReadyLeaseOwnership) -> Unit,
+): VideoReadyLeaseResult {
+    val acquiredLease = acquire() ?: return VideoReadyLeaseResult.UNAVAILABLE
+    val ownership = VideoReadyLeaseOwnership(acquiredLease)
+    try {
+        afterAcquire(acquiredLease)
+        currentCoroutineContext().ensureActive()
+        if (!isCurrent()) return VideoReadyLeaseResult.STALE
+        return try {
+            publishReady(ownership)
+            if (ownership.transferred) VideoReadyLeaseResult.READY else VideoReadyLeaseResult.STALE
+        } catch (failure: Throwable) {
+            if (ownership.transferred) VideoReadyLeaseResult.READY else throw failure
+        }
+    } finally {
+        ownership.releaseIfOwned()
+    }
+}
+
 /** Process-wide local-only video downloader used by every native fullscreen video surface. */
 internal object VideoAssetCache {
     private val gate = Any()
@@ -164,6 +212,8 @@ internal class VideoAssetCacheManager(
     private val abortConnection: (HttpURLConnection?) -> Unit = ::abortConnectionAsync,
     private val beforePublish: () -> Unit = {},
     private val afterPublish: () -> Unit = {},
+    private val beforeFinalLeaseDeleteClaim: () -> Unit = {},
+    private val afterFinalLeaseDeleteClaim: () -> Unit = {},
 ) {
     private class DownloadControl(
         private val abortConnection: (HttpURLConnection?) -> Unit,
@@ -181,7 +231,6 @@ internal class VideoAssetCacheManager(
         val generation: Long,
         val control: DownloadControl,
         var waiters: Int = 0,
-        var acceptingWaiters: Boolean = true,
     ) {
         lateinit var deferred: Deferred<File?>
     }
@@ -227,7 +276,6 @@ internal class VideoAssetCacheManager(
             val pendingWaiters = flights.values.sumOf(Flight::waiters)
             val existing = flights[name]
             if (pendingWaiters >= MAX_PENDING_ACQUIRES) return null
-            if (existing != null && !existing.acceptingWaiters) return null
             existing ?: Flight(
                 generation = nextGeneration.incrementAndGet(),
                 control = DownloadControl(abortConnection),
@@ -261,14 +309,12 @@ internal class VideoAssetCacheManager(
             val remainingMs = runCatching { remainingTimeoutMs(deadlineMs).toLong() }.getOrNull()
                 ?: return null
             val file = withTimeoutOrNull(remainingMs) { flight.deferred.await() } ?: return null
-            return synchronized(gate) {
-                if (evicting.contains(name)) null else leaseLocked(name, file)
-            }
+            return leaseCanonicalFile(name, file)
         } finally {
             val closeFlight = synchronized(gate) {
                 flight.waiters = (flight.waiters - 1).coerceAtLeast(0)
                 if (flight.waiters == 0) {
-                    flight.acceptingWaiters = false
+                    flights.remove(name, flight)
                     if (publicationGenerations[name] == flight.generation) {
                         publicationGenerations.remove(name)
                     }
@@ -280,8 +326,7 @@ internal class VideoAssetCacheManager(
                     flight.control.cancel()
                     flight.deferred.cancel()
                 }
-                cleanupUnclaimedPublication(name, flight.generation)
-                synchronized(gate) { flights.remove(name, flight) }
+                cleanupUnclaimedPublication(name)
             }
         }
     }
@@ -296,6 +341,11 @@ internal class VideoAssetCacheManager(
         flights.values.sumOf(Flight::waiters)
     }
 
+    internal fun activeLeaseCount(rawUrl: String): Int {
+        if (rawUrl.length > VIDEO_URL_MAX_LENGTH) return 0
+        return synchronized(gate) { leaseCounts[opaqueVideoAssetName(rawUrl)] ?: 0 }
+    }
+
     private suspend fun resolveFromCacheOrDownload(
         url: String,
         name: String,
@@ -305,10 +355,7 @@ internal class VideoAssetCacheManager(
     ): File? {
         if (!establishCapacitySnapshot()) return null
         val destination = File(directory, name)
-        if (isCompleteAsset(destination)) {
-            recordKnownFile(destination, complete = true)
-            return destination
-        }
+        completeCanonicalFile(name, destination)?.let { return it }
 
         ensureWithinDeadline(deadlineMs, control)
         SimulaHttp.validatePublicRedirectTarget(url, millisToNanos(deadlineMs), hostResolver)
@@ -341,10 +388,7 @@ internal class VideoAssetCacheManager(
         var reservation = 0L
         var completed = false
         try {
-            if (isCompleteAsset(destination)) {
-                recordKnownFile(destination, complete = true)
-                return destination
-            }
+            completeCanonicalFile(name, destination)?.let { return it }
             deadlineTask = deadlineScheduler.schedule(remainingTimeoutMs(deadlineMs).toLong()) {
                 deadlineExpired.set(true)
                 control.cancel()
@@ -463,27 +507,46 @@ internal class VideoAssetCacheManager(
         leaseCounts[name] = (leaseCounts[name] ?: 0) + 1
         return VideoAssetLease(file) {
             scope.launch(ioDispatcher) {
-                val shouldDelete = synchronized(gate) {
-                    val remaining = (leaseCounts[name] ?: 1) - 1
-                    if (remaining > 0) {
-                        leaseCounts[name] = remaining
-                        false
-                    } else {
-                        leaseCounts.remove(name)
-                        if (!flights.containsKey(name) && evicting.add(name)) true else false
+                runCatching { beforeFinalLeaseDeleteClaim() }
+                synchronized(publicationLock(name)) {
+                    val shouldDelete = synchronized(gate) {
+                        val remaining = (leaseCounts[name] ?: 1) - 1
+                        if (remaining > 0) {
+                            leaseCounts[name] = remaining
+                            false
+                        } else {
+                            leaseCounts.remove(name)
+                            if (!flights.containsKey(name) && evicting.add(name)) true else false
+                        }
                     }
-                }
-                if (shouldDelete) {
-                    deleteFile(file)
-                    synchronized(gate) {
-                        removeKnownFileLocked(name)
-                        canonicalGenerations.remove(name)
-                        evicting.remove(name)
+                    if (shouldDelete) {
+                        runCatching { afterFinalLeaseDeleteClaim() }
+                        deleteFile(file)
+                        synchronized(gate) {
+                            removeKnownFileLocked(name)
+                            canonicalGenerations.remove(name)
+                            evicting.remove(name)
+                        }
                     }
                 }
             }
         }
     }
+
+    private fun completeCanonicalFile(name: String, file: File): File? = synchronized(publicationLock(name)) {
+        if (synchronized(gate) { evicting.contains(name) }) return@synchronized null
+        if (!isCompleteAsset(file)) return@synchronized null
+        recordKnownFile(file, complete = true)
+        file
+    }
+
+    private fun leaseCanonicalFile(name: String, file: File): VideoAssetLease? =
+        synchronized(publicationLock(name)) {
+            if (!isCompleteAsset(file)) return@synchronized null
+            synchronized(gate) {
+                if (evicting.contains(name)) null else leaseLocked(name, file)
+            }
+        }
 
     private suspend fun establishCapacitySnapshot(): Boolean {
         invalidateStaleScan()
@@ -583,9 +646,22 @@ internal class VideoAssetCacheManager(
         } else {
             modified < cutoff || !complete
         }
-        if (!protected && removable && deleteFile(file)) {
-            synchronized(gate) { removeKnownFileLocked(name) }
-            return
+        if (!protected && removable) {
+            val deleted = synchronized(publicationLock(assetName)) {
+                val claimed = synchronized(gate) {
+                    !leaseCounts.containsKey(assetName) && !flights.containsKey(assetName) &&
+                        !activeReservations.containsKey(name) && evicting.add(assetName)
+                }
+                if (!claimed) false else try {
+                    deleteFile(file)
+                } finally {
+                    synchronized(gate) { evicting.remove(assetName) }
+                }
+            }
+            if (deleted) {
+                synchronized(gate) { removeKnownFileLocked(name) }
+                return
+            }
         }
         if (!protected || !partial) recordKnownFile(file, complete)
     }
@@ -610,7 +686,9 @@ internal class VideoAssetCacheManager(
                     .minByOrNull(CacheEntry::modifiedMs)
                     ?.also { evicting += it.file.name }
             } ?: return false
-            val deleted = deleteFile(candidate.file)
+            val deleted = synchronized(publicationLock(candidate.file.name)) {
+                deleteFile(candidate.file)
+            }
             synchronized(gate) {
                 if (deleted) removeKnownFileLocked(candidate.file.name)
                 evicting.remove(candidate.file.name)
@@ -634,7 +712,9 @@ internal class VideoAssetCacheManager(
                     .minByOrNull(CacheEntry::modifiedMs)
                     ?.also { evicting += it.file.name }
             } ?: return
-            val deleted = deleteFile(candidate.file)
+            val deleted = synchronized(publicationLock(candidate.file.name)) {
+                deleteFile(candidate.file)
+            }
             synchronized(gate) {
                 if (deleted) removeKnownFileLocked(candidate.file.name)
                 evicting.remove(candidate.file.name)
@@ -711,8 +791,7 @@ internal class VideoAssetCacheManager(
         generation: Long,
         control: DownloadControl,
     ): Boolean {
-        val publicationLock = publicationLocks[(name.hashCode() and Int.MAX_VALUE) % publicationLocks.size]
-        return synchronized(publicationLock) {
+        return synchronized(publicationLock(name)) {
             val ownsPublication = synchronized(gate) {
                 publicationGenerations[name] == generation
             }
@@ -731,22 +810,24 @@ internal class VideoAssetCacheManager(
         }
     }
 
-    private fun cleanupUnclaimedPublication(name: String, generation: Long) {
-        val publicationLock = publicationLocks[(name.hashCode() and Int.MAX_VALUE) % publicationLocks.size]
-        synchronized(publicationLock) {
+    private fun cleanupUnclaimedPublication(name: String) {
+        synchronized(publicationLock(name)) {
             val shouldDelete = synchronized(gate) {
-                canonicalGenerations[name] == generation && !leaseCounts.containsKey(name)
+                !leaseCounts.containsKey(name) && !flights.containsKey(name)
             }
             if (!shouldDelete) return
             deleteFile(File(directory, name))
             synchronized(gate) {
-                if (canonicalGenerations[name] == generation && !leaseCounts.containsKey(name)) {
+                if (!leaseCounts.containsKey(name) && !flights.containsKey(name)) {
                     canonicalGenerations.remove(name)
                     removeKnownFileLocked(name)
                 }
             }
         }
     }
+
+    private fun publicationLock(name: String): Any =
+        publicationLocks[(name.hashCode() and Int.MAX_VALUE) % publicationLocks.size]
 
     private fun remainingTimeoutMs(deadlineMs: Long): Int {
         val remaining = deadlineMs - elapsedRealtimeMs()
