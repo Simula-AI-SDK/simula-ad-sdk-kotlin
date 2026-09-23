@@ -912,13 +912,27 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
+    fun `all video contracts start unmuted while v2 keeps the presentation mute choice`() {
+        for (videoPlanV2 in listOf(false, true)) {
+            val audio = VideoAudioSessionState(videoPlanV2)
+            assertFalse(audio.desiredMuted)
+            val initialMuted = initialVideoDesiredMuted(videoPlanV2, audio.desiredMuted)
+            assertFalse(initialMuted)
+            assertFalse(effectiveVideoMuted(initialMuted, audioFocusHeld = true))
+            assertTrue(effectiveVideoMuted(initialMuted, audioFocusHeld = false))
+        }
+        assertTrue(initialVideoDesiredMuted(videoPlanV2 = true, presentationDesiredMuted = true))
+        assertFalse(initialVideoDesiredMuted(videoPlanV2 = false, presentationDesiredMuted = true))
+    }
+
+    @Test
     fun `v1 backgrounding permanently remutes without changing v2 presentation preference`() {
         val presentationAudio = VideoAudioSessionState(videoPlanV2 = true)
         val v1InitialMuted = initialVideoDesiredMuted(
             videoPlanV2 = false,
             presentationDesiredMuted = presentationAudio.desiredMuted,
         )
-        assertTrue(v1InitialMuted)
+        assertFalse(v1InitialMuted)
 
         presentationAudio.updateFromTap(videoPlanV2 = false, value = true)
         assertFalse(presentationAudio.desiredMuted)

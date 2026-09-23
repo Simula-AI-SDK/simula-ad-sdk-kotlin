@@ -1161,7 +1161,7 @@ private class NativeVideoController(
         ) return
         runCatching {
             val mediaPlayer = player ?: return
-            // Acquire focus before the first rendered frame so contract 2 starts without a late volume jump.
+            // Acquire focus before the first rendered frame so every video starts without a late volume jump.
             val focusHeld = !desiredMuted && requestAudioFocus()
             applyEffectiveMuted(effectiveVideoMuted(desiredMuted, focusHeld))
             mediaPlayer.start()
