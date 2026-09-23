@@ -1219,7 +1219,7 @@ private fun FallbackAdOverlay(
             isMainFrame = true,
             hasGesture = true,
             tappedUrl = request.url,
-            creativeBaseUrl = null,
+            creativeBaseUrl = ad.creativeBaseUrl,
             trackingUrl = ctaTrackingUrl,
             destination = ctaDestination,
         )) {
@@ -1683,7 +1683,7 @@ private fun FallbackAdOverlay(
                                 isMainFrame = request.isForMainFrame,
                                 hasGesture = request.hasGesture(),
                                 tappedUrl = target,
-                                creativeBaseUrl = null,
+                                creativeBaseUrl = ad.creativeBaseUrl,
                                 trackingUrl = ctaTrackingUrl,
                                 destination = ctaDestination,
                             )) {
@@ -1809,7 +1809,7 @@ private fun FallbackAdOverlay(
                             post(::applyRendererUnavailable)
                         } else {
                             realLoadStarted = true
-                            loadDataWithBaseURL(null, inlineHtml, "text/html", "UTF-8", null)
+                            loadDataWithBaseURL(ad.creativeBaseUrl, inlineHtml, "text/html", "UTF-8", null)
                         }
                     }
                 }

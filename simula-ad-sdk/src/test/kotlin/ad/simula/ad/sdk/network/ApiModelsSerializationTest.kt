@@ -38,6 +38,23 @@ class ApiModelsSerializationTest {
     // ── Session ─────────────────────────────────────────────────────────────
 
     @Test
+    fun `fallback inline HTML retains a valid legacy origin and rejects non HTTP bases`() {
+        for ((value, expected) in listOf(
+            "\"https://api.example/iframe/serve\"" to "https://api.example/iframe/serve",
+            "\"javascript:alert(1)\"" to null,
+            "\"file:///etc/passwd\"" to null,
+            "42" to null,
+        )) {
+            val response = json.decodeFromString<FallbackAdsApiResponse>(
+                """{"ads":[{"ad_id":"a","html":"<a href='next'>Next</a>","iframe_url":$value}]}""",
+            )
+            val fallback = SimulaApiClient.fallbackAdsFromResponse(response).single()
+            assertEquals(expected, fallback.creativeBaseUrl)
+            assertTrue(fallback.renderedHtml?.contains("href='next'") == true)
+        }
+    }
+
+    @Test
     fun `contract 2 ES1 video retains segments and progress treatment while ES2 video is rejected`() {
         val response = json.decodeFromString<FallbackAdsApiResponse>(
             """{"video_contract":2,"ads":[

@@ -274,6 +274,9 @@ internal data class FallbackAdBody(
     @SerialName("rendered_html") val renderedHtml: String? = null,
     // Shipped fallback payloads used `html`; keep decode-only compatibility while preferring rendered_html.
     val html: String? = null,
+    @SerialName("iframe_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val iframeUrl: String? = null,
     val url: String? = null,
     @SerialName("poster_url") val posterUrl: String? = null,
     @Serializable(with = LenientNullableStringSerializer::class)

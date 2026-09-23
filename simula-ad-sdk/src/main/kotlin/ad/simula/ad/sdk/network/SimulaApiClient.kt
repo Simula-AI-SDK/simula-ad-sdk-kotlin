@@ -805,6 +805,7 @@ internal object SimulaApiClient {
      * screen's own impression id (drives its report overlay). */
     data class FallbackAd(
         val adId: String,
+        val creativeBaseUrl: String? = null,
         val sourceIndex: Int = 0,
         val type: CreativeType = CreativeType.PLAYABLE,
         val renderedHtml: String? = null,
@@ -848,6 +849,7 @@ internal object SimulaApiClient {
         val clipIndex = (creative?.clipIndex ?: ad.clipIndex)?.takeIf { it in 0..2 }
         return FallbackAd(
             adId = ad.adId,
+            creativeBaseUrl = admittedRemoteAssetUrl(ad.iframeUrl),
             sourceIndex = ad.sourceIndex.coerceAtLeast(0),
             type = type,
             renderedHtml = html,
