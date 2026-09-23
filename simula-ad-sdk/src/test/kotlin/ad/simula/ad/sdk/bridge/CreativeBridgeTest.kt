@@ -350,6 +350,19 @@ class CreativeBridgeTest {
     }
 
     @Test
+    fun trustedStoreSchemesUseTheSameNativeAdmissionAsClickedLinks() {
+        val valid = "market://details?id=com.example.app"
+        assertEquals(valid, trustedCtaOpen(
+            """{"type":"SIMULA_CTA_OPEN","url":"$valid","activation_nonce":"nonce"}""", "nonce",
+        )?.url)
+        for (invalid in listOf("market://evil.example?id=com.example.app", "market://details", "intent://app#Intent;component=evil;end")) {
+            assertNull(trustedCtaOpen(
+                """{"type":"SIMULA_CTA_OPEN","url":"$invalid","activation_nonce":"nonce"}""", "nonce",
+            ))
+        }
+    }
+
+    @Test
     fun trustedCtaMessageRejectsMalformedOrNonStringFields() {
         assertNull(trustedCtaOpen("malformed", "nonce"))
         assertNull(trustedCtaOpen("""{"type":"SIMULA_CTA_OPEN","url":7,"activation_nonce":"nonce"}""", "nonce"))
@@ -427,7 +440,7 @@ class CreativeBridgeTest {
         assertTrue(source.contains("new URL(url, document.baseURI).origin === origin"))
         assertTrue(source.contains("new URL(String(value), document.baseURI)"))
         val sameOriginCheck = source.indexOf(
-            "if (!url || !isExternalHttpCta(url)) { return false; }",
+            "if (!url || !isExternalCta(url)) { return false; }",
         )
         assertTrue(source.contains("return protocol === 'http:' || protocol === 'https:'"))
         val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
@@ -446,10 +459,17 @@ class CreativeBridgeTest {
         assertTrue(source.contains("protocol === 'data:'"))
         assertTrue(source.contains("protocol === 'blob:'"))
         assertTrue(source.contains("protocol === 'javascript:'"))
-        val policyCheck = source.indexOf("if (!url || !isExternalHttpCta(url)")
+        val policyCheck = source.indexOf("if (!url || !isExternalCta(url)")
         val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
         assertTrue(policyCheck >= 0)
         assertTrue(policyCheck < gestureClaim)
+    }
+
+    @Test
+    fun trustedStoreLinksAreInterceptedBeforeCreativeBubbleHandlers() {
+        val source = trustedCtaRelaySource("nonce")
+        assertTrue(source.contains("protocol === 'market:' || protocol === 'intent:'"))
+        assertTrue(source.trimEnd().endsWith("}, true);"))
     }
 
     @Test

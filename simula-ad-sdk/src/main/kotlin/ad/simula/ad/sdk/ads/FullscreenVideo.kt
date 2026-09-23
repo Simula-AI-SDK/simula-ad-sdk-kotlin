@@ -51,7 +51,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.view.Surface
 import android.view.TextureView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -370,9 +369,10 @@ internal fun FullscreenVideo(
         AndroidView(
             factory = { ctx ->
                 TextureView(ctx).also { texture ->
+                    var retainedSurface: VideoPlayerSurface? = null
                     texture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                         override fun onSurfaceTextureAvailable(value: SurfaceTexture, width: Int, height: Int) {
-                            controller.attachSurface(texture, value, width, height)
+                            retainedSurface = controller.attachSurface(texture, value, width, height)
                         }
 
                         override fun onSurfaceTextureSizeChanged(value: SurfaceTexture, width: Int, height: Int) {
@@ -381,19 +381,23 @@ internal fun FullscreenVideo(
 
                         override fun onSurfaceTextureDestroyed(value: SurfaceTexture): Boolean {
                             controller.detachSurface(texture)
-                            return true
+                            val detached = retainedSurface?.takeIf { it.texture === value }
+                            retainedSurface = null
+                            detached?.releaseView()
+                            // Native detach may still be queued behind a blocked MediaPlayer call.
+                            return detached == null
                         }
 
                         override fun onSurfaceTextureUpdated(value: SurfaceTexture) = Unit
                     }
                     texture.surfaceTexture?.takeIf { texture.isAvailable }?.let {
-                        controller.attachSurface(texture, it, texture.width, texture.height)
+                        retainedSurface = controller.attachSurface(texture, it, texture.width, texture.height)
                     }
                 }
             },
             modifier = Modifier.fillMaxSize(),
             onRelease = { texture ->
-                texture.surfaceTextureListener = null
+                // Keep the destruction listener until TextureView relinquishes the texture.
                 controller.detachSurface(texture)
             },
         )
@@ -731,7 +735,7 @@ private class NativeVideoController(
     private var renderToken = 0L
     private var player: AsyncVideoPlayer? = null
     private var textureView: TextureView? = null
-    private var surface: Surface? = null
+    private var surface: VideoPlayerSurface? = null
     private var readinessDeadline: VideoReadinessDeadline? = null
     private var lifecycleActive = false
     private var prepared = false
@@ -989,23 +993,27 @@ private class NativeVideoController(
         surface?.let(mediaPlayer::setSurface)
     }
 
-    private fun releaseUnownedSurface(value: Surface?) {
-        if (value != null) SimulaScope.launch { runCatching { value.release() } }
+    private fun releaseUnownedSurface(value: VideoPlayerSurface?) {
+        if (value != null) SimulaScope.launch { runCatching { value.releasePlayer() } }
     }
 
-    fun attachSurface(texture: TextureView, surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-        if (released) return
-        runCatching {
+    fun attachSurface(texture: TextureView, surfaceTexture: SurfaceTexture, width: Int, height: Int): VideoPlayerSurface? {
+        if (released) return null
+        surface?.takeIf { it.texture === surfaceTexture }?.let { return it }
+        return runCatching {
             textureView = texture
             surfaceWidth = width.coerceAtLeast(0)
             surfaceHeight = height.coerceAtLeast(0)
             if (player == null) releaseUnownedSurface(surface)
-            surface = Surface(surfaceTexture)
-            player?.setSurface(surface)
+            val retained = VideoPlayerSurface(surfaceTexture)
+            surface = retained
+            player?.setSurface(retained)
             applyTextureTransform()
             startIfPossible()
-        }.onFailure {
+            retained
+        }.getOrElse {
             fail(videoMediaErrorCode(prepared))
+            null
         }
     }
 
@@ -1105,9 +1113,8 @@ private class NativeVideoController(
         abandonAudioFocus()
         val detachedPlayer = player
         player = null
-        val detachedTexture = textureView
+        // TextureView's listener retains its lease until onSurfaceTextureDestroyed.
         textureView = null
-        runCatching { detachedTexture?.surfaceTextureListener = null }
         if (detachedPlayer == null) releaseUnownedSurface(surface)
         surface = null
         readinessDeadline = null

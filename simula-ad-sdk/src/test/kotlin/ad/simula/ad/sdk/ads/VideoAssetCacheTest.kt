@@ -28,6 +28,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.advanceTimeBy
@@ -1306,10 +1307,12 @@ class VideoAssetCacheTest {
         val publicationCalls = AtomicInteger()
         val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
         val managerScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val clock = TestCoroutineScheduler()
+        val callerDispatcher = StandardTestDispatcher(clock)
         val manager = VideoAssetCacheManager(
             directory = directory,
-            downloadTimeoutMs = 75L,
-            elapsedRealtimeMs = { System.nanoTime() / 1_000_000L },
+            downloadTimeoutMs = VIDEO_DOWNLOAD_TIMEOUT_MS,
+            elapsedRealtimeMs = { clock.currentTime },
             ioDispatcher = dispatcher,
             scope = managerScope,
             resolveHost = publicDns,
@@ -1327,8 +1330,13 @@ class VideoAssetCacheTest {
             },
         )
         val url = "https://cdn.example/generation.mp4"
-        val first = async(Dispatchers.Default) { manager.acquire(url) }
-        assertTrue(firstAtPublish.await(2, TimeUnit.SECONDS))
+        val first = async(callerDispatcher) { manager.acquire(url) }
+        clock.runCurrent()
+        assertTrue(firstAtPublish.await(5, TimeUnit.SECONDS))
+        // Expire only the first waiter after its worker reaches the publication barrier.
+        // The replacement keeps the normal budget, independent of CI scheduling speed.
+        clock.advanceTimeBy(VIDEO_DOWNLOAD_TIMEOUT_MS)
+        clock.runCurrent()
         assertNull(first.await())
 
         val replacement = async(Dispatchers.Default) { manager.acquire(url) }

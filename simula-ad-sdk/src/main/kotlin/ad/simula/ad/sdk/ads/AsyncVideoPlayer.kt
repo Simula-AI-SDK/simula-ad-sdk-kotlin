@@ -6,7 +6,6 @@ import android.media.MediaPlayer
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
-import android.view.Surface
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -71,7 +70,8 @@ internal class AsyncVideoPlayer private constructor() {
     private val closed = AtomicBoolean()
     private var native: MediaPlayer? = null // Owner thread only.
     private var nativeReady = false // Owner thread only.
-    private var nativeSurface: Surface? = null // Owner thread only.
+    private var nativeSurface: VideoPlayerSurface? = null
+    private val failedSurfaces = ArrayList<VideoPlayerSurface>() // Owner thread only.
     private var refreshPending = false // Main thread only.
     var duration: Int = 0; private set
     var currentPosition: Int = 0; private set
@@ -100,7 +100,7 @@ internal class AsyncVideoPlayer private constructor() {
         player.setVolume(if (muted) 0f else 1f, if (muted) 0f else 1f)
         player.isLooping = false
         player.setDataSource(file.absolutePath)
-        nativeSurface?.let(player::setSurface)
+        nativeSurface?.let { player.setSurface(it.surface) }
         player.prepareAsync()
     }
 
@@ -112,19 +112,25 @@ internal class AsyncVideoPlayer private constructor() {
     fun setVolume(left: Float, right: Float) = command { native?.setVolume(left, right) }
 
     /** Ownership transfers even during disposal; the old surface is released only after detaching. */
-    fun setSurface(surface: Surface?) {
+    fun setSurface(surface: VideoPlayerSurface?) {
         if (closed.get()) {
-            if (surface != null) SimulaScope.launch { runCatching { surface.release() } }
+            if (surface != null) SimulaScope.launch { runCatching { surface.releasePlayer() } }
             return
         }
         if (!commands.submit {
                 val old = nativeSurface
-                nativeSurface = surface
-                runCatching { native?.setSurface(surface) }.onFailure { deliver { onError() } }
-                if (old !== surface) runCatching { old?.release() }
+                val detached = runCatching { native?.setSurface(surface?.surface) }.isSuccess
+                if (detached) {
+                    nativeSurface = surface
+                    if (old !== surface) old?.releasePlayer()
+                } else {
+                    // Retain both possible bindings until the native player has been released.
+                    if (surface != null && surface !== old) failedSurfaces.add(surface)
+                    deliver { onError() }
+                }
             }
         ) {
-            if (surface != null) SimulaScope.launch { runCatching { surface.release() } }
+            if (surface != null) SimulaScope.launch { runCatching { surface.releasePlayer() } }
             onError()
         }
     }
@@ -151,8 +157,10 @@ internal class AsyncVideoPlayer private constructor() {
                 runCatching { player?.setOnVideoSizeChangedListener(null) }
                 runCatching { player?.setOnBufferingUpdateListener(null) }
                 runCatching { player?.release() }
-                runCatching { nativeSurface?.release() }
+                nativeSurface?.releasePlayer()
                 nativeSurface = null
+                failedSurfaces.forEach { it.releasePlayer() }
+                failedSurfaces.clear()
             } finally { VideoPlayerThread.release() }
         }
     }

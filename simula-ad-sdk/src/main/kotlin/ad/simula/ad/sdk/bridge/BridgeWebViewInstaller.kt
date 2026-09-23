@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.bridge
 
 import ad.simula.ad.sdk.telemetry.Telemetry
+import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.network.ClickSources
@@ -183,11 +184,12 @@ internal fun trustedCtaRelaySource(
                 protocol === 'javascript:';
         } catch (_) { return true; }
     }
-    function isExternalHttpCta(url) {
+    function isExternalCta(url) {
         if (isInternalCta(url) || isSameOriginCta(url)) { return false; }
         try {
             var protocol = new URL(url, document.baseURI).protocol;
-            return protocol === 'http:' || protocol === 'https:';
+            return protocol === 'http:' || protocol === 'https:' ||
+                protocol === 'market:' || protocol === 'intent:';
         } catch (_) { return false; }
     }
     function nativeCtaEnabled() {
@@ -219,7 +221,7 @@ internal fun trustedCtaRelaySource(
     function forwardTrustedCta(value, element) {
         if (!nativeCtaEnabled()) { return false; }
         var url = resolvedUrl(value);
-        if (!url || !isExternalHttpCta(url)) { return false; }
+        if (!url || !isExternalCta(url)) { return false; }
         if (gestureSequence === 0) { return false; }
         if (claimedGesture === gestureSequence) { return true; }
         if (!hasActiveUserGesture()) { return false; }
@@ -257,7 +259,7 @@ internal fun trustedCtaRelaySource(
         var anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
         if (!anchor || String(anchor.target).toLowerCase() !== '_blank') { return; }
         if (forwardTrustedCta(anchor.href, anchor)) { event.preventDefault(); }
-    }, false);
+    }, true);
 """.trimIndent()
 
 /**
@@ -647,7 +649,7 @@ internal fun trustedCtaOpen(
         ?.takeIf { it.isString }
         ?.content
         ?.takeIf { it.isNotBlank() && it.length <= MAX_CTA_URL_CHARS }
-        ?.takeIf(::isTrustedCtaHttpUrl) ?: return null
+        ?.takeIf { CreativeCtaRouter.normalizeTappedDestination(it)?.let(::isTrustedCtaHttpUrl) == true } ?: return null
     val interactionElement = root["interaction_id"]
     val interactionId = when (interactionElement) {
         null, kotlinx.serialization.json.JsonNull -> null
