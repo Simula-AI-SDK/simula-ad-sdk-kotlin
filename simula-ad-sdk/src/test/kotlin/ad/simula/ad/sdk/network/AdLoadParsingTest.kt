@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.model.AdUnitType
+import ad.simula.ad.sdk.model.AdBehavior
 import ad.simula.ad.sdk.model.AutoStoreRedirectTrigger
 import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.ClosePosition
@@ -11,7 +12,9 @@ import ad.simula.ad.sdk.model.MAX_SK_OVERLAY_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.OverlayTiming
 import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.VideoChromeStyle
 import ad.simula.ad.sdk.model.endScreenTriggerForIndex
+import ad.simula.ad.sdk.model.effectiveSkOverlayConfig
 import ad.simula.ad.sdk.model.validatedHexColor
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -480,6 +483,60 @@ class AdLoadParsingTest {
         assertEquals(12, clampSkOverlayDelaySeconds(12) { clamps++ })
         assertEquals(60, clampSkOverlayDelaySeconds(60) { clamps++ })
         assertEquals(2, clamps)
+    }
+
+    @Test
+    fun `video v2 creative and Android overlay defaults parse additively`() {
+        val response = json.decodeFromString<AdLoadApiResponse>(
+            """{"creative":{"type":"video","url":"https://cdn/video.mp4","cta":"Play now",
+                "app_icon_url":"https://cdn/icon.png","app_name":"Game","subtitle":"New levels",
+                "video_pool":"ugc","clip_index":1},"ad_behavior":{"video":{}}}""",
+        )
+        val creative = requireNotNull(response.creative.toDomain())
+        val behavior = response.adBehavior.toDomain(videoPlanV2 = true)
+        val video = requireNotNull(behavior?.video)
+
+        assertEquals("Play now", creative.cta)
+        assertEquals("https://cdn/icon.png", creative.appIconUrl)
+        assertEquals("Game", creative.appName)
+        assertEquals("New levels", creative.subtitle)
+        assertEquals("ugc", creative.videoPool)
+        assertEquals(1, creative.clipIndex)
+        assertEquals(VideoChromeStyle.CORNER_CTA, video.style)
+        val overlay = requireNotNull(behavior.effectiveSkOverlayConfig(videoPlanV2 = true))
+        assertFalse(overlay.enabled)
+        assertEquals(3, overlay.delaySeconds)
+    }
+
+    @Test
+    fun `video v2 style and overlay clamp without changing legacy overlay defaults`() {
+        val behavior = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"video":{"style":"feed_card"},"skoverlay":{"enabled":false,"delay_seconds":99}}}""",
+        ).adBehavior.toDomain(videoPlanV2 = true)
+        val video = requireNotNull(behavior?.video)
+
+        assertEquals(VideoChromeStyle.FEED_CARD, video.style)
+        assertFalse(requireNotNull(behavior?.skoverlay).enabled)
+        assertEquals(60, behavior.skoverlay?.delaySeconds)
+        assertFalse(requireNotNull(behavior.effectiveSkOverlayConfig(videoPlanV2 = true)).enabled)
+    }
+
+    @Test
+    fun `Android v2 skoverlay stays effectively disabled while explicit true remains decodable`() {
+        val absentBehavior: AdBehavior? = null
+        val absent = absentBehavior.effectiveSkOverlayConfig(videoPlanV2 = true)
+        val partial = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"skoverlay":{"delay_seconds":7}}}""",
+        ).adBehavior.toDomain(videoPlanV2 = true)
+        val explicit = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_behavior":{"skoverlay":{"enabled":true,"delay_seconds":4}}}""",
+        ).adBehavior.toDomain(videoPlanV2 = true)
+
+        assertFalse(requireNotNull(absent).enabled)
+        assertFalse(requireNotNull(partial?.skoverlay).enabled)
+        assertFalse(requireNotNull(partial.effectiveSkOverlayConfig(videoPlanV2 = true)).enabled)
+        assertTrue(requireNotNull(explicit?.skoverlay).enabled)
+        assertFalse(requireNotNull(explicit.effectiveSkOverlayConfig(videoPlanV2 = true)).enabled)
     }
 
     @Test

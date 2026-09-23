@@ -84,6 +84,36 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `automatic video failure advance bypasses user terminal claim`() {
+        var claimAttempts = 0
+
+        assertTrue(
+            videoOverlayCloseAllowed(
+                origin = VideoOverlayCloseOrigin.AUTOMATIC,
+                videoPlanV2 = true,
+                videoTerminal = false,
+                claimUserClose = {
+                    claimAttempts += 1
+                    false
+                },
+            ),
+        )
+        assertEquals(0, claimAttempts)
+        assertFalse(
+            videoOverlayCloseAllowed(
+                origin = VideoOverlayCloseOrigin.USER,
+                videoPlanV2 = true,
+                videoTerminal = false,
+                claimUserClose = {
+                    claimAttempts += 1
+                    false
+                },
+            ),
+        )
+        assertEquals(1, claimAttempts)
+    }
+
+    @Test
     fun `HTML fallback close gate uses presentation time while video uses played time`() {
         assertTrue(fallbackCloseGateUsesPresentedTime(ad.simula.ad.sdk.model.CreativeType.PLAYABLE))
         assertFalse(fallbackCloseGateUsesPresentedTime(ad.simula.ad.sdk.model.CreativeType.VIDEO))

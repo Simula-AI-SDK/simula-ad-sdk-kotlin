@@ -6,6 +6,7 @@ import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.model.RewardCompletionReason
 import ad.simula.ad.sdk.model.monotonicRewardCompletionReason
+import ad.simula.ad.sdk.model.isVideoPlanV2
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.ClickInteraction
 import ad.simula.ad.sdk.network.ClickInteractionClaim
@@ -69,6 +70,8 @@ internal interface RewardedCallbacks {
 internal class RewardedPresentation(
     val renderedHtml: String = "",
     val creative: Creative,
+    val videoPlanV2: Boolean = creative.isVideoPlanV2,
+    val adUnitId: String? = null,
     // The impression id from /load/rewarded — the handle for tracking, reporting and fallbacks.
     val impressionId: String,
     val apiKey: String,
@@ -91,12 +94,13 @@ internal class RewardedPresentation(
     private var pendingClickHandoff: ClickPersistenceHandoff? = null
     private val clickRoute = ResumedPresentationRoute<SimulaRewardedActivity>()
     val primaryCtaNavigation = RetainedPrimaryCtaNavigationState<SimulaRewardedActivity>()
-    val fallbackState = FallbackPresentationState()
+    val fallbackState = FallbackPresentationState(videoPlanV2 = videoPlanV2)
     val automaticNavigationGate = AutomaticNavigationGate()
     val storeExit by lazy(LazyThreadSafetyMode.NONE) {
         StoreExitTracker(
             adId = impressionId.takeIf { it.isNotBlank() },
             adFormat = "rewarded",
+            adUnitId = adUnitId,
         )
     }
     val autoRedirectCoordinator = AutoRedirectCoordinator()

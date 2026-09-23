@@ -10,6 +10,8 @@ import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.GameData
 import ad.simula.ad.sdk.model.Message
 import ad.simula.ad.sdk.model.admittedVideoUrl
+import ad.simula.ad.sdk.model.admittedRemoteAssetUrl
+import ad.simula.ad.sdk.model.isVideoPlanV2
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -41,6 +43,9 @@ import java.net.URLEncoder
 internal class AdUnitNotFoundException(message: String) : Exception(message)
 
 private val sessionBodyJson = Json { encodeDefaults = true }
+
+internal fun canonicalVideoPlanV2Marker(value: String?): Boolean =
+    value?.trim() == "video_plan_v2"
 
 internal fun sessionCreateBody(
     privacy: JsonObject,
@@ -486,6 +491,7 @@ internal object SimulaApiClient {
         // Creative descriptor (`creative` node) and experiment metadata; null when omitted.
         val creative: Creative? = null,
         val experiment: Experiment? = null,
+        val videoPlanV2: Boolean = creative?.isVideoPlanV2 == true,
         // Estimated revenue derived on-device from the serve's `bid_amt` (CPM). Held on
         // the loaded ad and surfaced on the paid event when the impression fires. Defaults to a $0
         // estimate so locally-built results (preview) need not supply it.
@@ -497,6 +503,32 @@ internal object SimulaApiClient {
         val adUnitType: AdUnitType
             get() = creative?.adUnitType
                 ?: if (renderedFormat == "rewarded_video") AdUnitType.REWARDED else AdUnitType.INTERSTITIAL
+    }
+
+    internal fun adLoadResultFromResponse(data: AdLoadApiResponse): AdLoadResult {
+        val presentationV2 = canonicalVideoPlanV2Marker(data.videoPlanVersion)
+        val decodedCreative = data.creative.toDomain()
+        val creative = decodedCreative?.copy(
+            planVersion = "video_plan_v2".takeIf {
+                presentationV2 && decodedCreative.type == CreativeType.VIDEO && decodedCreative.clipIndex != null
+            },
+        )
+        return AdLoadResult(
+            impressionId = data.impressionId.orEmpty(),
+            adInserted = data.adInserted,
+            adUnitId = data.adUnitId,
+            destination = data.destination,
+            renderedFormat = data.renderedFormat,
+            trackingUrl = data.trackingUrl,
+            androidStoreUrl = data.androidStoreUrl,
+            prewarmSkProduct = data.prewarmSkProduct,
+            renderedHtml = data.renderedHtml,
+            adBehavior = data.adBehavior.toDomain(creative?.isVideoPlanV2 == true),
+            creative = creative,
+            experiment = data.experiment.toDomain(),
+            videoPlanV2 = presentationV2,
+            adValue = AdValue.fromBidCpm(data.bidAmt),
+        )
     }
 
     /**
@@ -539,21 +571,7 @@ internal object SimulaApiClient {
         }
         val data = json.decodeFromString<AdLoadApiResponse>(response.body)
 
-        AdLoadResult(
-            impressionId = data.impressionId.orEmpty(),
-            adInserted = data.adInserted,
-            adUnitId = data.adUnitId,
-            destination = data.destination,
-            renderedFormat = data.renderedFormat,
-            trackingUrl = data.trackingUrl,
-            androidStoreUrl = data.androidStoreUrl,
-            prewarmSkProduct = data.prewarmSkProduct,
-            renderedHtml = data.renderedHtml,
-            adBehavior = data.adBehavior.toDomain(),
-            creative = data.creative.toDomain(),
-            experiment = data.experiment.toDomain(),
-            adValue = AdValue.fromBidCpm(data.bidAmt),
-        )
+        adLoadResultFromResponse(data)
     }
 
     // ── Native sponsored-character ad ─────────────────────────────────────────
@@ -642,6 +660,7 @@ internal object SimulaApiClient {
     // ── Rewarded Minigame ───────────────────────────────────────────────────
 
     data class RewardedInitResult(
+        val adUnitId: String = "",
         // The impression id — replaces the old `serve_id`/`ad_id` pair as the single handle
         // for verify-reward, fallbacks, tracking and reporting.
         val impressionId: String,
@@ -658,24 +677,39 @@ internal object SimulaApiClient {
         val prewarmSkProduct: Boolean = false,
         val adBehavior: AdBehavior? = null,
         val experiment: Experiment? = null,
+        val videoPlanV2: Boolean = creative.isVideoPlanV2,
         // Estimated revenue derived from this serve's `bid_amt` (CPM); surfaced on the
         // paid event when the impression fires. Defaults to a $0 estimate (preview path).
         val adValue: AdValue = AdValue.fromBidCpm(0.0),
     )
 
-    internal fun rewardedResultFromResponse(data: RewardedInitApiResponse): RewardedInitResult =
-        RewardedInitResult(
+    internal fun rewardedResultFromResponse(
+        data: RewardedInitApiResponse,
+        adUnitId: String = "",
+    ): RewardedInitResult {
+        val responseV2 = canonicalVideoPlanV2Marker(data.videoPlanVersion)
+        val decodedCreative = data.creative.toDomain() ?: Creative()
+        val creative = decodedCreative.copy(
+            adUnitType = AdUnitType.REWARDED,
+            planVersion = "video_plan_v2".takeIf {
+                responseV2 && decodedCreative.type == CreativeType.VIDEO && decodedCreative.clipIndex != null
+            },
+        )
+        return RewardedInitResult(
+            adUnitId = adUnitId,
             impressionId = data.impressionId.orEmpty(),
             renderedHtml = data.renderedHtml.orEmpty(),
-            creative = (data.creative.toDomain() ?: Creative()).copy(adUnitType = AdUnitType.REWARDED),
+            creative = creative,
             destination = data.destination,
             trackingUrl = data.trackingUrl,
             androidStoreUrl = data.androidStoreUrl,
             prewarmSkProduct = data.prewarmSkProduct,
-            adBehavior = data.adBehavior.toDomain(),
+            adBehavior = data.adBehavior.toDomain(creative.isVideoPlanV2),
             experiment = data.experiment.toDomain(),
+            videoPlanV2 = responseV2,
             adValue = AdValue.fromBidCpm(data.bidAmt),
         )
+    }
 
     /**
      * Initialize a rewarded creative via `POST /load/rewarded`. Returns playable HTML or a typed
@@ -714,7 +748,7 @@ internal object SimulaApiClient {
             throw Exception("Empty response body")
         }
         val data = json.decodeFromString<RewardedInitApiResponse>(response.body)
-        rewardedResultFromResponse(data)
+        rewardedResultFromResponse(data, adUnitId)
     }
 
     /**
@@ -768,6 +802,15 @@ internal object SimulaApiClient {
         val renderedHtml: String? = null,
         val url: String? = null,
         val posterUrl: String? = null,
+        val cta: String? = null,
+        val appIconUrl: String? = null,
+        val appName: String? = null,
+        val subtitle: String? = null,
+        val videoPool: String? = null,
+        val clipIndex: Int? = null,
+        val videoBehavior: ad.simula.ad.sdk.model.VideoBehavior? = null,
+        val skoverlay: ad.simula.ad.sdk.model.SkOverlayConfig? = null,
+        val videoPlanV2: Boolean = false,
         val destination: String? = null,
         val trackingUrl: String? = null,
         val androidStoreUrl: String? = null,
@@ -778,25 +821,42 @@ internal object SimulaApiClient {
         ).any { !it.isNullOrBlank() },
         val nativeClickBeaconV1Enabled: Boolean = false,
         val closeBehavior: ad.simula.ad.sdk.model.CloseBehavior = fallbackCloseBehavior(null),
-    )
+    ) {
+        val isVideoPlanV2: Boolean
+            get() = videoPlanV2 && type == CreativeType.VIDEO && clipIndex != null
+    }
 
     internal fun fallbackAdFromBody(
         ad: FallbackAdBody,
         responseNativeClickBeaconV1Enabled: Boolean,
+        responseVideoPlanV2: Boolean = false,
     ): FallbackAd? {
-        val type = CreativeType.from(ad.type)
+        val creative = ad.creative
+        val type = CreativeType.from(creative?.type ?: ad.type)
         val html = ad.renderedHtml?.takeIf { it.isNotBlank() }
             ?: ad.html?.takeIf { it.isNotBlank() }
-        val url = admittedVideoUrl(ad.url)
+        val url = admittedVideoUrl(creative?.url ?: ad.url)
         if (type == CreativeType.VIDEO && url == null) return null
         if (type == CreativeType.PLAYABLE && html == null) return null
+        val clipIndex = (creative?.clipIndex ?: ad.clipIndex)?.takeIf { it in 0..2 }
+        val slotVideoPlanV2 = responseVideoPlanV2 && type == CreativeType.VIDEO && clipIndex != null
         return FallbackAd(
             adId = ad.adId,
             sourceIndex = ad.sourceIndex.coerceAtLeast(0),
             type = type,
             renderedHtml = html,
             url = url,
-            posterUrl = ad.posterUrl?.takeIf { it.isNotBlank() },
+            posterUrl = (creative?.posterUrl ?: ad.posterUrl)?.takeIf { it.isNotBlank() },
+            cta = (creative?.cta ?: ad.cta)?.trim()?.takeIf { it.isNotEmpty() },
+            appIconUrl = admittedRemoteAssetUrl(creative?.appIconUrl ?: ad.appIconUrl),
+            appName = (creative?.appName ?: ad.appName)?.trim()?.takeIf { it.isNotEmpty() },
+            subtitle = (creative?.subtitle ?: ad.subtitle)?.trim()?.takeIf { it.isNotEmpty() },
+            videoPool = (creative?.videoPool ?: creative?.pool ?: ad.videoPool ?: ad.pool)
+                ?.trim()?.takeIf { it.isNotEmpty() },
+            clipIndex = clipIndex,
+            videoBehavior = fallbackVideoBehavior(ad.adBehavior),
+            skoverlay = fallbackSkOverlayConfig(ad.adBehavior, slotVideoPlanV2),
+            videoPlanV2 = responseVideoPlanV2,
             destination = ad.destination?.trim()?.takeIf { it.isNotEmpty() },
             trackingUrl = ad.trackingUrl?.trim()?.takeIf { it.isNotEmpty() },
             androidStoreUrl = ad.androidStoreUrl?.trim()?.takeIf { it.isNotEmpty() },
@@ -810,7 +870,11 @@ internal object SimulaApiClient {
 
     internal fun fallbackAdsFromResponse(data: FallbackAdsApiResponse): List<FallbackAd> =
         data.ads.mapNotNull { ad ->
-            fallbackAdFromBody(ad, data.nativeClickBeaconV1Enabled == true)
+            fallbackAdFromBody(
+                ad,
+                data.nativeClickBeaconV1Enabled == true,
+                canonicalVideoPlanV2Marker(data.videoPlanVersion),
+            )
         }
 
     /**

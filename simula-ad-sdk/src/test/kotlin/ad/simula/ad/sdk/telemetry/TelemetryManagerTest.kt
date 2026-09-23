@@ -444,6 +444,51 @@ class TelemetryManagerTest {
     }
 
     @Test
+    fun `video lifecycle threads every canonical optional field`() = runTest {
+        val sender = FakeSender()
+        val m = build(this, FakeStore(), sender)
+
+        m.recordVideoLifecycle(
+            stage = "video_handoff",
+            adFormat = "interstitial",
+            adUnitId = "unit",
+            adId = "ad",
+            serveId = "serve",
+            impressionId = "imp",
+            style = "feed_card",
+            skoverlayEnabled = true,
+            skoverlayDelaySeconds = 3,
+            clipIndex = 1,
+            videoPositionS = 4.0,
+            muted = false,
+            pool = "ugc",
+            durationS = 10.0,
+            quartile = 50,
+            reason = "completed",
+            pausedMs = 200.0,
+            watchedS = 4.0,
+            secondsUnmuted = 3.0,
+            secondsMuted = 1.0,
+            msToNextStepReady = 35.0,
+            secondsSinceVideoStart = 4.1,
+            on = "next_step",
+            visibleS = 3.8,
+            error = "none",
+        )
+        m.flushNow()
+        advanceUntilIdle()
+
+        val event = sender.batches.allEvents().single { it.name == "video_handoff" }
+        assertEquals("imp", event.impressionId)
+        assertEquals("feed_card", event.style)
+        assertEquals(1, event.clipIndex)
+        assertEquals(35.0, event.msToNextStepReady ?: -1.0, 0.0)
+        assertEquals("next_step", event.on)
+        assertEquals(3.0, event.secondsUnmuted ?: -1.0, 0.0)
+        assertEquals(1.0, event.secondsMuted ?: -1.0, 0.0)
+    }
+
+    @Test
     fun `confirmed critical click survives later ordinary capacity pressure`() = runTest {
         val store = FakeStore()
         val sender = FakeSender().apply { gateFirst() }

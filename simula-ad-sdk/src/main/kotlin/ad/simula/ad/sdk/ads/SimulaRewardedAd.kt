@@ -436,6 +436,8 @@ class SimulaRewardedAd(val adUnitId: String) {
             RewardedPresentation(
                 renderedHtml = ad.renderedHtml,
                 creative = ad.creative,
+                videoPlanV2 = ad.videoPlanV2,
+                adUnitId = ad.adUnitId.takeIf { it.isNotBlank() } ?: adUnitId,
                 impressionId = ad.impressionId,
                 apiKey = SimulaAds.apiKey,
                 callbacks = bridge(ad.impressionId),

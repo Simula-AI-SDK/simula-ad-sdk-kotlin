@@ -99,7 +99,7 @@ class RewardedParsingTest {
         """.trimIndent()
 
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
-        val result = SimulaApiClient.rewardedResultFromResponse(r)
+        val result = SimulaApiClient.rewardedResultFromResponse(r, adUnitId = "rewarded-unit")
         assertEquals("imp_1", r.impressionId)
         assertEquals("<html>primary</html>", r.renderedHtml)
         assertEquals(CreativeType.VIDEO, r.creative.toDomain()?.type)
@@ -111,6 +111,7 @@ class RewardedParsingTest {
         assertEquals("rewarded_video_q3", result.experiment?.experimentId)
         assertEquals("video_b", result.experiment?.variantId)
         assertEquals("creative_media", result.experiment?.layer)
+        assertEquals("rewarded-unit", result.adUnitId)
         assertTrue(r.prewarmSkProduct)
         // The play-to-earn gate now rides on `ad_behavior.close.delay_seconds` (no top-level field).
         assertEquals(30, r.adBehavior?.close?.delaySeconds)
