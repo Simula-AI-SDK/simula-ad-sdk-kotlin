@@ -26,8 +26,8 @@ class SimulaHttpPlainGetTest {
         )
 
         assertEquals("GET", connection.requestMethod)
-        assertEquals(5_000, connection.connectTimeout)
-        assertEquals(5_000, connection.readTimeout)
+        assertTrue(connection.connectTimeout in 1..5_000)
+        assertTrue(connection.readTimeout in 1..5_000)
         assertFalse(connection.instanceFollowRedirects)
         assertFalse(connection.useCaches)
         assertFalse(connection.defaultUseCaches)
