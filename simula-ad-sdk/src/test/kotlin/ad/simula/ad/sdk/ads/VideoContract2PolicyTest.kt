@@ -250,6 +250,26 @@ class VideoContract2PolicyTest {
     }
 
     @Test
+    fun `failed video handoff probe cannot resolve primary reward authority`() {
+        val presentation = unitEndPresentation()
+        val fallback = presentation.fallbackState
+        fallback.retainFetchedAds(emptyList())
+        // A zero-delay payload may allow progression before a visual frame. The
+        // player's failure probe must not also manufacture final-screen authority.
+        presentation.markPrimaryProgressionAllowed()
+
+        assertFalse(shouldBeginVideoHandoff(true, fallback::primaryHasNextStep))
+        assertFalse(fallback.primaryEndReached)
+        assertFalse(presentation.rewardEarned)
+        assertNull(presentation.claimEarnedRewardOnTeardown())
+
+        fallback.markPrimaryEndReached()
+        assertTrue(fallback.primaryEndReached)
+        fallback.reportAuthoritativeEnd { presentation.markAuthoritativeEndReached() }
+        assertTrue(presentation.rewardEarned)
+    }
+
+    @Test
     fun `authority arriving before primary gate is claimed when gate crosses`() {
         val presentation = unitEndPresentation()
         assertNull(presentation.markAuthoritativeEndReached())

@@ -849,6 +849,17 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
+    fun `later delayed video does not inherit the preceding playable readiness`() {
+        val state = pendingFallbackHandoffState()
+        state.showing(0)
+        val generation = state.startPostCloseFetchWait(targetIndex = 1)
+
+        assertTrue(state.resolvePostCloseFetchWait(generation, listOf(playable(0), video(1))))
+        assertEquals(1, state.index)
+        assertTrue("video handoff stays pending until first frame", state.videoPlan.nextStepReady() != null)
+    }
+
+    @Test
     fun `late delayed fallback after timeout does not report readiness`() {
         val state = pendingFallbackHandoffState()
         val generation = state.startPostCloseFetchWait()

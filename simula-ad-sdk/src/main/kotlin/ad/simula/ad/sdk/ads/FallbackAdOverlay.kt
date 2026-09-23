@@ -573,7 +573,7 @@ internal class FallbackPresentationState(
         } else {
             done()
         }
-        notifyFirstResolvedStepReady(ads)
+        notifyFirstResolvedStepReady(ads.drop(fetchWaitTargetIndex))
         return true
     }
 
@@ -903,10 +903,7 @@ internal fun FallbackAdHost(
             FallbackPhase.Content -> content(
                 { onPrimaryClosed() },
                 null,
-                {
-                    presentationState.markPrimaryEndReached()
-                    presentationState.primaryHasNextStep()
-                },
+                presentationState::primaryHasNextStep,
             )
             // Prefetch wasn't ready at close — hold on the black backdrop and advance when it lands.
             is FallbackPhase.Fetching -> {

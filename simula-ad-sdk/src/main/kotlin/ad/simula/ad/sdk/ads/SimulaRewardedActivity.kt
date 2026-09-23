@@ -518,7 +518,7 @@ private fun RewardedMinigame(
                 presentation.retainRewardEarned(true)
             }
             rewardEarned = true
-            if (unitEndMode && !isVideo) hasNextStep()
+            if (unitEndMode && !isVideo) presentation.fallbackState.markPrimaryEndReached()
         }
     }
     var secondsLeft by remember {
@@ -655,7 +655,7 @@ private fun RewardedMinigame(
             presentation.retainRewardEarned(true)
         }
         rewardEarned = true
-        if (unitEndMode) hasNextStep()
+        if (unitEndMode) presentation.fallbackState.markPrimaryEndReached()
     }
     fun markBridgeUnavailable() {
         presentation.earlyCompleteState.discard()
@@ -888,7 +888,7 @@ private fun RewardedMinigame(
                 presentation.retainRewardEarned(true)
             }
             rewardEarned = true
-            if (unitEndMode) hasNextStep()
+            if (unitEndMode) presentation.fallbackState.markPrimaryEndReached()
             return@LaunchedEffect
         }
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -932,7 +932,7 @@ private fun RewardedMinigame(
                         presentation.retainRewardEarned(true)
                     }
                     rewardEarned = true
-                    if (unitEndMode) hasNextStep()
+                    if (unitEndMode) presentation.fallbackState.markPrimaryEndReached()
                     break
                 }
             }
@@ -1207,6 +1207,9 @@ private fun RewardedMinigame(
                             },
                         )
                         bridgeReady = true
+                        if (unitEndMode && presentation.primaryProgressionAllowed) {
+                            presentation.fallbackState.markPrimaryEndReached()
+                        }
                     },
                     onProgress = { positionMs, durationMs, advancedMs ->
                         presentation.videoPositionMs = retainVideoMaxPosition(
@@ -1244,7 +1247,7 @@ private fun RewardedMinigame(
                                 onRewardCompletionClaim(update.completionClaim)
                                 rewardEarned = true
                                 secondsLeft = 0
-                                if (update.newlyAllowed) hasNextStep()
+                                if (update.newlyAllowed) presentation.fallbackState.markPrimaryEndReached()
                             } else if (!unitEndMode) {
                                 presentation.recordCompletionReason(RewardCompletionReason.DURATION_ELAPSED)
                                 presentation.retainRewardEarned(true)
@@ -1256,7 +1259,7 @@ private fun RewardedMinigame(
                         if (unitEndMode) {
                             val update = presentation.markPrimaryProgressionAllowed()
                             onRewardCompletionClaim(update.completionClaim)
-                            if (update.newlyAllowed) hasNextStep()
+                            if (update.newlyAllowed) presentation.fallbackState.markPrimaryEndReached()
                         } else {
                             presentation.recordCompletionReason(RewardCompletionReason.VIDEO_COMPLETED)
                             presentation.retainRewardEarned(true)
