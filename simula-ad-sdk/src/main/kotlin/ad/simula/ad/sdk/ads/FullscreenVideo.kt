@@ -235,20 +235,6 @@ private fun videoAudioAttributes(): AudioAttributes = AudioAttributes.Builder()
     .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
     .build()
 
-private fun detachPlayerListeners(player: MediaPlayer) {
-    runCatching { player.setOnPreparedListener(null) }
-    runCatching { player.setOnSeekCompleteListener(null) }
-    runCatching { player.setOnCompletionListener(null) }
-    runCatching { player.setOnErrorListener(null) }
-    runCatching { player.setOnInfoListener(null) }
-    runCatching { player.setOnVideoSizeChangedListener(null) }
-    runCatching { player.setOnBufferingUpdateListener(null) }
-}
-
-private fun releasePlayerOffMain(player: MediaPlayer) {
-    SimulaScope.launch { runCatching { player.release() } }
-}
-
 @Composable
 internal fun FullscreenVideo(
     file: File? = null,
@@ -743,7 +729,7 @@ private class NativeVideoController(
     private val configuredGateMs = configuredGateSeconds.coerceAtLeast(0) * 1_000L
     private var playbackGeneration: Long? = null
     private var renderToken = 0L
-    private var player: MediaPlayer? = null
+    private var player: AsyncVideoPlayer? = null
     private var textureView: TextureView? = null
     private var surface: Surface? = null
     private var readinessDeadline: VideoReadinessDeadline? = null
@@ -927,28 +913,29 @@ private class NativeVideoController(
         readinessDeadline = VideoReadinessDeadline(deadlineMs)
         if (!lifecycleActive) readinessDeadline?.pause(nowMs)
         runCatching {
-            val mediaPlayer = MediaPlayer()
+            val mediaPlayer = AsyncVideoPlayer.create()
+            if (mediaPlayer == null) {
+                fail(VideoFailureCode.PREPARE_FAILED)
+                return
+            }
             player = mediaPlayer
             configurePlayer(mediaPlayer, token)
-            mediaPlayer.setVolume(if (effectiveMuted) 0f else 1f, if (effectiveMuted) 0f else 1f)
-            mediaPlayer.setAudioAttributes(videoAudioAttributes())
-            mediaPlayer.isLooping = false
-            mediaPlayer.setDataSource(file.absolutePath)
-            mediaPlayer.prepareAsync()
+            // The UI deadline also covers a stalled worker/native setup call.
             scheduleReadinessTimeout(nowMs)
+            mediaPlayer.prepare(file, videoAudioAttributes(), effectiveMuted)
         }.onFailure { fail(VideoFailureCode.PREPARE_FAILED) }
     }
 
-    private fun configurePlayer(mediaPlayer: MediaPlayer, token: Long) {
-        mediaPlayer.setOnPreparedListener {
-            if (!ownsCallback(token)) return@setOnPreparedListener
+    private fun configurePlayer(mediaPlayer: AsyncVideoPlayer, token: Long) {
+        mediaPlayer.onPrepared = prepared@ {
+            if (!ownsCallback(token)) return@prepared
             prepared = true
             publishPlaybackEligibility()
-            seedVideoDimensions(it)
-            val preparedDurationMs = runCatching { it.duration.toLong() }.getOrDefault(0L).coerceAtLeast(0L)
+            seedVideoDimensions(mediaPlayer)
+            val preparedDurationMs = runCatching { mediaPlayer.duration.toLong() }.getOrDefault(0L).coerceAtLeast(0L)
             if (preparedDurationMs > 0L) lastVideoDurationMs = maxOf(lastVideoDurationMs, preparedDurationMs)
             val seekRequested = runCatching {
-                resumeSeek.restoreAfterPrepared(preparedDurationMs, it::seekTo)
+                resumeSeek.restoreAfterPrepared(preparedDurationMs, mediaPlayer::seekTo)
             }.getOrElse {
                 resumeSeek.fail()
                 false
@@ -959,22 +946,21 @@ private class NativeVideoController(
             scheduleReadinessTimeout(SystemClock.elapsedRealtime())
             startIfPossible()
         }
-        mediaPlayer.setOnSeekCompleteListener {
-            if (!ownsCallback(token) || !resumeSeek.complete()) return@setOnSeekCompleteListener
+        mediaPlayer.onSeekComplete = seekComplete@ {
+            if (!ownsCallback(token) || !resumeSeek.complete()) return@seekComplete
             handler.removeCallbacks(resumeSeekTimeout)
             startIfPossible()
         }
-        mediaPlayer.setOnCompletionListener {
+        mediaPlayer.onCompleted = {
             if (resumeSeek.allowsPlaybackCallbacks) completePlayback(token)
         }
-        mediaPlayer.setOnErrorListener { _, _, _ ->
+        mediaPlayer.onError = {
             if (token == renderToken && !released && !failed) {
                 fail(videoMediaErrorCode(prepared))
             }
-            true
         }
-        mediaPlayer.setOnInfoListener { _, what, _ ->
-            if (!ownsCallback(token)) return@setOnInfoListener false
+        mediaPlayer.onInfo = info@ { what ->
+            if (!ownsCallback(token)) return@info
             when (what) {
                 MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START -> {
                     if (resumeSeek.allowsPlaybackCallbacks) admitFirstFrame(token)
@@ -986,15 +972,14 @@ private class NativeVideoController(
                     if (!videoPlanV2) resetPlaybackTimeout()
                 }
             }
-            false
         }
-        mediaPlayer.setOnVideoSizeChangedListener { _, width, height ->
-            if (!ownsCallback(token)) return@setOnVideoSizeChangedListener
+        mediaPlayer.onVideoSize = videoSize@ { width, height ->
+            if (!ownsCallback(token)) return@videoSize
             videoDimensions = resolveVideoDimensions(videoDimensions, width, height)
             applyTextureTransform()
         }
-        mediaPlayer.setOnBufferingUpdateListener { _, percent ->
-            if (!ownsCallback(token)) return@setOnBufferingUpdateListener
+        mediaPlayer.onBuffering = buffering@ { percent ->
+            if (!ownsCallback(token)) return@buffering
             val bounded = percent.coerceIn(0, 100)
             if (bounded > lastBufferingPercent) {
                 lastBufferingPercent = bounded
@@ -1004,13 +989,17 @@ private class NativeVideoController(
         surface?.let(mediaPlayer::setSurface)
     }
 
+    private fun releaseUnownedSurface(value: Surface?) {
+        if (value != null) SimulaScope.launch { runCatching { value.release() } }
+    }
+
     fun attachSurface(texture: TextureView, surfaceTexture: SurfaceTexture, width: Int, height: Int) {
         if (released) return
         runCatching {
             textureView = texture
             surfaceWidth = width.coerceAtLeast(0)
             surfaceHeight = height.coerceAtLeast(0)
-            surface?.release()
+            if (player == null) releaseUnownedSurface(surface)
             surface = Surface(surfaceTexture)
             player?.setSurface(surface)
             applyTextureTransform()
@@ -1030,9 +1019,10 @@ private class NativeVideoController(
     fun detachSurface(texture: TextureView) {
         if (textureView !== texture) return
         val detachedSurface = surface
+        val owningPlayer = player
         detachVideoSurfaceInOrder(
             pausePlayback = ::pause,
-            detachPlayerSurface = { player?.setSurface(null) },
+            detachPlayerSurface = { owningPlayer?.setSurface(null) },
             clearSurfaceOwnership = {
                 surface = null
                 textureView = null
@@ -1041,7 +1031,7 @@ private class NativeVideoController(
                 updatePlaying(false)
                 publishPlaybackEligibility()
             },
-            releaseSurface = { detachedSurface?.release() },
+            releaseSurface = { if (owningPlayer == null) releaseUnownedSurface(detachedSurface) },
         )
     }
 
@@ -1118,15 +1108,10 @@ private class NativeVideoController(
         val detachedTexture = textureView
         textureView = null
         runCatching { detachedTexture?.surfaceTextureListener = null }
-        if (detachedPlayer != null) {
-            detachPlayerListeners(detachedPlayer)
-            runCatching { detachedPlayer.pause() }
-            runCatching { detachedPlayer.setSurface(null) }
-        }
-        runCatching { surface?.release() }
+        if (detachedPlayer == null) releaseUnownedSurface(surface)
         surface = null
         readinessDeadline = null
-        if (detachedPlayer != null) releasePlayerOffMain(detachedPlayer)
+        detachedPlayer?.release()
     }
 
     private fun ownsCallback(token: Long): Boolean =
@@ -1248,6 +1233,8 @@ private class NativeVideoController(
     private fun emitProgress(force: Boolean, completed: Boolean = false): PlayerProgress? {
         if (!resumeSeek.allowsPlaybackCallbacks) return null
         val mediaPlayer = player ?: return null
+        mediaPlayer.refresh()
+        if (released || failed) return null
         val durationMs = durationMs()
         val sample = if (completed) {
             val currentAdvancedMs = runCatching { mediaPlayer.currentPosition.toLong() }
@@ -1318,7 +1305,7 @@ private class NativeVideoController(
     }
 
     /** Prepared leases may have emitted their size before listener ownership transferred. */
-    private fun seedVideoDimensions(mediaPlayer: MediaPlayer) {
+    private fun seedVideoDimensions(mediaPlayer: AsyncVideoPlayer) {
         val width = runCatching { mediaPlayer.videoWidth }.getOrDefault(0)
         val height = runCatching { mediaPlayer.videoHeight }.getOrDefault(0)
         videoDimensions = resolveVideoDimensions(videoDimensions, width, height)
@@ -1328,7 +1315,7 @@ private class NativeVideoController(
     private fun pause() {
         cancelPlaybackCallbacks()
         val mediaPlayer = player
-        runCatching { if (mediaPlayer?.isPlaying == true) mediaPlayer.pause() }
+        runCatching { mediaPlayer?.pause() }
         updatePlaying(false)
     }
 
