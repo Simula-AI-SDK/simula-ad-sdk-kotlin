@@ -1383,6 +1383,7 @@ class VideoAssetCacheTest {
     fun `more than sixteen simultaneous distinct callers are admitted atomically`() = runBlocking {
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
+        val rejected = CountDownLatch(16)
         val dispatcher = Executors.newFixedThreadPool(2).asCoroutineDispatcher()
         val managerScope = CoroutineScope(SupervisorJob() + dispatcher)
         val manager = VideoAssetCacheManager(
@@ -1399,11 +1400,18 @@ class VideoAssetCacheTest {
             openConnection = { FakeConnection(ByteArrayInputStream(byteArrayOf(1)), 1L) },
         )
         val waiters = (0 until 32).map { index ->
-            async(Dispatchers.Default) { manager.acquireResult("https://cdn.example/$index.mp4") }
+            async(Dispatchers.Default) {
+                manager.acquireResult("https://cdn.example/$index.mp4").also { result ->
+                    if (result == VideoAssetCacheResult.Failed(VideoAssetCacheError.ADMISSION_OVERFLOW)) {
+                        rejected.countDown()
+                    }
+                }
+            }
         }
         assertTrue(started.await(2, TimeUnit.SECONDS))
-        val admissionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
-        while (manager.pendingAcquireCount() < 16 && System.nanoTime() < admissionDeadline) Thread.yield()
+        // Keep admitted downloads blocked until every excess caller has attempted
+        // admission. Releasing at 16 pending alone lets late callers reuse freed slots.
+        assertTrue("excess callers must be rejected before downloads finish", rejected.await(2, TimeUnit.SECONDS))
         assertEquals(16, manager.pendingAcquireCount())
 
         release.countDown()
@@ -1422,6 +1430,7 @@ class VideoAssetCacheTest {
     fun `more than sixteen simultaneous same key callers are admitted atomically`() = runBlocking {
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
+        val rejected = CountDownLatch(16)
         val opens = AtomicInteger()
         val dispatcher = Executors.newFixedThreadPool(4).asCoroutineDispatcher()
         val managerScope = CoroutineScope(SupervisorJob() + dispatcher)
@@ -1443,11 +1452,18 @@ class VideoAssetCacheTest {
         )
         val url = "https://cdn.example/shared-admission.mp4"
         val waiters = (0 until 32).map {
-            async(Dispatchers.Default) { manager.acquireResult(url) }
+            async(Dispatchers.Default) {
+                manager.acquireResult(url).also { result ->
+                    if (result == VideoAssetCacheResult.Failed(VideoAssetCacheError.ADMISSION_OVERFLOW)) {
+                        rejected.countDown()
+                    }
+                }
+            }
         }
         assertTrue(started.await(2, TimeUnit.SECONDS))
-        val admissionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
-        while (manager.pendingAcquireCount() < 16 && System.nanoTime() < admissionDeadline) Thread.yield()
+        // Keep admitted downloads blocked until every excess caller has attempted
+        // admission. Releasing at 16 pending alone lets late callers reuse freed slots.
+        assertTrue("excess callers must be rejected before downloads finish", rejected.await(2, TimeUnit.SECONDS))
         assertEquals(16, manager.pendingAcquireCount())
 
         release.countDown()
