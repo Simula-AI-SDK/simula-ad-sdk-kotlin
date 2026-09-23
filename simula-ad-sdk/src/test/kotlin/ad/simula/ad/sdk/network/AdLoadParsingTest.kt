@@ -493,7 +493,7 @@ class AdLoadParsingTest {
                 "video_pool":"ugc","clip_index":1},"ad_behavior":{"video":{}}}""",
         )
         val creative = requireNotNull(response.creative.toDomain())
-        val behavior = response.adBehavior.toDomain(videoPlanV2 = true)
+        val behavior = response.adBehavior.toDomain(videoContract2 = true)
         val video = requireNotNull(behavior?.video)
 
         assertEquals("Play now", creative.cta)
@@ -509,15 +509,15 @@ class AdLoadParsingTest {
     }
 
     @Test
-    fun `video v2 style and overlay clamp without changing legacy overlay defaults`() {
+    fun `video v2 style and invalid overlay delay default without changing legacy overlay defaults`() {
         val behavior = json.decodeFromString<AdLoadApiResponse>(
             """{"ad_behavior":{"video":{"style":"feed_card"},"skoverlay":{"enabled":false,"delay_seconds":99}}}""",
-        ).adBehavior.toDomain(videoPlanV2 = true)
+        ).adBehavior.toDomain(videoContract2 = true)
         val video = requireNotNull(behavior?.video)
 
         assertEquals(VideoChromeStyle.FEED_CARD, video.style)
         assertFalse(requireNotNull(behavior?.skoverlay).enabled)
-        assertEquals(60, behavior.skoverlay?.delaySeconds)
+        assertEquals(3, behavior.skoverlay?.delaySeconds)
         assertFalse(requireNotNull(behavior.effectiveSkOverlayConfig(videoPlanV2 = true)).enabled)
     }
 
@@ -527,10 +527,10 @@ class AdLoadParsingTest {
         val absent = absentBehavior.effectiveSkOverlayConfig(videoPlanV2 = true)
         val partial = json.decodeFromString<AdLoadApiResponse>(
             """{"ad_behavior":{"skoverlay":{"delay_seconds":7}}}""",
-        ).adBehavior.toDomain(videoPlanV2 = true)
+        ).adBehavior.toDomain(videoContract2 = true)
         val explicit = json.decodeFromString<AdLoadApiResponse>(
             """{"ad_behavior":{"skoverlay":{"enabled":true,"delay_seconds":4}}}""",
-        ).adBehavior.toDomain(videoPlanV2 = true)
+        ).adBehavior.toDomain(videoContract2 = true)
 
         assertFalse(requireNotNull(absent).enabled)
         assertFalse(requireNotNull(partial?.skoverlay).enabled)

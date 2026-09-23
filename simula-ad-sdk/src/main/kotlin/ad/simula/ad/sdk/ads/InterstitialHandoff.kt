@@ -2,7 +2,6 @@ package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.core.FullscreenPresentationRegistry
 import ad.simula.ad.sdk.model.AdValue
-import ad.simula.ad.sdk.model.isVideoPlanV2
 import ad.simula.ad.sdk.model.effectiveSkOverlayConfig
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.ClickInteraction
@@ -36,11 +35,12 @@ internal interface InterstitialCallbacks {
         interaction: ClickInteraction,
         onTelemetryPersisted: () -> Unit = {},
     ) = persistClick(interaction, onTelemetryPersisted)
-    fun notifyClicked()
+    fun notifyClicked(interaction: ClickInteraction)
+    fun onDisplayFailed(error: SimulaAdError) = Unit
 
     fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {}) {
         persistClick(interaction, onTelemetryPersisted)
-        notifyClicked()
+        notifyClicked(interaction)
     }
     fun onClosed()
 }
@@ -48,6 +48,8 @@ internal interface InterstitialCallbacks {
 internal fun notifyPublisherClick(callback: () -> Unit) {
     runCatching(callback)
 }
+
+internal fun invalidateReadyLeaseAfterLaunch(launched: Boolean): Boolean = !launched
 
 internal fun notifyPublisherClickForClaim(
     claim: ClickInteractionClaim?,
@@ -64,15 +66,16 @@ internal class InterstitialPresentation(
     val apiKey: String,
     val callbacks: InterstitialCallbacks,
     val metadata: Map<String, String>? = null,
+    val videoLease: VideoAssetLease? = null,
 ) {
     private val clickInteractionGate = ClickInteractionGate()
     private var pendingClickHandoff: ClickPersistenceHandoff? = null
     private val clickRoute = ResumedPresentationRoute<SimulaInterstitialActivity>()
     val primaryCtaNavigation = RetainedPrimaryCtaNavigationState<SimulaInterstitialActivity>()
     val installBannerState = InstallBannerPresentationState(
-        ad.adBehavior?.skoverlay.takeUnless { ad.videoPlanV2 },
+        ad.adBehavior?.skoverlay.takeUnless { ad.videoContract2 },
     )
-    val fallbackState = FallbackPresentationState(videoPlanV2 = ad.videoPlanV2)
+    val fallbackState = FallbackPresentationState(videoPlanV2 = ad.videoContract2)
     val automaticNavigationGate = AutomaticNavigationGate()
     val storeExit by lazy(LazyThreadSafetyMode.NONE) {
         StoreExitTracker(
@@ -86,6 +89,14 @@ internal class InterstitialPresentation(
     @Synchronized
     fun claimClick(source: String): ClickInteractionClaim? =
         if (pendingClickHandoff == null) clickInteractionGate.claim(source) else null
+
+    @Synchronized
+    fun claimTrustedClick(interactionId: String, source: String): ClickInteractionClaim? =
+        if (pendingClickHandoff == null) clickInteractionGate.claimTrusted(interactionId, source) else null
+
+    @Synchronized
+    fun claimWebClick(source: String): ClickInteractionClaim? =
+        if (pendingClickHandoff == null) clickInteractionGate.claimWeb(source) else null
 
     fun hasPendingClick(): Boolean = clickInteractionGate.hasPendingClaim()
 
@@ -156,6 +167,7 @@ internal class InterstitialPresentation(
         primaryCtaNavigation.clear()
         automaticNavigationGate.clear()
         fallbackState.clear()
+        videoLease?.release()
     }
 
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */

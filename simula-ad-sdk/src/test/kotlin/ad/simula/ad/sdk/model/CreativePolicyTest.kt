@@ -138,18 +138,6 @@ class CreativePolicyTest {
     }
 
     @Test
-    fun `preparing claim transfers shared deadline while prepared claim receives first-frame budget`() {
-        assertEquals(
-            VideoPreparationClaimPolicy(VideoPreparationPhase.PREPARING, 10_000L),
-            videoPreparationClaimPolicy(VideoPreparationPhase.PREPARING, 10_000L, 7_000L, 10_000L),
-        )
-        assertEquals(
-            VideoPreparationClaimPolicy(VideoPreparationPhase.PREPARED, 17_000L),
-            videoPreparationClaimPolicy(VideoPreparationPhase.PREPARED, 10_000L, 7_000L, 10_000L),
-        )
-    }
-
-    @Test
     fun `readiness deadline pauses foreground budget and resumes remaining time`() {
         val deadline = VideoReadinessDeadline(deadlineMs = 10_000L)
         assertEquals(7_000L, deadline.remainingMs(3_000L))

@@ -63,27 +63,6 @@ internal fun videoReadinessTimeoutCode(prepared: Boolean): VideoFailureCode =
 internal fun videoMediaErrorCode(prepared: Boolean): VideoFailureCode =
     if (prepared) VideoFailureCode.PLAYBACK_ERROR else VideoFailureCode.PREPARE_FAILED
 
-internal enum class VideoPreparationPhase { PREPARING, PREPARED }
-
-internal data class VideoPreparationClaimPolicy(
-    val phase: VideoPreparationPhase,
-    val readinessDeadlineMs: Long,
-)
-
-internal fun videoPreparationClaimPolicy(
-    phase: VideoPreparationPhase,
-    originalDeadlineMs: Long,
-    claimedAtMs: Long,
-    totalReadinessMs: Long,
-): VideoPreparationClaimPolicy = VideoPreparationClaimPolicy(
-    phase = phase,
-    readinessDeadlineMs = if (phase == VideoPreparationPhase.PREPARED) {
-        claimedAtMs + totalReadinessMs.coerceAtLeast(0L)
-    } else {
-        originalDeadlineMs
-    },
-)
-
 internal class VideoReadinessDeadline(private var deadlineMs: Long) {
     private var pausedRemainingMs: Long? = null
 
@@ -183,6 +162,13 @@ internal fun videoSequenceAdvance(
     }
 }
 
+internal fun primaryCreativeCloseAllowed(
+    videoContract2: Boolean,
+    creativeType: CreativeType,
+    videoTerminal: Boolean,
+    claimVideoClose: () -> Boolean,
+): Boolean = !videoContract2 || creativeType != CreativeType.VIDEO || videoTerminal || claimVideoClose()
+
 internal const val VIDEO_STALL_BUDGET_MS = 8_000L
 
 /** Counts eligible foreground playback/waiting time without media or download progress. */
@@ -221,12 +207,15 @@ internal class VideoStallBudget(
 }
 
 internal class VideoQuartileTracker {
-    private val emitted = mutableSetOf<Int>()
+    private var emitted = false
 
     fun crossed(positionMs: Long, durationMs: Long): List<Int> {
         if (positionMs < 0L || durationMs <= 0L) return emptyList()
         val percent = (positionMs.coerceAtMost(durationMs) * 100L / durationMs).toInt()
-        return listOf(25, 50, 75).filter { percent >= it && emitted.add(it) }
+        return if (percent >= 50 && !emitted) {
+            emitted = true
+            listOf(50)
+        } else emptyList()
     }
 }
 
@@ -280,18 +269,10 @@ internal fun videoDesiredMutedAfterLifecycleDeactivation(
 internal class VideoAudioSessionState(videoPlanV2: Boolean) {
     var desiredMuted: Boolean = !videoPlanV2
         private set
-    private var preferenceChanged = false
-
     @Synchronized
     fun updateFromTap(videoPlanV2: Boolean, value: Boolean) {
         if (!videoPlanV2) return
         desiredMuted = value
-        preferenceChanged = true
-    }
-
-    @Synchronized
-    fun activateVideoPlanV2() {
-        if (!preferenceChanged) desiredMuted = false
     }
 }
 

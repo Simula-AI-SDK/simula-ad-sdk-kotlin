@@ -50,7 +50,7 @@ class VideoPlanV2PolicyTest {
         url = "https://cdn.example/$sourceIndex.mp4",
         videoPool = "ugc".takeIf { v2 },
         clipIndex = sourceIndex.takeIf { v2 },
-        videoPlanV2 = v2,
+        videoContract2 = v2,
     )
 
     @Test
@@ -84,40 +84,7 @@ class VideoPlanV2PolicyTest {
     @Test
     fun `pool metadata alone does not opt legacy video into v2`() {
         val legacy = video(0, v2 = false).copy(videoPool = "ugc")
-        assertFalse(legacy.isVideoPlanV2)
-    }
-
-    @Test
-    fun `v2 terminal videos advance after blockers and hand off to playable`() {
-        val ads = listOf(video(0), video(1), playable(2))
-        val state = FallbackPresentationState(clockMs = { 0L }, videoPlanV2 = true)
-        state.retainFetchedAds(ads)
-        state.showing(0)
-
-        assertEquals(
-            VideoSequenceAdvance.WAIT_FOR_BLOCKER,
-            videoSequenceAdvance(true, CreativeType.VIDEO, terminal = true, clickHandoffPending = true, false),
-        )
-        assertEquals(
-            VideoSequenceAdvance.WAIT_FOR_BLOCKER,
-            videoSequenceAdvance(true, CreativeType.VIDEO, terminal = true, false, storeVisitPending = true),
-        )
-        assertEquals(
-            VideoSequenceAdvance.ADVANCE,
-            videoSequenceAdvance(true, CreativeType.VIDEO, terminal = true, false, false),
-        )
-        assertTrue(state.advance(ads.size))
-        assertEquals(CreativeType.VIDEO, ads[state.index].type)
-        assertTrue(state.advance(ads.size))
-        assertEquals(CreativeType.PLAYABLE, ads[state.index].type)
-        assertEquals(VideoSequenceAdvance.MANUAL, videoSequenceAdvance(true, CreativeType.PLAYABLE, true, false, false))
-    }
-
-    @Test
-    fun `v2 preparation selects only immediate consecutive video`() {
-        assertEquals("https://cdn.example/1.mp4", nextVideoPlanV2Url(listOf(video(0), video(1)), 0))
-        assertNull(nextVideoPlanV2Url(listOf(video(0), playable(1), video(2)), 0))
-        assertNull(nextVideoPlanV2Url(listOf(video(0), video(1, v2 = false)), 0))
+        assertFalse(legacy.videoContract2)
     }
 
     @Test
@@ -223,7 +190,6 @@ class VideoPlanV2PolicyTest {
         val audio = VideoAudioSessionState(videoPlanV2 = true)
         assertFalse(audio.desiredMuted)
         audio.updateFromTap(videoPlanV2 = true, value = true)
-        audio.activateVideoPlanV2()
         assertTrue(audio.desiredMuted)
     }
 
@@ -742,10 +708,10 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `quartiles fire 25 50 75 once even across jumps`() {
+    fun `duration telemetry emits midpoint only`() {
         val tracker = VideoQuartileTracker()
-        assertEquals(listOf(25), tracker.crossed(2_500L, 10_000L))
-        assertEquals(listOf(50, 75), tracker.crossed(8_000L, 10_000L))
+        assertTrue(tracker.crossed(2_500L, 10_000L).isEmpty())
+        assertEquals(listOf(50), tracker.crossed(8_000L, 10_000L))
         assertTrue(tracker.crossed(10_000L, 10_000L).isEmpty())
     }
 
@@ -804,28 +770,33 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `primary v2 handoff reads live fallback knowledge at terminal time`() {
-        val state = FallbackPresentationState(videoPlanV2 = true)
-        val hasNextStep = {
-            primaryVideoWillHandoff(videoPlanV2 = true, fallbackAds = state.fetchedAds)
-        }
-
-        assertTrue(shouldBeginVideoHandoff(videoPlanV2 = true, hasNextStep))
-
-        state.retainFetchedAds(emptyList())
-        assertFalse(shouldBeginVideoHandoff(videoPlanV2 = true, hasNextStep))
-
-        assertTrue(primaryVideoWillHandoff(videoPlanV2 = true, fallbackAds = listOf(playable(0))))
-        assertFalse(primaryVideoWillHandoff(videoPlanV2 = false, fallbackAds = null))
-    }
-
-    @Test
     fun `accepted delayed playable fallback reports first step ready immediately`() {
         val state = pendingFallbackHandoffState()
         val generation = state.startPostCloseFetchWait()
 
         assertTrue(state.resolvePostCloseFetchWait(generation, listOf(playable(0))))
         assertNull(state.videoPlan.nextStepReady())
+    }
+
+    @Test
+    fun `fallback preparation plans only current and immediate next`() {
+        val ads = listOf(playable(0), video(1), video(2))
+
+        assertEquals(listOf(0, 1), fallbackPreparationWindow(ads, 0).map { it.sourceIndex })
+        assertEquals(listOf(1, 2), fallbackPreparationWindow(ads, 1).map { it.sourceIndex })
+    }
+
+    @Test
+    fun `post close fallback settle has one aggregate bounded deadline`() {
+        var now = 100L
+        val state = FallbackPresentationState(clockMs = { now })
+        val generation = state.startPostCloseFetchWait()
+
+        now += FALLBACK_POST_CLOSE_WAIT_MS
+
+        assertEquals(0L, state.postCloseFetchWaitRemainingMs(generation))
+        assertTrue(state.timeoutPostCloseFetchWait(generation))
+        assertEquals(FallbackStage.DONE, state.stage)
     }
 
     @Test

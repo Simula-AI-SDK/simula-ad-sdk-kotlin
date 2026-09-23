@@ -179,6 +179,7 @@ internal const val DEFAULT_FALLBACK_CLOSE_DELAY_SECONDS = 5
 
 /** Independent safety cap for the delayed install overlay. Kept separate from close-gate policy. */
 internal const val MAX_SK_OVERLAY_DELAY_SECONDS = 300
+internal const val MAX_CONTRACT_2_SK_OVERLAY_DELAY_SECONDS = 60
 
 /**
  * Validates a server-supplied progress-bar color. Accepts an optional leading `#` followed by
@@ -353,6 +354,7 @@ internal enum class CreativeType {
 }
 
 internal enum class RewardCompletionReason(val wire: String) {
+    UNIT_END("unit_end"),
     DURATION_ELAPSED("duration_elapsed"),
     VIDEO_COMPLETED("video_completed"),
     CREATIVE_COMPLETED("creative_completed");
@@ -380,13 +382,37 @@ internal data class Creative(
     val subtitle: String? = null,
     val videoPool: String? = null,
     val clipIndex: Int? = null,
-    val planVersion: String? = null,
+    val segments: List<VideoSegment> = emptyList(),
 )
 
-internal val Creative.isVideoPlanV2: Boolean
-    get() = planVersion == "video_plan_v2" &&
-        type == CreativeType.VIDEO &&
-        clipIndex?.let { it in 0..2 } == true
+/** Attribution ranges within one stitched video asset. They never select or hand off players. */
+internal data class VideoSegment(
+    val clipIndex: Int,
+    val videoPool: String,
+    val startSeconds: Double,
+    val endSeconds: Double,
+)
+
+internal enum class RewardEarnAt {
+    UNIT_END;
+
+    companion object {
+        fun from(raw: String?): RewardEarnAt? = UNIT_END.takeIf { normalizeBehaviorToken(raw) == "unit_end" }
+    }
+}
+
+internal data class RewardBehavior(val earnAt: RewardEarnAt? = null)
+
+internal enum class ProgressBarStyle {
+    SINGLE, TWO_TONE;
+
+    companion object {
+        fun from(raw: String?): ProgressBarStyle =
+            if (normalizeBehaviorToken(raw) == "two_tone") TWO_TONE else SINGLE
+    }
+}
+
+internal data class ProgressBarBehavior(val style: ProgressBarStyle = ProgressBarStyle.SINGLE)
 
 internal enum class VideoChromeStyle(val wire: String) {
     BOTTOM_BAR("bottom_bar"),
@@ -472,8 +498,8 @@ internal data class StorePrompt(
     val platform: StorePromptPlatform = StorePromptPlatform.ANDROID,
 )
 
-/** Play Install Prompt (Android) / SKOverlay (iOS) wire config. V2 SKOverlay presentation is iOS-only;
- * Android decodes it for parity but keeps the effective V2 policy disabled. */
+/** Play Install Prompt (Android) / SKOverlay (iOS) wire config. Contract-2 SKOverlay presentation is
+ * iOS-only; Android decodes it for parity but keeps the effective policy disabled. */
 internal data class SkOverlayConfig(
     val enabled: Boolean = false,
     val timing: OverlayTiming = OverlayTiming.ON_CLICK,
@@ -512,6 +538,8 @@ internal data class AdBehavior(
     val skoverlay: SkOverlayConfig? = null,
     val autoStoreRedirect: AutoStoreRedirect? = null,
     val video: VideoBehavior? = null,
+    val reward: RewardBehavior? = null,
+    val progressBar: ProgressBarBehavior = ProgressBarBehavior(),
 )
 
 internal fun AdBehavior?.effectiveSkOverlayConfig(videoPlanV2: Boolean): SkOverlayConfig? {
@@ -520,7 +548,8 @@ internal fun AdBehavior?.effectiveSkOverlayConfig(videoPlanV2: Boolean): SkOverl
     return SkOverlayConfig(
         enabled = false,
         timing = OverlayTiming.DELAYED,
-        delaySeconds = (config?.delaySeconds ?: 3).coerceIn(0, 60),
+        delaySeconds = config?.delaySeconds
+            ?.takeIf { it in 0..MAX_CONTRACT_2_SK_OVERLAY_DELAY_SECONDS } ?: 3,
         position = config?.position ?: OverlayPosition.BOTTOM,
         dismissible = config?.dismissible ?: true,
     )

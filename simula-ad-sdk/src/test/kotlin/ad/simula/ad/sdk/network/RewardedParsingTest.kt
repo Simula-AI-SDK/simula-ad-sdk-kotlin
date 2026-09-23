@@ -48,7 +48,7 @@ class RewardedParsingTest {
         val body = RewardedInitRequestBody(adUnitId = "unit_1")
         val decoded = json.decodeFromString<RewardedInitRequestBody>(json.encodeToString(body))
         assertEquals("", decoded.sessionId)
-        assertFalse(decoded.capabilities.videoV1)
+        assertEquals(2, decoded.contracts["video"])
     }
 
     @Test
@@ -178,6 +178,7 @@ class RewardedParsingTest {
         assertTrue(encoded.contains("\"session_id\""))
         assertTrue(encoded.contains("\"elapsed_play_time\""))
         assertTrue(encoded.contains("\"completion_reason\":\"duration_elapsed\""))
+        assertFalse(encoded.contains("ad_unit_id"))
 
         val decoded = json.decodeFromString<VerifyRewardRequestBody>(encoded)
         assertEquals("srv_1", decoded.serveId)
@@ -214,5 +215,15 @@ class RewardedParsingTest {
         val r = json.decodeFromString<VerifyRewardApiResponse>("{}")
         assertEquals(false, r.verified)
         assertNull(r.token)
+    }
+
+    @Test
+    fun `successful HTTP response must explicitly verify reward`() {
+        val failure = runCatching {
+            requireVerifiedReward(json.decodeFromString<VerifyRewardApiResponse>("""{"verified":false}"""))
+        }.exceptionOrNull()
+
+        assertTrue(failure is RewardNotVerifiedException)
+        assertTrue(requireVerifiedReward(VerifyRewardApiResponse(verified = true, token = "token")).verified)
     }
 }
