@@ -449,15 +449,30 @@ internal fun retainVideoMaxPosition(previousMs: Long, currentMs: Long): Long =
 internal fun videoReachedMidpoint(maxPositionMs: Long, durationMs: Long): Boolean =
     durationMs > 0L && maxPositionMs.coerceAtLeast(0L) >= durationMs / 2L
 
+internal fun shouldEmitVideoMidpoint(
+    alreadyEmitted: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+): Boolean = !alreadyEmitted && videoReachedMidpoint(positionMs, durationMs)
+
 /** Converts MediaPlayer's position into monotonic played time without trusting Started wall time. */
-internal class VideoPositionAccumulator(initialPlayedMs: Long = 0L) {
-    private var lastPositionMs: Long? = null
-    private var sessionPlayedMs = 0L
+internal class VideoPositionAccumulator(
+    initialPlayedMs: Long = 0L,
+    initialPositionMs: Long = 0L,
+) {
+    private var lastPositionMs: Long? = initialPositionMs.coerceAtLeast(0L).takeIf { it > 0L }
+    private var retainedBaselineMs: Long? = lastPositionMs
+    private var sessionPlayedMs = initialPositionMs.coerceAtLeast(0L)
     var totalPlayedMs: Long = initialPlayedMs.coerceAtLeast(0L)
         private set
 
     fun sample(rawPositionMs: Long): VideoPositionSample {
         val positionMs = rawPositionMs.coerceAtLeast(0L)
+        val retainedBaseline = retainedBaselineMs
+        if (retainedBaseline != null && positionMs < retainedBaseline) {
+            return VideoPositionSample(positionMs, 0L, totalPlayedMs)
+        }
+        retainedBaselineMs = null
         val previous = lastPositionMs
         val advancedMs = when {
             previous == null -> positionMs
@@ -477,6 +492,50 @@ internal class VideoPositionAccumulator(initialPlayedMs: Long = 0L) {
         totalPlayedMs += advancedMs
         lastPositionMs = maxOf(lastPositionMs ?: 0L, durationMs)
         return VideoPositionSample(durationMs, advancedMs, totalPlayedMs)
+    }
+}
+
+/** One-shot MediaPlayer seek owned by a controller generation and consumed only after prepare. */
+internal class VideoResumeSeek(initialPositionMs: Long = 0L) {
+    private enum class State { IDLE, PENDING, READY, RELEASED }
+
+    private var targetMs = initialPositionMs.coerceAtLeast(0L)
+    private var state = if (targetMs > 0L) State.IDLE else State.READY
+
+    val allowsPlaybackCallbacks: Boolean
+        get() = state == State.READY
+
+    val pending: Boolean
+        get() = state == State.PENDING
+
+    fun retain(positionMs: Long) {
+        if (state == State.IDLE) targetMs = maxOf(targetMs, positionMs.coerceAtLeast(0L))
+    }
+
+    fun restoreAfterPrepared(durationMs: Long, seek: (Int) -> Unit): Boolean {
+        if (state != State.IDLE) return false
+        val target = targetMs.coerceAtMost(durationMs.coerceAtLeast(0L)).coerceAtMost(Int.MAX_VALUE.toLong())
+        if (target <= 0L) {
+            state = State.READY
+            return false
+        }
+        state = State.PENDING
+        seek(target.toInt())
+        return true
+    }
+
+    fun complete(): Boolean = settlePending(State.READY)
+
+    fun fail(): Boolean = settlePending(State.READY)
+
+    fun release() {
+        state = State.RELEASED
+    }
+
+    private fun settlePending(terminal: State): Boolean {
+        if (state != State.PENDING) return false
+        state = terminal
+        return true
     }
 }
 

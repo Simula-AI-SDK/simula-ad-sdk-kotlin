@@ -276,6 +276,12 @@ internal class RewardedPresentation(
     }
 
     @Synchronized
+    fun claimEarnedRewardOnTeardown(): RewardCompletionClaim? {
+        if (!rewardEarned || completionReason == null) return null
+        return claimRewardCompletion()
+    }
+
+    @Synchronized
     internal fun hasAuthoritativeEndReached(): Boolean = authoritativeEndReached
 
     @Synchronized

@@ -286,7 +286,17 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         closed = true
         runCatching { storeExit?.onAdClosed() } // resolve any outstanding store visit as an abandon
         presentation?.let { p ->
+            val earnedClaim = p.claimEarnedRewardOnTeardown()
             runCatching { p.callbacks.onPresentationAborted(p.rewardEarned, elapsedSeconds(p)) }
+            if (earnedClaim != null) {
+                runCatching {
+                    p.callbacks.onRewardCompleted(
+                        earnedClaim.earned,
+                        elapsedSeconds(p),
+                        earnedClaim.reason,
+                    )
+                }
+            }
         }
     }
 
@@ -485,6 +495,9 @@ private fun RewardedMinigame(
     val close = presentation.adBehavior?.close ?: CloseBehavior()
     val unitEndMode = presentation.videoContract2 &&
         presentation.adBehavior?.reward?.earnAt == ad.simula.ad.sdk.model.RewardEarnAt.UNIT_END
+    val videoProgressBarStyle = presentation.adBehavior?.progressBar?.style
+        ?.takeIf { isVideo && presentation.videoContract2 }
+        ?: ProgressBarStyle.SINGLE
 
     // Earned immediately when there is no gate; otherwise resolved by the timer below.
     // A gate that already elapsed in a prior Activity instance (config-change recreation)
@@ -969,11 +982,13 @@ private fun RewardedMinigame(
         val claim = (if (trusted == null) {
             presentation.claimClick(ClickSources.PRIMARY_CTA)
         } else if (trusted.interactionId == null) {
-            presentation.claimWebClick(trusted.clickSource ?: ClickSources.PRIMARY_UNKNOWN)
+            presentation.claimWebClick(
+                ClickSources.trustedHtmlOr(trusted.clickSource, ClickSources.PRIMARY_UNKNOWN),
+            )
         } else {
             presentation.claimTrustedClick(
                 trusted.interactionId,
-                trusted.clickSource ?: ClickSources.PRIMARY_UNKNOWN,
+                ClickSources.trustedHtmlOr(trusted.clickSource, ClickSources.PRIMARY_UNKNOWN),
             )
         }) ?: return true
         notifyPublisherClick { presentation.callbacks.notifyClicked(claim.interaction) }
@@ -1153,6 +1168,7 @@ private fun RewardedMinigame(
                     serveId = presentation.impressionId.takeIf { it.isNotBlank() },
                     configuredGateSeconds = gateSeconds,
                     initialPlayedMs = presentation.accumulatedPlayTimeMs,
+                    initialPositionMs = presentation.videoPositionMs,
                     ctaEnabled = videoCtaRoute(
                         presentation.trackingUrl,
                         presentation.androidStoreUrl,
@@ -1162,16 +1178,25 @@ private fun RewardedMinigame(
                     appIconUrl = presentation.creative.appIconUrl,
                     appName = presentation.creative.appName,
                     subtitle = presentation.creative.subtitle,
-                    chromeStyle = presentation.adBehavior?.video?.style ?: VideoChromeStyle.CORNER_CTA,
-                    effectiveClosePosition = effectiveClosePosition(close.treatment, close.position),
-                    bottomProgressBarObstructed = closeBarAtBottom(close.treatment, close.position),
+                    chromeStyle = presentation.adBehavior?.video?.style
+                        ?.takeIf { presentation.videoContract2 } ?: VideoChromeStyle.CORNER_CTA,
+                    effectiveClosePosition = effectiveClosePosition(
+                        close.treatment,
+                        close.position,
+                        videoProgressBarStyle,
+                    ),
+                    bottomProgressBarObstructed = progressBarAtBottom(
+                        close.treatment,
+                        close.position,
+                        videoProgressBarStyle,
+                    ),
                     videoPool = presentation.creative.videoPool,
                     playbackSlotIdentity = VideoPlaybackSlotIdentity.Primary,
                     clipIndex = presentation.creative.clipIndex,
                     skoverlayEnabled = videoSkOverlay?.enabled,
                     skoverlayDelaySeconds = videoSkOverlay?.delaySeconds,
                     videoPlanV2 = presentation.videoContract2,
-                    segments = presentation.creative.segments,
+                    segments = presentation.creative.segments.takeIf { presentation.videoContract2 }.orEmpty(),
                     videoPlanState = presentation.fallbackState.videoPlan,
                     presentationBlocked = clickHandoffPending || storeVisitBlocked,
                     willHandoff = hasNextStep,
@@ -1502,8 +1527,7 @@ private fun RewardedMinigame(
                 ),
                 remaining = secondsLeft,
                 progress = if (isVideo) smoothVideoCloseProgress else closeProgress.value,
-                progressBarStyle = presentation.adBehavior?.progressBar?.style
-                    ?.takeIf { isVideo } ?: ProgressBarStyle.SINGLE,
+                progressBarStyle = videoProgressBarStyle,
                 videoProgress = videoPlaybackProgress,
                 gateFraction = twoToneGateFraction(gateSeconds, presentation.videoDurationMs),
                 onClose = {
@@ -1609,7 +1633,11 @@ private fun RewardedMinigame(
             apiKey = presentation.apiKey,
             // A genuine bottom-left ✕ shares the bottom-left corner with the "i" (shrink its hit area);
             // a progress_bar bottom ✕ relocates to top-right, leaving the "i" its full hit area.
-            closeAtBottomLeft = close.position == ClosePosition.BOTTOM_LEFT && !closeBarAtBottom(close.treatment, close.position),
+            closeAtBottomLeft = close.position == ClosePosition.BOTTOM_LEFT && !progressBarAtBottom(
+                close.treatment,
+                close.position,
+                videoProgressBarStyle,
+            ),
         )
     }
 }

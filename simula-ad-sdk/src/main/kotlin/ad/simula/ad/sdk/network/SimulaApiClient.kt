@@ -510,7 +510,13 @@ internal object SimulaApiClient {
 
     internal fun adLoadResultFromResponse(data: AdLoadApiResponse): AdLoadResult {
         val videoContract2 = data.videoContract == 2
-        val creative = data.creative.toDomain()
+        val creative = data.creative.toDomain()?.let { value ->
+            if (videoContract2) value else value.copy(
+                videoPool = null,
+                clipIndex = null,
+                segments = emptyList(),
+            )
+        }
         return AdLoadResult(
             impressionId = data.impressionId.orEmpty(),
             adInserted = data.adInserted,
@@ -518,7 +524,7 @@ internal object SimulaApiClient {
             destination = data.destination,
             renderedFormat = data.renderedFormat,
             trackingUrl = data.trackingUrl,
-            impressionUrl = admittedRemoteAssetUrl(data.impressionUrl),
+            impressionUrl = admittedRemoteAssetUrl(data.impressionUrl).takeIf { videoContract2 },
             androidStoreUrl = data.androidStoreUrl,
             prewarmSkProduct = data.prewarmSkProduct,
             renderedHtml = data.renderedHtml,
@@ -688,7 +694,12 @@ internal object SimulaApiClient {
         adUnitId: String = "",
     ): RewardedInitResult {
         val videoContract2 = data.videoContract == 2
-        val creative = (data.creative.toDomain() ?: Creative()).copy(
+        val decodedCreative = data.creative.toDomain() ?: Creative()
+        val creative = (if (videoContract2) decodedCreative else decodedCreative.copy(
+            videoPool = null,
+            clipIndex = null,
+            segments = emptyList(),
+        )).copy(
             adUnitType = AdUnitType.REWARDED,
         )
         return RewardedInitResult(
@@ -698,7 +709,7 @@ internal object SimulaApiClient {
             creative = creative,
             destination = data.destination,
             trackingUrl = data.trackingUrl,
-            impressionUrl = admittedRemoteAssetUrl(data.impressionUrl),
+            impressionUrl = admittedRemoteAssetUrl(data.impressionUrl).takeIf { videoContract2 },
             androidStoreUrl = data.androidStoreUrl,
             prewarmSkProduct = data.prewarmSkProduct,
             adBehavior = data.adBehavior.toDomain(videoContract2),
@@ -844,9 +855,9 @@ internal object SimulaApiClient {
             appName = (creative?.appName ?: ad.appName)?.trim()?.takeIf { it.isNotEmpty() },
             subtitle = (creative?.subtitle ?: ad.subtitle)?.trim()?.takeIf { it.isNotEmpty() },
             videoPool = (creative?.videoPool ?: creative?.pool ?: ad.videoPool ?: ad.pool)
-                ?.trim()?.takeIf { it.length in 1..64 },
-            clipIndex = clipIndex,
-            videoBehavior = fallbackVideoBehavior(ad.adBehavior),
+                ?.trim()?.takeIf { responseVideoContract2 && it.length in 1..64 },
+            clipIndex = clipIndex.takeIf { responseVideoContract2 },
+            videoBehavior = fallbackVideoBehavior(ad.adBehavior).takeIf { responseVideoContract2 },
             skoverlay = fallbackSkOverlayConfig(ad.adBehavior, responseVideoContract2),
             videoContract2 = responseVideoContract2,
             destination = ad.destination?.trim()?.takeIf { it.isNotEmpty() },

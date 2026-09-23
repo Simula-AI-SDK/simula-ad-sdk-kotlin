@@ -815,7 +815,49 @@ class VideoPlanV2PolicyTest {
 
         assertTrue(state.timeoutPostCloseFetchWait(generation))
         assertFalse(state.resolvePostCloseFetchWait(generation, listOf(playable(0))))
-        assertTrue(state.videoPlan.nextStepReady() != null)
+        assertNull(state.videoPlan.nextStepReady())
+    }
+
+    @Test
+    fun `timeout with prepared playable records successful handoff instead of timeout close`() {
+        val terminalEvents = mutableListOf<Pair<String, VideoLifecycleReason?>>()
+        val state = FallbackPresentationState(
+            clockMs = { 0L },
+            videoPlanV2 = true,
+            videoPlanState = VideoPlanPresentationState(
+                videoPlanV2 = true,
+                clockMs = { 0L },
+                terminalRecorder = { _, stage, reason, _ -> terminalEvents += stage to reason },
+            ),
+        )
+        state.videoPlan.beginHandoff(playbackTelemetry(0, 1.0, 1.0, 0.0), VideoLifecycleReason.COMPLETED)
+        val generation = state.startPostCloseFetchWait()
+
+        assertTrue(state.timeoutPostCloseFetchWait(generation, listOf(playable(0))))
+
+        assertEquals(FallbackStage.SHOWING, state.stage)
+        assertEquals(listOf(VIDEO_STAGE_HANDOFF to VideoLifecycleReason.COMPLETED), terminalEvents)
+    }
+
+    @Test
+    fun `timeout without displayable fallback closes pending handoff as timeout`() {
+        val terminalEvents = mutableListOf<Pair<String, VideoLifecycleReason?>>()
+        val state = FallbackPresentationState(
+            clockMs = { 0L },
+            videoPlanV2 = true,
+            videoPlanState = VideoPlanPresentationState(
+                videoPlanV2 = true,
+                clockMs = { 0L },
+                terminalRecorder = { _, stage, reason, _ -> terminalEvents += stage to reason },
+            ),
+        )
+        state.videoPlan.beginHandoff(playbackTelemetry(0, 1.0, 1.0, 0.0), VideoLifecycleReason.COMPLETED)
+        val generation = state.startPostCloseFetchWait()
+
+        assertTrue(state.timeoutPostCloseFetchWait(generation))
+
+        assertEquals(FallbackStage.DONE, state.stage)
+        assertEquals(listOf(VIDEO_STAGE_CLOSE to VideoLifecycleReason.NEXT_STEP_TIMEOUT), terminalEvents)
     }
 
     @Test

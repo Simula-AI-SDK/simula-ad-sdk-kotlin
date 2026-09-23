@@ -6,6 +6,8 @@ import java.io.InputStream
 import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.InetAddress
+import java.net.CookieHandler
+import java.net.CookieManager
 import java.net.URL
 import ad.simula.ad.sdk.network.DeadlineHostResolver
 import java.util.concurrent.CountDownLatch
@@ -45,9 +47,33 @@ import org.junit.rules.TemporaryFolder
 class VideoAssetCacheTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()
+    private val seededAssetId = AtomicInteger()
 
     private val publicDns: (String) -> Array<InetAddress> = {
         arrayOf(InetAddress.getByName("8.8.8.8"))
+    }
+
+    private suspend fun VideoAssetCacheManager.acquire(rawUrl: String): VideoAssetLease? =
+        (acquireResult(rawUrl) as? VideoAssetCacheResult.Ready)?.lease
+
+    @Test
+    fun `manifest strictly validates state name size line and entry bounds`() {
+        val asset = opaqueVideoAssetName("https://cdn.example/valid.mp4")
+        val file = "$asset.process.1.asset"
+        val valid = "SIMULA_VIDEO_CACHE_INDEX_V1\nC\t$asset\t$file\t1\t1\n"
+        assertTrue(isValidVideoCacheManifest(valid.toByteArray()))
+        assertFalse(isValidVideoCacheManifest(valid.replace("\nC\t", "\nX\t").toByteArray()))
+        assertFalse(isValidVideoCacheManifest(valid.replace(file, "../asset").toByteArray()))
+        assertFalse(isValidVideoCacheManifest(valid.replace("\t1\t1\n", "\t0\t1\n").toByteArray()))
+        assertFalse(isValidVideoCacheManifest((valid + "x".repeat(321) + "\n").toByteArray()))
+        val tooMany = buildString {
+            append("SIMULA_VIDEO_CACHE_INDEX_V1\n")
+            repeat(257) { index ->
+                val indexedAsset = opaqueVideoAssetName("https://cdn.example/$index.mp4")
+                append("P\t$indexedAsset\t$indexedAsset.process.${index + 1}.asset\t1\t1\n")
+            }
+        }
+        assertFalse(isValidVideoCacheManifest(tooMany.toByteArray()))
     }
 
     @Test
@@ -114,6 +140,35 @@ class VideoAssetCacheTest {
         assertFalse(fileOperationUnderLock.get())
         lease?.release()
         advanceUntilIdle()
+    }
+
+    @Test
+    fun `installed global cookie handler rejects video before opening connection and is not mutated`() = runTest {
+        val previous = CookieHandler.getDefault()
+        val installed = CookieManager()
+        val opens = AtomicInteger()
+        try {
+            CookieHandler.setDefault(installed)
+            val manager = VideoAssetCacheManager(
+                directory = temporaryFolder.newFolder("global-cookie-handler"),
+                elapsedRealtimeMs = { 0L },
+                ioDispatcher = StandardTestDispatcher(testScheduler),
+                scope = this,
+                resolveHost = publicDns,
+                openConnection = {
+                    opens.incrementAndGet()
+                    FakeConnection(ByteArrayInputStream(byteArrayOf(1)), 1L)
+                },
+            )
+
+            val result = manager.acquireResult("https://cdn.example/video.mp4")
+
+            assertEquals(VideoAssetCacheResult.Failed(VideoAssetCacheError.UNSAFE_TARGET), result)
+            assertEquals(0, opens.get())
+            assertTrue(CookieHandler.getDefault() === installed)
+        } finally {
+            CookieHandler.setDefault(previous)
+        }
     }
 
     @Test
@@ -430,7 +485,6 @@ class VideoAssetCacheTest {
             ioDispatcher = dispatcher,
             scope = this,
         )
-
         val lease = acquireVideoAssetLeaseWithOwnership(
             timeoutMs = 100L,
             ioDispatcher = dispatcher,
@@ -442,6 +496,7 @@ class VideoAssetCacheTest {
         lease?.release()
         advanceUntilIdle()
         assertFalse(file.exists())
+        assertFalse(File(directory, VIDEO_CACHE_MANIFEST_NAME).readText().contains(file.name))
     }
 
     @Test
@@ -451,9 +506,11 @@ class VideoAssetCacheTest {
         val result = async {
             acquireVideoLeaseForReady(
                 acquire = {
-                    VideoAssetLease(temporaryFolder.newFile("cancelled-ready.mp4")) {
-                        releases.incrementAndGet()
-                    }
+                    VideoAssetCacheResult.Ready(
+                        VideoAssetLease(temporaryFolder.newFile("cancelled-ready.mp4")) {
+                            releases.incrementAndGet()
+                        },
+                    )
                 },
                 afterAcquire = { currentCoroutineContext().job.cancel() },
                 isCurrent = { true },
@@ -477,15 +534,17 @@ class VideoAssetCacheTest {
 
         val result = acquireVideoLeaseForReady(
             acquire = {
-                VideoAssetLease(temporaryFolder.newFile("stale-ready.mp4")) {
-                    releases.incrementAndGet()
-                }.also { current = false }
+                VideoAssetCacheResult.Ready(
+                    VideoAssetLease(temporaryFolder.newFile("stale-ready.mp4")) {
+                        releases.incrementAndGet()
+                    }.also { current = false },
+                )
             },
             isCurrent = { current },
             publishReady = { error("stale generation must not publish Ready") },
         )
 
-        assertEquals(VideoReadyLeaseResult.STALE, result)
+        assertEquals(VideoReadyLeaseResult.Stale, result)
         assertEquals(1, releases.get())
     }
 
@@ -496,9 +555,11 @@ class VideoAssetCacheTest {
         val failure = runCatching {
             acquireVideoLeaseForReady(
                 acquire = {
-                    VideoAssetLease(temporaryFolder.newFile("rejected-ready.mp4")) {
-                        releases.incrementAndGet()
-                    }
+                    VideoAssetCacheResult.Ready(
+                        VideoAssetLease(temporaryFolder.newFile("rejected-ready.mp4")) {
+                            releases.incrementAndGet()
+                        },
+                    )
                 },
                 isCurrent = { true },
                 publishReady = { error("Ready publication failed") },
@@ -516,9 +577,11 @@ class VideoAssetCacheTest {
 
         val result = acquireVideoLeaseForReady(
             acquire = {
-                VideoAssetLease(temporaryFolder.newFile("published-ready.mp4")) {
-                    releases.incrementAndGet()
-                }
+                VideoAssetCacheResult.Ready(
+                    VideoAssetLease(temporaryFolder.newFile("published-ready.mp4")) {
+                        releases.incrementAndGet()
+                    },
+                )
             },
             isCurrent = { true },
             publishReady = { ownership ->
@@ -527,7 +590,7 @@ class VideoAssetCacheTest {
             },
         )
 
-        assertEquals(VideoReadyLeaseResult.READY, result)
+        assertEquals(VideoReadyLeaseResult.Ready, result)
         assertEquals(0, releases.get())
         readyLease?.release()
         readyLease?.release()
@@ -541,9 +604,11 @@ class VideoAssetCacheTest {
         val result = async {
             acquireVideoLeaseForReady(
                 acquire = {
-                    VideoAssetLease(temporaryFolder.newFile("cancelled-after-ready.mp4")) {
-                        releases.incrementAndGet()
-                    }
+                    VideoAssetCacheResult.Ready(
+                        VideoAssetLease(temporaryFolder.newFile("cancelled-after-ready.mp4")) {
+                            releases.incrementAndGet()
+                        },
+                    )
                 },
                 isCurrent = { true },
                 publishReady = { ownership ->
@@ -585,6 +650,53 @@ class VideoAssetCacheTest {
     }
 
     @Test
+    fun `manifest replacement uses fsynced same directory fallback`() = runTest {
+        val directory = temporaryFolder.newFolder("rename-fallback")
+        val renameAttempts = AtomicInteger()
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            elapsedRealtimeMs = { 0L },
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            scope = this,
+            resolveHost = publicDns,
+            openConnection = {
+                FakeConnection(ByteArrayInputStream(byteArrayOf(1, 2, 3, 4)), 4L)
+            },
+            renameFile = { source, destination ->
+                renameAttempts.incrementAndGet()
+                if (destination.exists()) false else source.renameTo(destination)
+            },
+        )
+
+        val lease = manager.acquire("https://cdn.example/rename-fallback.mp4")
+
+        assertEquals(listOf<Byte>(1, 2, 3, 4), lease?.file?.readBytes()?.toList())
+        assertTrue(renameAttempts.get() >= 3)
+        assertTrue(File(directory, VIDEO_CACHE_MANIFEST_NAME).readText().contains("\nC\t"))
+        lease?.release()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `asset file is not created when manifest publication fails`() = runTest {
+        val directory = temporaryFolder.newFolder("manifest-write-failure")
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            elapsedRealtimeMs = { 0L },
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            scope = this,
+            resolveHost = publicDns,
+            openConnection = { FakeConnection(ByteArrayInputStream(byteArrayOf(1)), 1L) },
+            renameFile = { _, _ -> false },
+        )
+
+        val result = manager.acquireResult("https://cdn.example/no-index-no-file.mp4")
+
+        assertEquals(VideoAssetCacheResult.Failed(VideoAssetCacheError.CACHE_FULL), result)
+        assertTrue(directory.listFiles().orEmpty().none { it.name.endsWith(".asset") })
+    }
+
+    @Test
     fun `positive declared length overrun fails on first oversized read`() = runTest {
         val body = CountingInputStream(byteArrayOf(1, 2, 3))
         val manager = VideoAssetCacheManager(
@@ -619,7 +731,7 @@ class VideoAssetCacheTest {
         val directory = temporaryFolder.newFolder("capacity")
         val oldUrl = "https://cdn.example/old.mp4"
         val activeUrl = "https://cdn.example/active.mp4"
-        sparseAsset(directory, oldUrl, 50L * 1024L * 1024L, modified = 1L)
+        val oldFile = sparseAsset(directory, oldUrl, 50L * 1024L * 1024L, modified = 1L)
         val activeFile = sparseAsset(directory, activeUrl, 40L * 1024L * 1024L, modified = 2L)
         val dispatcher = StandardTestDispatcher(testScheduler)
         val manager = VideoAssetCacheManager(
@@ -637,7 +749,7 @@ class VideoAssetCacheTest {
 
         assertTrue(downloaded != null)
         assertTrue(activeFile.exists())
-        assertFalse(File(directory, opaqueVideoAssetName(oldUrl)).exists())
+        assertFalse(oldFile.exists())
         activeLease.release()
         downloaded?.release()
         advanceUntilIdle()
@@ -803,37 +915,251 @@ class VideoAssetCacheTest {
         assertNull(manager.acquire("https://cdn.example/unknown.mp4"))
         assertTrue(firstFile.exists())
         assertTrue(secondFile.exists())
-        assertTrue(directory.listFiles().orEmpty().none { it.name.endsWith(".part") })
+        assertTrue(indexedAssetFiles(directory).none { it.name.endsWith(".part") })
         first.release()
         second.release()
         advanceUntilIdle()
     }
 
     @Test
-    fun `entry cap fails closed before cache admission`() = runTest {
-        val directory = temporaryFolder.newFolder("cleanup-batches")
-        repeat(300) { index ->
-            File(directory, "orphan-$index.part").apply {
-                writeText("partial")
-                setLastModified(1L)
-            }
+    fun `manifest over entry cap resets only bounded valid listed paths`() = runTest {
+        val directory = temporaryFolder.newFolder("manifest-entry-cap")
+        val files = (0..256).map { index ->
+            val url = "https://cdn.example/corrupt-$index.mp4"
+            sparseAsset(directory, url, 1L, modified = 1L)
         }
-        val url = "https://cdn.example/retained.mp4"
-        sparseAsset(directory, url, 1L, modified = 2_000_000_000L)
-        val dispatcher = StandardTestDispatcher(testScheduler)
         val manager = VideoAssetCacheManager(
             directory = directory,
-            wallClockMs = { 2_000_000_000L },
+            wallClockMs = { 1L },
             elapsedRealtimeMs = { 0L },
-            ioDispatcher = dispatcher,
+            ioDispatcher = StandardTestDispatcher(testScheduler),
             scope = this,
+            resolveHost = publicDns,
+            openConnection = { FakeConnection(ByteArrayInputStream(byteArrayOf(1)), 1L) },
         )
 
-        val lease = manager.acquire(url)
+        val lease = manager.acquire("https://cdn.example/recovered.mp4")
 
-        assertNull(lease)
+        assertTrue(lease != null)
+        assertTrue(files.take(256).none(File::exists))
+        assertTrue(files.last().exists())
+        assertTrue(File(directory, VIDEO_CACHE_MANIFEST_NAME).length() < 96L * 1024L)
+        lease?.release()
         advanceUntilIdle()
-        assertTrue(directory.listFiles().orEmpty().size <= 301)
+    }
+
+    @Test
+    fun `invalid primary recovers valid backup before removing it`() = runTest {
+        val directory = temporaryFolder.newFolder("manifest-invalid-primary-valid-backup")
+        val invalidPrimaryFile = seededAssetFile(directory, "https://cdn.example/invalid-primary.mp4", 1L, 1L)
+        val backupUrl = "https://cdn.example/backup.mp4"
+        val backupFile = seededAssetFile(directory, backupUrl, 1L, 1L)
+        val primary = File(directory, VIDEO_CACHE_MANIFEST_NAME)
+        primary.writeText(manifestText(invalidPrimaryFile, "https://cdn.example/invalid-primary.mp4") + "invalid\n")
+        val backupText = manifestText(backupFile, backupUrl)
+        val backup = File(directory, "$VIDEO_CACHE_MANIFEST_NAME.bak").apply { writeText(backupText) }
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            wallClockMs = { 1L },
+            elapsedRealtimeMs = { 0L },
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            scope = this,
+            openConnection = { error("valid backup must avoid download") },
+        )
+
+        val lease = manager.acquire(backupUrl)
+
+        assertEquals(backupFile.canonicalPath, lease?.file?.canonicalPath)
+        assertEquals(backupText, primary.readText())
+        assertTrue(invalidPrimaryFile.exists())
+        assertFalse(backup.exists())
+        lease?.release()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `valid primary is preferred over stale backup`() = runTest {
+        val directory = temporaryFolder.newFolder("manifest-valid-primary-stale-backup")
+        val primaryUrl = "https://cdn.example/primary.mp4"
+        val primaryFile = seededAssetFile(directory, primaryUrl, 1L, 1L)
+        val staleUrl = "https://cdn.example/stale-backup.mp4"
+        val staleFile = seededAssetFile(directory, staleUrl, 1L, 1L)
+        val primaryText = manifestText(primaryFile, primaryUrl)
+        val primary = File(directory, VIDEO_CACHE_MANIFEST_NAME).apply { writeText(primaryText) }
+        val backup = File(directory, "$VIDEO_CACHE_MANIFEST_NAME.bak").apply {
+            writeText(manifestText(staleFile, staleUrl))
+        }
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            wallClockMs = { 1L },
+            elapsedRealtimeMs = { 0L },
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            scope = this,
+            openConnection = { error("valid primary must avoid download") },
+        )
+
+        val lease = manager.acquire(primaryUrl)
+
+        assertEquals(primaryFile.canonicalPath, lease?.file?.canonicalPath)
+        assertEquals(primaryText, primary.readText())
+        assertTrue(staleFile.exists())
+        assertFalse(backup.exists())
+        lease?.release()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `invalid primary and backup reset union of at most 256 validated paths`() = runTest {
+        val directory = temporaryFolder.newFolder("manifest-both-invalid")
+        val primaryFiles = (0 until 128).map { index ->
+            val url = "https://cdn.example/invalid-primary-$index.mp4"
+            seededAssetFile(directory, url, 1L, 1L) to url
+        }
+        val backupFiles = (0 until 129).map { index ->
+            val url = "https://cdn.example/invalid-backup-$index.mp4"
+            seededAssetFile(directory, url, 1L, 1L) to url
+        }
+        File(directory, VIDEO_CACHE_MANIFEST_NAME).writeText(
+            manifestText(primaryFiles) + "invalid\n",
+        )
+        File(directory, "$VIDEO_CACHE_MANIFEST_NAME.bak").writeText(
+            manifestText(backupFiles) + "invalid\n",
+        )
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            wallClockMs = { 1L },
+            elapsedRealtimeMs = { 0L },
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            scope = this,
+            resolveHost = publicDns,
+            openConnection = { FakeConnection(ByteArrayInputStream(byteArrayOf(9)), 1L) },
+        )
+
+        val lease = manager.acquire("https://cdn.example/after-bounded-reset.mp4")
+
+        assertTrue(lease != null)
+        assertTrue(primaryFiles.none { (file, _) -> file.exists() })
+        assertTrue(backupFiles.take(128).none { (file, _) -> file.exists() })
+        assertTrue(backupFiles.last().first.exists())
+        lease?.release()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `backup is retained when recovered primary cannot be persisted`() = runTest {
+        val directory = temporaryFolder.newFolder("manifest-recovery-persist-failure")
+        val invalidFile = seededAssetFile(directory, "https://cdn.example/invalid.mp4", 1L, 1L)
+        val backupUrl = "https://cdn.example/retry-backup.mp4"
+        val backupFile = seededAssetFile(directory, backupUrl, 1L, 1L)
+        File(directory, VIDEO_CACHE_MANIFEST_NAME).writeText(
+            manifestText(invalidFile, "https://cdn.example/invalid.mp4") + "invalid\n",
+        )
+        val backupText = manifestText(backupFile, backupUrl)
+        val backup = File(directory, "$VIDEO_CACHE_MANIFEST_NAME.bak").apply { writeText(backupText) }
+        val failingManager = VideoAssetCacheManager(
+            directory = directory,
+            elapsedRealtimeMs = { 0L },
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            scope = this,
+            renameFile = { _, _ -> false },
+        )
+
+        assertEquals(
+            VideoAssetCacheResult.Failed(VideoAssetCacheError.CACHE_FULL),
+            failingManager.acquireResult(backupUrl),
+        )
+        assertEquals(backupText, backup.readText())
+
+        val retryManager = VideoAssetCacheManager(
+            directory = directory,
+            wallClockMs = { 1L },
+            elapsedRealtimeMs = { 0L },
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            scope = this,
+            openConnection = { error("retained backup must be retryable") },
+        )
+        val lease = retryManager.acquire(backupUrl)
+
+        assertEquals(backupFile.canonicalPath, lease?.file?.canonicalPath)
+        assertFalse(backup.exists())
+        lease?.release()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `oversize manifest reads bounded prefix and resets its valid listed paths`() = runTest {
+        val directory = temporaryFolder.newFolder("manifest-byte-cap")
+        val listed = sparseAsset(directory, "https://cdn.example/listed.mp4", 1L, modified = 1L)
+        File(directory, VIDEO_CACHE_MANIFEST_NAME).appendText("x".repeat(100_000))
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            wallClockMs = { 1L },
+            elapsedRealtimeMs = { 0L },
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            scope = this,
+            resolveHost = publicDns,
+            openConnection = { FakeConnection(ByteArrayInputStream(byteArrayOf(2)), 1L) },
+        )
+
+        val lease = manager.acquire("https://cdn.example/after-oversize.mp4")
+
+        assertTrue(lease != null)
+        assertFalse(listed.exists())
+        assertTrue(File(directory, VIDEO_CACHE_MANIFEST_NAME).length() < 96L * 1024L)
+        lease?.release()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `invalid state name size and line fail closed without touching unsafe path`() = runTest {
+        val directory = temporaryFolder.newFolder("manifest-strict-validation")
+        val unsafe = temporaryFolder.newFile("outside.asset").apply { writeText("host") }
+        val manifest = File(directory, VIDEO_CACHE_MANIFEST_NAME)
+        manifest.writeText(
+            "SIMULA_VIDEO_CACHE_INDEX_V1\n" +
+                "X\tbad.video\t../${unsafe.name}\t-1\t-1\n" +
+                "z".repeat(321) + "\n",
+        )
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            elapsedRealtimeMs = { 0L },
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            scope = this,
+            resolveHost = publicDns,
+            openConnection = { FakeConnection(ByteArrayInputStream(byteArrayOf(3)), 1L) },
+        )
+
+        val lease = manager.acquire("https://cdn.example/strict-reset.mp4")
+
+        assertTrue(lease != null)
+        assertEquals("host", unsafe.readText())
+        assertFalse(manifest.readText().contains("../"))
+        lease?.release()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `startup prunes missing listed file without directory enumeration`() = runTest {
+        val directory = temporaryFolder.newFolder("manifest-missing")
+        val missingUrl = "https://cdn.example/missing.mp4"
+        val missing = sparseAsset(directory, missingUrl, 1L, modified = 1L)
+        assertTrue(missing.delete())
+        val manager = VideoAssetCacheManager(
+            directory = directory,
+            wallClockMs = { 1L },
+            elapsedRealtimeMs = { 0L },
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            scope = this,
+            resolveHost = publicDns,
+            openConnection = { FakeConnection(ByteArrayInputStream(byteArrayOf(4)), 1L) },
+        )
+
+        val lease = manager.acquire("https://cdn.example/present.mp4")
+
+        assertTrue(lease != null)
+        assertFalse(File(directory, VIDEO_CACHE_MANIFEST_NAME).readText().contains(opaqueVideoAssetName(missingUrl)))
+        lease?.release()
+        advanceUntilIdle()
     }
 
     @Test
@@ -854,25 +1180,31 @@ class VideoAssetCacheTest {
         )
 
         val lease = manager.acquire(targetUrl)
-        val afterFirstBatch = directory.listFiles().orEmpty().sumOf(File::length)
+        val afterFirstBatch = indexedAssetFiles(directory).sumOf(File::length)
         assertTrue(lease != null)
         assertTrue(afterFirstBatch > VIDEO_CACHE_MAX_BYTES)
 
         advanceTimeBy(49L)
-        assertEquals(afterFirstBatch, directory.listFiles().orEmpty().sumOf(File::length))
+        assertEquals(afterFirstBatch, indexedAssetFiles(directory).sumOf(File::length))
         advanceTimeBy(1L)
         advanceUntilIdle()
-        assertTrue(directory.listFiles().orEmpty().sumOf(File::length) <= VIDEO_CACHE_MAX_BYTES)
+        assertTrue(indexedAssetFiles(directory).sumOf(File::length) <= VIDEO_CACHE_MAX_BYTES)
         lease?.release()
         advanceUntilIdle()
     }
 
     @Test
-    fun `fresh foreign partial survives cleanup and counts against capacity`() = runTest {
+    fun `fresh indexed partial survives cleanup and counts against capacity`() = runTest {
         val directory = temporaryFolder.newFolder("foreign-partial")
-        val foreign = File(directory, "${opaqueVideoAssetName("https://cdn.example/foreign.mp4")}.other.1.part")
-        RandomAccessFile(foreign, "rw").use { it.setLength(60L * 1024L * 1024L) }
+        val assetName = opaqueVideoAssetName("https://cdn.example/foreign.mp4")
+        val foreign = File(directory, "$assetName.other.1.asset")
+        RandomAccessFile(foreign, "rw").use { it.setLength(50L * 1024L * 1024L) }
         foreign.setLastModified(1_000L)
+        File(directory, VIDEO_CACHE_MANIFEST_NAME).writeText(
+            "SIMULA_VIDEO_CACHE_INDEX_V1\nP\t$assetName\t${foreign.name}\t${50L * 1024L * 1024L}\t1000\n",
+        )
+        val activeUrl = "https://cdn.example/active-partial-cap.mp4"
+        val activeFile = sparseAsset(directory, activeUrl, 50L * 1024L * 1024L, modified = 1_000L)
         val manager = VideoAssetCacheManager(
             directory = directory,
             wallClockMs = { 1_000L },
@@ -882,55 +1214,59 @@ class VideoAssetCacheTest {
             processPartId = "current",
             resolveHost = publicDns,
             openConnection = {
-                FakeConnection(ZeroInputStream(50L * 1024L * 1024L), 50L * 1024L * 1024L)
+                FakeConnection(ZeroInputStream(1L), 1L)
             },
         )
 
+        val active = requireNotNull(manager.acquire(activeUrl))
         assertNull(manager.acquire("https://cdn.example/new.mp4"))
         assertTrue(foreign.exists())
+        assertTrue(activeFile.exists())
+        active.release()
+        advanceUntilIdle()
     }
 
     @Test
-    fun `different process flights use distinct partial files`() = runTest {
-        val directory = temporaryFolder.newFolder("unique-parts")
-        val firstStarted = CountDownLatch(1)
-        val secondStarted = CountDownLatch(1)
+    fun `partial is indexed before asset file creation and publishes atomically`() = runTest {
+        val directory = temporaryFolder.newFolder("indexed-before-create")
+        val checkedBeforeCreate = AtomicBoolean(false)
+        val started = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val firstDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
-        val secondDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
-        fun manager(
-            process: String,
-            started: CountDownLatch,
-            dispatcher: CoroutineDispatcher,
-        ) = VideoAssetCacheManager(
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        val managerScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val url = "https://cdn.example/manifest-protocol.mp4"
+        val assetName = opaqueVideoAssetName(url)
+        val manager = VideoAssetCacheManager(
             directory = directory,
             elapsedRealtimeMs = { System.nanoTime() / 1_000_000L },
             ioDispatcher = dispatcher,
-            scope = CoroutineScope(SupervisorJob() + dispatcher),
-            processPartId = process,
+            scope = managerScope,
+            processPartId = "process-a",
             resolveHost = publicDns,
             openConnection = {
                 FakeConnection(BlockingInputStream(byteArrayOf(1), started, release), 1L)
             },
+            onFileOperation = {
+                val manifest = File(directory, VIDEO_CACHE_MANIFEST_NAME)
+                val partialLine = manifest.takeIf(File::isFile)?.readText()?.contains("P\t$assetName\t") == true
+                val physicalExists = manifest.takeIf(File::isFile)?.readLines()?.drop(1)
+                    ?.mapNotNull { line -> line.split('\t').getOrNull(2) }
+                    ?.any { File(directory, it).exists() } == true
+                if (partialLine && !physicalExists) checkedBeforeCreate.set(true)
+            },
         )
-        val firstManager = manager("process-a", firstStarted, firstDispatcher)
-        val secondManager = manager("process-b", secondStarted, secondDispatcher)
-
-        val first = async(Dispatchers.Default) { firstManager.acquire("https://cdn.example/shared.mp4") }
-        val second = async(Dispatchers.Default) { secondManager.acquire("https://cdn.example/shared.mp4") }
-        assertTrue(withContext(Dispatchers.IO) { firstStarted.await(5, TimeUnit.SECONDS) })
-        assertTrue(withContext(Dispatchers.IO) { secondStarted.await(5, TimeUnit.SECONDS) })
-
-        val partials = directory.listFiles().orEmpty().filter { it.name.endsWith(".part") }
-        assertEquals(2, partials.size)
-        assertTrue(partials.any { it.name.contains(".process-a.") })
-        assertTrue(partials.any { it.name.contains(".process-b.") })
+        val acquisition = async(Dispatchers.Default) { manager.acquire(url) }
+        assertTrue(withContext(Dispatchers.IO) { started.await(5, TimeUnit.SECONDS) })
+        assertTrue(checkedBeforeCreate.get())
+        assertFalse(manifestHasComplete(directory, url))
 
         release.countDown()
-        first.await()?.release()
-        second.await()?.release()
-        firstDispatcher.close()
-        secondDispatcher.close()
+        val lease = requireNotNull(acquisition.await())
+        assertTrue(manifestHasComplete(directory, url))
+        assertTrue(lease.file.exists())
+        lease.release()
+        managerScope.cancel()
+        dispatcher.close()
     }
 
     @Test
@@ -991,7 +1327,6 @@ class VideoAssetCacheTest {
             },
         )
         val url = "https://cdn.example/generation.mp4"
-        val destination = File(directory, opaqueVideoAssetName(url))
         val first = async(Dispatchers.Default) { manager.acquire(url) }
         assertTrue(firstAtPublish.await(2, TimeUnit.SECONDS))
         assertNull(first.await())
@@ -999,12 +1334,12 @@ class VideoAssetCacheTest {
         val replacement = async(Dispatchers.Default) { manager.acquire(url) }
         releaseFirst.countDown()
         assertTrue(secondAtPublish.await(2, TimeUnit.SECONDS))
-        assertFalse("stale worker published the canonical file", destination.exists())
+        assertFalse("stale worker published a complete entry", manifestHasComplete(directory, url))
 
         releaseSecond.countDown()
         val lease = replacement.await()
         assertTrue(lease != null)
-        assertTrue(destination.exists())
+        assertTrue(lease?.file?.exists() == true)
         lease?.release()
         managerScope.cancel()
         dispatcher.close()
@@ -1033,12 +1368,11 @@ class VideoAssetCacheTest {
             },
         )
         val url = "https://cdn.example/post-move.mp4"
-        val destination = File(directory, opaqueVideoAssetName(url))
         val acquisition = async(Dispatchers.Default) { manager.acquire(url) }
         assertTrue(published.await(2, TimeUnit.SECONDS))
 
         assertNull(acquisition.await())
-        assertFalse(destination.exists())
+        assertTrue(indexedAssetFiles(directory).isEmpty())
 
         releaseWorker.countDown()
         managerScope.cancel()
@@ -1046,7 +1380,7 @@ class VideoAssetCacheTest {
     }
 
     @Test
-    fun `pending acquire admission is bounded`() = runBlocking {
+    fun `more than sixteen simultaneous distinct callers are admitted atomically`() = runBlocking {
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
         val dispatcher = Executors.newFixedThreadPool(2).asCoroutineDispatcher()
@@ -1062,28 +1396,112 @@ class VideoAssetCacheTest {
                 release.await(5, TimeUnit.SECONDS)
                 publicDns("cdn.example")
             },
+            openConnection = { FakeConnection(ByteArrayInputStream(byteArrayOf(1)), 1L) },
         )
-        val waiters = (0 until 16).map { index ->
-            async(Dispatchers.Default) { manager.acquire("https://cdn.example/$index.mp4") }
+        val waiters = (0 until 32).map { index ->
+            async(Dispatchers.Default) { manager.acquireResult("https://cdn.example/$index.mp4") }
         }
         assertTrue(started.await(2, TimeUnit.SECONDS))
         val admissionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
         while (manager.pendingAcquireCount() < 16 && System.nanoTime() < admissionDeadline) Thread.yield()
         assertEquals(16, manager.pendingAcquireCount())
 
-        assertNull(manager.acquire("https://cdn.example/rejected.mp4"))
-
-        waiters.forEach { it.cancel() }
         release.countDown()
+        val results = waiters.map { it.await() }
+        assertEquals(16, results.count { it is VideoAssetCacheResult.Ready })
+        assertEquals(
+            16,
+            results.count { it == VideoAssetCacheResult.Failed(VideoAssetCacheError.ADMISSION_OVERFLOW) },
+        )
+        results.filterIsInstance<VideoAssetCacheResult.Ready>().forEach { it.lease.release() }
         managerScope.cancel()
         dispatcher.close()
     }
 
-    private fun sparseAsset(directory: File, url: String, size: Long, modified: Long): File =
-        File(directory, opaqueVideoAssetName(url)).also { file ->
+    @Test
+    fun `more than sixteen simultaneous same key callers are admitted atomically`() = runBlocking {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val opens = AtomicInteger()
+        val dispatcher = Executors.newFixedThreadPool(4).asCoroutineDispatcher()
+        val managerScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val manager = VideoAssetCacheManager(
+            directory = temporaryFolder.newFolder("bounded-pending-same-key"),
+            downloadTimeoutMs = 5_000L,
+            elapsedRealtimeMs = { System.nanoTime() / 1_000_000L },
+            ioDispatcher = dispatcher,
+            scope = managerScope,
+            hostResolver = DeadlineHostResolver { _, _ ->
+                started.countDown()
+                release.await(5, TimeUnit.SECONDS)
+                publicDns("cdn.example")
+            },
+            openConnection = {
+                opens.incrementAndGet()
+                FakeConnection(ByteArrayInputStream(byteArrayOf(1)), 1L)
+            },
+        )
+        val url = "https://cdn.example/shared-admission.mp4"
+        val waiters = (0 until 32).map {
+            async(Dispatchers.Default) { manager.acquireResult(url) }
+        }
+        assertTrue(started.await(2, TimeUnit.SECONDS))
+        val admissionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (manager.pendingAcquireCount() < 16 && System.nanoTime() < admissionDeadline) Thread.yield()
+        assertEquals(16, manager.pendingAcquireCount())
+
+        release.countDown()
+        val results = waiters.map { it.await() }
+        assertEquals(16, results.count { it is VideoAssetCacheResult.Ready })
+        assertEquals(
+            16,
+            results.count { it == VideoAssetCacheResult.Failed(VideoAssetCacheError.ADMISSION_OVERFLOW) },
+        )
+        assertEquals(1, opens.get())
+        results.filterIsInstance<VideoAssetCacheResult.Ready>().forEach { it.lease.release() }
+        managerScope.cancel()
+        dispatcher.close()
+    }
+
+    private fun seededAssetFile(directory: File, url: String, size: Long, modified: Long): File {
+        val assetName = opaqueVideoAssetName(url)
+        return File(directory, "$assetName.seed.${seededAssetId.incrementAndGet()}.asset").also { file ->
             RandomAccessFile(file, "rw").use { it.setLength(size) }
             file.setLastModified(modified)
         }
+    }
+
+    private fun manifestText(file: File, url: String): String = manifestText(listOf(file to url))
+
+    private fun manifestText(files: List<Pair<File, String>>): String = buildString {
+        append("SIMULA_VIDEO_CACHE_INDEX_V1\n")
+        files.forEach { (file, url) ->
+            append("C\t${opaqueVideoAssetName(url)}\t${file.name}\t${file.length()}\t1\n")
+        }
+    }
+
+    private fun sparseAsset(directory: File, url: String, size: Long, modified: Long): File {
+        val file = seededAssetFile(directory, url, size, modified)
+        val assetName = opaqueVideoAssetName(url)
+        val manifest = File(directory, VIDEO_CACHE_MANIFEST_NAME)
+        if (!manifest.exists()) manifest.writeText("SIMULA_VIDEO_CACHE_INDEX_V1\n")
+        manifest.appendText("C\t$assetName\t${file.name}\t$size\t$modified\n")
+        return file
+    }
+
+    private fun indexedAssetFiles(directory: File): List<File> {
+        val manifest = File(directory, VIDEO_CACHE_MANIFEST_NAME)
+        if (!manifest.isFile) return emptyList()
+        return manifest.readLines().drop(1).mapNotNull { line ->
+            line.split('\t').getOrNull(2)?.let { File(directory, it) }
+        }.filter(File::exists)
+    }
+
+    private fun manifestHasComplete(directory: File, url: String): Boolean {
+        val assetName = opaqueVideoAssetName(url)
+        return File(directory, VIDEO_CACHE_MANIFEST_NAME).takeIf(File::isFile)
+            ?.readLines().orEmpty().any { it.startsWith("C\t$assetName\t") }
+    }
 
     private class FakeConnection(
         private val body: InputStream,

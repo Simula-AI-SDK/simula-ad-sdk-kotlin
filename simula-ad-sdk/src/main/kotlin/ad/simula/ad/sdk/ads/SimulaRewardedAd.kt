@@ -211,17 +211,23 @@ class SimulaRewardedAd(val adUnitId: String) {
                     return@launch
                 }
                 val published = if (ad.creative.type == CreativeType.VIDEO) {
-                    when (acquireVideoLeaseForReady(
+                    when (val readyResult = acquireVideoLeaseForReady(
                         acquire = { VideoAssetCache.acquire(SimulaAds.appContext, ad.creative.url) },
                         isCurrent = { generation == loadGeneration },
                         publishReady = { ownership ->
                             publishReadyOnMain(generation, ad, metadata, session, ownership)
                         },
                     )) {
-                        VideoReadyLeaseResult.READY -> true
-                        VideoReadyLeaseResult.STALE -> false
-                        VideoReadyLeaseResult.UNAVAILABLE -> {
-                            failLoadOnMain(generation, SimulaAdError.NoFill)
+                        VideoReadyLeaseResult.Ready -> true
+                        VideoReadyLeaseResult.Stale -> false
+                        is VideoReadyLeaseResult.Failed -> {
+                            val failure = videoAssetLoadFailure(readyResult.error) ?: return@launch
+                            Telemetry.recordError(
+                                signature = failure.telemetrySignature,
+                                errorCode = failure.telemetryCode,
+                                breadcrumb = "surface=rewarded",
+                            )
+                            failLoadOnMain(generation, failure.callbackError, failure.telemetryCode)
                             false
                         }
                     }
@@ -690,16 +696,20 @@ class SimulaRewardedAd(val adUnitId: String) {
         true
     }
 
-    private fun failLoad(error: SimulaAdError) {
+    private fun failLoad(error: SimulaAdError, telemetryCode: String = error.telemetryCode()) {
         state = State.Idle
-        Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, elapsedSinceLoad(), error.telemetryCode())
+        Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, elapsedSinceLoad(), telemetryCode)
         runCatching { listener?.onAdFailedToLoad(this, error) }
     }
 
-    private suspend fun failLoadOnMain(generation: Int, error: SimulaAdError) {
+    private suspend fun failLoadOnMain(
+        generation: Int,
+        error: SimulaAdError,
+        telemetryCode: String = error.telemetryCode(),
+    ) {
         withContext(Dispatchers.Main) {
             if (generation != loadGeneration) return@withContext // superseded
-            failLoad(error)
+            failLoad(error, telemetryCode)
         }
     }
 

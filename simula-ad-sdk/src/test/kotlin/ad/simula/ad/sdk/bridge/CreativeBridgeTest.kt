@@ -188,7 +188,7 @@ class CreativeBridgeTest {
         val request = trustedCtaOpen(message, "nonce-1")
         assertEquals("https://tracker.example/click", request?.url)
         assertEquals(interactionId, request?.interactionId)
-        assertEquals("hero_cta", request?.clickSource)
+        assertNull(request?.clickSource)
         assertNull(trustedCtaOpen(message, "other-presentation"))
         assertNull(trustedCtaOpen(message, null))
         assertNull("disabled installation rejects an already queued message", trustedCtaOpen(message, "nonce-1", false))
@@ -212,7 +212,7 @@ class CreativeBridgeTest {
             "nonce",
         )
         assertNull(request?.interactionId)
-        assertEquals("hero_cta", request?.clickSource)
+        assertNull(request?.clickSource)
     }
 
     @Test
@@ -355,11 +355,14 @@ class CreativeBridgeTest {
         assertNull(trustedCtaOpen("""{"type":"SIMULA_CTA_OPEN","url":7,"activation_nonce":"nonce"}""", "nonce"))
         assertNull(trustedCtaOpen("""{"type":"SIMULA_CTA_OPEN","url":"","activation_nonce":"nonce"}""", "nonce"))
         assertNull(trustedCtaOpen("""{"type":"AD_EARLY_COMPLETE","url":"https://x","activation_nonce":"nonce"}""", "nonce"))
+        assertNull(trustedCtaOpen("""{"type":"SIMULA_CTA_OPEN","url":"partner-app://offer","activation_nonce":"nonce"}""", "nonce"))
+        assertNull(trustedCtaOpen("""{"type":"SIMULA_CTA_OPEN","url":"about:blank","activation_nonce":"nonce"}""", "nonce"))
     }
 
     @Test
     fun trustedCtaMessageBoundsUrlAndWholeEnvelope() {
-        val acceptedUrl = "x".repeat(8 * 1024)
+        val prefix = "https://x/"
+        val acceptedUrl = prefix + "x".repeat(8 * 1024 - prefix.length)
         val oversizedUrl = "$acceptedUrl?"
 
         assertEquals(
@@ -424,8 +427,9 @@ class CreativeBridgeTest {
         assertTrue(source.contains("new URL(url, document.baseURI).origin === origin"))
         assertTrue(source.contains("new URL(String(value), document.baseURI)"))
         val sameOriginCheck = source.indexOf(
-            "if (!url || isInternalCta(url) || isSameOriginCta(url)) { return false; }",
+            "if (!url || !isExternalHttpCta(url)) { return false; }",
         )
+        assertTrue(source.contains("return protocol === 'http:' || protocol === 'https:'"))
         val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
         assertTrue(sameOriginCheck >= 0)
         assertTrue(gestureClaim >= 0)
@@ -442,7 +446,7 @@ class CreativeBridgeTest {
         assertTrue(source.contains("protocol === 'data:'"))
         assertTrue(source.contains("protocol === 'blob:'"))
         assertTrue(source.contains("protocol === 'javascript:'"))
-        val policyCheck = source.indexOf("if (!url || isInternalCta(url) || isSameOriginCta(url)")
+        val policyCheck = source.indexOf("if (!url || !isExternalHttpCta(url)")
         val gestureClaim = source.indexOf("claimedGesture = gestureSequence;")
         assertTrue(policyCheck >= 0)
         assertTrue(policyCheck < gestureClaim)

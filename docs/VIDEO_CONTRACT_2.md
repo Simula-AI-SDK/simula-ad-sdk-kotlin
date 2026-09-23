@@ -20,19 +20,22 @@ never cause player replacement or fallback-screen handoff.
 
 Video load readiness requires a complete local cache file. Downloads are single-flight, limited to
 two concurrent transfers, 30 seconds total, 50 MiB per asset, and 100 MiB process-wide. Files use
-opaque URL hashes and `.part` staging. MediaPlayer receives only the completed local path; the SDK
-does not fall back to remote streaming.
+opaque URL hashes and process-isolated directories. A persisted index, capped at 256 entries, records
+each partial before its file is created and atomically publishes its completed state. Startup reads
+only that bounded index and never enumerates the cache directory. MediaPlayer receives only an
+index-complete local path; the SDK does not fall back to remote streaming. This cache format was not
+shipped, so pre-index cache files are intentionally ignored and no migration is performed.
 
 ## Reward And End Screens
 
 For rewarded contract-2 units with `ad_behavior.reward.earn_at: "unit_end"`, the primary gate or
-video end permits progression but does not earn. The reward and durable verification are emitted
-once when the final renderable screen's gate opens or final clip ends. If end screens are unusable,
-the last successfully rendered screen remains authoritative; if no fallback rendered, the primary is
-authoritative. Fallback fetch failure and the bounded post-close fetch timeout resolve that authority
-once and fail open to unit completion rather than exposing or blocking the host app.
-Teardown does not salvage an unearned unit-end reward. Verification uses
-`completion_reason: "unit_end"`.
+video end permits progression but does not earn. Authority and earned state resolve at the final
+renderable screen's gate or end. The publisher grant and durable verification occur once at
+whole-unit close. If end screens are unusable, the last successfully rendered screen remains
+authoritative; if no fallback rendered, the primary is authoritative. Fallback fetch failure and the
+bounded post-close fetch timeout resolve that authority once and fail open to unit completion rather
+than exposing or blocking the host app. Teardown does not salvage an unearned unit-end reward.
+Verification uses `completion_reason: "unit_end"`.
 
 Fallback ads remain ordinary end screens. They are not interpreted as consecutive primary clips.
 

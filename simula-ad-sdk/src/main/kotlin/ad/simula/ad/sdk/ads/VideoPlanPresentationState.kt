@@ -108,6 +108,9 @@ internal fun videoPlaybackReplayAction(
 internal data class VideoPlaybackRegistration(
     val generation: Long,
     val retainedTerminalOutcome: VideoPlaybackTerminalOutcome?,
+    val retainedPositionMs: Long,
+    val retainedDurationMs: Long,
+    val midpointEmitted: Boolean,
 )
 
 /** State shared by the primary contract-2 playback and its ordinary end-screen presentation. */
@@ -147,6 +150,9 @@ internal class VideoPlanPresentationState(
     private var currentPlaybackGeneration: Long? = null
     private var currentPlaybackSlotIdentity: VideoPlaybackSlotIdentity? = null
     private var terminalOutcome: VideoPlaybackTerminalOutcome? = null
+    private var retainedPositionMs = 0L
+    private var retainedDurationMs = 0L
+    private var midpointEmitted = false
 
     @Synchronized
     fun registerPlaybackGeneration(
@@ -161,8 +167,17 @@ internal class VideoPlanPresentationState(
             terminalOutcome = null
             currentTelemetry = null
             currentVideoStartedAtMs = null
+            retainedPositionMs = 0L
+            retainedDurationMs = 0L
+            midpointEmitted = false
         }
-        return VideoPlaybackRegistration(playbackGeneration, terminalOutcome)
+        return VideoPlaybackRegistration(
+            playbackGeneration,
+            terminalOutcome,
+            retainedPositionMs,
+            retainedDurationMs,
+            midpointEmitted,
+        )
     }
 
     @Synchronized
@@ -229,6 +244,19 @@ internal class VideoPlanPresentationState(
         if (active && currentPlaybackGeneration == generation && terminalOutcome == null) {
             currentTelemetry = telemetry
         }
+    }
+
+    @Synchronized
+    fun retainPlaybackProgress(
+        generation: Long,
+        positionMs: Long,
+        durationMs: Long,
+        midpointEmitted: Boolean,
+    ) {
+        if (!active || currentPlaybackGeneration != generation || terminalOutcome != null) return
+        retainedPositionMs = maxOf(retainedPositionMs, positionMs.coerceAtLeast(0L))
+        retainedDurationMs = maxOf(retainedDurationMs, durationMs.coerceAtLeast(0L))
+        this.midpointEmitted = this.midpointEmitted || midpointEmitted
     }
 
     fun nextStepReady(): VideoHandoffTiming? {

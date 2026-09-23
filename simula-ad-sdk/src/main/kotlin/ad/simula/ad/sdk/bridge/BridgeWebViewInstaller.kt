@@ -4,7 +4,6 @@ import ad.simula.ad.sdk.telemetry.Telemetry
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaUserAgent
 import ad.simula.ad.sdk.network.ClickSources
-import ad.simula.ad.sdk.network.isValidIdentityPart
 import ad.simula.ad.sdk.network.isRfc4122Uuid
 import android.database.ContentObserver
 import android.os.Handler
@@ -16,6 +15,7 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import java.lang.ref.WeakReference
+import java.net.URL
 import java.util.UUID
 import java.util.WeakHashMap
 import kotlinx.serialization.json.Json
@@ -183,6 +183,13 @@ internal fun trustedCtaRelaySource(
                 protocol === 'javascript:';
         } catch (_) { return true; }
     }
+    function isExternalHttpCta(url) {
+        if (isInternalCta(url) || isSameOriginCta(url)) { return false; }
+        try {
+            var protocol = new URL(url, document.baseURI).protocol;
+            return protocol === 'http:' || protocol === 'https:';
+        } catch (_) { return false; }
+    }
     function nativeCtaEnabled() {
         try {
             return nativeReceiver && typeof nativeReceiver.isCtaEnabled === 'function' &&
@@ -212,7 +219,7 @@ internal fun trustedCtaRelaySource(
     function forwardTrustedCta(value, element) {
         if (!nativeCtaEnabled()) { return false; }
         var url = resolvedUrl(value);
-        if (!url || isInternalCta(url) || isSameOriginCta(url)) { return false; }
+        if (!url || !isExternalHttpCta(url)) { return false; }
         if (gestureSequence === 0) { return false; }
         if (claimedGesture === gestureSequence) { return true; }
         if (!hasActiveUserGesture()) { return false; }
@@ -639,7 +646,8 @@ internal fun trustedCtaOpen(
     val url = (root["url"] as? JsonPrimitive)
         ?.takeIf { it.isString }
         ?.content
-        ?.takeIf { it.isNotBlank() && it.length <= MAX_CTA_URL_CHARS } ?: return null
+        ?.takeIf { it.isNotBlank() && it.length <= MAX_CTA_URL_CHARS }
+        ?.takeIf(::isTrustedCtaHttpUrl) ?: return null
     val interactionElement = root["interaction_id"]
     val interactionId = when (interactionElement) {
         null, kotlinx.serialization.json.JsonNull -> null
@@ -647,9 +655,16 @@ internal fun trustedCtaOpen(
             ?.content?.takeIf(::isRfc4122Uuid)
         else -> null
     }
-    val clickSource = (root["click_source"] as? JsonPrimitive)
-        ?.takeIf { it.isString }?.content?.takeIf(::isValidIdentityPart)
+    val clickSource = ClickSources.trustedHtmlOrNull(
+        (root["click_source"] as? JsonPrimitive)?.takeIf { it.isString }?.content,
+    )
     return TrustedCtaOpen(url, interactionId, clickSource)
+}
+
+private fun isTrustedCtaHttpUrl(value: String): Boolean {
+    val url = runCatching { URL(value) }.getOrNull() ?: return false
+    return (url.protocol.equals("http", true) || url.protocol.equals("https", true)) &&
+        url.host.isNotBlank() && url.userInfo == null
 }
 
 internal fun readyPageId(message: String, installationId: String): String? {

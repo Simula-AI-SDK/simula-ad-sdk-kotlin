@@ -16,6 +16,8 @@ import ad.simula.ad.sdk.model.effectiveVideoMuted
 import ad.simula.ad.sdk.model.videoAudioFocusLossPolicy
 import ad.simula.ad.sdk.model.videoChromeObstructionClearance
 import ad.simula.ad.sdk.model.VideoQuartileTracker
+import ad.simula.ad.sdk.model.VideoResumeSeek
+import ad.simula.ad.sdk.model.shouldEmitVideoMidpoint
 import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.primaryCreativeCloseAllowed
 import org.junit.Assert.assertEquals
@@ -188,8 +190,12 @@ class VideoContract2PolicyTest {
     fun `active cache leases retain asset until the final release`() = runTest {
         val directory = temporaryFolder.newFolder("video-cache")
         val url = "https://cdn.example/video.mp4"
-        val file = java.io.File(directory, opaqueVideoAssetName(url))
+        val assetName = opaqueVideoAssetName(url)
+        val file = java.io.File(directory, "$assetName.test.1.asset")
         file.writeBytes(byteArrayOf(1, 2, 3))
+        java.io.File(directory, VIDEO_CACHE_MANIFEST_NAME).writeText(
+            "SIMULA_VIDEO_CACHE_INDEX_V1\nC\t$assetName\t${file.name}\t3\t${file.lastModified()}\n",
+        )
         val cache = VideoAssetCacheManager(
             directory = directory,
             elapsedRealtimeMs = { 0L },
@@ -197,8 +203,8 @@ class VideoContract2PolicyTest {
             scope = this,
         )
 
-        val first = requireNotNull(cache.acquire(url))
-        val second = requireNotNull(cache.acquire(url))
+        val first = requireNotNull((cache.acquireResult(url) as? VideoAssetCacheResult.Ready)?.lease)
+        val second = requireNotNull((cache.acquireResult(url) as? VideoAssetCacheResult.Ready)?.lease)
         first.release()
         advanceUntilIdle()
         assertTrue(file.exists())
@@ -400,6 +406,30 @@ class VideoContract2PolicyTest {
     }
 
     @Test
+    fun `teardown consumes already earned unit end authority exactly once`() {
+        val presentation = unitEndPresentation()
+        presentation.markPrimaryProgressionAllowed()
+        presentation.markAuthoritativeEndReached()
+
+        assertEquals(
+            RewardCompletionClaim(true, RewardCompletionReason.UNIT_END),
+            presentation.claimEarnedRewardOnTeardown(),
+        )
+        assertNull(presentation.claimEarnedRewardOnTeardown())
+        assertTrue(presentation.hasClaimedRewardCompletion())
+    }
+
+    @Test
+    fun `teardown does not promote an unresolved primary unit end gate`() {
+        val presentation = unitEndPresentation()
+        presentation.markPrimaryProgressionAllowed()
+
+        assertNull(presentation.claimEarnedRewardOnTeardown())
+        assertFalse(presentation.rewardEarned)
+        assertFalse(presentation.hasClaimedRewardCompletion())
+    }
+
+    @Test
     fun `fallback videos remain candidates until a lease settles`() {
         val state = FallbackPresentationState(videoPlanV2 = true)
         val playable = ad.simula.ad.sdk.network.SimulaApiClient.FallbackAd(
@@ -454,11 +484,37 @@ class VideoContract2PolicyTest {
     @Test
     fun `two tone remains visible after gate and exposes exact bright dark fractions`() {
         assertTrue(progressBarVisible(true, CloseTreatment.PROGRESS_BAR, ProgressBarStyle.TWO_TONE))
+        assertTrue(progressBarVisible(true, CloseTreatment.HIDDEN, ProgressBarStyle.TWO_TONE))
         assertFalse(progressBarVisible(true, CloseTreatment.PROGRESS_BAR, ProgressBarStyle.SINGLE))
         assertEquals(TwoToneProgressFractions(0.4f, 0.35f), twoToneProgressFractions(0.75f, 0.4f))
         assertEquals(0xFF3A3A40L, TWO_TONE_PROGRESS_BACKGROUND_ARGB)
         assertEquals(0xFF1186F2L, TWO_TONE_PROGRESS_BRIGHT_ARGB)
         assertEquals(0xFF1156B6L, TWO_TONE_PROGRESS_DARK_ARGB)
+    }
+
+    @Test
+    fun `interstitial two tone is an independent surface for hidden and default close`() {
+        assertTrue(progressBarVisible(false, CloseTreatment.HIDDEN, ProgressBarStyle.TWO_TONE))
+        assertTrue(progressBarVisible(true, CloseTreatment.HIDDEN, ProgressBarStyle.TWO_TONE))
+        assertFalse(progressBarAtBottom(CloseTreatment.HIDDEN, ClosePosition.TOP_RIGHT, ProgressBarStyle.TWO_TONE))
+        assertTrue(progressBarAtBottom(CloseTreatment.HIDDEN, ClosePosition.BOTTOM_LEFT, ProgressBarStyle.TWO_TONE))
+        assertEquals(
+            ClosePosition.TOP_RIGHT,
+            effectiveClosePosition(CloseTreatment.HIDDEN, ClosePosition.BOTTOM_LEFT, ProgressBarStyle.TWO_TONE),
+        )
+    }
+
+    @Test
+    fun `rewarded two tone is independent while single remains tied to progress bar treatment`() {
+        assertTrue(progressBarVisible(true, CloseTreatment.COUNTDOWN_CIRCLE, ProgressBarStyle.TWO_TONE))
+        assertFalse(progressBarVisible(false, CloseTreatment.HIDDEN, ProgressBarStyle.SINGLE))
+        assertTrue(progressBarVisible(false, CloseTreatment.PROGRESS_BAR, ProgressBarStyle.SINGLE))
+        assertFalse(progressBarVisible(true, CloseTreatment.PROGRESS_BAR, ProgressBarStyle.SINGLE))
+        assertTrue(progressBarAtBottom(CloseTreatment.HIDDEN, ClosePosition.BOTTOM_LEFT, ProgressBarStyle.TWO_TONE))
+        assertEquals(
+            ClosePosition.TOP_RIGHT,
+            effectiveClosePosition(CloseTreatment.HIDDEN, ClosePosition.BOTTOM_LEFT, ProgressBarStyle.TWO_TONE),
+        )
     }
 
     @Test
@@ -509,6 +565,82 @@ class VideoContract2PolicyTest {
         assertEquals(VideoPlaybackTerminalOutcome.COMPLETED, recreated.retainedTerminalOutcome)
         assertFalse(state.isPlaybackGenerationOpen(recreated.generation))
         assertFalse(state.claimPlaybackTerminal(recreated.generation, VideoPlaybackTerminalOutcome.COMPLETED))
+    }
+
+    @Test
+    fun `configuration recreation retains seek and midpoint presentation wide`() {
+        val state = VideoPlanPresentationState(videoPlanV2 = true)
+        val first = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary)
+        state.retainPlaybackProgress(first.generation, 6_000L, 10_000L, midpointEmitted = true)
+
+        val recreated = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary)
+
+        assertEquals(6_000L, recreated.retainedPositionMs)
+        assertEquals(10_000L, recreated.retainedDurationMs)
+        assertTrue(recreated.midpointEmitted)
+        assertFalse(shouldEmitVideoMidpoint(recreated.midpointEmitted, 7_000L, 10_000L))
+    }
+
+    @Test
+    fun `retained media position seeks once after prepare without recounting elapsed play`() {
+        val seek = VideoResumeSeek(4_250L)
+        val targets = mutableListOf<Int>()
+        assertTrue(seek.restoreAfterPrepared(10_000L, targets::add))
+        assertFalse(seek.allowsPlaybackCallbacks)
+        assertFalse(seek.restoreAfterPrepared(10_000L, targets::add))
+        assertTrue(seek.complete())
+        assertTrue(seek.allowsPlaybackCallbacks)
+        assertFalse(seek.complete())
+        assertEquals(listOf(4_250), targets)
+
+        val accumulator = ad.simula.ad.sdk.model.VideoPositionAccumulator(
+            initialPlayedMs = 3_000L,
+            initialPositionMs = 4_250L,
+        )
+        assertEquals(0L, accumulator.sample(0L).advancedMs)
+        assertEquals(0L, accumulator.sample(4_250L).advancedMs)
+        assertEquals(250L, accumulator.sample(4_500L).advancedMs)
+        assertEquals(3_250L, accumulator.totalPlayedMs)
+    }
+
+    @Test
+    fun `resume seek failure opens bounded fallback without retrying seek`() {
+        val seek = VideoResumeSeek(4_250L)
+        var attempts = 0
+
+        assertTrue(seek.restoreAfterPrepared(10_000L) { attempts++ })
+        assertFalse(seek.allowsPlaybackCallbacks)
+        assertTrue(seek.fail())
+        assertTrue(seek.allowsPlaybackCallbacks)
+        assertFalse(seek.restoreAfterPrepared(10_000L) { attempts++ })
+        assertEquals(1, attempts)
+    }
+
+    @Test
+    fun `resume seek release rejects late completion and playback callbacks`() {
+        val seek = VideoResumeSeek(4_250L)
+        assertTrue(seek.restoreAfterPrepared(10_000L) {})
+
+        seek.release()
+
+        assertFalse(seek.complete())
+        assertFalse(seek.fail())
+        assertFalse(seek.allowsPlaybackCallbacks)
+    }
+
+    @Test
+    fun `terminal claim wins recreation progress race`() {
+        val state = VideoPlanPresentationState(videoPlanV2 = true)
+        val first = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary)
+        state.retainPlaybackProgress(first.generation, 4_000L, 10_000L, midpointEmitted = false)
+        assertTrue(state.claimPlaybackTerminal(first.generation, VideoPlaybackTerminalOutcome.COMPLETED))
+        state.retainPlaybackProgress(first.generation, 8_000L, 10_000L, midpointEmitted = true)
+
+        val recreated = state.registerPlaybackGeneration(VideoPlaybackSlotIdentity.Primary)
+
+        assertEquals(VideoPlaybackTerminalOutcome.COMPLETED, recreated.retainedTerminalOutcome)
+        assertEquals(4_000L, recreated.retainedPositionMs)
+        assertFalse(recreated.midpointEmitted)
     }
 
     @Test

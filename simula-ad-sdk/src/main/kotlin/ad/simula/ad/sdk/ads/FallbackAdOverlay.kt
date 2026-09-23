@@ -271,8 +271,9 @@ internal fun enqueueOwnedFallbackClickBeacon(
 internal class FallbackPresentationState(
     private val clockMs: () -> Long = SystemClock::elapsedRealtime,
     videoPlanV2: Boolean = false,
+    videoPlanState: VideoPlanPresentationState? = null,
 ) {
-    val videoPlan = VideoPlanPresentationState(videoPlanV2, clockMs)
+    val videoPlan = videoPlanState ?: VideoPlanPresentationState(videoPlanV2, clockMs)
     var stage: FallbackStage = FallbackStage.CONTENT
         private set
     var index: Int = 0
@@ -568,7 +569,13 @@ internal class FallbackPresentationState(
     ): Boolean {
         if (stage != FallbackStage.FETCHING || generation != fetchWaitGeneration) return false
         markPendingVideosUnavailable()
-        if (ads.getOrNull(fetchWaitTargetIndex) != null) showing(fetchWaitTargetIndex) else done()
+        if (ads.getOrNull(fetchWaitTargetIndex) != null) {
+            showing(fetchWaitTargetIndex)
+            notifyFirstResolvedStepReady(ads.drop(fetchWaitTargetIndex))
+        } else {
+            done()
+            videoPlan.closePendingHandoff(VideoLifecycleReason.NEXT_STEP_TIMEOUT)
+        }
         return true
     }
 
@@ -845,7 +852,10 @@ internal fun FallbackAdHost(
                 .filter { it.type == CreativeType.VIDEO && admittedVideoUrl(it.url) != null }
                 .forEach { ad ->
                     val job = launch {
-                        val lease = VideoAssetCache.acquire(context.applicationContext, ad.url)
+                        val lease = when (val result = VideoAssetCache.acquire(context.applicationContext, ad.url)) {
+                            is VideoAssetCacheResult.Ready -> result.lease
+                            is VideoAssetCacheResult.Failed -> null
+                        }
                         presentationState.settleVideoPreparation(ad.sourceIndex, lease)
                         publishPreparedState()
                     }
@@ -897,7 +907,6 @@ internal fun FallbackAdHost(
                     presentationState.retainFetchedAds(resolved)
                     prefetched = resolved
                     if (presentationState.timeoutPostCloseFetchWait(p.generation, resolved)) {
-                        presentationState.videoPlan.closePendingHandoff(VideoLifecycleReason.NEXT_STEP_TIMEOUT)
                         phase = if (presentationState.stage == FallbackStage.SHOWING) {
                             FallbackPhase.Showing(resolved, presentationState.index)
                         } else {
@@ -1205,7 +1214,7 @@ private fun FallbackAdOverlay(
             1 -> ClickSources.END_SCREEN_2_UNKNOWN
             else -> ClickSources.END_SCREEN_2_UNKNOWN
         }
-        val source = request.clickSource ?: fallbackSource
+        val source = ClickSources.trustedHtmlOr(request.clickSource, fallbackSource)
         val claim = request.interactionId?.let { claimTrustedClick?.invoke(it, source) }
             ?: claimWebClick(source) ?: return
         notifyPublisherClick { onAdClick(claim.interaction) }

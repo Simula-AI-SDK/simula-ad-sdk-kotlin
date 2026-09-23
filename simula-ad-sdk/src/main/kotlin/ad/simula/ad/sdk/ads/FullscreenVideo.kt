@@ -11,6 +11,7 @@ import ad.simula.ad.sdk.model.VideoNearEndCompletionDetector
 import ad.simula.ad.sdk.model.VideoDimensions
 import ad.simula.ad.sdk.model.VideoPositionAccumulator
 import ad.simula.ad.sdk.model.VideoPositionSample
+import ad.simula.ad.sdk.model.VideoResumeSeek
 import ad.simula.ad.sdk.model.VideoReadinessDeadline
 import ad.simula.ad.sdk.model.VideoUiProgressCoalescer
 import ad.simula.ad.sdk.model.VideoAudioWatchAccounting
@@ -18,7 +19,6 @@ import ad.simula.ad.sdk.model.VideoChromeStyle
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.VideoMuteControlPlacement
 import ad.simula.ad.sdk.model.VideoPreFirstFrameFailureAction
-import ad.simula.ad.sdk.model.VideoQuartileTracker
 import ad.simula.ad.sdk.model.VideoStallBudget
 import ad.simula.ad.sdk.model.VideoSegment
 import ad.simula.ad.sdk.model.videoAspectFitTransform
@@ -36,6 +36,7 @@ import ad.simula.ad.sdk.model.videoReadinessTimeoutCode
 import ad.simula.ad.sdk.model.videoMediaErrorCode
 import ad.simula.ad.sdk.model.initialVideoDesiredMuted
 import ad.simula.ad.sdk.model.resolveVideoDimensions
+import ad.simula.ad.sdk.model.shouldEmitVideoMidpoint
 import ad.simula.ad.sdk.model.resolvedVideoChromeStyle
 import ad.simula.ad.sdk.model.effectiveVideoMuted
 import ad.simula.ad.sdk.telemetry.Telemetry
@@ -127,6 +128,7 @@ internal fun videoCtaRoute(
 
 internal const val VIDEO_READINESS_TIMEOUT_MS = 10_000L
 internal const val VIDEO_PLAYBACK_TIMEOUT_MS = 10_000L
+internal const val VIDEO_RESUME_SEEK_TIMEOUT_MS = 1_500L
 internal const val VIDEO_STAGE_START = "video_start"
 internal const val VIDEO_STAGE_DURATION = "video_duration"
 internal const val VIDEO_STAGE_COMPLETE = "video_complete"
@@ -235,6 +237,7 @@ private fun videoAudioAttributes(): AudioAttributes = AudioAttributes.Builder()
 
 private fun detachPlayerListeners(player: MediaPlayer) {
     runCatching { player.setOnPreparedListener(null) }
+    runCatching { player.setOnSeekCompleteListener(null) }
     runCatching { player.setOnCompletionListener(null) }
     runCatching { player.setOnErrorListener(null) }
     runCatching { player.setOnInfoListener(null) }
@@ -256,6 +259,7 @@ internal fun FullscreenVideo(
     serveId: String? = null,
     configuredGateSeconds: Int = 0,
     initialPlayedMs: Long = 0L,
+    initialPositionMs: Long = 0L,
     ctaEnabled: Boolean = true,
     ctaLabel: String? = null,
     appIconUrl: String? = null,
@@ -317,6 +321,7 @@ internal fun FullscreenVideo(
             ),
             configuredGateSeconds = configuredGateSeconds,
             initialPlayedMs = initialPlayedMs,
+            initialPositionMs = initialPositionMs,
             videoPlanV2 = videoPlanV2,
             videoPlanState = videoPlanState,
             playbackSlotIdentity = playbackSlotIdentity,
@@ -708,7 +713,8 @@ private class NativeVideoController(
     context: Context,
     private val telemetry: VideoTelemetryContext,
     configuredGateSeconds: Int,
-    initialPlayedMs: Long,
+    private val initialPlayedMs: Long,
+    initialPositionMs: Long,
     private val videoPlanV2: Boolean,
     private val videoPlanState: VideoPlanPresentationState,
     private val playbackSlotIdentity: VideoPlaybackSlotIdentity,
@@ -727,13 +733,13 @@ private class NativeVideoController(
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private val handler = Handler(Looper.getMainLooper())
     private val renderGate = RenderAttemptGate()
-    private val position = VideoPositionAccumulator(initialPlayedMs)
+    private var position = VideoPositionAccumulator(initialPlayedMs, initialPositionMs)
+    private var resumeSeek = VideoResumeSeek(initialPositionMs)
     private val progressCoalescer = VideoUiProgressCoalescer(VIDEO_UI_PROGRESS_INTERVAL_MS)
     private val nearEndCompletion = VideoNearEndCompletionDetector()
     private val completionGate = VideoCompletionGate()
     private val stallBudget = VideoStallBudget()
     private val clipAudioWatch = VideoAudioWatchAccounting()
-    private val quartiles = VideoQuartileTracker()
     private val configuredGateMs = configuredGateSeconds.coerceAtLeast(0) * 1_000L
     private var playbackGeneration: Long? = null
     private var renderToken = 0L
@@ -758,9 +764,10 @@ private class NativeVideoController(
     private var surfaceHeight = 0
     private var pendingAdvancedMs = 0L
     private var lastDeliveredTotalMs = initialPlayedMs.coerceAtLeast(0L)
-    private var lastDeliveredPositionMs = 0L
-    private var lastVideoPositionMs = 0L
+    private var lastDeliveredPositionMs = initialPositionMs.coerceAtLeast(0L)
+    private var lastVideoPositionMs = initialPositionMs.coerceAtLeast(0L)
     private var lastVideoDurationMs = 0L
+    private var midpointEmitted = false
     private var focusRequest: AudioFocusRequest? = null
     private var audioFocusHeld = false
     private var pausedAtMs: Long? = null
@@ -788,6 +795,9 @@ private class NativeVideoController(
         fail(videoReadinessTimeoutCode(prepared))
     }
     private val playbackTimeout = Runnable { handlePlaybackTimeout() }
+    private val resumeSeekTimeout = Runnable {
+        if (resumeSeek.fail() && !released && !failed) startIfPossible()
+    }
     private val positionPoll = object : Runnable {
         override fun run() {
             if (!lifecycleActive || released || failed || !firstFrameRendered) return
@@ -877,6 +887,13 @@ private class NativeVideoController(
         if (released || playbackGeneration != null) return false
         val registration = videoPlanState.registerPlaybackGeneration(playbackSlotIdentity)
         playbackGeneration = registration.generation
+        val retainedPosition = maxOf(lastVideoPositionMs, registration.retainedPositionMs)
+        lastVideoPositionMs = retainedPosition
+        lastDeliveredPositionMs = retainedPosition
+        lastVideoDurationMs = maxOf(lastVideoDurationMs, registration.retainedDurationMs)
+        midpointEmitted = registration.midpointEmitted
+        position = VideoPositionAccumulator(initialPlayedMs, retainedPosition)
+        resumeSeek = VideoResumeSeek(retainedPosition)
         when (videoPlaybackReplayAction(registration.retainedTerminalOutcome)) {
             VideoPlaybackReplayAction.PREPARE -> return true
             VideoPlaybackReplayAction.COMPLETE -> {
@@ -928,11 +945,27 @@ private class NativeVideoController(
             prepared = true
             publishPlaybackEligibility()
             seedVideoDimensions(it)
+            val preparedDurationMs = runCatching { it.duration.toLong() }.getOrDefault(0L).coerceAtLeast(0L)
+            if (preparedDurationMs > 0L) lastVideoDurationMs = maxOf(lastVideoDurationMs, preparedDurationMs)
+            val seekRequested = runCatching {
+                resumeSeek.restoreAfterPrepared(preparedDurationMs, it::seekTo)
+            }.getOrElse {
+                resumeSeek.fail()
+                false
+            }
+            if (seekRequested && resumeSeek.pending) {
+                handler.postDelayed(resumeSeekTimeout, VIDEO_RESUME_SEEK_TIMEOUT_MS)
+            }
             scheduleReadinessTimeout(SystemClock.elapsedRealtime())
             startIfPossible()
         }
+        mediaPlayer.setOnSeekCompleteListener {
+            if (!ownsCallback(token) || !resumeSeek.complete()) return@setOnSeekCompleteListener
+            handler.removeCallbacks(resumeSeekTimeout)
+            startIfPossible()
+        }
         mediaPlayer.setOnCompletionListener {
-            completePlayback(token)
+            if (resumeSeek.allowsPlaybackCallbacks) completePlayback(token)
         }
         mediaPlayer.setOnErrorListener { _, _, _ ->
             if (token == renderToken && !released && !failed) {
@@ -943,7 +976,9 @@ private class NativeVideoController(
         mediaPlayer.setOnInfoListener { _, what, _ ->
             if (!ownsCallback(token)) return@setOnInfoListener false
             when (what) {
-                MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START -> admitFirstFrame(token)
+                MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START -> {
+                    if (resumeSeek.allowsPlaybackCallbacks) admitFirstFrame(token)
+                }
                 MediaPlayer.MEDIA_INFO_BUFFERING_START -> {
                     if (!videoPlanV2) resetPlaybackTimeout()
                 }
@@ -1074,7 +1109,9 @@ private class NativeVideoController(
         publishPlaybackEligibility()
         renderGate.fail(renderToken)
         handler.removeCallbacks(readinessTimeout)
+        handler.removeCallbacks(resumeSeekTimeout)
         cancelPlaybackCallbacks()
+        resumeSeek.release()
         abandonAudioFocus()
         val detachedPlayer = player
         player = null
@@ -1119,7 +1156,9 @@ private class NativeVideoController(
     }
 
     private fun startIfPossible() {
-        if (!prepared || !lifecycleActive || surface == null || released || failed) return
+        if (!prepared || !resumeSeek.allowsPlaybackCallbacks || !lifecycleActive ||
+            surface == null || released || failed
+        ) return
         runCatching {
             val mediaPlayer = player ?: return
             // Acquire focus before the first rendered frame so contract 2 starts without a late volume jump.
@@ -1207,6 +1246,7 @@ private class NativeVideoController(
     }
 
     private fun emitProgress(force: Boolean, completed: Boolean = false): PlayerProgress? {
+        if (!resumeSeek.allowsPlaybackCallbacks) return null
         val mediaPlayer = player ?: return null
         val durationMs = durationMs()
         val sample = if (completed) {
@@ -1227,10 +1267,19 @@ private class NativeVideoController(
         videoPlanState.addEligibleMediaDelta(videoPlanV2, sample.advancedMs, effectiveMuted)
         clipAudioWatch.add(sample.advancedMs, effectiveMuted)
         if (videoPlanV2) {
-            quartiles.crossed(sample.positionMs, durationMs).forEach { quartile ->
-                recordLifecycle(VIDEO_STAGE_DURATION, quartile = quartile)
+            if (shouldEmitVideoMidpoint(midpointEmitted, sample.positionMs, durationMs)) {
+                midpointEmitted = true
+                recordLifecycle(VIDEO_STAGE_DURATION, quartile = 50)
             }
-            playbackGeneration?.let { videoPlanState.retainCurrentTelemetry(it, telemetrySnapshot()) }
+            playbackGeneration?.let { generation ->
+                videoPlanState.retainPlaybackProgress(
+                    generation,
+                    sample.positionMs,
+                    durationMs,
+                    midpointEmitted,
+                )
+                videoPlanState.retainCurrentTelemetry(generation, telemetrySnapshot())
+            }
         }
         if (sample.advancedMs > 0L) resetPlaybackTimeout()
         val gateDurationMs = if (durationMs > 0L) minOf(configuredGateMs, durationMs) else configuredGateMs

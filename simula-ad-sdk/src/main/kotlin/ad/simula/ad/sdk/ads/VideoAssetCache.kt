@@ -6,7 +6,6 @@ import ad.simula.ad.sdk.network.BoundedDeadlineHostResolver
 import ad.simula.ad.sdk.network.DeadlineHostResolver
 import ad.simula.ad.sdk.network.SimulaHttp
 import ad.simula.ad.sdk.network.abortConnectionAsync
-import ad.simula.ad.sdk.telemetry.Telemetry
 import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
@@ -19,11 +18,9 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.InetAddress
+import java.net.CookieHandler
 import java.net.SocketTimeoutException
 import java.net.URL
-import java.nio.file.DirectoryStream
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -53,14 +50,89 @@ internal const val VIDEO_DOWNLOAD_TIMEOUT_MS = 30_000L
 internal const val VIDEO_URL_MAX_LENGTH = 8_192
 internal const val VIDEO_CACHE_ORPHAN_MAX_AGE_MS = 24L * 60L * 60L * 1_000L
 private const val VIDEO_CACHE_DIRECTORY = "simula_video_v2"
+internal const val VIDEO_CACHE_MANIFEST_NAME = "cache-index-v1"
 private const val MAX_CLEANUP_FILES = 128
 private const val MAX_CACHE_ENTRIES = 256
 private const val MAX_PENDING_ACQUIRES = 16
+private const val MAX_MANIFEST_BYTES = 96 * 1024
+private const val MAX_MANIFEST_LINE_BYTES = 320
+private const val MANIFEST_HEADER = "SIMULA_VIDEO_CACHE_INDEX_V1"
+private const val MANIFEST_TEMP_SUFFIX = ".tmp"
+private const val MANIFEST_COPY_SUFFIX = ".copy"
+private const val MANIFEST_BACKUP_SUFFIX = ".bak"
 private const val MAINTENANCE_FOLLOW_UP_DELAY_MS = 50L
 private const val CAPACITY_SCAN_INVALIDATION_MS = 60_000L
 private const val MAX_VIDEO_REDIRECTS = 5
 private const val NANOS_PER_MILLISECOND = 1_000_000L
 private val VIDEO_REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
+
+internal enum class VideoAssetCacheError(val telemetryCode: String) {
+    INVALID_URL("invalid_url"),
+    UNSAFE_TARGET("unsafe_target"),
+    UNAVAILABLE("transfer_failed"),
+    TOO_LARGE("asset_too_large"),
+    CACHE_FULL("cache_full"),
+    ADMISSION_OVERFLOW("cache_admission"),
+    TIMED_OUT("cache_timeout"),
+    STALE("stale"),
+}
+
+internal sealed interface VideoAssetCacheResult {
+    data class Ready(val lease: VideoAssetLease) : VideoAssetCacheResult
+    data class Failed(val error: VideoAssetCacheError) : VideoAssetCacheResult
+}
+
+internal data class VideoAssetLoadFailure(
+    val callbackError: SimulaAdError,
+    val telemetryCode: String,
+) {
+    val telemetrySignature: String = "video_asset:$telemetryCode"
+}
+
+internal fun videoAssetLoadFailure(error: VideoAssetCacheError): VideoAssetLoadFailure? = when (error) {
+    VideoAssetCacheError.TIMED_OUT -> VideoAssetLoadFailure(
+        SimulaAdError.Network(SocketTimeoutException("Video cache deadline exceeded")),
+        error.telemetryCode,
+    )
+    VideoAssetCacheError.UNAVAILABLE -> VideoAssetLoadFailure(
+        SimulaAdError.Network(java.io.IOException("Video asset transfer failed")),
+        error.telemetryCode,
+    )
+    VideoAssetCacheError.INVALID_URL,
+    VideoAssetCacheError.UNSAFE_TARGET,
+    VideoAssetCacheError.TOO_LARGE,
+    VideoAssetCacheError.CACHE_FULL,
+    VideoAssetCacheError.ADMISSION_OVERFLOW,
+    -> VideoAssetLoadFailure(SimulaAdError.NoFill, error.telemetryCode)
+    VideoAssetCacheError.STALE -> VideoAssetLoadFailure(
+        SimulaAdError.NoFill,
+        VideoAssetCacheError.ADMISSION_OVERFLOW.telemetryCode,
+    )
+}
+
+private enum class VideoCacheEntryState(val wireValue: String) {
+    PARTIAL("P"),
+    COMPLETE("C"),
+}
+
+private data class VideoCacheManifestEntry(
+    val assetName: String,
+    val fileName: String,
+    val size: Long,
+    val modifiedMs: Long,
+    val state: VideoCacheEntryState,
+)
+
+private data class VideoCacheManifestRead(
+    val entries: LinkedHashMap<String, VideoCacheManifestEntry>,
+    val validPaths: List<File>,
+    val valid: Boolean,
+)
+
+private sealed interface VideoAssetFileResult {
+    data class Ready(val file: File) : VideoAssetFileResult
+    data class Failed(val error: VideoAssetCacheError) : VideoAssetFileResult
+}
 
 internal fun interface VideoDeadlineCancellation {
     fun cancel()
@@ -120,10 +192,35 @@ internal suspend fun acquireVideoAssetLeaseWithOwnership(
     }
 }
 
-internal enum class VideoReadyLeaseResult {
-    READY,
-    UNAVAILABLE,
-    STALE,
+internal suspend fun acquireVideoAssetResultWithOwnership(
+    timeoutMs: Long,
+    ioDispatcher: CoroutineDispatcher,
+    acquire: suspend () -> VideoAssetCacheResult,
+): VideoAssetCacheResult {
+    var acquired: VideoAssetLease? = null
+    var delivered = false
+    try {
+        val result = withTimeoutOrNull(timeoutMs) {
+            withContext(ioDispatcher) {
+                acquire().also { outcome ->
+                    if (outcome is VideoAssetCacheResult.Ready) acquired = outcome.lease
+                }
+            }
+        } ?: VideoAssetCacheResult.Failed(VideoAssetCacheError.TIMED_OUT)
+        if (result is VideoAssetCacheResult.Ready) delivered = true
+        return result
+    } finally {
+        val abandoned = acquired.takeIf { !delivered }
+        if (abandoned != null) {
+            withContext(NonCancellable + ioDispatcher) { abandoned.release() }
+        }
+    }
+}
+
+internal sealed interface VideoReadyLeaseResult {
+    data object Ready : VideoReadyLeaseResult
+    data object Stale : VideoReadyLeaseResult
+    data class Failed(val error: VideoAssetCacheError) : VideoReadyLeaseResult
 }
 
 internal class VideoReadyLeaseOwnership internal constructor(
@@ -144,22 +241,25 @@ internal class VideoReadyLeaseOwnership internal constructor(
 }
 
 internal suspend fun acquireVideoLeaseForReady(
-    acquire: suspend () -> VideoAssetLease?,
+    acquire: suspend () -> VideoAssetCacheResult,
     afterAcquire: suspend (VideoAssetLease) -> Unit = {},
     isCurrent: () -> Boolean,
     publishReady: suspend (VideoReadyLeaseOwnership) -> Unit,
 ): VideoReadyLeaseResult {
-    val acquiredLease = acquire() ?: return VideoReadyLeaseResult.UNAVAILABLE
+    val acquiredLease = when (val result = acquire()) {
+        is VideoAssetCacheResult.Ready -> result.lease
+        is VideoAssetCacheResult.Failed -> return VideoReadyLeaseResult.Failed(result.error)
+    }
     val ownership = VideoReadyLeaseOwnership(acquiredLease)
     try {
         afterAcquire(acquiredLease)
         currentCoroutineContext().ensureActive()
-        if (!isCurrent()) return VideoReadyLeaseResult.STALE
+        if (!isCurrent()) return VideoReadyLeaseResult.Stale
         return try {
             publishReady(ownership)
-            if (ownership.transferred) VideoReadyLeaseResult.READY else VideoReadyLeaseResult.STALE
+            if (ownership.transferred) VideoReadyLeaseResult.Ready else VideoReadyLeaseResult.Stale
         } catch (failure: Throwable) {
-            if (ownership.transferred) VideoReadyLeaseResult.READY else throw failure
+            if (ownership.transferred) VideoReadyLeaseResult.Ready else throw failure
         }
     } finally {
         ownership.releaseIfOwned()
@@ -171,19 +271,21 @@ internal object VideoAssetCache {
     private val gate = Any()
     private var manager: VideoAssetCacheManager? = null
 
-    suspend fun acquire(context: Context, rawUrl: String?): VideoAssetLease? {
+    suspend fun acquire(context: Context, rawUrl: String?): VideoAssetCacheResult {
         val deadlineMs = saturatingAdd(SystemClock.elapsedRealtime(), VIDEO_DOWNLOAD_TIMEOUT_MS)
-        return acquireVideoAssetLeaseWithOwnership(VIDEO_DOWNLOAD_TIMEOUT_MS, Dispatchers.IO) {
+        return acquireVideoAssetResultWithOwnership(VIDEO_DOWNLOAD_TIMEOUT_MS, Dispatchers.IO) {
             val url = rawUrl?.takeIf { it.length <= VIDEO_URL_MAX_LENGTH }
                 ?.let(::admittedVideoUrl)
-                ?: return@acquireVideoAssetLeaseWithOwnership null
+                ?: return@acquireVideoAssetResultWithOwnership VideoAssetCacheResult.Failed(
+                    VideoAssetCacheError.INVALID_URL,
+                )
             val processIdentifier = videoCacheProcessIdentifier(currentVideoCacheProcessName(context))
             val cacheDirectory = videoCacheProcessDirectory(context.applicationContext.cacheDir, processIdentifier)
             val active = synchronized(gate) {
                 manager ?: VideoAssetCacheManager(cacheDirectory, processPartId = processIdentifier)
                     .also { manager = it }
             }
-            active.acquire(url, deadlineMs)
+            active.acquireResult(url, deadlineMs)
         }
     }
 }
@@ -210,6 +312,10 @@ internal class VideoAssetCacheManager(
     private val onCapacityCheck: () -> Unit = {},
     private val onDownloadFailure: (Throwable) -> Unit = {},
     private val abortConnection: (HttpURLConnection?) -> Unit = ::abortConnectionAsync,
+    private val cookieHandler: () -> CookieHandler? = CookieHandler::getDefault,
+    private val renameFile: (File, File) -> Boolean = { source, destination ->
+        source.renameTo(destination)
+    },
     private val beforePublish: () -> Unit = {},
     private val afterPublish: () -> Unit = {},
     private val beforeFinalLeaseDeleteClaim: () -> Unit = {},
@@ -232,10 +338,11 @@ internal class VideoAssetCacheManager(
         val control: DownloadControl,
         var waiters: Int = 0,
     ) {
-        lateinit var deferred: Deferred<File?>
+        lateinit var deferred: Deferred<VideoAssetFileResult>
     }
 
     private data class CacheEntry(
+        val assetName: String,
         val file: File,
         val size: Long,
         val modifiedMs: Long,
@@ -243,73 +350,90 @@ internal class VideoAssetCacheManager(
     )
 
     private val gate = Any()
+    private val manifestLock = Any()
     private val maintenanceMutex = Mutex()
     private val downloads = Semaphore(2)
     private val flights = LinkedHashMap<String, Flight>()
     private val leaseCounts = LinkedHashMap<String, Int>()
-    private val activeReservations = LinkedHashMap<String, Long>()
     private val knownFiles = LinkedHashMap<String, CacheEntry>()
+    private val manifestEntries = LinkedHashMap<String, VideoCacheManifestEntry>()
+    private val activeEntries = mutableSetOf<String>()
     private val evicting = mutableSetOf<String>()
     private val nextPartId = AtomicLong()
     private val nextGeneration = AtomicLong()
     private val publicationGenerations = LinkedHashMap<String, Long>()
-    private val canonicalGenerations = LinkedHashMap<String, Long>()
     private val publicationLocks = Array(16) { Any() }
     private val followUpScheduled = AtomicBoolean(false)
     private var knownBytes = 0L
     private var directoryReady = false
-    private var scanStream: DirectoryStream<java.nio.file.Path>? = null
-    private var scanIterator: Iterator<java.nio.file.Path>? = null
+    private var manifestReady = false
+    private var scanFiles: Array<CacheEntry>? = null
+    private var scanIndex = 0
     private var scanComplete = false
     private var scanAvailable = true
     private var scannedEntryCount = 0
     private var lastScanCompletedMs = Long.MIN_VALUE
 
-    suspend fun acquire(rawUrl: String, absoluteDeadlineMs: Long? = null): VideoAssetLease? {
+    suspend fun acquireResult(rawUrl: String, absoluteDeadlineMs: Long? = null): VideoAssetCacheResult {
         val startedAtMs = elapsedRealtimeMs()
         val deadlineMs = absoluteDeadlineMs ?: saturatingAdd(startedAtMs, downloadTimeoutMs)
         val url = rawUrl.takeIf { it.length <= VIDEO_URL_MAX_LENGTH }
             ?.let(::admittedVideoUrl)
-            ?: return null
+            ?: return VideoAssetCacheResult.Failed(VideoAssetCacheError.INVALID_URL)
         val name = opaqueVideoAssetName(url)
         val flight = synchronized(gate) {
             val pendingWaiters = flights.values.sumOf(Flight::waiters)
-            val existing = flights[name]
-            if (pendingWaiters >= MAX_PENDING_ACQUIRES) return null
-            existing ?: Flight(
+            if (pendingWaiters >= MAX_PENDING_ACQUIRES) {
+                return VideoAssetCacheResult.Failed(VideoAssetCacheError.ADMISSION_OVERFLOW)
+            }
+            flights[name]?.also { existing ->
+                existing.waiters++
+            } ?: Flight(
                 generation = nextGeneration.incrementAndGet(),
                 control = DownloadControl(abortConnection),
-            ).also { created ->
+                waiters = 1,
+            ).let { created ->
                 flights[name] = created
                 publicationGenerations[name] = created.generation
-                created.deferred = scope.async(ioDispatcher) {
-                    try {
-                        resolveFromCacheOrDownload(
-                            url,
-                            name,
-                            deadlineMs,
-                            created.generation,
-                            created.control,
-                        )
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (failure: Throwable) {
-                        onDownloadFailure(failure)
-                        Telemetry.recordError(
-                            signature = "video:asset_download_failed",
-                            errorCode = failure::class.java.simpleName,
-                        )
-                        null
+                try {
+                    created.deferred = scope.async(ioDispatcher) {
+                        try {
+                            resolveFromCacheOrDownload(
+                                url,
+                                name,
+                                deadlineMs,
+                                created.generation,
+                                created.control,
+                            )
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Throwable) {
+                            onDownloadFailure(failure)
+                            VideoAssetFileResult.Failed(normalizeVideoAssetError(failure))
+                        }
                     }
+                    created
+                } catch (failure: Throwable) {
+                    flights.remove(name, created)
+                    if (publicationGenerations[name] == created.generation) {
+                        publicationGenerations.remove(name)
+                    }
+                    onDownloadFailure(failure)
+                    null
                 }
             }
-        }
-        synchronized(gate) { flight.waiters++ }
+        } ?: return VideoAssetCacheResult.Failed(VideoAssetCacheError.UNAVAILABLE)
         try {
             val remainingMs = runCatching { remainingTimeoutMs(deadlineMs).toLong() }.getOrNull()
-                ?: return null
-            val file = withTimeoutOrNull(remainingMs) { flight.deferred.await() } ?: return null
-            return leaseCanonicalFile(name, file)
+                ?: return VideoAssetCacheResult.Failed(VideoAssetCacheError.TIMED_OUT)
+            val result = withTimeoutOrNull(remainingMs) { flight.deferred.await() }
+                ?: return VideoAssetCacheResult.Failed(VideoAssetCacheError.TIMED_OUT)
+            return when (result) {
+                is VideoAssetFileResult.Ready -> leaseCanonicalFile(name, result.file)
+                    ?.let(VideoAssetCacheResult::Ready)
+                    ?: VideoAssetCacheResult.Failed(VideoAssetCacheError.STALE)
+                is VideoAssetFileResult.Failed -> VideoAssetCacheResult.Failed(result.error)
+            }
         } finally {
             val closeFlight = synchronized(gate) {
                 flight.waiters = (flight.waiters - 1).coerceAtLeast(0)
@@ -352,10 +476,9 @@ internal class VideoAssetCacheManager(
         deadlineMs: Long,
         generation: Long,
         control: DownloadControl,
-    ): File? {
-        if (!establishCapacitySnapshot()) return null
-        val destination = File(directory, name)
-        completeCanonicalFile(name, destination)?.let { return it }
+    ): VideoAssetFileResult {
+        if (!establishCapacitySnapshot()) return VideoAssetFileResult.Failed(VideoAssetCacheError.CACHE_FULL)
+        completeAssetFile(name)?.let { return VideoAssetFileResult.Ready(it) }
 
         ensureWithinDeadline(deadlineMs, control)
         SimulaHttp.validatePublicRedirectTarget(url, millisToNanos(deadlineMs), hostResolver)
@@ -365,7 +488,7 @@ internal class VideoAssetCacheManager(
             downloads.acquire()
             true
         } ?: false
-        if (!acquired) return null
+        if (!acquired) return VideoAssetFileResult.Failed(VideoAssetCacheError.TIMED_OUT)
         try {
             return downloadOnIo(url, name, deadlineMs, generation, control)
         } finally {
@@ -379,16 +502,13 @@ internal class VideoAssetCacheManager(
         deadlineMs: Long,
         generation: Long,
         control: DownloadControl,
-    ): File? {
-        val destination = File(directory, name)
-        val part = File(directory, "$name.$processPartId.${nextPartId.incrementAndGet()}.part")
-        val completedPart = File(directory, "$name.$processPartId.$generation.completed")
+    ): VideoAssetFileResult {
+        val part = File(directory, "$name.$processPartId.${nextPartId.incrementAndGet()}.asset")
         val deadlineExpired = AtomicBoolean(false)
         var deadlineTask: VideoDeadlineCancellation? = null
-        var reservation = 0L
         var completed = false
         try {
-            completeCanonicalFile(name, destination)?.let { return it }
+            completeAssetFile(name)?.let { return VideoAssetFileResult.Ready(it) }
             deadlineTask = deadlineScheduler.schedule(remainingTimeoutMs(deadlineMs).toLong()) {
                 deadlineExpired.set(true)
                 control.cancel()
@@ -406,6 +526,7 @@ internal class VideoAssetCacheManager(
                     )
                     ensureWithinDeadline(deadlineMs, control, deadlineExpired)
                 }
+                SimulaHttp.validateRedirectCookieIsolation(cookieHandler())
                 val connection = openConnection(currentUrl)
                 control.connection.set(connection)
                 configureConnection(connection, remainingTimeoutMs(deadlineMs))
@@ -418,20 +539,27 @@ internal class VideoAssetCacheManager(
                     val location = connection.getHeaderField("Location")
                     drainBounded(connection.errorStream ?: connection.inputStream, 64L * 1024L)
                     control.connection.compareAndSet(connection, null)
-                    if (redirectCount >= MAX_VIDEO_REDIRECTS) return null
-                    currentUrl = resolveVideoRedirect(currentUrl, location) ?: return null
+                    if (redirectCount >= MAX_VIDEO_REDIRECTS) {
+                        return VideoAssetFileResult.Failed(VideoAssetCacheError.UNAVAILABLE)
+                    }
+                    currentUrl = resolveVideoRedirect(currentUrl, location)
+                        ?: return VideoAssetFileResult.Failed(VideoAssetCacheError.UNSAFE_TARGET)
                     redirectCount++
                     initialTargetValidated = false
                     continue
                 }
                 if (code !in 200..299) {
                     drainBounded(connection.errorStream, 64L * 1024L)
-                    return null
+                    return VideoAssetFileResult.Failed(VideoAssetCacheError.UNAVAILABLE)
                 }
                 val declared = connection.contentLengthLong
-                if (declared > VIDEO_ASSET_MAX_BYTES) return null
-                reservation = if (declared in 1..VIDEO_ASSET_MAX_BYTES) declared else VIDEO_ASSET_MAX_BYTES
-                if (!reserveCapacity(part.name, reservation, name)) return null
+                if (declared > VIDEO_ASSET_MAX_BYTES) {
+                    return VideoAssetFileResult.Failed(VideoAssetCacheError.TOO_LARGE)
+                }
+                val reservation = if (declared in 1..VIDEO_ASSET_MAX_BYTES) declared else VIDEO_ASSET_MAX_BYTES
+                if (!reserveCapacity(part, reservation, name)) {
+                    return VideoAssetFileResult.Failed(VideoAssetCacheError.CACHE_FULL)
+                }
 
                 var received = 0L
                 connection.inputStream.use { input ->
@@ -451,37 +579,33 @@ internal class VideoAssetCacheManager(
                             if (received > VIDEO_ASSET_MAX_BYTES) throw VideoAssetTooLargeException()
                             output.write(buffer, 0, count)
                         }
-                        if (received <= 0L || (declared >= 0L && received != declared)) return null
+                        if (received <= 0L || (declared >= 0L && received != declared)) {
+                            return VideoAssetFileResult.Failed(VideoAssetCacheError.UNAVAILABLE)
+                        }
                         ensureWithinDeadline(deadlineMs, control, deadlineExpired)
                         output.fd.sync()
                     }
                 }
                 ensureWithinDeadline(deadlineMs, control, deadlineExpired)
-                if (!moveIntoPlace(part, completedPart)) return null
                 beforePublish()
                 ensureWithinDeadline(deadlineMs, control, deadlineExpired)
-                if (!publishGeneration(completedPart, destination, name, generation, control)) return null
+                if (!publishGeneration(part, name, generation, received, control)) {
+                    return VideoAssetFileResult.Failed(VideoAssetCacheError.STALE)
+                }
                 afterPublish()
-                completed = isCompleteAsset(destination)
-                if (!completed) return null
-                recordKnownFile(destination, complete = true)
+                completed = isCompleteAsset(part)
+                if (!completed) return VideoAssetFileResult.Failed(VideoAssetCacheError.UNAVAILABLE)
                 control.connection.compareAndSet(connection, null)
-                return destination
+                return VideoAssetFileResult.Ready(part)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (t: Throwable) {
             onDownloadFailure(t)
-            Telemetry.recordError(
-                signature = "video:asset_download_failed",
-                errorCode = t::class.java.simpleName,
-            )
-            return null
+            return VideoAssetFileResult.Failed(normalizeVideoAssetError(t))
         } finally {
             deadlineTask?.cancel()
-            if (reservation > 0L) synchronized(gate) { activeReservations.remove(part.name) }
-            if (partExists(part)) deleteFile(part)
-            if (partExists(completedPart)) deleteFile(completedPart)
+            if (!completed) deleteTrackedFile(part.name)
             val incompleteConnection = control.connection.getAndSet(null)
             if (!completed) abortConnection(incompleteConnection)
         }
@@ -521,10 +645,8 @@ internal class VideoAssetCacheManager(
                     }
                     if (shouldDelete) {
                         runCatching { afterFinalLeaseDeleteClaim() }
-                        deleteFile(file)
+                        deleteTrackedFile(file.name)
                         synchronized(gate) {
-                            removeKnownFileLocked(name)
-                            canonicalGenerations.remove(name)
                             evicting.remove(name)
                         }
                     }
@@ -533,16 +655,24 @@ internal class VideoAssetCacheManager(
         }
     }
 
-    private fun completeCanonicalFile(name: String, file: File): File? = synchronized(publicationLock(name)) {
+    private fun completeAssetFile(name: String): File? = synchronized(publicationLock(name)) {
         if (synchronized(gate) { evicting.contains(name) }) return@synchronized null
-        if (!isCompleteAsset(file)) return@synchronized null
-        recordKnownFile(file, complete = true)
-        file
+        val entry = synchronized(gate) {
+            knownFiles.values.firstOrNull { it.assetName == name && it.complete }
+        } ?: return@synchronized null
+        if (!isCompleteAsset(entry.file) || fileLength(entry.file) != entry.size) {
+            deleteTrackedFile(entry.file.name)
+            return@synchronized null
+        }
+        entry.file
     }
 
     private fun leaseCanonicalFile(name: String, file: File): VideoAssetLease? =
         synchronized(publicationLock(name)) {
-            if (!isCompleteAsset(file)) return@synchronized null
+            val tracked = synchronized(gate) {
+                knownFiles[file.name]?.takeIf { it.assetName == name && it.complete }
+            } ?: return@synchronized null
+            if (!isCompleteAsset(file) || fileLength(file) != tracked.size) return@synchronized null
             synchronized(gate) {
                 if (evicting.contains(name)) null else leaseLocked(name, file)
             }
@@ -563,32 +693,34 @@ internal class VideoAssetCacheManager(
             synchronized(gate) { scanAvailable = false }
             return@withLock false
         }
+        if (!initializeManifest()) {
+            synchronized(gate) { scanAvailable = false }
+            return@withLock false
+        }
         if (synchronized(gate) { scanComplete }) return@withLock false
         try {
-            if (scanStream == null) {
-                fileOperation()
-                val opened = Files.newDirectoryStream(directory.toPath())
-                scanStream = opened
-                scanIterator = opened.iterator()
+            if (scanFiles == null) {
+                scanFiles = synchronized(gate) { knownFiles.values.toTypedArray() }
+                scanIndex = 0
             }
-            val iterator = scanIterator ?: run {
+            val files = scanFiles ?: run {
                 synchronized(gate) { scanAvailable = false }
                 return@withLock false
             }
             var count = 0
-            while (count < MAX_CLEANUP_FILES && iterator.hasNext()) {
-                val file = iterator.next().toFile()
+            while (count < MAX_CLEANUP_FILES && scanIndex < files.size) {
+                val entry = files[scanIndex++]
                 scannedEntryCount++
                 if (scannedEntryCount > MAX_CACHE_ENTRIES) {
                     synchronized(gate) { scanAvailable = false }
-                    closeScanStream()
+                    closeScanFiles()
                     return@withLock false
                 }
-                inspectMaintenanceFile(file)
+                inspectMaintenanceFile(entry)
                 count++
             }
-            if (iterator.hasNext()) return@withLock true
-            closeScanStream()
+            if (scanIndex < files.size) return@withLock true
+            closeScanFiles()
             synchronized(gate) {
                 scanComplete = true
                 scanAvailable = true
@@ -597,7 +729,7 @@ internal class VideoAssetCacheManager(
             trimKnownCache()
             false
         } catch (failure: Throwable) {
-            closeScanStream()
+            closeScanFiles()
             synchronized(gate) { scanAvailable = false }
             onDownloadFailure(failure)
             false
@@ -609,89 +741,86 @@ internal class VideoAssetCacheManager(
             scanComplete && elapsedRealtimeMs() - lastScanCompletedMs >= CAPACITY_SCAN_INVALIDATION_MS
         }
         if (!invalidate) return
-        closeScanStream()
+        closeScanFiles()
         synchronized(gate) {
-            knownFiles.clear()
-            knownBytes = 0L
             scanComplete = false
             scanAvailable = true
             scannedEntryCount = 0
         }
     }
 
-    private fun closeScanStream() {
-        val stream = scanStream
-        try {
-            runCatching { stream?.close() }
-        } finally {
-            scanStream = null
-            scanIterator = null
-        }
+    private fun closeScanFiles() {
+        scanFiles = null
+        scanIndex = 0
     }
 
-    private fun inspectMaintenanceFile(file: File) {
+    private fun inspectMaintenanceFile(entry: CacheEntry) {
+        val file = entry.file
         val name = file.name
-        val assetName = partialAssetName(name) ?: name
+        val assetName = entry.assetName
         val protected = synchronized(gate) {
-            leaseCounts.containsKey(assetName) || flights.containsKey(assetName) ||
-                activeReservations.containsKey(name) || evicting.contains(assetName)
+            leaseCounts.containsKey(assetName) ||
+                (entry.complete && flights.containsKey(assetName)) ||
+                activeEntries.contains(name) || evicting.contains(assetName)
         }
-        val partial = name.endsWith(".part") || name.endsWith(".completed")
+        val exists = fileIsFile(file)
         val modified = fileLastModified(file)
         val size = fileLength(file)
-        val complete = !partial && fileIsFile(file) && size in 1..VIDEO_ASSET_MAX_BYTES
-        val cutoff = wallClockMs() - VIDEO_CACHE_ORPHAN_MAX_AGE_MS
-        val removable = if (partial) {
-            modified < cutoff || name.contains(".$processPartId.")
+        val valid = if (entry.complete) {
+            exists && size == entry.size && size in 1..VIDEO_ASSET_MAX_BYTES
         } else {
-            modified < cutoff || !complete
+            exists && size in 0..entry.size && entry.size in 0..VIDEO_ASSET_MAX_BYTES
         }
+        val cutoff = wallClockMs() - VIDEO_CACHE_ORPHAN_MAX_AGE_MS
+        if (!exists && !protected) {
+            reconcileMissingEntry(name)
+            return
+        }
+        val removable = !valid || modified < cutoff
         if (!protected && removable) {
             val deleted = synchronized(publicationLock(assetName)) {
                 val claimed = synchronized(gate) {
                     !leaseCounts.containsKey(assetName) && !flights.containsKey(assetName) &&
-                        !activeReservations.containsKey(name) && evicting.add(assetName)
+                        !activeEntries.contains(name) && evicting.add(assetName)
                 }
                 if (!claimed) false else try {
-                    deleteFile(file)
+                    deleteTrackedFile(name)
                 } finally {
                     synchronized(gate) { evicting.remove(assetName) }
                 }
             }
-            if (deleted) {
-                synchronized(gate) { removeKnownFileLocked(name) }
-                return
-            }
+            if (deleted) return
         }
-        if (!protected || !partial) recordKnownFile(file, complete)
     }
 
-    private fun reserveCapacity(partName: String, bytes: Long, protectedName: String): Boolean {
+    private fun reserveCapacity(part: File, bytes: Long, protectedName: String): Boolean {
         onCapacityCheck()
         repeat(MAX_CLEANUP_FILES) {
-            val candidate = synchronized(gate) {
-                val reserved = activeReservations.values.fold(0L, ::saturatingAdd)
-                if (saturatingAdd(saturatingAdd(knownBytes, reserved), bytes) <= VIDEO_CACHE_MAX_BYTES) {
-                    activeReservations[partName] = bytes
-                    return true
+            val admitted = synchronized(manifestLock) {
+                val canAdmit = synchronized(gate) {
+                    knownFiles.size < MAX_CACHE_ENTRIES &&
+                        saturatingAdd(knownBytes, bytes) <= VIDEO_CACHE_MAX_BYTES
                 }
+                if (!canAdmit) false else registerPartialLocked(part, bytes, protectedName)
+            }
+            if (admitted) return true
+            val candidate = synchronized(gate) {
                 knownFiles.values
                     .asSequence()
                     .filter { entry ->
-                        entry.complete && entry.file.name != protectedName &&
-                            !leaseCounts.containsKey(entry.file.name) &&
-                            !flights.containsKey(entry.file.name) &&
-                            !evicting.contains(entry.file.name)
+                        entry.complete && entry.assetName != protectedName &&
+                            !leaseCounts.containsKey(entry.assetName) &&
+                            !flights.containsKey(entry.assetName) &&
+                            !evicting.contains(entry.assetName)
                     }
                     .minByOrNull(CacheEntry::modifiedMs)
-                    ?.also { evicting += it.file.name }
+                    ?.also { evicting += it.assetName }
             } ?: return false
-            val deleted = synchronized(publicationLock(candidate.file.name)) {
-                deleteFile(candidate.file)
+            val deleted = synchronized(publicationLock(candidate.assetName)) {
+                deleteTrackedFile(candidate.file.name)
             }
             synchronized(gate) {
-                if (deleted) removeKnownFileLocked(candidate.file.name)
-                evicting.remove(candidate.file.name)
+                evicting.remove(candidate.assetName)
             }
             if (!deleted) return false
         }
@@ -706,18 +835,17 @@ internal class VideoAssetCacheManager(
                 knownFiles.values
                     .asSequence()
                     .filter { entry ->
-                        entry.complete && !leaseCounts.containsKey(entry.file.name) &&
-                            !flights.containsKey(entry.file.name) && !evicting.contains(entry.file.name)
+                        entry.complete && !leaseCounts.containsKey(entry.assetName) &&
+                            !flights.containsKey(entry.assetName) && !evicting.contains(entry.assetName)
                     }
                     .minByOrNull(CacheEntry::modifiedMs)
-                    ?.also { evicting += it.file.name }
+                    ?.also { evicting += it.assetName }
             } ?: return
-            val deleted = synchronized(publicationLock(candidate.file.name)) {
-                deleteFile(candidate.file)
+            val deleted = synchronized(publicationLock(candidate.assetName)) {
+                deleteTrackedFile(candidate.file.name)
             }
             synchronized(gate) {
-                if (deleted) removeKnownFileLocked(candidate.file.name)
-                evicting.remove(candidate.file.name)
+                evicting.remove(candidate.assetName)
             }
             if (!deleted) return
         }
@@ -725,17 +853,20 @@ internal class VideoAssetCacheManager(
     }
 
     private fun scheduleTrimFollowUp() {
-        val stillOverCapacity = synchronized(gate) { knownBytes > VIDEO_CACHE_MAX_BYTES }
-        if (stillOverCapacity && followUpScheduled.compareAndSet(false, true)) {
+        val canTrim = synchronized(gate) {
+            knownBytes > VIDEO_CACHE_MAX_BYTES && knownFiles.values.any { entry ->
+                entry.complete && !leaseCounts.containsKey(entry.assetName) &&
+                    !flights.containsKey(entry.assetName) && !evicting.contains(entry.assetName)
+            }
+        }
+        if (canTrim && followUpScheduled.compareAndSet(false, true)) {
             scope.launch(ioDispatcher) {
                 try {
                     delay(MAINTENANCE_FOLLOW_UP_DELAY_MS)
                     trimKnownCache()
                 } finally {
                     followUpScheduled.set(false)
-                    if (synchronized(gate) { knownBytes > VIDEO_CACHE_MAX_BYTES }) {
-                        scheduleTrimFollowUp()
-                    }
+                    scheduleTrimFollowUp()
                 }
             }
         }
@@ -751,12 +882,172 @@ internal class VideoAssetCacheManager(
         return ready
     }
 
-    private fun recordKnownFile(file: File, complete: Boolean) {
-        val entry = CacheEntry(file, fileLength(file), fileLastModified(file), complete)
+    private fun initializeManifest(): Boolean = synchronized(manifestLock) {
+        if (manifestReady) return@synchronized true
+        val manifest = File(directory, VIDEO_CACHE_MANIFEST_NAME)
+        val backup = File(directory, VIDEO_CACHE_MANIFEST_NAME + MANIFEST_BACKUP_SUFFIX)
+        val primaryRead = readVideoCacheManifest(manifest, directory)
+        val backupRead = if (primaryRead?.valid == true) null else readVideoCacheManifest(backup, directory)
+        val selected = when {
+            primaryRead?.valid == true -> primaryRead
+            backupRead?.valid == true -> backupRead
+            primaryRead == null && backupRead == null ->
+                VideoCacheManifestRead(LinkedHashMap(), emptyList(), valid = true)
+            else -> null
+        }
+        if (selected == null) {
+            val resetPaths = LinkedHashSet<File>(MAX_CACHE_ENTRIES)
+            listOfNotNull(primaryRead, backupRead).forEach { invalid ->
+                for (path in invalid.validPaths) {
+                    if (resetPaths.size >= MAX_CACHE_ENTRIES) break
+                    resetPaths += path
+                }
+            }
+            var deletedAll = true
+            resetPaths.forEach { path ->
+                if (!deleteFile(path)) deletedAll = false
+            }
+            if (!deletedAll) return@synchronized false
+            deleteFile(manifest)
+            deleteFile(backup)
+            deleteFile(File(directory, VIDEO_CACHE_MANIFEST_NAME + MANIFEST_TEMP_SUFFIX))
+            deleteFile(File(directory, VIDEO_CACHE_MANIFEST_NAME + MANIFEST_COPY_SUFFIX))
+            if (!persistManifestLocked(LinkedHashMap())) return@synchronized false
+        } else {
+            if (selected === backupRead &&
+                !persistManifestLocked(LinkedHashMap(selected.entries), preserveBackup = true)
+            ) return@synchronized false
+            manifestEntries.clear()
+            manifestEntries.putAll(selected.entries)
+            synchronized(gate) {
+                knownFiles.clear()
+                knownBytes = 0L
+                selected.entries.values.forEach { record ->
+                    putKnownFileLocked(record.toCacheEntry())
+                }
+            }
+        }
+        deleteFile(File(directory, VIDEO_CACHE_MANIFEST_NAME + MANIFEST_TEMP_SUFFIX))
+        deleteFile(File(directory, VIDEO_CACHE_MANIFEST_NAME + MANIFEST_COPY_SUFFIX))
+        deleteFile(backup)
+        manifestReady = true
+        true
+    }
+
+    private fun registerPartialLocked(file: File, bytes: Long, assetName: String): Boolean {
+        if (manifestEntries.containsKey(file.name) || manifestEntries.size >= MAX_CACHE_ENTRIES) return false
+        val record = VideoCacheManifestEntry(
+            assetName = assetName,
+            fileName = file.name,
+            size = bytes,
+            modifiedMs = wallClockMs().coerceAtLeast(0L),
+            state = VideoCacheEntryState.PARTIAL,
+        )
+        val candidate = LinkedHashMap(manifestEntries).apply { put(file.name, record) }
+        if (!persistManifestLocked(candidate)) return false
+        manifestEntries[file.name] = record
         synchronized(gate) {
-            val previous = knownFiles.put(file.name, entry)
-            if (previous != null) knownBytes = (knownBytes - previous.size).coerceAtLeast(0L)
-            knownBytes = saturatingAdd(knownBytes, entry.size)
+            putKnownFileLocked(record.toCacheEntry())
+            activeEntries += file.name
+        }
+        return true
+    }
+
+    private fun publishManifestEntry(file: File, assetName: String, size: Long): Boolean =
+        synchronized(manifestLock) {
+            val current = manifestEntries[file.name]
+                ?.takeIf { it.assetName == assetName && it.state == VideoCacheEntryState.PARTIAL }
+                ?: return@synchronized false
+            val complete = current.copy(
+                size = size,
+                modifiedMs = wallClockMs().coerceAtLeast(0L),
+                state = VideoCacheEntryState.COMPLETE,
+            )
+            val candidate = LinkedHashMap(manifestEntries).apply { put(file.name, complete) }
+            if (!persistManifestLocked(candidate)) return@synchronized false
+            manifestEntries[file.name] = complete
+            synchronized(gate) {
+                activeEntries.remove(file.name)
+                putKnownFileLocked(complete.toCacheEntry())
+            }
+            true
+        }
+
+    private fun reconcileMissingEntry(fileName: String): Boolean = synchronized(manifestLock) {
+        if (!manifestEntries.containsKey(fileName)) return@synchronized true
+        val candidate = LinkedHashMap(manifestEntries).apply { remove(fileName) }
+        if (!persistManifestLocked(candidate)) return@synchronized false
+        manifestEntries.remove(fileName)
+        synchronized(gate) {
+            activeEntries.remove(fileName)
+            removeKnownFileLocked(fileName)
+        }
+        true
+    }
+
+    private fun deleteTrackedFile(fileName: String): Boolean {
+        val record = synchronized(manifestLock) { manifestEntries[fileName] }
+            ?: return deleteFile(File(directory, fileName))
+        if (!deleteFile(File(directory, record.fileName))) return false
+        return reconcileMissingEntry(fileName)
+    }
+
+    private fun VideoCacheManifestEntry.toCacheEntry(): CacheEntry = CacheEntry(
+        assetName = assetName,
+        file = File(directory, fileName),
+        size = size,
+        modifiedMs = modifiedMs,
+        complete = state == VideoCacheEntryState.COMPLETE,
+    )
+
+    private fun putKnownFileLocked(entry: CacheEntry) {
+        val previous = knownFiles.put(entry.file.name, entry)
+        if (previous != null) knownBytes = (knownBytes - previous.size).coerceAtLeast(0L)
+        knownBytes = saturatingAdd(knownBytes, entry.size)
+    }
+
+    private fun persistManifestLocked(
+        entries: LinkedHashMap<String, VideoCacheManifestEntry>,
+        preserveBackup: Boolean = false,
+    ): Boolean {
+        val bytes = serializeVideoCacheManifest(entries.values) ?: return false
+        val manifest = File(directory, VIDEO_CACHE_MANIFEST_NAME)
+        val temporary = File(directory, VIDEO_CACHE_MANIFEST_NAME + MANIFEST_TEMP_SUFFIX)
+        val copy = File(directory, VIDEO_CACHE_MANIFEST_NAME + MANIFEST_COPY_SUFFIX)
+        val backup = File(directory, VIDEO_CACHE_MANIFEST_NAME + MANIFEST_BACKUP_SUFFIX)
+        return try {
+            writeSyncedFile(temporary, bytes)
+            if (runCatching { renameFile(temporary, manifest) }.getOrDefault(false)) return true
+            writeSyncedFile(copy, bytes)
+            if (preserveBackup) {
+                if (partExists(manifest) && !deleteFile(manifest)) return false
+                return runCatching { renameFile(copy, manifest) }.getOrDefault(false)
+            }
+            deleteFile(backup)
+            val hadManifest = partExists(manifest)
+            if (hadManifest && !runCatching { renameFile(manifest, backup) }.getOrDefault(false)) return false
+            if (runCatching { renameFile(copy, manifest) }.getOrDefault(false)) {
+                deleteFile(temporary)
+                deleteFile(backup)
+                true
+            } else {
+                if (hadManifest) runCatching { renameFile(backup, manifest) }
+                false
+            }
+        } catch (failure: Throwable) {
+            onDownloadFailure(failure)
+            false
+        } finally {
+            deleteFile(temporary)
+            deleteFile(copy)
+        }
+    }
+
+    private fun writeSyncedFile(file: File, bytes: ByteArray) {
+        fileOperation()
+        FileOutputStream(file).use { output ->
+            output.write(bytes)
+            output.fd.sync()
         }
     }
 
@@ -765,30 +1056,11 @@ internal class VideoAssetCacheManager(
         knownBytes = (knownBytes - previous.size).coerceAtLeast(0L)
     }
 
-    private fun moveIntoPlace(part: File, destination: File): Boolean {
-        fileOperation()
-        return runCatching {
-            Files.move(
-                part.toPath(),
-                destination.toPath(),
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-            true
-        }.getOrElse {
-            fileOperation()
-            runCatching {
-                Files.move(part.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                true
-            }.getOrDefault(false)
-        }
-    }
-
     private fun publishGeneration(
-        completedPart: File,
-        destination: File,
+        part: File,
         name: String,
         generation: Long,
+        size: Long,
         control: DownloadControl,
     ): Boolean {
         return synchronized(publicationLock(name)) {
@@ -796,15 +1068,14 @@ internal class VideoAssetCacheManager(
                 publicationGenerations[name] == generation
             }
             if (!ownsPublication || control.cancelled.get()) return@synchronized false
-            if (!moveIntoPlace(completedPart, destination)) return@synchronized false
+            if (!publishManifestEntry(part, name, size)) return@synchronized false
             val retained = synchronized(gate) {
                 if (publicationGenerations[name] == generation && !control.cancelled.get()) {
-                    canonicalGenerations[name] = generation
                     true
                 } else false
             }
             if (!retained) {
-                deleteFile(destination)
+                deleteTrackedFile(part.name)
             }
             retained
         }
@@ -816,13 +1087,10 @@ internal class VideoAssetCacheManager(
                 !leaseCounts.containsKey(name) && !flights.containsKey(name)
             }
             if (!shouldDelete) return
-            deleteFile(File(directory, name))
-            synchronized(gate) {
-                if (!leaseCounts.containsKey(name) && !flights.containsKey(name)) {
-                    canonicalGenerations.remove(name)
-                    removeKnownFileLocked(name)
-                }
+            val files = synchronized(gate) {
+                knownFiles.values.filter { it.assetName == name }.map { it.file.name }
             }
+            files.forEach(::deleteTrackedFile)
         }
     }
 
@@ -844,16 +1112,6 @@ internal class VideoAssetCacheManager(
             throw SocketTimeoutException("Video download deadline exceeded")
         }
         remainingTimeoutMs(deadlineMs)
-    }
-
-    private fun partialAssetName(name: String): String? {
-        val suffix = when {
-            name.endsWith(".part") -> ".part"
-            name.endsWith(".completed") -> ".completed"
-            else -> return null
-        }
-        val withoutFlight = name.removeSuffix(suffix).substringBeforeLast('.', missingDelimiterValue = "")
-        return withoutFlight.substringBeforeLast('.', missingDelimiterValue = "").takeIf { it.isNotEmpty() }
     }
 
     private fun isCompleteAsset(file: File): Boolean = fileIsFile(file) &&
@@ -890,6 +1148,121 @@ internal class VideoAssetCacheManager(
         fileOperation()
         return runCatching { !file.exists() || file.delete() }.getOrDefault(false)
     }
+}
+
+private val VIDEO_ASSET_NAME_PATTERN = Regex("^[0-9a-f]{64}\\.video$")
+private val VIDEO_CACHE_FILE_NAME_PATTERN =
+    Regex("^[0-9a-f]{64}\\.video\\.[a-z0-9_-]{1,64}\\.[1-9][0-9]{0,18}\\.asset$")
+
+private fun readVideoCacheManifest(file: File, directory: File): VideoCacheManifestRead? {
+    if (!runCatching { file.isFile }.getOrDefault(false)) return null
+    val buffer = ByteArray(MAX_MANIFEST_BYTES + 1)
+    var count = 0
+    var oversize = false
+    return try {
+        FileInputStream(file).use { input ->
+            while (count < buffer.size) {
+                val read = input.read(buffer, count, buffer.size - count)
+                if (read < 0) break
+                count += read
+            }
+            if (count > MAX_MANIFEST_BYTES) oversize = true
+            if (!oversize && input.read() >= 0) oversize = true
+        }
+        parseVideoCacheManifest(buffer.copyOf(minOf(count, MAX_MANIFEST_BYTES)), directory, oversize)
+    } catch (_: Throwable) {
+        VideoCacheManifestRead(LinkedHashMap(), emptyList(), valid = false)
+    }
+}
+
+private fun parseVideoCacheManifest(
+    bytes: ByteArray,
+    directory: File,
+    forcedInvalid: Boolean,
+): VideoCacheManifestRead {
+    val entries = LinkedHashMap<String, VideoCacheManifestEntry>()
+    val validPaths = ArrayList<File>(MAX_CACHE_ENTRIES)
+    var valid = !forcedInvalid && bytes.isNotEmpty() && bytes.last() == '\n'.code.toByte()
+    if (bytes.any { byte ->
+            val value = byte.toInt() and 0xff
+            value != '\n'.code && value != '\t'.code && value !in 0x20..0x7e
+        }
+    ) valid = false
+    val text = String(bytes, Charsets.US_ASCII)
+    val lines = text.removeSuffix("\n").split('\n')
+    if (lines.firstOrNull() != MANIFEST_HEADER) valid = false
+    if (lines.size - 1 > MAX_CACHE_ENTRIES) valid = false
+    lines.drop(1).forEach { line ->
+        if (line.toByteArray(Charsets.US_ASCII).size > MAX_MANIFEST_LINE_BYTES) {
+            valid = false
+            return@forEach
+        }
+        val fields = line.split('\t')
+        if (fields.size != 5) {
+            valid = false
+            return@forEach
+        }
+        val state = when (fields[0]) {
+            VideoCacheEntryState.PARTIAL.wireValue -> VideoCacheEntryState.PARTIAL
+            VideoCacheEntryState.COMPLETE.wireValue -> VideoCacheEntryState.COMPLETE
+            else -> null
+        }
+        val assetName = fields[1]
+        val fileName = fields[2]
+        val size = fields[3].toLongOrNull()
+        val modifiedMs = fields[4].toLongOrNull()
+        val safeName = VIDEO_ASSET_NAME_PATTERN.matches(assetName) &&
+            VIDEO_CACHE_FILE_NAME_PATTERN.matches(fileName) && fileName.startsWith("$assetName.")
+        if (safeName && validPaths.size < MAX_CACHE_ENTRIES) validPaths += File(directory, fileName)
+        if (state == null || size == null || modifiedMs == null) {
+            valid = false
+            return@forEach
+        }
+        val safeSize = when (state) {
+            VideoCacheEntryState.PARTIAL -> size in 0..VIDEO_ASSET_MAX_BYTES
+            VideoCacheEntryState.COMPLETE -> size in 1..VIDEO_ASSET_MAX_BYTES
+        }
+        if (!safeName || !safeSize || modifiedMs < 0L ||
+            entries.containsKey(fileName) || entries.values.any { it.assetName == assetName &&
+                it.state == VideoCacheEntryState.COMPLETE && state == VideoCacheEntryState.COMPLETE }
+        ) {
+            valid = false
+            return@forEach
+        }
+        if (entries.size >= MAX_CACHE_ENTRIES) {
+            valid = false
+            return@forEach
+        }
+        entries[fileName] = VideoCacheManifestEntry(assetName, fileName, size, modifiedMs, state)
+    }
+    return VideoCacheManifestRead(entries, validPaths, valid)
+}
+
+internal fun isValidVideoCacheManifest(bytes: ByteArray): Boolean =
+    parseVideoCacheManifest(bytes, File("."), forcedInvalid = false).valid
+
+private fun serializeVideoCacheManifest(entries: Collection<VideoCacheManifestEntry>): ByteArray? {
+    if (entries.size > MAX_CACHE_ENTRIES) return null
+    val builder = StringBuilder(MANIFEST_HEADER).append('\n')
+    val fileNames = mutableSetOf<String>()
+    val completeAssets = mutableSetOf<String>()
+    for (entry in entries) {
+        val safeName = VIDEO_ASSET_NAME_PATTERN.matches(entry.assetName) &&
+            VIDEO_CACHE_FILE_NAME_PATTERN.matches(entry.fileName) &&
+            entry.fileName.startsWith("${entry.assetName}.")
+        val safeSize = when (entry.state) {
+            VideoCacheEntryState.PARTIAL -> entry.size in 0..VIDEO_ASSET_MAX_BYTES
+            VideoCacheEntryState.COMPLETE -> entry.size in 1..VIDEO_ASSET_MAX_BYTES
+        }
+        if (!safeName || !safeSize || entry.modifiedMs < 0L || !fileNames.add(entry.fileName) ||
+            (entry.state == VideoCacheEntryState.COMPLETE && !completeAssets.add(entry.assetName))
+        ) return null
+        val line = "${entry.state.wireValue}\t${entry.assetName}\t${entry.fileName}\t${entry.size}\t${entry.modifiedMs}"
+        if (line.length > MAX_MANIFEST_LINE_BYTES) return null
+        builder.append(line).append('\n')
+        if (builder.length > MAX_MANIFEST_BYTES) return null
+    }
+    return builder.toString().toByteArray(Charsets.US_ASCII).takeIf { it.size <= MAX_MANIFEST_BYTES }
 }
 
 private fun saturatingAdd(left: Long, right: Long): Long =
@@ -966,3 +1339,14 @@ private fun drainBounded(stream: InputStream?, limit: Long) {
 
 private class VideoAssetTooLargeException : java.io.IOException("Video asset exceeds size limit")
 private class VideoDeclaredLengthExceededException : java.io.IOException("Video asset exceeds declared length")
+
+private fun normalizeVideoAssetError(failure: Throwable): VideoAssetCacheError = when (failure) {
+    is SocketTimeoutException -> VideoAssetCacheError.TIMED_OUT
+    is SimulaHttp.RedirectTargetRejectedException,
+    is SimulaHttp.RedirectCookieIsolationException,
+    -> VideoAssetCacheError.UNSAFE_TARGET
+    is VideoAssetTooLargeException,
+    is VideoDeclaredLengthExceededException,
+    -> VideoAssetCacheError.TOO_LARGE
+    else -> VideoAssetCacheError.UNAVAILABLE
+}

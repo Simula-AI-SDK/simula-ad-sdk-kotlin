@@ -62,6 +62,32 @@ class ClickTrackingTest {
     }
 
     @Test
+    fun `trusted HTML source uses exact contract 2 allowlist`() {
+        val allowed = setOf(
+            "auto_redirect", "companion", "cta", "end_screen",
+            "end_screen_ad_1_backdrop", "end_screen_ad_1_cta",
+            "end_screen_ad_2_backdrop", "end_screen_ad_2_cta",
+            "end_screen_ad_2_interested_button", "fallback_cta", "install_banner",
+            "interstitial", "native", "native_backdrop", "native_cta", "playable",
+            "primary_cta", "primary_unknown", "rewarded", "sdk", "store_prompt",
+            "video_preview_cta", "end_screen_1_unknown", "end_screen_2_unknown",
+        )
+        assertEquals(allowed, ClickSources.CONTRACT_2_ALLOWLIST)
+        allowed.forEach { assertEquals(it, ClickSources.trustedHtmlOrNull(it)) }
+        listOf(null, "", "hero_cta", "auto_store_redirect", "PRIMARY_CTA").forEach {
+            assertNull(ClickSources.trustedHtmlOrNull(it))
+        }
+        assertEquals(
+            ClickSources.END_SCREEN_1_UNKNOWN,
+            ClickSources.trustedHtmlOr("hero_cta", ClickSources.END_SCREEN_1_UNKNOWN),
+        )
+        assertEquals(
+            ClickSources.PRIMARY_UNKNOWN,
+            ClickSources.trustedHtmlOr(null, ClickSources.PRIMARY_UNKNOWN),
+        )
+    }
+
+    @Test
     fun `presentation gate drops rapid duplicate dispatch and assigns later interaction a new id`() {
         var now = 1_000L
         var nextId = 0

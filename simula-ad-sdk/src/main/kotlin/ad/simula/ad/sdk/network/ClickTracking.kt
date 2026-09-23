@@ -13,6 +13,37 @@ internal object ClickSources {
     const val PRIMARY_UNKNOWN = "primary_unknown"
     const val END_SCREEN_1_UNKNOWN = "end_screen_1_unknown"
     const val END_SCREEN_2_UNKNOWN = "end_screen_2_unknown"
+    internal val CONTRACT_2_ALLOWLIST = setOf(
+        "auto_redirect",
+        "companion",
+        "cta",
+        "end_screen",
+        "end_screen_ad_1_backdrop",
+        "end_screen_ad_1_cta",
+        "end_screen_ad_2_backdrop",
+        "end_screen_ad_2_cta",
+        "end_screen_ad_2_interested_button",
+        "fallback_cta",
+        "install_banner",
+        "interstitial",
+        "native",
+        "native_backdrop",
+        "native_cta",
+        "playable",
+        PRIMARY_CTA,
+        PRIMARY_UNKNOWN,
+        "rewarded",
+        "sdk",
+        STORE_PROMPT,
+        "video_preview_cta",
+        END_SCREEN_1_UNKNOWN,
+        END_SCREEN_2_UNKNOWN,
+    )
+
+    fun trustedHtmlOrNull(source: String?): String? = source?.takeIf(CONTRACT_2_ALLOWLIST::contains)
+
+    fun trustedHtmlOr(source: String?, semanticFallback: String): String =
+        trustedHtmlOrNull(source) ?: trustedHtmlOrNull(semanticFallback) ?: PRIMARY_UNKNOWN
 
     fun normalize(source: String): String = when (source) {
         PRIMARY_CTA, "cta" -> PRIMARY_CTA

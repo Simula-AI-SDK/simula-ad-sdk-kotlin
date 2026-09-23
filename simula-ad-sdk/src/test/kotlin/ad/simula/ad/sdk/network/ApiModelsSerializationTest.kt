@@ -3,8 +3,10 @@ package ad.simula.ad.sdk.network
 import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
+import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.ProgressBarStyle
 import ad.simula.ad.sdk.model.RewardEarnAt
+import ad.simula.ad.sdk.model.isRenderable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -242,6 +244,82 @@ class ApiModelsSerializationTest {
                 ),
             ).isEmpty(),
         )
+    }
+
+    @Test
+    fun `one malformed segment discards the whole list without dropping stitched video`() {
+        val response = json.decodeFromString<AdLoadApiResponse>(
+            """{"video_contract":2,"creative":{"type":"video","url":"https://cdn.example/v.mp4",
+                "segments":[
+                    {"clip_index":0,"video_pool":"ugc","start_seconds":0,"end_seconds":2},
+                    {"clip_index":"1","video_pool":"brand","start_seconds":2,"end_seconds":4},
+                    {"clip_index":2,"video_pool":"brand","start_seconds":4,"end_seconds":6}
+                ]}}""",
+        )
+        val result = SimulaApiClient.adLoadResultFromResponse(response)
+
+        assertEquals(CreativeType.VIDEO, result.creative?.type)
+        assertEquals("https://cdn.example/v.mp4", result.creative?.url)
+        assertTrue(result.creative?.segments?.isEmpty() == true)
+        assertTrue(requireNotNull(result.creative).isRenderable(result.renderedHtml))
+    }
+
+    @Test
+    fun `malformed optional creative and behavior containers degrade independently`() {
+        val primary = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_inserted":true,"rendered_html":"<html/>","creative":42,"ad_behavior":[]}""",
+        )
+        val rewarded = json.decodeFromString<RewardedInitApiResponse>(
+            """{"rendered_html":"<html/>","creative":"bad","ad_behavior":false}""",
+        )
+
+        val primaryResult = SimulaApiClient.adLoadResultFromResponse(primary)
+        val rewardedResult = SimulaApiClient.rewardedResultFromResponse(rewarded)
+        assertNull(primaryResult.creative)
+        assertNull(primaryResult.adBehavior)
+        assertEquals("<html/>", primaryResult.renderedHtml)
+        assertEquals(CreativeType.PLAYABLE, rewardedResult.creative.type)
+        assertNull(rewardedResult.adBehavior)
+        assertEquals("<html/>", rewardedResult.renderedHtml)
+    }
+
+    @Test
+    fun `malformed optional creative fields do not reject behavior or response`() {
+        val response = json.decodeFromString<AdLoadApiResponse>(
+            """{"ad_inserted":true,"rendered_html":"<html/>",
+                "creative":{"type":{},"url":"https://cdn.example/v.mp4"},
+                "ad_behavior":{"close":{"delay_seconds":3}}}""",
+        )
+        val result = SimulaApiClient.adLoadResultFromResponse(response)
+
+        assertNull(result.creative)
+        assertEquals(3, result.adBehavior?.close?.delaySeconds)
+        assertEquals("<html/>", result.renderedHtml)
+    }
+
+    @Test
+    fun `missing or malformed marker preserves v1 video but cannot activate contract 2 features`() {
+        for (marker in listOf("", ",\"video_contract\":\"2\"", ",\"video_contract\":2.0")) {
+            val response = json.decodeFromString<AdLoadApiResponse>(
+                """{"ad_inserted":true,"impression_url":"https://measure.example/view",
+                    "creative":{"type":"video","url":"https://cdn.example/v.mp4","video_pool":"ugc",
+                        "clip_index":0,"segments":[{"clip_index":0,"video_pool":"ugc","start_seconds":0,"end_seconds":4}]},
+                    "ad_behavior":{"video":{"style":"feed_card"},"reward":{"earn_at":"unit_end"},
+                        "progress_bar":{"style":"two_tone"}}$marker}""",
+            )
+            val result = SimulaApiClient.adLoadResultFromResponse(response)
+
+            assertFalse(result.videoContract2)
+            assertEquals(CreativeType.VIDEO, result.creative?.type)
+            assertEquals("https://cdn.example/v.mp4", result.creative?.url)
+            assertTrue(result.creative?.segments?.isEmpty() == true)
+            assertNull(result.creative?.videoPool)
+            assertNull(result.creative?.clipIndex)
+            assertNull(result.adBehavior?.video)
+            assertNull(result.adBehavior?.reward)
+            assertEquals(ProgressBarStyle.SINGLE, result.adBehavior?.progressBar?.style)
+            assertNull(result.impressionUrl)
+        }
     }
 
     @Test

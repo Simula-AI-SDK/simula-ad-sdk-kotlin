@@ -94,6 +94,7 @@ import ad.simula.ad.sdk.ads.AdInfoReportOverlay
 import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.ads.FullscreenVideo
 import ad.simula.ad.sdk.ads.VideoAssetCache
+import ad.simula.ad.sdk.ads.VideoAssetCacheResult
 import ad.simula.ad.sdk.ads.FALLBACK_RENDER_TIMEOUT_MS
 import ad.simula.ad.sdk.ads.FALLBACK_POST_CLOSE_WAIT_MS
 import ad.simula.ad.sdk.ads.VideoPlanPresentationState
@@ -377,7 +378,10 @@ fun MiniGameMenu(
                         .filter { it.type == CreativeType.VIDEO && admittedVideoUrl(it.url) != null }
                         .forEach { ad ->
                             val job = scope.launch {
-                                val lease = VideoAssetCache.acquire(context.applicationContext, ad.url)
+                                val lease = when (val result = VideoAssetCache.acquire(context.applicationContext, ad.url)) {
+                                    is VideoAssetCacheResult.Ready -> result.lease
+                                    is VideoAssetCacheResult.Failed -> null
+                                }
                                 fallbackPreparation.settleVideoPreparation(ad.sourceIndex, lease)
                                 publishPreparedFallbacks()
                             }

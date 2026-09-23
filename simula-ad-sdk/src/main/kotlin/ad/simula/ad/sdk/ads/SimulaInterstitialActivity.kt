@@ -471,6 +471,9 @@ private fun CreativeInterstitial(
     val close = behavior?.close ?: CloseBehavior()
     val isVideo = ad.creative?.type == CreativeType.VIDEO
     val treatment = behavior?.close?.treatment ?: CloseTreatment.HIDDEN
+    val videoProgressBarStyle = behavior?.progressBar?.style
+        ?.takeIf { isVideo && ad.videoContract2 }
+        ?: ProgressBarStyle.SINGLE
     // "Reward in X" vs "Close in X" copy for the reward_or_close_label treatment.
     val isRewardCopy = ad.adUnitType == AdUnitType.REWARDED
 
@@ -835,11 +838,13 @@ private fun CreativeInterstitial(
         val claim = (if (trusted == null) {
             presentation.claimClick(ClickSources.PRIMARY_CTA)
         } else if (trusted.interactionId == null) {
-            presentation.claimWebClick(trusted.clickSource ?: ClickSources.PRIMARY_UNKNOWN)
+            presentation.claimWebClick(
+                ClickSources.trustedHtmlOr(trusted.clickSource, ClickSources.PRIMARY_UNKNOWN),
+            )
         } else {
             presentation.claimTrustedClick(
                 trusted.interactionId,
-                trusted.clickSource ?: ClickSources.PRIMARY_UNKNOWN,
+                ClickSources.trustedHtmlOr(trusted.clickSource, ClickSources.PRIMARY_UNKNOWN),
             )
         }) ?: return false
         if (Build.VERSION.SDK_INT >= 21) presentation.installBannerState.onPrimaryCtaAdmitted()
@@ -931,21 +936,31 @@ private fun CreativeInterstitial(
                     serveId = ad.impressionId.takeIf { it.isNotBlank() },
                     configuredGateSeconds = behavior?.close?.delaySeconds ?: 0,
                     initialPlayedMs = presentation.accumulatedGateTimeMs,
+                    initialPositionMs = presentation.videoPositionMs,
                     ctaEnabled = videoCtaRoute(ad.trackingUrl, ad.androidStoreUrl, ad.destination) != null,
                     ctaLabel = ad.creative.cta,
                     appIconUrl = ad.creative.appIconUrl,
                     appName = ad.creative.appName,
                     subtitle = ad.creative.subtitle,
-                    chromeStyle = behavior?.video?.style ?: VideoChromeStyle.CORNER_CTA,
-                    effectiveClosePosition = effectiveClosePosition(close.treatment, close.position),
-                    bottomProgressBarObstructed = closeBarAtBottom(close.treatment, close.position),
+                    chromeStyle = behavior?.video?.style
+                        ?.takeIf { ad.videoContract2 } ?: VideoChromeStyle.CORNER_CTA,
+                    effectiveClosePosition = effectiveClosePosition(
+                        close.treatment,
+                        close.position,
+                        videoProgressBarStyle,
+                    ),
+                    bottomProgressBarObstructed = progressBarAtBottom(
+                        close.treatment,
+                        close.position,
+                        videoProgressBarStyle,
+                    ),
                     videoPool = ad.creative.videoPool,
                     playbackSlotIdentity = VideoPlaybackSlotIdentity.Primary,
                     clipIndex = ad.creative.clipIndex,
                     skoverlayEnabled = videoSkOverlay?.enabled,
                     skoverlayDelaySeconds = videoSkOverlay?.delaySeconds,
                     videoPlanV2 = ad.videoContract2,
-                    segments = ad.creative.segments,
+                    segments = ad.creative.segments.takeIf { ad.videoContract2 }.orEmpty(),
                     videoPlanState = presentation.fallbackState.videoPlan,
                     presentationBlocked = clickHandoffPending || storeVisitBlocked,
                     willHandoff = hasNextStep,
@@ -1054,7 +1069,7 @@ private fun CreativeInterstitial(
         // Close button — always shown with the compact chrome. Driven by
         // `ad_behavior.close` when present; otherwise a default (top-right, always available) so ads
         // with no `ad_behavior` still get the small close, not a big one.
-        val barAtBottom = closeBarAtBottom(close.treatment, close.position)
+        val barAtBottom = progressBarAtBottom(close.treatment, close.position, videoProgressBarStyle)
         if (videoPreFirstFrameEscapeAvailable(isVideo, displayAdmitted)) {
             VideoPreFirstFrameEscapeButton("Cancel ad", onPreFirstFrameEscape)
         } else {
@@ -1067,8 +1082,7 @@ private fun CreativeInterstitial(
                 enabled = canDismissFullscreen(closeEnabled, clickHandoffPending, displayAdmitted, storeVisitBlocked),
                 remaining = closeRemaining,
                 progress = if (isVideo) smoothVideoCloseProgress else closeProgress.value,
-                progressBarStyle = behavior?.progressBar?.style
-                    ?.takeIf { isVideo } ?: ProgressBarStyle.SINGLE,
+                progressBarStyle = videoProgressBarStyle,
                 videoProgress = videoPlaybackProgress,
                 gateFraction = twoToneGateFraction(behavior?.close?.delaySeconds ?: 0, videoDurationMs),
                 onClose = {
@@ -1461,8 +1475,18 @@ private const val CLOSE_BOTTOM_BAR_LIFT_DP = 26
 internal fun closeBarAtBottom(treatment: CloseTreatment, position: ClosePosition): Boolean =
     treatment == CloseTreatment.PROGRESS_BAR && position == ClosePosition.BOTTOM_LEFT
 
-internal fun effectiveClosePosition(treatment: CloseTreatment, position: ClosePosition): ClosePosition =
-    if (closeBarAtBottom(treatment, position)) ClosePosition.TOP_RIGHT else position
+internal fun progressBarAtBottom(
+    treatment: CloseTreatment,
+    position: ClosePosition,
+    style: ProgressBarStyle,
+): Boolean = position == ClosePosition.BOTTOM_LEFT &&
+    (treatment == CloseTreatment.PROGRESS_BAR || style == ProgressBarStyle.TWO_TONE)
+
+internal fun effectiveClosePosition(
+    treatment: CloseTreatment,
+    position: ClosePosition,
+    style: ProgressBarStyle = ProgressBarStyle.SINGLE,
+): ClosePosition = if (progressBarAtBottom(treatment, position, style)) ClosePosition.TOP_RIGHT else position
 
 internal const val TWO_TONE_PROGRESS_BACKGROUND_ARGB = 0xFF3A3A40L
 internal const val TWO_TONE_PROGRESS_BRIGHT_ARGB = 0xFF1186F2L
@@ -1483,7 +1507,8 @@ internal fun progressBarVisible(
     enabled: Boolean,
     treatment: CloseTreatment,
     style: ProgressBarStyle,
-): Boolean = treatment == CloseTreatment.PROGRESS_BAR && (!enabled || style == ProgressBarStyle.TWO_TONE)
+): Boolean = style == ProgressBarStyle.TWO_TONE ||
+    (treatment == CloseTreatment.PROGRESS_BAR && !enabled)
 
 /**
  * The `ad_behavior`-driven close button. Renders the assigned [treatment] at the configured corner:
@@ -1517,8 +1542,8 @@ internal fun BoxScope.AdCloseButton(
     // bottom edge there, so the ✕ moves up to the top-right. (The mid-ad store prompt sits top-right
     // for any bottom_left close — diagonally opposite a bottom-left ✕, or sharing the top-right with
     // the relocated one.)
-    val barAtBottom = closeBarAtBottom(treatment, position)
-    val alignment = when (effectiveClosePosition(treatment, position)) {
+    val barAtBottom = progressBarAtBottom(treatment, position, progressBarStyle)
+    val alignment = when (effectiveClosePosition(treatment, position, progressBarStyle)) {
         ClosePosition.TOP_RIGHT -> Alignment.TopEnd
         ClosePosition.TOP_LEFT -> Alignment.TopStart
         ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
