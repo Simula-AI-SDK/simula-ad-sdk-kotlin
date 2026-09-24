@@ -152,6 +152,8 @@ internal class VideoPlanPresentationState(
     private var terminalOutcome: VideoPlaybackTerminalOutcome? = null
     private var retainedPositionMs = 0L
     private var retainedDurationMs = 0L
+    var segmentTelemetry = VideoSegmentTelemetryState()
+        private set
     private var midpointEmitted = false
 
     @Synchronized
@@ -170,6 +172,7 @@ internal class VideoPlanPresentationState(
             retainedPositionMs = 0L
             retainedDurationMs = 0L
             midpointEmitted = false
+            segmentTelemetry = VideoSegmentTelemetryState()
         }
         return VideoPlaybackRegistration(
             playbackGeneration,

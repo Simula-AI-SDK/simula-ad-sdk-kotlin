@@ -199,21 +199,21 @@ class RewardedParsingTest {
     @Test
     fun `verify response decodes verified and token`() {
         val r = json.decodeFromString<VerifyRewardApiResponse>("""{"verified":true,"token":"tok_1"}""")
-        assertTrue(r.verified)
+        assertEquals(true, r.verified)
         assertEquals("tok_1", r.token)
     }
 
     @Test
     fun `verify response missing token is null`() {
         val r = json.decodeFromString<VerifyRewardApiResponse>("""{"verified":true}""")
-        assertTrue(r.verified)
+        assertEquals(true, r.verified)
         assertNull(r.token)
     }
 
     @Test
-    fun `verify response empty object is unverified`() {
+    fun `verify response empty object is malformed and retryable`() {
         val r = json.decodeFromString<VerifyRewardApiResponse>("{}")
-        assertEquals(false, r.verified)
+        assertNull(r.verified)
         assertNull(r.token)
     }
 
@@ -224,6 +224,6 @@ class RewardedParsingTest {
         }.exceptionOrNull()
 
         assertTrue(failure is RewardNotVerifiedException)
-        assertTrue(requireVerifiedReward(VerifyRewardApiResponse(verified = true, token = "token")).verified)
+        assertEquals(true, requireVerifiedReward(VerifyRewardApiResponse(verified = true, token = "token")).verified)
     }
 }

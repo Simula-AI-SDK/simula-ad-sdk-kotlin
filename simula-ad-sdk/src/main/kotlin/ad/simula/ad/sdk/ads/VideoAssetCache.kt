@@ -69,6 +69,7 @@ private val VIDEO_REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
 internal enum class VideoAssetCacheError(val telemetryCode: String) {
     INVALID_URL("invalid_url"),
     UNSAFE_TARGET("unsafe_target"),
+    COOKIE_ISOLATION_UNAVAILABLE("cookie_isolation_unavailable"),
     UNAVAILABLE("transfer_failed"),
     TOO_LARGE("asset_too_large"),
     CACHE_FULL("cache_full"),
@@ -92,6 +93,10 @@ internal data class VideoAssetLoadFailure(
 internal fun videoAssetLoadFailure(error: VideoAssetCacheError): VideoAssetLoadFailure? = when (error) {
     VideoAssetCacheError.TIMED_OUT -> VideoAssetLoadFailure(
         SimulaAdError.Network(SocketTimeoutException("Video cache deadline exceeded")),
+        error.telemetryCode,
+    )
+    VideoAssetCacheError.COOKIE_ISOLATION_UNAVAILABLE -> VideoAssetLoadFailure(
+        SimulaAdError.Network(SimulaHttp.RedirectCookieIsolationException()),
         error.telemetryCode,
     )
     VideoAssetCacheError.UNAVAILABLE -> VideoAssetLoadFailure(
@@ -1342,9 +1347,8 @@ private class VideoDeclaredLengthExceededException : java.io.IOException("Video 
 
 private fun normalizeVideoAssetError(failure: Throwable): VideoAssetCacheError = when (failure) {
     is SocketTimeoutException -> VideoAssetCacheError.TIMED_OUT
-    is SimulaHttp.RedirectTargetRejectedException,
-    is SimulaHttp.RedirectCookieIsolationException,
-    -> VideoAssetCacheError.UNSAFE_TARGET
+    is SimulaHttp.RedirectCookieIsolationException -> VideoAssetCacheError.COOKIE_ISOLATION_UNAVAILABLE
+    is SimulaHttp.RedirectTargetRejectedException -> VideoAssetCacheError.UNSAFE_TARGET
     is VideoAssetTooLargeException,
     is VideoDeclaredLengthExceededException,
     -> VideoAssetCacheError.TOO_LARGE

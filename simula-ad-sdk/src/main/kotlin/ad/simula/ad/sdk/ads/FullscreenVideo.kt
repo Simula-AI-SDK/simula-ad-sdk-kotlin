@@ -253,6 +253,7 @@ internal fun FullscreenVideo(
     chromeStyle: VideoChromeStyle = VideoChromeStyle.CORNER_CTA,
     effectiveClosePosition: ClosePosition = ClosePosition.TOP_RIGHT,
     bottomProgressBarObstructed: Boolean,
+    storePromptObstructsMute: Boolean = false,
     videoPool: String? = null,
     playbackSlotIdentity: VideoPlaybackSlotIdentity,
     clipIndex: Int? = null,
@@ -301,7 +302,7 @@ internal fun FullscreenVideo(
                 clipIndex = clipIndex,
                 style = resolvedStyle.wire,
                 skoverlayEnabled = skoverlayEnabled,
-                skoverlayDelaySeconds = skoverlayDelaySeconds,
+                skoverlayDelaySeconds = skoverlayDelaySeconds.takeIf { skoverlayEnabled == true },
                 pool = videoPool,
             ),
             configuredGateSeconds = configuredGateSeconds,
@@ -446,9 +447,11 @@ internal fun FullscreenVideo(
         if (videoMuteControlVisible(completed)) {
             val muteModifier = when (videoMuteControlPlacement(videoPlanV2, ctaEnabled, effectiveClosePosition)) {
                 VideoMuteControlPlacement.TOP_LEFT ->
-                    Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(16.dp)
+                    Modifier.align(Alignment.TopStart).safeDrawingPadding()
+                        .padding(start = 16.dp, top = if (storePromptObstructsMute) 64.dp else 16.dp)
                 VideoMuteControlPlacement.TOP_RIGHT ->
-                    Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(16.dp)
+                    Modifier.align(Alignment.TopEnd).safeDrawingPadding()
+                        .padding(end = 16.dp, top = if (storePromptObstructsMute) 64.dp else 16.dp)
                 VideoMuteControlPlacement.BOTTOM_RIGHT ->
                     Modifier.align(Alignment.BottomEnd).safeDrawingPadding().padding(16.dp)
             }
@@ -1261,7 +1264,22 @@ private class NativeVideoController(
         videoPlanState.addEligibleMediaDelta(videoPlanV2, sample.advancedMs, effectiveMuted)
         clipAudioWatch.add(sample.advancedMs, effectiveMuted)
         if (videoPlanV2) {
-            if (shouldEmitVideoMidpoint(midpointEmitted, sample.positionMs, durationMs)) {
+            if (segments.isNotEmpty() && firstFrameRendered) {
+                videoPlanState.segmentTelemetry.update(
+                    segments, sample.positionMs / 1_000.0, sample.advancedMs / 1_000.0, effectiveMuted,
+                ).forEach { event ->
+                    VideoPlaybackTelemetry(
+                        context = telemetry.copy(clipIndex = event.segment.clipIndex, pool = event.segment.videoPool),
+                        videoPositionS = event.position,
+                        muted = effectiveMuted,
+                        durationS = event.duration,
+                        watchedS = event.mutedSeconds + event.unmutedSeconds,
+                        secondsUnmuted = event.unmutedSeconds,
+                        secondsMuted = event.mutedSeconds,
+                    ).record(event.stage, quartile = 50.takeIf { event.stage == VIDEO_STAGE_DURATION })
+                }
+            }
+            if (segments.isEmpty() && shouldEmitVideoMidpoint(midpointEmitted, sample.positionMs, durationMs)) {
                 midpointEmitted = true
                 recordLifecycle(VIDEO_STAGE_DURATION, quartile = 50)
             }
@@ -1390,6 +1408,9 @@ private class NativeVideoController(
         pausedMs: Double? = null,
         errorCode: String? = null,
     ) {
+        if (videoPlanV2 && segments.isNotEmpty() &&
+            (stage == VIDEO_STAGE_START || stage == VIDEO_STAGE_COMPLETE)
+        ) return // Stitched boundaries are emitted by the presentation's per-clip state.
         if (videoPlanV2) {
             telemetrySnapshot().record(
                 stage = stage,

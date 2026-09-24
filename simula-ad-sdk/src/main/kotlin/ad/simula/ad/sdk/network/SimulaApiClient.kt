@@ -44,7 +44,8 @@ internal class AdUnitNotFoundException(message: String) : Exception(message)
 internal class RewardNotVerifiedException : Exception("Reward verification response was not verified")
 
 internal fun requireVerifiedReward(response: VerifyRewardApiResponse): VerifyRewardApiResponse {
-    if (!response.verified) throw RewardNotVerifiedException()
+    if (response.verified == false) throw RewardNotVerifiedException()
+    if (response.verified != true) throw java.io.IOException("Invalid reward verification response")
     return response
 }
 

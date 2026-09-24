@@ -15,6 +15,21 @@ import org.junit.Test
 class RewardVerificationPolicyTest {
 
     @Test
+    fun `explicit rejection is permanent but missing or malformed verification is retryable`() {
+        val rejected = runCatching {
+            requireVerifiedReward(Json.decodeFromString<VerifyRewardApiResponse>("""{"verified":false}"""))
+        }.exceptionOrNull()
+        assertTrue(rejected is RewardNotVerifiedException)
+        assertTrue(rejected?.let(::isPermanentVerificationError) == true)
+        for (body in listOf("{}", """{"verified":"false"}""", """{"verified":null}""")) {
+            val error = runCatching { requireVerifiedReward(Json.decodeFromString<VerifyRewardApiResponse>(body)) }
+                .exceptionOrNull()
+            assertTrue(error != null)
+            assertFalse(error?.let(::isPermanentVerificationError) == true)
+        }
+    }
+
+    @Test
     fun `legacy durable verification decodes without completion reason and new row preserves it`() {
         val json = Json { ignoreUnknownKeys = true }
         val legacy = json.decodeFromString<PendingVerification>(

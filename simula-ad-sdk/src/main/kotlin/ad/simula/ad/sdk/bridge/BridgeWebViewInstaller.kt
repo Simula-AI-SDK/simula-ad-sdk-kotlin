@@ -218,7 +218,7 @@ internal fun trustedCtaRelaySource(
         } catch (_) {}
         return { interactionId: null, clickSource: slotSource };
     }
-    function forwardTrustedCta(value, element) {
+    function forwardTrustedCta(value, element, clickEvent) {
         if (!nativeCtaEnabled()) { return false; }
         var url = resolvedUrl(value);
         if (!url || !isExternalCta(url)) { return false; }
@@ -227,11 +227,22 @@ internal fun trustedCtaRelaySource(
         if (!hasActiveUserGesture()) { return false; }
         claimedGesture = gestureSequence;
         try {
-            var identity = clickIdentity();
-            nativePost('{"type":"$TRUSTED_CTA_OPEN","url":' + nativeStringify(url) +
-                ',"activation_nonce":' + nativeStringify(activationNonce) +
-                ',"interaction_id":' + nativeStringify(identity.interactionId) +
-                ',"click_source":' + nativeStringify(identity.clickSource) + '}');
+            var identity = clickEvent && typeof window.simulaClickForEvent === 'function'
+                ? window.simulaClickForEvent(clickEvent, fallbackClickSource) : null;
+            function deliver() {
+                var resolved = identity ? {
+                    interactionId: identity.interaction_id, clickSource: identity.click_source
+                } : clickIdentity();
+                try {
+                    nativePost('{"type":"$TRUSTED_CTA_OPEN","url":' + nativeStringify(url) +
+                        ',"activation_nonce":' + nativeStringify(activationNonce) +
+                        ',"interaction_id":' + nativeStringify(resolved.interactionId) +
+                        ',"click_source":' + nativeStringify(resolved.clickSource) + '}');
+                } catch (_) {}
+            }
+            // Keep capture-phase routing even if the creative stops propagation, and read
+            // its exact click source after the event. window.open remains synchronous.
+            if (clickEvent) { nativeSetTimeout(deliver, 0); } else { deliver(); }
             return true;
         } catch (_) {
             if (claimedGesture === gestureSequence) { claimedGesture = -1; }
@@ -258,7 +269,7 @@ internal fun trustedCtaRelaySource(
         if (!event || event.isTrusted !== true || !hasActiveUserGesture()) { return; }
         var anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
         if (!anchor || String(anchor.target).toLowerCase() !== '_blank') { return; }
-        if (forwardTrustedCta(anchor.href, anchor)) { event.preventDefault(); }
+        if (forwardTrustedCta(anchor.href, anchor, event)) { event.preventDefault(); }
     }, true);
 """.trimIndent()
 

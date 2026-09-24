@@ -200,6 +200,10 @@ internal object SimulaHttp {
         } catch (cancelled: CancellationException) {
             abortConnectionAsync(conn)
             throw cancelled
+        } catch (_: RedirectCookieIsolationException) {
+            abortConnectionAsync(conn)
+            Telemetry.recordError(signature = "impression:cookie_isolation_unavailable")
+            false
         } catch (_: Exception) {
             abortConnectionAsync(conn)
             false

@@ -686,7 +686,7 @@ private fun RewardedMinigame(
                 creativeUnavailable = bridgeUnavailable,
                 clickHandoffPending = clickHandoffPending,
                 storeVisitPending = storeVisitBlocked,
-            ) != RewardedUnavailableCreativeAction.EXIT
+            ) == RewardedUnavailableCreativeAction.WAIT
         ) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
@@ -698,6 +698,10 @@ private fun RewardedMinigame(
             ) return@repeatOnLifecycle
             if (unavailableExitIssued) return@repeatOnLifecycle
             unavailableExitIssued = true
+            if (videoPreFirstFrameEscapeAvailable(isVideo, displayAdmitted)) {
+                onPreFirstFrameEscape()
+                return@repeatOnLifecycle
+            }
             val earned = monotonicRewardEarned(rewardEarned, presentation.rewardEarned)
             rewardEarned = earned
             onFinish(earned)
@@ -1178,6 +1182,8 @@ private fun RewardedMinigame(
                         close.position,
                         videoProgressBarStyle,
                     ),
+                    storePromptObstructsMute = displayAdmitted && storePrompt?.enabled == true &&
+                        storePromptVisible && !rewardEarned && close.position != ClosePosition.BOTTOM_LEFT,
                     videoPool = presentation.creative.videoPool,
                     playbackSlotIdentity = VideoPlaybackSlotIdentity.Primary,
                     clipIndex = presentation.creative.clipIndex,

@@ -29,6 +29,22 @@ Full integration guides, API references, and examples are available at:
 - [Interstitial Ad](https://docs.simula.ad/kotlin-sdk/interstitial-ad) -- full-screen ad
 - [Rewarded Ad](https://docs.simula.ad/kotlin-sdk/rewarded-ad) -- rewarded ad with server-side verification
 
+## Video behavior
+
+Videos start unmuted, including legacy plans; unavailable audio focus falls back to muted playback.
+Contract-2 stitched clips emit their own start, 50%, and completion events with clip-local position,
+duration, and muted/unmuted watch time. Playback uses one cached asset and one player.
+
+For rewarded contract-2 units, an admitted primary video that fails before its gate can still earn
+at the final rendered end screen's gate. Delivery and verification wait until the whole unit closes.
+If neither the primary nor a rendered end screen reaches a gate, failures do not create a reward.
+An explicit `verified: false` permanently reconciles verification; malformed responses remain retryable.
+
+Android's `HttpURLConnection` cannot isolate a process-wide `CookieHandler` per connection. When a
+host installs one, cookie-free video downloads report a `SimulaAdError.Network` with telemetry code
+`video_asset:cookie_isolation_unavailable`, rather than no fill. The impression GET is skipped with
+`impression:cookie_isolation_unavailable`. The SDK never replaces the host's cookie handler.
+
 ## Publisher Metadata
 
 Attach non-sensitive string metadata to ad loads for reporting and attribution:

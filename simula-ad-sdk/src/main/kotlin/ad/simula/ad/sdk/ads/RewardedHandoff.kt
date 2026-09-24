@@ -289,7 +289,8 @@ internal class RewardedPresentation(
 
     private fun claimUnitEndRewardLocked(): RewardCompletionClaim? {
         if (!videoContract2 || adBehavior?.reward?.earnAt != ad.simula.ad.sdk.model.RewardEarnAt.UNIT_END ||
-            !primaryProgressionAllowed || !authoritativeEndReached || rewardCompletionClaimed
+            (!primaryProgressionAllowed && !fallbackState.renderableGateReached) ||
+            !authoritativeEndReached || rewardCompletionClaimed
         ) return null
         rewardEarned = true
         completionReason = monotonicRewardCompletionReason(completionReason, RewardCompletionReason.UNIT_END)

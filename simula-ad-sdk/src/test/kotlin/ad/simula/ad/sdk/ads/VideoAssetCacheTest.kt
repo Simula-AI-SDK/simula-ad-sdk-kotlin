@@ -164,7 +164,10 @@ class VideoAssetCacheTest {
 
             val result = manager.acquireResult("https://cdn.example/video.mp4")
 
-            assertEquals(VideoAssetCacheResult.Failed(VideoAssetCacheError.UNSAFE_TARGET), result)
+            assertEquals(VideoAssetCacheResult.Failed(VideoAssetCacheError.COOKIE_ISOLATION_UNAVAILABLE), result)
+            val failure = videoAssetLoadFailure(VideoAssetCacheError.COOKIE_ISOLATION_UNAVAILABLE)
+            assertTrue(failure?.callbackError is SimulaAdError.Network)
+            assertEquals("video_asset:cookie_isolation_unavailable", failure?.telemetrySignature)
             assertEquals(0, opens.get())
             assertTrue(CookieHandler.getDefault() === installed)
         } finally {

@@ -571,7 +571,6 @@ private fun CreativeInterstitial(
     var unavailableExitIssued by remember(presentation) { mutableStateOf(false) }
     LaunchedEffect(bridgeUnavailable, clickHandoffPending, storeVisitBlocked) {
         if (!bridgeUnavailable || clickHandoffPending) return@LaunchedEffect
-        if (videoPreFirstFrameEscapeAvailable(isVideo, displayAdmitted)) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
             if (shouldExitUnavailableCreative(
@@ -581,7 +580,11 @@ private fun CreativeInterstitial(
                 ) && !unavailableExitIssued
             ) {
                 unavailableExitIssued = true
-                runCatching(onFinish)
+                if (videoPreFirstFrameEscapeAvailable(isVideo, displayAdmitted)) {
+                    runCatching(onPreFirstFrameEscape)
+                } else {
+                    runCatching(onFinish)
+                }
             }
         }
     }
@@ -942,6 +945,8 @@ private fun CreativeInterstitial(
                         close.position,
                         videoProgressBarStyle,
                     ),
+                    storePromptObstructsMute = displayAdmitted && storePrompt?.enabled == true &&
+                        storePromptVisible && !closeEnabled && close.position != ClosePosition.BOTTOM_LEFT,
                     videoPool = ad.creative.videoPool,
                     playbackSlotIdentity = VideoPlaybackSlotIdentity.Primary,
                     clipIndex = ad.creative.clipIndex,

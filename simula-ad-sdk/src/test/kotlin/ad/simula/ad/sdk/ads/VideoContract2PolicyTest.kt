@@ -270,6 +270,29 @@ class VideoContract2PolicyTest {
     }
 
     @Test
+    fun `rendered fallback gate earns after primary failure only at unit end`() {
+        val presentation = unitEndPresentation()
+        presentation.fallbackState.markRenderableGateReached()
+        assertFalse(presentation.primaryProgressionAllowed)
+        assertFalse(presentation.rewardEarned)
+        presentation.markAuthoritativeEndReached()
+        assertTrue(presentation.rewardEarned)
+        assertEquals(
+            RewardCompletionClaim(true, ad.simula.ad.sdk.model.RewardCompletionReason.UNIT_END),
+            presentation.claimRewardCompletion(),
+        )
+        assertNull(presentation.claimRewardCompletion())
+    }
+
+    @Test
+    fun `failed primary and unavailable fallbacks do not manufacture gate evidence`() {
+        val presentation = unitEndPresentation()
+        presentation.markAuthoritativeEndReached()
+        assertFalse(presentation.rewardEarned)
+        assertNull(presentation.claimEarnedRewardOnTeardown())
+    }
+
+    @Test
     fun `authority arriving before primary gate is claimed when gate crosses`() {
         val presentation = unitEndPresentation()
         assertNull(presentation.markAuthoritativeEndReached())

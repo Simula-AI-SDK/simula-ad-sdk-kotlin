@@ -845,7 +845,8 @@ internal data class VerifyRewardRequestBody(
 
 @Serializable
 internal data class VerifyRewardApiResponse(
-    val verified: Boolean = false,
+    @Serializable(with = LenientNullableBooleanSerializer::class)
+    val verified: Boolean? = null,
     val token: String? = null,
 )
 

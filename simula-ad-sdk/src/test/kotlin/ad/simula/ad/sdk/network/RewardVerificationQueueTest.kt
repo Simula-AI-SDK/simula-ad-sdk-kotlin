@@ -519,7 +519,7 @@ class RewardVerificationQueueTest {
     }
 
     @Test
-    fun `unverified 2xx failure keeps queue row and never reports verified`() = runTest {
+    fun `explicit unverified 2xx permanently reconciles queue and never reports verified`() = runTest {
         val store = FakeStore()
         val verifier = FakeVerifier().apply { errors["A"] = RewardNotVerifiedException() }
         val engine = RewardVerificationQueue(store, verifier, clock = { 1_000L }, scope = this)
@@ -534,7 +534,7 @@ class RewardVerificationQueueTest {
         assertEquals(0, verifiedCount)
         assertEquals(1, failureCount)
         assertEquals(1, verifier.callCounts["A"])
-        assertEquals(1, store.data.single().retryCount)
+        assertTrue(store.data.isEmpty())
     }
 
     @Test

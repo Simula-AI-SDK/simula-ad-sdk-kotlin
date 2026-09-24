@@ -414,6 +414,13 @@ internal class FallbackPresentationState(
     fun notifyFirstResolvedStepReady(ads: List<SimulaApiClient.FallbackAd>) {
         if (ads.firstOrNull()?.type == CreativeType.PLAYABLE) videoPlan.nextStepReady()
     }
+    var renderableGateReached = false
+        private set
+
+    fun markRenderableGateReached() {
+        renderableGateReached = true
+    }
+
     fun markPrimaryEndReached() {
         primaryEndReached = true
     }
@@ -1450,6 +1457,7 @@ private fun FallbackAdOverlay(
     LaunchedEffect(countdown, isVideo, pageCommitted, videoFirstFrameAdmitted, videoTerminal) {
         val renderAdmitted = if (isVideo) videoFirstFrameAdmitted else pageCommitted
         if (fallbackReachedAuthoritativeGate(isVideo, renderAdmitted, countdown, videoTerminal)) {
+            presentationState.markRenderableGateReached()
             reportAuthoritativeEnd()
         }
     }
