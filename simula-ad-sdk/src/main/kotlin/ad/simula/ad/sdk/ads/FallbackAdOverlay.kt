@@ -149,7 +149,8 @@ internal fun fallbackReachedAuthoritativeGate(
     renderAdmitted: Boolean,
     countdown: Int,
     videoTerminal: Boolean,
-): Boolean = if (isVideo) {
+    rendererUnavailable: Boolean = false,
+): Boolean = !rendererUnavailable && if (isVideo) {
     videoTerminal || (renderAdmitted && countdown <= 0)
 } else {
     renderAdmitted && countdown <= 0
@@ -1304,11 +1305,23 @@ private fun FallbackAdOverlay(
             onFinished = onClickHandoffFinished,
         )
     }
+    val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
+    var countdown by remember(presentationState, fallbackIndex) {
+        mutableStateOf(closeGateSecondsRemaining(retainedGateMs, gateMs))
+    }
     var authoritativeEndReported by remember(presentationState, fallbackIndex) { mutableStateOf(false) }
     fun reportAuthoritativeEnd() {
         if (authoritativeEndReported) return
         authoritativeEndReported = true
         runCatching(onAuthoritativeEndReached)
+    }
+    fun retainRenderableGateIfReached(): Boolean {
+        val reached = fallbackReachedAuthoritativeGate(
+            isVideo, if (isVideo) videoFirstFrameAdmitted else pageCommitted,
+            countdown, videoTerminal, rendererUnavailable = rendererGone,
+        )
+        if (reached) presentationState.markRenderableGateReached()
+        return reached
     }
     var unavailableExitIssued by remember { mutableStateOf(false) }
     fun closeOnce(origin: VideoOverlayCloseOrigin) {
@@ -1317,6 +1330,9 @@ private fun FallbackAdOverlay(
                 presentationState.videoPlan.closeCurrent(VideoLifecycleReason.USER, hasNextStep())
             }
         ) return
+        // A close can run before the next Compose effect. Retain gate evidence before authority
+        // is delivered to the host, without treating a renderer failure as a completed gate.
+        retainRenderableGateIfReached()
         unavailableExitIssued = true
         runCatching(onClose)
     }
@@ -1358,10 +1374,6 @@ private fun FallbackAdOverlay(
             }
         }
     }
-    val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
-    var countdown by remember(presentationState, fallbackIndex) {
-        mutableStateOf(closeGateSecondsRemaining(retainedGateMs, gateMs))
-    }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ring = remember(presentationState, fallbackIndex) {
         Animatable(closeGateProgress(retainedGateMs, gateMs))
@@ -1386,10 +1398,11 @@ private fun FallbackAdOverlay(
         gateMs,
         isVideo,
         pageCommitted,
+        rendererGone,
         presentationState.clickHandoffPending,
         storeVisitBlocked,
     ) {
-        if (!fallbackCloseGateUsesPresentedTime(ad.type)) return@LaunchedEffect
+        if (rendererGone || !fallbackCloseGateUsesPresentedTime(ad.type)) return@LaunchedEffect
         if (!fallbackPlayableGateCanAccrue(
                 renderAdmitted = pageCommitted,
                 foreground = true,
@@ -1399,6 +1412,7 @@ private fun FallbackAdOverlay(
         ) return@LaunchedEffect
         if (gateMs <= 0L) {
             countdown = 0
+            retainRenderableGateIfReached()
             ring.snapTo(1f)
             return@LaunchedEffect
         }
@@ -1414,7 +1428,7 @@ private fun FallbackAdOverlay(
                     clickHandoffPending = presentationState.clickHandoffPending,
                     storeVisitPending = storeVisitPending(),
                 )
-                if (!canAccrue) break
+                if (!canAccrue || rendererGone) break
                 val now = SystemClock.elapsedRealtime()
                 val deltaMs = (now - lastTickMs).coerceIn(0L, gateMs)
                 accumulatedMs = presentationState.addPlayableCloseGateElapsedMs(
@@ -1429,6 +1443,7 @@ private fun FallbackAdOverlay(
                 lastTickMs = now
                 ring.snapTo(closeGateProgress(accumulatedMs, gateMs))
                 countdown = closeGateSecondsRemaining(accumulatedMs, gateMs)
+                retainRenderableGateIfReached()
             }
         }
     }
@@ -1454,12 +1469,8 @@ private fun FallbackAdOverlay(
             closeOnce(VideoOverlayCloseOrigin.USER)
         }
     }
-    LaunchedEffect(countdown, isVideo, pageCommitted, videoFirstFrameAdmitted, videoTerminal) {
-        val renderAdmitted = if (isVideo) videoFirstFrameAdmitted else pageCommitted
-        if (fallbackReachedAuthoritativeGate(isVideo, renderAdmitted, countdown, videoTerminal)) {
-            presentationState.markRenderableGateReached()
-            reportAuthoritativeEnd()
-        }
+    LaunchedEffect(countdown, isVideo, pageCommitted, videoFirstFrameAdmitted, videoTerminal, rendererGone) {
+        if (retainRenderableGateIfReached()) reportAuthoritativeEnd()
     }
 
     Box(
@@ -1512,6 +1523,7 @@ private fun FallbackAdOverlay(
                         val accumulated = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
                         countdown = closeGateSecondsRemaining(accumulated, gateMs)
                         videoRingProgress = closeGateProgress(accumulated, gateMs)
+                        retainRenderableGateIfReached()
                     },
                     onProgress = { positionMs, durationMs, advancedMs ->
                         presentationState.retainVideoPositionMs(fallbackIndex, positionMs)
@@ -1526,6 +1538,7 @@ private fun FallbackAdOverlay(
                         )
                         countdown = closeGateSecondsRemaining(accumulated, gateMs)
                         videoRingProgress = closeGateProgress(accumulated, gateMs)
+                        retainRenderableGateIfReached()
                     },
                     onCompleted = {
                         presentationState.retainVideoPositionMs(fallbackIndex, videoDurationMs)
@@ -1534,6 +1547,7 @@ private fun FallbackAdOverlay(
                         countdown = 0
                         videoRingProgress = 1f
                         videoTerminal = true
+                        retainRenderableGateIfReached()
                     },
                     onError = {
                         applyRendererUnavailable()

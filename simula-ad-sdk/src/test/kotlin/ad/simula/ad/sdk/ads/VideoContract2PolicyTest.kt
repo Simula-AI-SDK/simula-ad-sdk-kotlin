@@ -328,6 +328,20 @@ class VideoContract2PolicyTest {
     }
 
     @Test
+    fun `unavailable renderer cannot create fallback gate evidence`() {
+        for (isVideo in listOf(false, true)) {
+            assertFalse(fallbackReachedAuthoritativeGate(
+                isVideo, renderAdmitted = true, countdown = 0, videoTerminal = true,
+                rendererUnavailable = true,
+            ))
+            assertTrue(fallbackReachedAuthoritativeGate(
+                isVideo, renderAdmitted = true, countdown = 0, videoTerminal = false,
+                rendererUnavailable = false,
+            ))
+        }
+    }
+
+    @Test
     fun `final playable that never commits cannot accrue or reach gate authority`() {
         val gates = FallbackCloseGateState()
 
