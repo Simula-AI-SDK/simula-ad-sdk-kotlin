@@ -449,6 +449,21 @@ class FullscreenClickHandoffPolicyTest {
     }
 
     @Test
+    fun `ad closure is terminal for confirmed and provisional store visits`() {
+        for (confirmed in listOf(false, true)) {
+            val visit = StoreVisitLifecycle()
+            visit.open("cta", openedAtMs = 100L)
+            if (confirmed) visit.pause()
+            assertEquals(confirmed, visit.abandon() != null)
+            assertFalse(visit.open("fallback_cta", openedAtMs = 200L))
+            assertNull(visit.pause())
+            assertNull(visit.resume())
+            assertNull(visit.abandon())
+            assertFalse(visit.launchTimedOut())
+        }
+    }
+
+    @Test
     fun `unconfirmed launch does not consume an open ordinal and duplicate callback is ignored`() {
         val visit = StoreVisitLifecycle()
 

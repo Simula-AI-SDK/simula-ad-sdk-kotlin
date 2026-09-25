@@ -296,10 +296,11 @@ internal class StoreVisitLifecycle {
     private var trigger: String? = null
     private var openedAtMs = 0L
     private var openCount = 0
+    private var closed = false
     private var contaminated: Boolean? = null
 
     fun open(trigger: String, openedAtMs: Long): Boolean {
-        if (phase != StoreVisitPhase.NONE) return false
+        if (closed || phase != StoreVisitPhase.NONE) return false
         this.trigger = trigger
         this.openedAtMs = openedAtMs
         contaminated = null
@@ -331,12 +332,14 @@ internal class StoreVisitLifecycle {
         return true
     }
 
-    fun abandon(): ResolvedStoreVisit? =
-        when (phase) {
+    fun abandon(): ResolvedStoreVisit? {
+        closed = true
+        return when (phase) {
             StoreVisitPhase.AWAY -> resolve()
             StoreVisitPhase.LAUNCHING -> null.also { clear() }
             StoreVisitPhase.NONE -> null
         }
+    }
 
     private fun snapshot(): ResolvedStoreVisit? {
         val currentTrigger = trigger ?: return null
