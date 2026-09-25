@@ -501,6 +501,15 @@ internal class VideoResumeSeek(initialPositionMs: Long = 0L) {
 
     private var targetMs = initialPositionMs.coerceAtLeast(0L)
     private var state = if (targetMs > 0L) State.IDLE else State.READY
+    private var renderingStarted = false
+
+    val canAdmitRenderedFrame: Boolean
+        get() = renderingStarted && allowsPlaybackCallbacks
+
+    /** Rendering-start may arrive during the seek and is not guaranteed to repeat afterward. */
+    fun renderingDidStart() {
+        if (state != State.RELEASED) renderingStarted = true
+    }
 
     val allowsPlaybackCallbacks: Boolean
         get() = state == State.READY
@@ -530,6 +539,7 @@ internal class VideoResumeSeek(initialPositionMs: Long = 0L) {
 
     fun release() {
         state = State.RELEASED
+        renderingStarted = false
     }
 
     private fun settlePending(terminal: State): Boolean {

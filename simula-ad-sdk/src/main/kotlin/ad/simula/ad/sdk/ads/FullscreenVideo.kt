@@ -970,7 +970,8 @@ private class NativeVideoController(
             if (!ownsCallback(token)) return@info
             when (what) {
                 MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START -> {
-                    if (resumeSeek.allowsPlaybackCallbacks) admitFirstFrame(token)
+                    resumeSeek.renderingDidStart()
+                    if (resumeSeek.canAdmitRenderedFrame) admitFirstFrame(token)
                 }
                 MediaPlayer.MEDIA_INFO_BUFFERING_START -> {
                     if (!videoPlanV2) resetPlaybackTimeout()
@@ -1160,6 +1161,7 @@ private class NativeVideoController(
             val focusHeld = !desiredMuted && requestAudioFocus()
             applyEffectiveMuted(effectiveVideoMuted(desiredMuted, focusHeld))
             mediaPlayer.start()
+            if (resumeSeek.canAdmitRenderedFrame) admitFirstFrame(renderToken)
             updatePlaying(runCatching { mediaPlayer.isPlaying }.getOrDefault(false))
             scheduleReadinessTimeout(SystemClock.elapsedRealtime())
             if (firstFrameRendered) {

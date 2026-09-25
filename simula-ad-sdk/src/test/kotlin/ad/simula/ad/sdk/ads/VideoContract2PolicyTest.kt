@@ -668,6 +668,38 @@ class VideoContract2PolicyTest {
     }
 
     @Test
+    fun `rendering start survives resume seek regardless of callback order`() {
+        for (frameBeforeSeekCompletion in listOf(true, false)) {
+            val seek = VideoResumeSeek(4_250L)
+            val gate = ad.simula.ad.sdk.model.RenderAttemptGate()
+            val token = gate.begin()
+            assertTrue(seek.restoreAfterPrepared(10_000L) {})
+            if (frameBeforeSeekCompletion) seek.renderingDidStart()
+            assertFalse(seek.canAdmitRenderedFrame)
+            assertTrue(seek.complete())
+            if (!frameBeforeSeekCompletion) {
+                assertFalse(seek.canAdmitRenderedFrame)
+                seek.renderingDidStart()
+            }
+            assertTrue(seek.canAdmitRenderedFrame)
+            assertTrue(gate.ready(token))
+            seek.renderingDidStart()
+            assertFalse(gate.ready(token))
+        }
+    }
+
+    @Test
+    fun `release discards rendering evidence from an unfinished resume seek`() {
+        val seek = VideoResumeSeek(4_250L)
+        seek.restoreAfterPrepared(10_000L) {}
+        seek.renderingDidStart()
+        seek.release()
+        assertFalse(seek.complete())
+        seek.renderingDidStart()
+        assertFalse(seek.canAdmitRenderedFrame)
+    }
+
+    @Test
     fun `resume seek failure opens bounded fallback without retrying seek`() {
         val seek = VideoResumeSeek(4_250L)
         var attempts = 0
