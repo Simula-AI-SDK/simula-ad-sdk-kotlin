@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.AdBehavior
+import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.Creative
@@ -508,6 +509,9 @@ class VideoContract2PolicyTest {
         val hasNextStep = { state.hasNextStepAfter(playable.sourceIndex) }
         assertTrue("pending video must retain handoff and prevent early unit-end authority", hasNextStep())
         assertFalse(state.hasNextStepAfter(video.sourceIndex))
+        assertEquals(CloseAction.FORWARD, ad.simula.ad.sdk.model.resolveFallbackCloseAction(
+            CloseAction.FORWARD, 0, hasNextStep(),
+        ))
 
         val file = temporaryFolder.newFile("prepared.video").apply { writeBytes(byteArrayOf(1)) }
         state.settleVideoPreparation(1, VideoAssetLease(file) {})
@@ -539,6 +543,9 @@ class VideoContract2PolicyTest {
         state.settleVideoPreparation(1, null)
         assertFalse("the live decision must discard a next video only once it fails", hasNextStep())
         val displayable = state.displayablePreparedAds()
+        assertEquals(CloseAction.CLOSE_X, ad.simula.ad.sdk.model.resolveFallbackCloseAction(
+            CloseAction.FORWARD, 0, hasNextStep(),
+        ))
 
         assertEquals(listOf(playable), displayable)
         assertTrue(state.resolvePostCloseFetchWait(generation, displayable))

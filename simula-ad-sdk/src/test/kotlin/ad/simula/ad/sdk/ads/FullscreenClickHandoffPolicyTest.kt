@@ -1182,11 +1182,11 @@ class FullscreenClickHandoffPolicyTest {
 
     @Test
     fun `fallback action is consumed only by first usable screen with a successor`() {
-        assertEquals(CloseAction.FORWARD, resolveFallbackCloseAction(CloseAction.FORWARD, 0, 2))
-        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.CLOSE_X, 0, 2))
-        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 0, 1))
-        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 1, 3))
-        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 2, 3))
+        assertEquals(CloseAction.FORWARD, resolveFallbackCloseAction(CloseAction.FORWARD, 0, true))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.CLOSE_X, 0, true))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 0, false))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 1, true))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 2, false))
     }
 
     @Test

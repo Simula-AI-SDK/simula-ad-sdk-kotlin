@@ -5,8 +5,20 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.*
 import org.junit.Test
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.currentTime
 
 class VideoPlayerCommandQueueTest {
+    @Test
+    fun `thread startup failures retain work and retry with capped backoff`() = runTest {
+        val attemptTimes = mutableListOf<Long>()
+        retryVideoPlayerThreadStart {
+            attemptTimes += currentTime
+            if (attemptTimes.size <= 8) error("thread unavailable")
+        }
+        assertEquals(listOf(0L, 1_000L, 3_000L, 7_000L, 15_000L, 31_000L, 63_000L, 123_000L, 183_000L), attemptTimes)
+    }
+
     @Test
     fun `commands are deferred bounded and terminal cleanup is reserved`() {
         val scheduled = ArrayDeque<() -> Unit>()

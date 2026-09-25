@@ -10,6 +10,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 /** All MediaPlayer calls, including construction, reads and disposal, have one Looper owner. */
 private object VideoPlayerThread {
@@ -21,6 +22,7 @@ private object VideoPlayerThread {
     private var starting = false
 
     fun acquire(): Boolean {
+        ensureStarted()
         while (true) {
             val count = owners.get()
             if (count >= MAX_PLAYERS) return false
@@ -35,25 +37,42 @@ private object VideoPlayerThread {
             handler?.let { it.post { work() }; return }
             // At most one drain per admitted owner can wait for the shared Looper.
             waiting.addLast(work)
-            if (starting) return
+        }
+        ensureStarted()
+    }
+
+    fun ensureStarted() {
+        synchronized(lock) {
+            if (handler != null || starting || waiting.isEmpty()) return
             starting = true
         }
-        SimulaScope.launch {
-            val thread = object : HandlerThread("simula-video") {
-                override fun onLooperPrepared() {
-                    val ready = Handler(looper)
-                    synchronized(lock) {
-                        handler = ready
-                        while (waiting.isNotEmpty()) {
-                            val work = waiting.removeFirst()
-                            ready.post { work() }
+        runCatching {
+            SimulaScope.launch {
+                retryVideoPlayerThreadStart {
+                    val thread = object : HandlerThread("simula-video") {
+                        override fun onLooperPrepared() {
+                            val ready = Handler(looper)
+                            synchronized(lock) {
+                                handler = ready
+                                starting = false
+                                while (waiting.isNotEmpty()) {
+                                    val work = waiting.removeFirst()
+                                    ready.post { work() }
+                                }
+                            }
                         }
                     }
+                    thread.start()
                 }
+            }.invokeOnCompletion { failure ->
+                if (failure != null) synchronized(lock) { if (handler == null) starting = false }
             }
-            thread.start()
+        }.onFailure {
+            // A later acquire/close can retry even if coroutine dispatch itself was unavailable.
+            synchronized(lock) { if (handler == null) starting = false }
         }
     }
+
 }
 
 /** Main-thread facade. UI reads only snapshots; pending reads and native commands are bounded. */
@@ -163,6 +182,7 @@ internal class AsyncVideoPlayer private constructor() {
                 failedSurfaces.clear()
             } finally { VideoPlayerThread.release() }
         }
+        VideoPlayerThread.ensureStarted()
     }
 
     private fun command(work: () -> Unit) {
@@ -195,4 +215,14 @@ internal class AsyncVideoPlayer private constructor() {
     }
 
     private data class Snapshot(val duration: Int, val position: Int, val playing: Boolean, val width: Int, val height: Int)
+}
+
+/** One startup job retains the bounded owner drains while transient thread allocation recovers. */
+internal suspend fun retryVideoPlayerThreadStart(start: () -> Unit) {
+    var delayMs = 1_000L
+    while (true) {
+        if (runCatching(start).isSuccess) return
+        delay(delayMs)
+        delayMs = (delayMs * 2).coerceAtMost(60_000L)
+    }
 }

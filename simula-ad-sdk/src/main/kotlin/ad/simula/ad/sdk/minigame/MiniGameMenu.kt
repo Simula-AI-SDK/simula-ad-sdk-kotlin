@@ -245,7 +245,7 @@ fun MiniGameMenu(
     var catalogError by remember { mutableStateOf(false) }
     var adFetched by remember { mutableStateOf(false) }
     // Post-game ad screens (`GET /load/fallbacks/{serveId}`), revealed one per close tap.
-    var fallbackAds by remember { mutableStateOf<List<SimulaApiClient.FallbackAd>>(emptyList()) }
+    var fallbackAds by remember { mutableStateOf<List<SimulaApiClient.FallbackAd>>(emptyList(), androidx.compose.runtime.neverEqualPolicy()) }
     var fallbackAdIndex by remember { mutableStateOf(0) }
     var fallbackAdvancePending by remember { mutableStateOf(false) }
     var currentServeId by remember { mutableStateOf<String?>(null) }
@@ -844,14 +844,14 @@ fun MiniGameMenu(
                         action = resolveFallbackCloseAction(
                             currentFallbackAd.closeBehavior.action,
                             fallbackAdIndex,
-                            fallbackAds.size,
+                            fallbackPreparation.hasNextStepAfter(currentFallbackAd.sourceIndex),
                         ),
                     )
                     MiniGameFallbackOverlay(
                         ad = currentFallbackAd,
                         videoFile = fallbackPreparation.videoFile(currentFallbackAd.sourceIndex),
                         nextVideoUrl = null,
-                        hasNextStep = fallbackAdIndex + 1 < fallbackAds.size,
+                        hasNextStep = fallbackPreparation.hasNextStepAfter(currentFallbackAd.sourceIndex),
                         onClose = { handleFallbackClose() },
                         playableHeightDp = fallbackPlayableHeightDp,
                         playableBorderColor = theme.playableBorderColor ?: "#262626",

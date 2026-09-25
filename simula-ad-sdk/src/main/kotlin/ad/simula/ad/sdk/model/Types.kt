@@ -245,8 +245,8 @@ internal fun fallbackCloseTreatment(raw: String?): CloseTreatment =
 internal fun resolveFallbackCloseAction(
     configured: CloseAction,
     usableIndex: Int,
-    usableCount: Int,
-): CloseAction = if (usableIndex == 0 && usableCount > 1) configured else CloseAction.CLOSE_X
+    hasNextStep: Boolean,
+): CloseAction = if (usableIndex == 0 && hasNextStep) configured else CloseAction.CLOSE_X
 
 /** How a CTA tap opens the store. Missing/unknown → SKSTOREPRODUCT (the platform's native
  * in-app store surface — the documented default; the v2 payload omits `store_open` entirely), so

@@ -845,7 +845,7 @@ internal fun FallbackAdHost(
     // they present instantly on close instead of fetching then (which flashed the host behind).
     // `GET /load/fallbacks` is side-effect-free, so prefetching reports nothing prematurely.
     // null = still in flight; empty = none returned.
-    var prefetched by remember(presentationState) { mutableStateOf(presentationState.fetchedAds) }
+    var prefetched by remember(presentationState) { mutableStateOf(presentationState.fetchedAds, androidx.compose.runtime.neverEqualPolicy()) }
     LaunchedEffect(prefetched, presentationState.primaryEndReached) {
         if (presentationState.primaryEndReached && prefetched?.isEmpty() == true) {
             reportAuthoritativeEnd()
@@ -1025,7 +1025,11 @@ internal fun FallbackAdHost(
                 // next screen would inherit the previous one's elapsed countdown and loaded page.
                 key(screenIndex) {
                     val resolvedClose = ad.closeBehavior.copy(
-                        action = resolveFallbackCloseAction(ad.closeBehavior.action, p.index, p.ads.size),
+                        action = resolveFallbackCloseAction(
+                            ad.closeBehavior.action, p.index,
+                            // Read the preparation snapshot so failure/ready publications refresh chrome.
+                            prefetched != null && presentationState.hasNextStepAfter(ad.sourceIndex),
+                        ),
                     )
                     FallbackAdOverlay(
                         ad = ad,
