@@ -44,6 +44,8 @@ Android's `HttpURLConnection` cannot isolate a process-wide `CookieHandler` per 
 host installs one, cookie-free video downloads report a `SimulaAdError.Network` with telemetry code
 `video_asset:cookie_isolation_unavailable`, rather than no fill. The impression GET is skipped with
 `impression:cookie_isolation_unavailable`. The SDK never replaces the host's cookie handler.
+Impression GETs reuse the browser User-Agent when already captured from an SDK WebView; otherwise
+they use the platform default. Measurement never creates a WebView solely to obtain its agent.
 
 ## Publisher Metadata
 

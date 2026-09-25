@@ -155,6 +155,7 @@ internal object SimulaHttp {
         url: String,
         resolver: DeadlineHostResolver = SharedDeadlineHostResolver,
         clockNanos: () -> Long = System::nanoTime,
+        userAgent: String? = SimulaUserAgent.browserValue,
         openConnection: (String) -> HttpURLConnection = { target ->
             URL(target).openConnection() as? HttpURLConnection
                 ?: throw IOException("Expected an HttpURLConnection")
@@ -172,7 +173,7 @@ internal object SimulaHttp {
                 val connectTimeoutMs = remainingPlainGetTimeoutMs(deadlineNanos, clockNanos)
                     ?: return@withContext false
                 conn = openConnection(current)
-                configurePlainGetConnection(conn, connectTimeoutMs)
+                configurePlainGetConnection(conn, connectTimeoutMs, userAgent)
                 validateRedirectCookieIsolation()
                 conn.connect()
                 val readTimeoutMs = remainingPlainGetTimeoutMs(deadlineNanos, clockNanos)
@@ -213,6 +214,7 @@ internal object SimulaHttp {
     internal fun configurePlainGetConnection(
         conn: HttpURLConnection,
         timeoutMs: Int = PLAIN_GET_TIMEOUT_MS,
+        userAgent: String? = null,
     ) {
         conn.requestMethod = "GET"
         conn.connectTimeout = timeoutMs.coerceAtLeast(1)
@@ -220,6 +222,8 @@ internal object SimulaHttp {
         conn.instanceFollowRedirects = false
         conn.useCaches = false
         conn.defaultUseCaches = false
+        // Reuse the captured browser identity without creating a WebView for a measurement GET.
+        userAgent?.takeIf { it.isNotBlank() }?.let { conn.setRequestProperty("User-Agent", it) }
     }
 
     internal class RedirectTargetRejectedException : IOException("Redirect target is not public")

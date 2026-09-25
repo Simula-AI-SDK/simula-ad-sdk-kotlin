@@ -14,12 +14,13 @@ import java.net.SocketTimeoutException
 
 class SimulaHttpPlainGetTest {
     @Test
-    fun `plain impression GET is isolated bounded and header free`() = runTest {
+    fun `plain impression GET is isolated bounded and uses only browser identity`() = runTest {
         val connection = FakeConnection()
 
         assertTrue(
             SimulaHttp.requestPlainGet(
                 url = "https://tracker.example/impression",
+                userAgent = "WebView UA",
                 resolver = resolver { arrayOf(InetAddress.getByName("8.8.8.8")) },
                 openConnection = { connection },
             ),
@@ -31,7 +32,8 @@ class SimulaHttpPlainGetTest {
         assertFalse(connection.instanceFollowRedirects)
         assertFalse(connection.useCaches)
         assertFalse(connection.defaultUseCaches)
-        assertEquals(emptySet<String>(), connection.requestProperties.keys)
+        assertEquals(setOf("User-Agent"), connection.requestProperties.keys)
+        assertEquals("WebView UA", connection.getRequestProperty("User-Agent"))
         assertFalse(connection.disconnected)
     }
 
