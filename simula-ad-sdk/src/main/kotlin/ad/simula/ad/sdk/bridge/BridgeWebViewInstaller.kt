@@ -1,8 +1,11 @@
 package ad.simula.ad.sdk.bridge
 
 import ad.simula.ad.sdk.telemetry.Telemetry
+import ad.simula.ad.sdk.ads.CreativeCtaRouter
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.network.SimulaUserAgent
+import ad.simula.ad.sdk.network.ClickSources
+import ad.simula.ad.sdk.network.isRfc4122Uuid
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
@@ -13,6 +16,7 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import java.lang.ref.WeakReference
+import java.net.URL
 import java.util.UUID
 import java.util.WeakHashMap
 import kotlinx.serialization.json.Json
@@ -42,8 +46,12 @@ internal fun bridgeInjectionMode(
     else -> BridgeInjectionMode.PAGE_START_FALLBACK
 }
 
-internal fun trustedCtaRelaySource(activationNonce: String): String = """
+internal fun trustedCtaRelaySource(
+    activationNonce: String,
+    fallbackClickSource: String = ClickSources.PRIMARY_UNKNOWN,
+): String = """
     var activationNonce = ${JsonPrimitive(activationNonce)};
+    var fallbackClickSource = ${JsonPrimitive(fallbackClickSource)};
     var originalOpen = window.open;
     var routedWindow = { closed: false, close: function () {}, focus: function () {}, blur: function () {} };
     var capturedUserActivation = navigator.userActivation;
@@ -176,23 +184,65 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
                 protocol === 'javascript:';
         } catch (_) { return true; }
     }
+    function isExternalCta(url) {
+        if (isInternalCta(url) || isSameOriginCta(url)) { return false; }
+        try {
+            var protocol = new URL(url, document.baseURI).protocol;
+            return protocol === 'http:' || protocol === 'https:' ||
+                protocol === 'market:' || protocol === 'intent:';
+        } catch (_) { return false; }
+    }
     function nativeCtaEnabled() {
         try {
             return nativeReceiver && typeof nativeReceiver.isCtaEnabled === 'function' &&
                 nativeReceiver.isCtaEnabled(activationNonce) === true;
         } catch (_) { return false; }
     }
-    function forwardTrustedCta(value) {
+    function clickIdentity() {
+        var slotSource = fallbackClickSource;
+        try {
+            if (typeof window.simulaClickInteraction === 'function') {
+                var identity = window.simulaClickInteraction(slotSource, true);
+                if (typeof identity === 'string') {
+                    return { interactionId: identity, clickSource: slotSource };
+                }
+                if (identity && typeof identity === 'object') {
+                    return {
+                        interactionId: typeof identity.interaction_id === 'string'
+                            ? identity.interaction_id : null,
+                        clickSource: typeof identity.click_source === 'string'
+                            ? identity.click_source : slotSource
+                    };
+                }
+            }
+        } catch (_) {}
+        return { interactionId: null, clickSource: slotSource };
+    }
+    function forwardTrustedCta(value, element, clickEvent) {
         if (!nativeCtaEnabled()) { return false; }
         var url = resolvedUrl(value);
-        if (!url || isInternalCta(url) || isSameOriginCta(url)) { return false; }
+        if (!url || !isExternalCta(url)) { return false; }
         if (gestureSequence === 0) { return false; }
         if (claimedGesture === gestureSequence) { return true; }
         if (!hasActiveUserGesture()) { return false; }
         claimedGesture = gestureSequence;
         try {
-            nativePost('{"type":"$TRUSTED_CTA_OPEN","url":' + nativeStringify(url) +
-                ',"activation_nonce":' + nativeStringify(activationNonce) + '}');
+            var identity = clickEvent && typeof window.simulaClickForEvent === 'function'
+                ? window.simulaClickForEvent(clickEvent, fallbackClickSource) : null;
+            function deliver() {
+                var resolved = identity ? {
+                    interactionId: identity.interaction_id, clickSource: identity.click_source
+                } : clickIdentity();
+                try {
+                    nativePost('{"type":"$TRUSTED_CTA_OPEN","url":' + nativeStringify(url) +
+                        ',"activation_nonce":' + nativeStringify(activationNonce) +
+                        ',"interaction_id":' + nativeStringify(resolved.interactionId) +
+                        ',"click_source":' + nativeStringify(resolved.clickSource) + '}');
+                } catch (_) {}
+            }
+            // Keep capture-phase routing even if the creative stops propagation, and read
+            // its exact click source after the event. window.open remains synchronous.
+            if (clickEvent) { nativeSetTimeout(deliver, 0); } else { deliver(); }
             return true;
         } catch (_) {
             if (claimedGesture === gestureSequence) { claimedGesture = -1; }
@@ -200,14 +250,26 @@ internal fun trustedCtaRelaySource(activationNonce: String): String = """
         }
     }
     window.open = function () {
-        if (arguments.length > 0 && forwardTrustedCta(arguments[0])) { return routedWindow; }
+        if (arguments.length > 0 && forwardTrustedCta(arguments[0], document.activeElement)) { return routedWindow; }
         return originalOpen.apply(window, arguments);
     };
+    function openCTA(url) {
+        return forwardTrustedCta(url, document.activeElement);
+    }
+    try {
+        var simulaAdAPI = {};
+        Object.defineProperty(simulaAdAPI, 'openCTA', {
+            value: openCTA, writable: false, configurable: false, enumerable: true
+        });
+        Object.defineProperty(window, 'SimulaAd', {
+            value: simulaAdAPI, writable: false, configurable: false, enumerable: true
+        });
+    } catch (_) {}
     window.addEventListener('click', function (event) {
         if (!event || event.isTrusted !== true || !hasActiveUserGesture()) { return; }
         var anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
         if (!anchor || String(anchor.target).toLowerCase() !== '_blank') { return; }
-        if (forwardTrustedCta(anchor.href)) { event.preventDefault(); }
+        if (forwardTrustedCta(anchor.href, anchor, event)) { event.preventDefault(); }
     }, true);
 """.trimIndent()
 
@@ -293,7 +355,10 @@ internal object BridgeWebViewInstaller {
         })();
     """.trimIndent()
 
-    internal fun trustedCtaDocumentStartScript(activationNonce: String): String = """
+    internal fun trustedCtaDocumentStartScript(
+        activationNonce: String,
+        fallbackClickSource: String = ClickSources.PRIMARY_UNKNOWN,
+    ): String = """
         (function () {
             'use strict';
             function isCtaFrame() {
@@ -308,7 +373,7 @@ internal object BridgeWebViewInstaller {
                 ? nativeReceiver.postMessage.bind(nativeReceiver)
                 : null;
             var nativeStringify = JSON.stringify.bind(JSON);
-${trustedCtaRelaySource(activationNonce)}
+${trustedCtaRelaySource(activationNonce, fallbackClickSource)}
         })();
     """.trimIndent()
 
@@ -316,6 +381,7 @@ ${trustedCtaRelaySource(activationNonce)}
         installationId: String,
         bridgeCapability: String,
         activationNonce: String?,
+        fallbackClickSource: String = ClickSources.PRIMARY_UNKNOWN,
         coreDocumentStartInstalled: Boolean,
         ctaDocumentStartInstalled: Boolean,
     ): String = buildString {
@@ -323,7 +389,7 @@ ${trustedCtaRelaySource(activationNonce)}
         if (!ctaDocumentStartInstalled) {
             activationNonce?.let { nonce ->
                 if (isNotEmpty()) append('\n')
-                append(trustedCtaDocumentStartScript(nonce))
+                append(trustedCtaDocumentStartScript(nonce, fallbackClickSource))
             }
         }
     }
@@ -340,7 +406,8 @@ ${trustedCtaRelaySource(activationNonce)}
     fun install(
         webView: WebView,
         bridge: CreativeBridge,
-        onTrustedCtaOpen: ((String) -> Unit)? = null,
+        onTrustedCtaOpen: ((TrustedCtaOpen) -> Unit)? = null,
+        fallbackClickSource: String = ClickSources.PRIMARY_UNKNOWN,
         onPageReady: ((String) -> Unit)? = null,
     ): BridgeInjectionMode {
         SimulaUserAgent.captureBrowser(runCatching { webView.settings.userAgentString }.getOrNull())
@@ -353,6 +420,7 @@ ${trustedCtaRelaySource(activationNonce)}
             bridgeCapability = UUID.randomUUID().toString(),
             audioObserver = CreativeAudioStateObserver(webView),
             activationNonce = onTrustedCtaOpen?.let { UUID.randomUUID().toString() },
+            fallbackClickSource = fallbackClickSource,
             onTrustedCtaOpen = onTrustedCtaOpen,
             onPageReady = onPageReady,
         )
@@ -379,14 +447,14 @@ ${trustedCtaRelaySource(activationNonce)}
                     }
                     return
                 }
-                trustedCtaUrl(
+                trustedCtaOpen(
                     json,
                     installation.activationNonce,
                     enabled = installation.active,
-                )?.let { url ->
+                )?.let { request ->
                     webView.post {
                         if (installations[webView] === installation) {
-                            runCatching { installation.onTrustedCtaOpen?.invoke(url) }
+                            runCatching { installation.onTrustedCtaOpen?.invoke(request) }
                         }
                     }
                     return
@@ -441,7 +509,7 @@ ${trustedCtaRelaySource(activationNonce)}
                     runCatching {
                         WebViewCompat.addDocumentStartJavaScript(
                             webView,
-                            trustedCtaDocumentStartScript(nonce),
+                            trustedCtaDocumentStartScript(nonce, installation.fallbackClickSource),
                             setOf("*"),
                         )
                     }.onFailure {
@@ -482,6 +550,7 @@ ${trustedCtaRelaySource(activationNonce)}
             installationId = installation.id,
             bridgeCapability = installation.bridgeCapability,
             activationNonce = installation.activationNonce,
+            fallbackClickSource = installation.fallbackClickSource,
             coreDocumentStartInstalled = installation.coreDocumentStartInstalled,
             ctaDocumentStartInstalled = installation.ctaDocumentStartInstalled,
         )
@@ -551,7 +620,8 @@ private data class BridgeInstallation(
     val bridgeCapability: String,
     val audioObserver: CreativeAudioStateObserver,
     val activationNonce: String?,
-    val onTrustedCtaOpen: ((String) -> Unit)?,
+    val fallbackClickSource: String,
+    val onTrustedCtaOpen: ((TrustedCtaOpen) -> Unit)?,
     val onPageReady: ((String) -> Unit)?,
 ) {
     var injectionMode: BridgeInjectionMode = BridgeInjectionMode.UNAVAILABLE
@@ -566,11 +636,17 @@ private data class DocumentStartScripts(
     var cta: ScriptHandler?,
 )
 
-internal fun trustedCtaUrl(
+internal data class TrustedCtaOpen(
+    val url: String,
+    val interactionId: String?,
+    val clickSource: String?,
+)
+
+internal fun trustedCtaOpen(
     message: String,
     expectedNonce: String?,
     enabled: Boolean = true,
-): String? {
+): TrustedCtaOpen? {
     if (!enabled) return null
     val nonce = expectedNonce ?: return null
     if (message.length > CREATIVE_BRIDGE_MAX_MESSAGE_UTF16_CHARS) return null
@@ -580,10 +656,28 @@ internal fun trustedCtaUrl(
     if (type != TRUSTED_CTA_OPEN) return null
     val suppliedNonce = (root["activation_nonce"] as? JsonPrimitive)?.takeIf { it.isString }?.content
     if (suppliedNonce != nonce) return null
-    return (root["url"] as? JsonPrimitive)
+    val url = (root["url"] as? JsonPrimitive)
         ?.takeIf { it.isString }
         ?.content
         ?.takeIf { it.isNotBlank() && it.length <= MAX_CTA_URL_CHARS }
+        ?.takeIf { CreativeCtaRouter.normalizeTappedDestination(it)?.let(::isTrustedCtaHttpUrl) == true } ?: return null
+    val interactionElement = root["interaction_id"]
+    val interactionId = when (interactionElement) {
+        null, kotlinx.serialization.json.JsonNull -> null
+        is JsonPrimitive -> interactionElement.takeIf { it.isString }
+            ?.content?.takeIf(::isRfc4122Uuid)
+        else -> null
+    }
+    val clickSource = ClickSources.trustedHtmlOrNull(
+        (root["click_source"] as? JsonPrimitive)?.takeIf { it.isString }?.content,
+    )
+    return TrustedCtaOpen(url, interactionId, clickSource)
+}
+
+private fun isTrustedCtaHttpUrl(value: String): Boolean {
+    val url = runCatching { URL(value) }.getOrNull() ?: return false
+    return (url.protocol.equals("http", true) || url.protocol.equals("https", true)) &&
+        url.host.isNotBlank() && url.userInfo == null
 }
 
 internal fun readyPageId(message: String, installationId: String): String? {

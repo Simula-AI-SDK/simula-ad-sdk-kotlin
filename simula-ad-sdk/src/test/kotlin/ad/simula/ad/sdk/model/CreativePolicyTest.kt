@@ -50,6 +50,25 @@ class CreativePolicyTest {
     }
 
     @Test
+    fun `v2 stall expiry completes stable near end and fails away from end`() {
+        val nearEnd = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        val nearEndBudget = VideoStallBudget(1_000L)
+        assertFalse(nearEnd.observe(10_000L, 9_700L, true, true, isPlaying = true))
+        assertFalse(nearEnd.observe(10_000L, 9_900L, true, true, isPlaying = true))
+        assertFalse(nearEndBudget.observe(0L, eligible = true, healthyProgress = false))
+        assertTrue(nearEndBudget.observe(1_000L, eligible = true, healthyProgress = false))
+        assertTrue(nearEnd.onPlaybackTimeout(10_000L, 9_900L, true, true))
+
+        val notNearEnd = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        val stalledBudget = VideoStallBudget(1_000L)
+        assertFalse(notNearEnd.observe(10_000L, 5_000L, true, true, isPlaying = true))
+        assertFalse(notNearEnd.observe(10_000L, 5_000L, true, true, isPlaying = false))
+        assertFalse(stalledBudget.observe(0L, eligible = true, healthyProgress = false))
+        assertTrue(stalledBudget.observe(1_000L, eligible = true, healthyProgress = false))
+        assertFalse(notNearEnd.onPlaybackTimeout(10_000L, 5_000L, true, true))
+    }
+
+    @Test
     fun `duration change backward position and lifecycle pause reject terminal inference`() {
         val durationMismatch = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
         assertFalse(durationMismatch.observe(10_000L, 9_700L, true, true, isPlaying = true))
@@ -119,18 +138,6 @@ class CreativePolicyTest {
     }
 
     @Test
-    fun `preparing claim transfers shared deadline while prepared claim receives first-frame budget`() {
-        assertEquals(
-            VideoPreparationClaimPolicy(VideoPreparationPhase.PREPARING, 10_000L),
-            videoPreparationClaimPolicy(VideoPreparationPhase.PREPARING, 10_000L, 7_000L, 10_000L),
-        )
-        assertEquals(
-            VideoPreparationClaimPolicy(VideoPreparationPhase.PREPARED, 17_000L),
-            videoPreparationClaimPolicy(VideoPreparationPhase.PREPARED, 10_000L, 7_000L, 10_000L),
-        )
-    }
-
-    @Test
     fun `readiness deadline pauses foreground budget and resumes remaining time`() {
         val deadline = VideoReadinessDeadline(deadlineMs = 10_000L)
         assertEquals(7_000L, deadline.remainingMs(3_000L))
@@ -163,6 +170,42 @@ class CreativePolicyTest {
     }
 
     @Test
+    fun `repeated v2 null position reads consume eligible stall budget and retain near end evidence`() {
+        val budget = VideoStallBudget(8_000L)
+        val detector = VideoNearEndCompletionDetector(maxToleranceMs = 150L)
+        var nowMs = 0L
+
+        assertFalse(detector.observe(10_000L, 9_700L, true, true, isPlaying = true))
+        assertFalse(detector.observe(10_000L, 9_900L, true, true, isPlaying = true))
+        repeat(2) {
+            assertTrue(
+                continueAfterVideoPositionPoll(
+                    read = { null as Long? },
+                    onReadFailure = { !budget.observe(nowMs, eligible = true, healthyProgress = false) },
+                ) { true },
+            )
+            nowMs += 4_000L
+        }
+        assertFalse(
+            continueAfterVideoPositionPoll(
+                read = { null as Long? },
+                onReadFailure = { !budget.observe(nowMs, eligible = true, healthyProgress = false) },
+            ) { true },
+        )
+        assertEquals(0L, budget.remainingMs())
+        assertTrue(detector.onPlaybackTimeout(10_000L, 9_900L, true, true))
+    }
+
+    @Test
+    fun `v1 null position reads keep polling without consuming v2 budget`() {
+        val budget = VideoStallBudget(8_000L)
+
+        assertTrue(continueAfterVideoPositionPoll(read = { null as Long? }) { true })
+        assertTrue(continueAfterVideoPositionPoll(read = { throw IllegalStateException("transient") }) { true })
+        assertEquals(8_000L, budget.remainingMs())
+    }
+
+    @Test
     fun `natural completion callback precedes forced final progress`() {
         val callbacks = mutableListOf<String>()
 
@@ -187,10 +230,19 @@ class CreativePolicyTest {
     }
 
     @Test
-    fun `video interactions stay consumed until first frame`() {
-        assertFalse(videoCtaInteractionAllowed(firstFrameRendered = false))
+    fun `video cta interaction matrix preserves completed v1 and disables terminal v2`() {
+        for (videoPlanV2 in listOf(false, true)) {
+            assertFalse(videoCtaInteractionAllowed(videoPlanV2, firstFrameRendered = false, completed = false))
+            assertFalse(videoCtaInteractionAllowed(videoPlanV2, firstFrameRendered = false, completed = true))
+            assertTrue(videoCtaInteractionAllowed(videoPlanV2, firstFrameRendered = true, completed = false))
+        }
+        assertTrue(videoCtaInteractionAllowed(videoPlanV2 = false, firstFrameRendered = true, completed = true))
+        assertFalse(videoCtaInteractionAllowed(videoPlanV2 = true, firstFrameRendered = true, completed = true))
+    }
+
+    @Test
+    fun `video mute interactions stay consumed until first frame`() {
         assertFalse(videoMuteInteractionAllowed(firstFrameRendered = false, playerActive = true))
-        assertTrue(videoCtaInteractionAllowed(firstFrameRendered = true))
         assertTrue(videoMuteInteractionAllowed(firstFrameRendered = true, playerActive = true))
         assertFalse(videoMuteInteractionAllowed(firstFrameRendered = true, playerActive = false))
         assertEquals("Unmute video", videoMuteActionLabel(muted = true))

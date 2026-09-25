@@ -23,6 +23,19 @@ import org.junit.Test
 
 class FullscreenClickHandoffPolicyTest {
     @Test
+    fun `fallback recreation retains playback position separately from close gate`() {
+        val state = FallbackCloseGateState()
+        state.addElapsedMs(0, 5_000L, 5_000L)
+        state.retainVideoPositionMs(0, 8_500L)
+        state.retainVideoPositionMs(0, 8_000L)
+        assertEquals(8_500L, state.videoPositionMs(0))
+        assertEquals(5_000L, state.elapsedMs(0))
+        assertEquals(0L, state.videoPositionMs(1))
+        state.clear()
+        assertEquals(0L, state.videoPositionMs(0))
+    }
+
+    @Test
     fun `invalid internal fallback video enters unavailable path once`() {
         assertTrue(
             shouldEnterFallbackVideoUnavailable(
@@ -81,6 +94,51 @@ class FullscreenClickHandoffPolicyTest {
     fun `HTML fallback failures stay for manual close while video failures advance`() {
         assertFalse(fallbackFailureAutoAdvances(ad.simula.ad.sdk.model.CreativeType.PLAYABLE))
         assertTrue(fallbackFailureAutoAdvances(ad.simula.ad.sdk.model.CreativeType.VIDEO))
+    }
+
+    @Test
+    fun `automatic video failure advance bypasses user terminal claim`() {
+        var claimAttempts = 0
+
+        assertTrue(
+            videoOverlayCloseAllowed(
+                origin = VideoOverlayCloseOrigin.AUTOMATIC,
+                isVideo = true,
+                videoPlanV2 = true,
+                videoTerminal = false,
+                claimUserClose = {
+                    claimAttempts += 1
+                    false
+                },
+            ),
+        )
+        assertEquals(0, claimAttempts)
+        assertFalse(
+            videoOverlayCloseAllowed(
+                origin = VideoOverlayCloseOrigin.USER,
+                isVideo = true,
+                videoPlanV2 = true,
+                videoTerminal = false,
+                claimUserClose = {
+                    claimAttempts += 1
+                    false
+                },
+            ),
+        )
+        assertEquals(1, claimAttempts)
+    }
+
+    @Test
+    fun `contract 2 HTML close does not require a video playback generation`() {
+        val presentation = VideoPlanPresentationState(videoPlanV2 = true)
+        assertTrue(videoOverlayCloseAllowed(
+            origin = VideoOverlayCloseOrigin.USER,
+            isVideo = false,
+            videoPlanV2 = true,
+            videoTerminal = false,
+            claimUserClose = { error("HTML must not claim a video terminal") },
+        ))
+        assertFalse(presentation.closeCurrent(ad.simula.ad.sdk.model.VideoLifecycleReason.USER))
     }
 
     @Test
@@ -310,18 +368,6 @@ class FullscreenClickHandoffPolicyTest {
         )
     }
 
-    @Test
-    fun `upcoming fallback video selection supports consecutive videos with one next owner`() {
-        val ads = listOf(
-            SimulaApiClient.FallbackAd("one", type = ad.simula.ad.sdk.model.CreativeType.VIDEO, url = "https://cdn/1"),
-            SimulaApiClient.FallbackAd("two", type = ad.simula.ad.sdk.model.CreativeType.VIDEO, url = "https://cdn/2"),
-            SimulaApiClient.FallbackAd("html", renderedHtml = "<html/>"),
-        )
-
-        assertEquals("https://cdn/1", nextFallbackVideoUrl(ads, -1))
-        assertEquals("https://cdn/2", nextFallbackVideoUrl(ads, 0))
-        assertNull(nextFallbackVideoUrl(ads, 1))
-    }
     private class TestScheduler : ClickHandoffScheduler {
         private val ready = ArrayDeque<Runnable>()
         private val delayed = LinkedHashSet<Runnable>()
@@ -1176,11 +1222,11 @@ class FullscreenClickHandoffPolicyTest {
 
     @Test
     fun `fallback action is consumed only by first usable screen with a successor`() {
-        assertEquals(CloseAction.FORWARD, resolveFallbackCloseAction(CloseAction.FORWARD, 0, 2))
-        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.CLOSE_X, 0, 2))
-        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 0, 1))
-        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 1, 3))
-        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 2, 3))
+        assertEquals(CloseAction.FORWARD, resolveFallbackCloseAction(CloseAction.FORWARD, 0, true))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.CLOSE_X, 0, true))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 0, false))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 1, true))
+        assertEquals(CloseAction.CLOSE_X, resolveFallbackCloseAction(CloseAction.FORWARD, 2, false))
     }
 
     @Test

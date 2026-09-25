@@ -29,6 +29,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -58,6 +59,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
         /** [loadedAtMs] is `elapsedRealtime()` at the moment the creative became ready (for staleness). */
         class Ready(
             val ad: SimulaApiClient.AdLoadResult,
+            val videoLease: VideoAssetLease?,
             val metadata: Map<String, String>?,
             val loadedAtMs: Long,
         ) : State
@@ -85,6 +87,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
     // matches has been superseded (a newer load replaced it) and is dropped.
     @Volatile
     private var loadGeneration: Int = 0
+    private var loadJob: Job? = null
 
     // Monotonic stage markers for telemetry latencies (0 = not yet started).
     private var loadStartNanos = 0L
@@ -164,12 +167,14 @@ class SimulaInterstitialAd(val adUnitId: String) {
         }
 
         // Supersede any in-flight load / discard any ready ad, then start fresh.
+        loadJob?.cancel()
+        (state as? State.Ready)?.videoLease?.release()
         val generation = ++loadGeneration
         currentKey = key
         currentKeyAtMs = now
         loadStartNanos = System.nanoTime()
         state = State.Loading
-        SimulaScope.launch {
+        loadJob = SimulaScope.launch {
             try {
                 val sessionId = SimulaAds.store.ensureSession()
                 if (generation != loadGeneration) return@launch // superseded
@@ -204,28 +209,31 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     failLoadOnMain(generation, SimulaAdError.NoFill)
                     return@launch
                 }
-                withContext(Dispatchers.Main) {
-                    if (generation != loadGeneration) return@withContext // superseded
-                    recordAcceptedLoadTelemetry(
-                        experiment = ad.experiment,
-                        applyExperiment = Telemetry::setExperiment,
-                    ) {
-                        Telemetry.recordLifecycle(
-                            stage = "load_success",
-                            adFormat = AD_FORMAT,
-                            adUnitId = adUnitId,
-                            adId = ad.impressionId,
-                            serveId = ad.impressionId,
-                            durationMs = elapsedSinceLoad(),
-                            errorCode = null,
-                        )
+                val published = if (creative.type == CreativeType.VIDEO) {
+                    when (val readyResult = acquireVideoLeaseForReady(
+                        acquire = { VideoAssetCache.acquire(SimulaAds.appContext, creative.url) },
+                        isCurrent = { generation == loadGeneration },
+                        publishReady = { ownership ->
+                            publishReadyOnMain(generation, ad, metadata, ownership)
+                        },
+                    )) {
+                        VideoReadyLeaseResult.Ready -> true
+                        VideoReadyLeaseResult.Stale -> false
+                        is VideoReadyLeaseResult.Failed -> {
+                            val failure = videoAssetLoadFailure(readyResult.error) ?: return@launch
+                            Telemetry.recordError(
+                                signature = failure.telemetrySignature,
+                                errorCode = failure.telemetryCode,
+                                breadcrumb = "surface=interstitial",
+                            )
+                            failLoadOnMain(generation, failure.callbackError, failure.telemetryCode)
+                            false
+                        }
                     }
-                    state = State.Ready(ad, metadata, SystemClock.elapsedRealtime())
-                    if (ad.creative?.type == CreativeType.VIDEO) {
-                        FullscreenVideoPreparer.prepare(ad.creative.url)
-                    }
-                    runCatching { listener?.onAdLoaded(this@SimulaInterstitialAd) }
+                } else {
+                    publishReadyOnMain(generation, ad, metadata, videoOwnership = null)
                 }
+                if (!published) return@launch
                 scheduleWebViewPrewarm(generation, ad)
             } catch (e: Exception) {
                 if (generation != loadGeneration) return@launch
@@ -378,9 +386,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
         )
 
         val token = UUID.randomUUID().toString()
-        InterstitialHandoff.put(
-            token,
-            InterstitialPresentation(
+        val presentation = InterstitialPresentation(
                 ad = ad,
                 apiKey = SimulaAds.apiKey,
                 // Preview is local-only: report lifecycle but do NOT auto-preload a real ad on close.
@@ -396,18 +402,23 @@ class SimulaInterstitialAd(val adUnitId: String) {
                     ) {
                         onTelemetryPersisted()
                     }
-                    override fun notifyClicked() {
-                        notifyPublisherClick { listener?.onAdClicked(this@SimulaInterstitialAd) }
+                    override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) {
+                        notifyPublisherClick {
+                            listener?.onAdClicked(this@SimulaInterstitialAd)
+                        }
                     }
                     override fun onClosed() {
                         state = State.Idle
                         runCatching { listener?.onAdClosed(this@SimulaInterstitialAd) }
                     }
                 },
-            ),
-        )
-        if (!launchActivity(token, activity)) {
-            InterstitialHandoff.remove(token)
+            )
+        if (!launchWithHandoff(
+                publish = { InterstitialHandoff.put(token, presentation) },
+                launch = { launchActivity(token, activity) },
+                rollback = { InterstitialHandoff.remove(token) },
+            )
+        ) {
             failShow(SimulaAdError.NoPresentationContext)
             return
         }
@@ -430,6 +441,7 @@ class SimulaInterstitialAd(val adUnitId: String) {
                 // A loaded ad expires after 1 hour. Drop it (back to Idle so the host
                 // can load() again — the dedup window is long gone) and report Stale.
                 if (SystemClock.elapsedRealtime() - current.loadedAtMs > STALE_AFTER_MS) {
+                    current.videoLease?.release()
                     state = State.Idle
                     failShow(SimulaAdError.Stale)
                     return
@@ -449,18 +461,20 @@ class SimulaInterstitialAd(val adUnitId: String) {
 
         val token = UUID.randomUUID().toString()
         showStartNanos = System.nanoTime()
-        InterstitialHandoff.put(
-            token,
-            InterstitialPresentation(
+        val presentation = InterstitialPresentation(
                 ad = ad,
                 apiKey = SimulaAds.apiKey,
                 callbacks = bridge(ad.impressionId),
                 metadata = ready.metadata,
-            ),
-        )
+                videoLease = ready.videoLease,
+            )
 
-        if (!launchActivity(token, activity)) {
-            InterstitialHandoff.remove(token) // clean up the unused handoff
+        if (!launchWithHandoff(
+                publish = { InterstitialHandoff.put(token, presentation) },
+                launch = { launchActivity(token, activity) },
+                rollback = { InterstitialHandoff.recoverAfterLaunchFailure(token) },
+            )
+        ) {
             failShow(SimulaAdError.NoPresentationContext)
             return
         }
@@ -519,8 +533,16 @@ class SimulaInterstitialAd(val adUnitId: String) {
             )
         }
 
-        override fun notifyClicked() {
-            notifyPublisherClick { listener?.onAdClicked(this@SimulaInterstitialAd) }
+        override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) {
+            notifyPublisherClick {
+                listener?.onAdClicked(this@SimulaInterstitialAd)
+            }
+        }
+
+        override fun onDisplayFailed(error: SimulaAdError) {
+            state = State.Idle
+            failShow(error)
+            load(lastCharId, lastCharName, lastCharImage, lastCharDesc)
         }
 
         override fun onClosed() {
@@ -532,27 +554,53 @@ class SimulaInterstitialAd(val adUnitId: String) {
         }
     }
 
-    private fun launchActivity(token: String, activity: Activity): Boolean {
-        return try {
-            val intent = Intent(activity, SimulaInterstitialActivity::class.java)
-                .putExtra(SimulaInterstitialActivity.EXTRA_TOKEN, token)
-            activity.startActivity(intent)
-            true
-        } catch (e: Exception) {
-            false
-        }
+    private fun launchActivity(token: String, activity: Activity) {
+        val intent = Intent(activity, SimulaInterstitialActivity::class.java)
+            .putExtra(SimulaInterstitialActivity.EXTRA_TOKEN, token)
+        activity.startActivity(intent)
     }
 
-    private fun failLoad(error: SimulaAdError) {
+    private suspend fun publishReadyOnMain(
+        generation: Int,
+        ad: SimulaApiClient.AdLoadResult,
+        metadata: Map<String, String>?,
+        videoOwnership: VideoReadyLeaseOwnership?,
+    ): Boolean = withContext(Dispatchers.Main) {
+        if (generation != loadGeneration) return@withContext false
+        recordAcceptedLoadTelemetry(
+            experiment = ad.experiment,
+            applyExperiment = Telemetry::setExperiment,
+        ) {
+            Telemetry.recordLifecycle(
+                stage = "load_success",
+                adFormat = AD_FORMAT,
+                adUnitId = adUnitId,
+                adId = ad.impressionId,
+                serveId = ad.impressionId,
+                durationMs = elapsedSinceLoad(),
+                errorCode = null,
+            )
+        }
+        state = State.Ready(ad, videoOwnership?.lease, metadata, SystemClock.elapsedRealtime())
+        videoOwnership?.transferToReady()
+        runCatching { listener?.onAdLoaded(this@SimulaInterstitialAd) }
+        true
+    }
+
+    private fun failLoad(error: SimulaAdError, telemetryCode: String = error.telemetryCode()) {
         state = State.Idle
-        Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, elapsedSinceLoad(), error.telemetryCode())
+        Telemetry.recordLifecycle("load_fail", AD_FORMAT, adUnitId, null, null, elapsedSinceLoad(), telemetryCode)
         runCatching { listener?.onAdFailedToLoad(this, error) }
     }
 
-    private suspend fun failLoadOnMain(generation: Int, error: SimulaAdError) {
+    private suspend fun failLoadOnMain(
+        generation: Int,
+        error: SimulaAdError,
+        telemetryCode: String = error.telemetryCode(),
+    ) {
         withContext(Dispatchers.Main) {
             if (generation != loadGeneration) return@withContext // superseded
-            failLoad(error)
+            failLoad(error, telemetryCode)
         }
     }
 
@@ -596,6 +644,12 @@ class SimulaInterstitialAd(val adUnitId: String) {
         if (Looper.myLooper() == Looper.getMainLooper()) return true
         mainHandler.post { block() }
         return false
+    }
+
+    @Suppress("deprecation")
+    protected fun finalize() {
+        runCatching { loadJob?.cancel() }
+        runCatching { (state as? State.Ready)?.videoLease?.release() }
     }
 
     private companion object {

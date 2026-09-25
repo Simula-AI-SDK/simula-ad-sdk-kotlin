@@ -121,6 +121,7 @@ internal fun rewardVerificationBackoffMs(retryCount: Int): Long {
  * status embedded in the message thrown by [SimulaApiClient] (`"... status: NNN"`).
  */
 internal fun isPermanentVerificationError(e: Throwable): Boolean {
+    if (e is RewardNotVerifiedException) return true
     val code = Regex("status: (\\d{3})").find(e.message ?: return false)
         ?.groupValues?.get(1)?.toIntOrNull() ?: return false
     return code in 400..499 && code != 408 && code != 429

@@ -179,6 +179,7 @@ internal const val DEFAULT_FALLBACK_CLOSE_DELAY_SECONDS = 5
 
 /** Independent safety cap for the delayed install overlay. Kept separate from close-gate policy. */
 internal const val MAX_SK_OVERLAY_DELAY_SECONDS = 300
+internal const val MAX_CONTRACT_2_SK_OVERLAY_DELAY_SECONDS = 60
 
 /**
  * Validates a server-supplied progress-bar color. Accepts an optional leading `#` followed by
@@ -244,8 +245,8 @@ internal fun fallbackCloseTreatment(raw: String?): CloseTreatment =
 internal fun resolveFallbackCloseAction(
     configured: CloseAction,
     usableIndex: Int,
-    usableCount: Int,
-): CloseAction = if (usableIndex == 0 && usableCount > 1) configured else CloseAction.CLOSE_X
+    hasNextStep: Boolean,
+): CloseAction = if (usableIndex == 0 && hasNextStep) configured else CloseAction.CLOSE_X
 
 /** How a CTA tap opens the store. Missing/unknown → SKSTOREPRODUCT (the platform's native
  * in-app store surface — the documented default; the v2 payload omits `store_open` entirely), so
@@ -353,6 +354,7 @@ internal enum class CreativeType {
 }
 
 internal enum class RewardCompletionReason(val wire: String) {
+    UNIT_END("unit_end"),
     DURATION_ELAPSED("duration_elapsed"),
     VIDEO_COMPLETED("video_completed"),
     CREATIVE_COMPLETED("creative_completed");
@@ -374,6 +376,60 @@ internal data class Creative(
     val url: String? = null,
     val posterUrl: String? = null,
     val adUnitType: AdUnitType = AdUnitType.INTERSTITIAL,
+    val cta: String? = null,
+    val appIconUrl: String? = null,
+    val appName: String? = null,
+    val subtitle: String? = null,
+    val videoPool: String? = null,
+    val clipIndex: Int? = null,
+    val segments: List<VideoSegment> = emptyList(),
+)
+
+/** Attribution ranges within one stitched video asset. They never select or hand off players. */
+internal data class VideoSegment(
+    val clipIndex: Int,
+    val videoPool: String,
+    val startSeconds: Double,
+    val endSeconds: Double,
+)
+
+internal enum class RewardEarnAt {
+    UNIT_END;
+
+    companion object {
+        fun from(raw: String?): RewardEarnAt? = UNIT_END.takeIf { normalizeBehaviorToken(raw) == "unit_end" }
+    }
+}
+
+internal data class RewardBehavior(val earnAt: RewardEarnAt? = null)
+
+internal enum class ProgressBarStyle {
+    SINGLE, TWO_TONE;
+
+    companion object {
+        fun from(raw: String?): ProgressBarStyle =
+            if (normalizeBehaviorToken(raw) == "two_tone") TWO_TONE else SINGLE
+    }
+}
+
+internal data class ProgressBarBehavior(val style: ProgressBarStyle = ProgressBarStyle.SINGLE)
+
+internal enum class VideoChromeStyle(val wire: String) {
+    BOTTOM_BAR("bottom_bar"),
+    FLOATING_PILL("floating_pill"),
+    BOTTOM_CARD("bottom_card"),
+    CORNER_CTA("corner_cta"),
+    FEED_CARD("feed_card");
+
+    companion object {
+        fun from(raw: String?): VideoChromeStyle = entries.firstOrNull {
+            it.wire == normalizeBehaviorToken(raw)
+        } ?: CORNER_CTA
+    }
+}
+
+internal data class VideoBehavior(
+    val style: VideoChromeStyle = VideoChromeStyle.CORNER_CTA,
 )
 
 /** Accept only network video assets. Invalid or opaque values are rejected before MediaPlayer sees them. */
@@ -383,6 +439,8 @@ internal fun admittedVideoUrl(raw: String?): String? {
     val networkScheme = uri.scheme.equals("http", true) || uri.scheme.equals("https", true)
     return value.takeIf { networkScheme && !uri.host.isNullOrBlank() }
 }
+
+internal fun admittedRemoteAssetUrl(raw: String?): String? = admittedVideoUrl(raw)
 
 internal fun Creative.isRenderable(renderedHtml: String?): Boolean = when (type) {
     CreativeType.PLAYABLE -> !renderedHtml.isNullOrBlank()
@@ -408,6 +466,21 @@ internal fun rewardedVideoDurationGateReached(
 internal fun closeGateSecondsLeft(elapsedMs: Long, requiredMs: Long): Int =
     ceil((requiredMs - elapsedMs).coerceAtLeast(0L) / 1000.0).toInt()
 
+internal fun storePromptHalfGateReached(elapsedMs: Long, effectiveGateMs: Long): Boolean =
+    effectiveGateMs > 0L && elapsedMs.coerceAtLeast(0L) >= effectiveGateMs / 2L
+
+internal fun videoStorePromptReached(
+    videoPlanV2: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    gateElapsedMs: Long,
+    effectiveGateMs: Long,
+): Boolean = if (videoPlanV2) {
+    storePromptHalfGateReached(gateElapsedMs, effectiveGateMs)
+} else {
+    videoReachedMidpoint(positionMs, durationMs)
+}
+
 /** Experiment-assignment metadata (`experiment` node), carried for telemetry only. */
 internal data class Experiment(
     val experimentId: String? = null,
@@ -425,8 +498,8 @@ internal data class StorePrompt(
     val platform: StorePromptPlatform = StorePromptPlatform.ANDROID,
 )
 
-/** Play Install Prompt (Android) / SKOverlay (iOS) config (`skoverlay` node): a native,
- * SDK-presented install banner, independent of the creative click handler. */
+/** Play Install Prompt (Android) / SKOverlay (iOS) wire config. Contract-2 SKOverlay presentation is
+ * iOS-only; Android decodes it for parity but keeps the effective policy disabled. */
 internal data class SkOverlayConfig(
     val enabled: Boolean = false,
     val timing: OverlayTiming = OverlayTiming.ON_CLICK,
@@ -464,7 +537,23 @@ internal data class AdBehavior(
     val storePrompt: StorePrompt? = null,
     val skoverlay: SkOverlayConfig? = null,
     val autoStoreRedirect: AutoStoreRedirect? = null,
+    val video: VideoBehavior? = null,
+    val reward: RewardBehavior? = null,
+    val progressBar: ProgressBarBehavior = ProgressBarBehavior(),
 )
+
+internal fun AdBehavior?.effectiveSkOverlayConfig(videoPlanV2: Boolean): SkOverlayConfig? {
+    if (!videoPlanV2) return this?.skoverlay
+    val config = this?.skoverlay
+    return SkOverlayConfig(
+        enabled = false,
+        timing = OverlayTiming.DELAYED,
+        delaySeconds = config?.delaySeconds
+            ?.takeIf { it in 0..MAX_CONTRACT_2_SK_OVERLAY_DELAY_SECONDS } ?: 3,
+        position = config?.position ?: OverlayPosition.BOTTOM,
+        dismissible = config?.dismissible ?: true,
+    )
+}
 
 /** User-selectable reasons for the in-ad report flow (the "i" → report sheet). [flag] is the wire
  * value posted to `POST /impressions/{adId}/report`; [label] is the user-facing copy. */

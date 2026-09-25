@@ -89,7 +89,7 @@ class MetadataApiTest {
                     interaction: ad.simula.ad.sdk.network.ClickInteraction,
                     onTelemetryPersisted: () -> Unit,
                 ) = Unit
-                override fun notifyClicked() = Unit
+                override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) = Unit
                 override fun onClosed() = Unit
             },
             metadata = snapshot,
@@ -97,6 +97,7 @@ class MetadataApiTest {
         val rewarded = RewardedPresentation(
             renderedHtml = "<html></html>",
             creative = Creative(),
+            adUnitId = "rewarded-unit",
             impressionId = "rewarded-impression",
             apiKey = "test-key",
             callbacks = object : RewardedCallbacks {
@@ -107,7 +108,7 @@ class MetadataApiTest {
                     interaction: ad.simula.ad.sdk.network.ClickInteraction,
                     onTelemetryPersisted: () -> Unit,
                 ) = Unit
-                override fun notifyClicked() = Unit
+                override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) = Unit
                 override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
                 override fun onRewardCompleted(
                     earned: Boolean,
@@ -120,5 +121,6 @@ class MetadataApiTest {
 
         assertEquals(snapshot, interstitial.metadata)
         assertEquals(snapshot, rewarded.metadata)
+        assertEquals("rewarded-unit", rewarded.adUnitId)
     }
 }

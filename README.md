@@ -29,6 +29,24 @@ Full integration guides, API references, and examples are available at:
 - [Interstitial Ad](https://docs.simula.ad/kotlin-sdk/interstitial-ad) -- full-screen ad
 - [Rewarded Ad](https://docs.simula.ad/kotlin-sdk/rewarded-ad) -- rewarded ad with server-side verification
 
+## Video behavior
+
+Videos start unmuted, including legacy plans; unavailable audio focus falls back to muted playback.
+Contract-2 stitched clips emit their own start, 50%, and completion events with clip-local position,
+duration, and muted/unmuted watch time. Playback uses one cached asset and one player.
+
+For rewarded contract-2 units, an admitted primary video that fails before its gate can still earn
+at the final rendered end screen's gate. Delivery and verification wait until the whole unit closes.
+If neither the primary nor a rendered end screen reaches a gate, failures do not create a reward.
+An explicit `verified: false` permanently reconciles verification; malformed responses remain retryable.
+
+Android's `HttpURLConnection` cannot isolate a process-wide `CookieHandler` per connection. When a
+host installs one, cookie-free video downloads report a `SimulaAdError.Network` with telemetry code
+`video_asset:cookie_isolation_unavailable`, rather than no fill. The impression GET is skipped with
+`impression:cookie_isolation_unavailable`. The SDK never replaces the host's cookie handler.
+Impression GETs reuse the browser User-Agent when already captured from an SDK WebView; otherwise
+they use the platform default. Measurement never creates a WebView solely to obtain its agent.
+
 ## Publisher Metadata
 
 Attach non-sensitive string metadata to ad loads for reporting and attribution:
@@ -65,6 +83,13 @@ Metadata is limited to 10 entries. Keys must be non-empty, at most 64 Unicode co
 start with `$`, and must not contain `.`. Values are limited to 256 Unicode code points. Invalid or
 over-limit entries are ignored safely and reported in Logcat and SDK telemetry. Do not include PII,
 credentials, tokens, or other secrets.
+
+## Video Contract
+
+Imperative interstitial and rewarded video use the stitched-asset video contract 2. A video is Ready
+only after its bounded local download completes; playback never streams the remote URL. See
+[`docs/VIDEO_CONTRACT_2.md`](docs/VIDEO_CONTRACT_2.md) for the wire, reward, click, impression, cache,
+telemetry, and progress-bar contract.
 
 ## Staging Environment
 

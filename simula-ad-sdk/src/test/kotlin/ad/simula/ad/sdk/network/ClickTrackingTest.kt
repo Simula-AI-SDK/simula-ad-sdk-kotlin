@@ -7,6 +7,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.UUID
 
 class ClickTrackingTest {
     @Test
@@ -19,6 +20,71 @@ class ClickTrackingTest {
         assertEquals("cta", ClickSources.storeExitTrigger(ClickSources.PRIMARY_CTA))
         assertEquals("cta", ClickSources.storeExitTrigger("cta"))
         assertEquals(ClickSources.STORE_PROMPT, ClickSources.storeExitTrigger(ClickSources.STORE_PROMPT))
+    }
+
+    @Test
+    fun `trusted HTML identity and source are preserved without UUID replacement`() {
+        val gate = ClickInteractionGate(idFactory = { "native-uuid" })
+        val trustedId = "123e4567-e89b-42d3-a456-426614174000"
+        val trusted = gate.claimTrusted(trustedId, "hero_button")
+
+        assertEquals(trustedId, trusted?.interaction?.id)
+        assertEquals("hero_button", trusted?.interaction?.source)
+        trusted?.release()
+        assertNull(gate.claimTrusted("creative-event-7", ClickSources.PRIMARY_UNKNOWN))
+    }
+
+    @Test
+    fun `native HTML fallback mints an RFC4122 UUID`() {
+        val interaction = requireNotNull(ClickInteractionGate().claimWeb(ClickSources.PRIMARY_UNKNOWN)).interaction
+
+        assertEquals(interaction.id, UUID.fromString(interaction.id).toString())
+        assertEquals(4, UUID.fromString(interaction.id).version())
+        assertEquals(2, UUID.fromString(interaction.id).variant())
+        assertEquals(ClickSources.PRIMARY_UNKNOWN, interaction.source)
+    }
+
+    @Test
+    fun `trusted backend UUIDs accept RFC4122 versions one through five only`() {
+        (1..5).forEach { version ->
+            assertTrue(isRfc4122Uuid("123e4567-e89b-${version}2d3-a456-426614174000"))
+        }
+        assertFalse(isRfc4122Uuid("123e4567-e89b-02d3-a456-426614174000"))
+        assertFalse(isRfc4122Uuid("123e4567-e89b-62d3-a456-426614174000"))
+        assertFalse(isRfc4122Uuid("123e4567-e89b-42d3-7456-426614174000"))
+    }
+
+    @Test
+    fun `invalid semantic source falls back to primary unknown`() {
+        assertEquals(ClickSources.PRIMARY_UNKNOWN, ClickSources.normalize("bad source"))
+        assertEquals(ClickSources.END_SCREEN_1_UNKNOWN, ClickSources.normalize(ClickSources.END_SCREEN_1_UNKNOWN))
+        assertEquals(ClickSources.END_SCREEN_2_UNKNOWN, ClickSources.normalize(ClickSources.END_SCREEN_2_UNKNOWN))
+    }
+
+    @Test
+    fun `trusted HTML source uses exact contract 2 allowlist`() {
+        val allowed = setOf(
+            "auto_redirect", "companion", "cta", "end_screen",
+            "end_screen_ad_1_backdrop", "end_screen_ad_1_cta",
+            "end_screen_ad_2_backdrop", "end_screen_ad_2_cta",
+            "end_screen_ad_2_interested_button", "fallback_cta", "install_banner",
+            "interstitial", "native", "native_backdrop", "native_cta", "playable",
+            "primary_cta", "primary_unknown", "rewarded", "sdk", "store_prompt",
+            "video_preview_cta", "end_screen_1_unknown", "end_screen_2_unknown",
+        )
+        assertEquals(allowed, ClickSources.CONTRACT_2_ALLOWLIST)
+        allowed.forEach { assertEquals(it, ClickSources.trustedHtmlOrNull(it)) }
+        listOf(null, "", "hero_cta", "auto_store_redirect", "PRIMARY_CTA").forEach {
+            assertNull(ClickSources.trustedHtmlOrNull(it))
+        }
+        assertEquals(
+            ClickSources.END_SCREEN_1_UNKNOWN,
+            ClickSources.trustedHtmlOr("hero_cta", ClickSources.END_SCREEN_1_UNKNOWN),
+        )
+        assertEquals(
+            ClickSources.PRIMARY_UNKNOWN,
+            ClickSources.trustedHtmlOr(null, ClickSources.PRIMARY_UNKNOWN),
+        )
     }
 
     @Test

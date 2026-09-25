@@ -1,6 +1,10 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.bridge.recordRenderProcessGone
+import ad.simula.ad.sdk.bridge.BridgeWebViewInstaller
+import ad.simula.ad.sdk.bridge.BridgeInjectionMode
+import ad.simula.ad.sdk.bridge.androidCreativeBridge
+import ad.simula.ad.sdk.bridge.TrustedCtaOpen
 import ad.simula.ad.sdk.minigame.WebViewPool
 import ad.simula.ad.sdk.minigame.repaintOnNextFrame
 import ad.simula.ad.sdk.model.AutoStoreRedirect
@@ -14,6 +18,8 @@ import ad.simula.ad.sdk.model.endScreenTriggerForIndex
 import ad.simula.ad.sdk.model.videoCloseGateMs
 import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.RenderAttemptGate
+import ad.simula.ad.sdk.model.VideoChromeStyle
+import ad.simula.ad.sdk.model.VideoLifecycleReason
 import ad.simula.ad.sdk.network.AutoRedirectCoordinator
 import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.AdBeaconManager
@@ -28,6 +34,7 @@ import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickSources
 import ad.simula.ad.sdk.network.PresentationRouteResult
 import android.content.Context
+import android.app.Activity
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.os.Handler
@@ -85,6 +92,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
 import java.lang.ref.WeakReference
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.ceil
 
 internal enum class FallbackStage { CONTENT, FETCHING, SHOWING, DONE }
@@ -93,6 +101,7 @@ private const val FALLBACK_FETCH_RETRY_MS = 250L
 internal const val FALLBACK_POST_CLOSE_WAIT_MS = 2_000L
 internal const val FALLBACK_CLOSE_GATE_MS = 5_000L
 internal const val FALLBACK_RENDER_TIMEOUT_MS = 10_000L
+internal const val FALLBACK_SCREEN_MAX = 2
 
 internal enum class FallbackHtmlFailureAction { FAIL_BLANK, IGNORE }
 
@@ -107,7 +116,52 @@ internal fun fallbackHtmlFailureAction(
 
 internal fun fallbackFailureAutoAdvances(type: CreativeType): Boolean = type == CreativeType.VIDEO
 
+internal fun fallbackPreparationWindow(
+    ads: List<SimulaApiClient.FallbackAd>,
+    currentIndex: Int,
+): List<SimulaApiClient.FallbackAd> = ads.drop(currentIndex.coerceAtLeast(0)).take(2)
+
+internal enum class VideoOverlayCloseOrigin { USER, AUTOMATIC }
+
+internal enum class FallbackUnavailableExitCause { USER_ESCAPE, RENDERER_FAILURE }
+
+internal fun fallbackUnavailableExitReportsAuthority(
+    cause: FallbackUnavailableExitCause,
+    rendererClaimAccepted: Boolean,
+): Boolean = cause == FallbackUnavailableExitCause.RENDERER_FAILURE && rendererClaimAccepted
+
+internal fun videoOverlayCloseAllowed(
+    origin: VideoOverlayCloseOrigin,
+    isVideo: Boolean,
+    videoPlanV2: Boolean,
+    videoTerminal: Boolean,
+    claimUserClose: () -> Boolean,
+): Boolean = origin == VideoOverlayCloseOrigin.AUTOMATIC ||
+    !isVideo || !videoPlanV2 || videoTerminal || claimUserClose()
+
 internal fun fallbackCloseGateUsesPresentedTime(type: CreativeType): Boolean = type != CreativeType.VIDEO
+
+internal fun fallbackScreenIsAuthoritative(index: Int, total: Int): Boolean =
+    total > 0 && index == total - 1
+
+internal fun fallbackReachedAuthoritativeGate(
+    isVideo: Boolean,
+    renderAdmitted: Boolean,
+    countdown: Int,
+    videoTerminal: Boolean,
+    rendererUnavailable: Boolean = false,
+): Boolean = !rendererUnavailable && if (isVideo) {
+    videoTerminal || (renderAdmitted && countdown <= 0)
+} else {
+    renderAdmitted && countdown <= 0
+}
+
+internal fun fallbackPlayableGateCanAccrue(
+    renderAdmitted: Boolean,
+    foreground: Boolean,
+    clickHandoffPending: Boolean,
+    storeVisitPending: Boolean,
+): Boolean = renderAdmitted && foreground && !clickHandoffPending && !storeVisitPending
 
 internal fun shouldEnterFallbackVideoUnavailable(
     type: CreativeType,
@@ -146,13 +200,6 @@ internal fun resolveFallbackVideoRouting(
     return FallbackVideoRouting(route, destination, storeUrl, inherited)
 }
 
-internal fun nextFallbackVideoUrl(
-    ads: List<SimulaApiClient.FallbackAd>,
-    afterDisplayIndex: Int,
-): String? = ads.drop((afterDisplayIndex + 1).coerceAtLeast(0))
-    .firstOrNull { it.type == CreativeType.VIDEO }
-    ?.url
-
 internal fun closeGateProgress(elapsedMs: Long, durationMs: Long): Float =
     if (durationMs <= 0L) 1f else (elapsedMs.toFloat() / durationMs).coerceIn(0f, 1f)
 
@@ -162,6 +209,7 @@ internal fun closeGateSecondsRemaining(elapsedMs: Long, durationMs: Long): Int =
 internal class FallbackCloseGateState {
     private val elapsedByIndex = LinkedHashMap<Int, Long>()
     private val videoDurationByIndex = LinkedHashMap<Int, Long>()
+    private val videoPositionByIndex = LinkedHashMap<Int, Long>()
 
     @Synchronized
     fun elapsedMs(index: Int): Long = elapsedByIndex[index.coerceAtLeast(0)] ?: 0L
@@ -176,6 +224,25 @@ internal class FallbackCloseGateState {
         return updated
     }
 
+    fun addPlayableElapsedMs(
+        index: Int,
+        elapsedMs: Long,
+        durationMs: Long,
+        renderAdmitted: Boolean,
+        foreground: Boolean,
+        clickHandoffPending: Boolean,
+        storeVisitPending: Boolean,
+    ): Long {
+        if (!fallbackPlayableGateCanAccrue(
+                renderAdmitted,
+                foreground,
+                clickHandoffPending,
+                storeVisitPending,
+            )
+        ) return this.elapsedMs(index)
+        return addElapsedMs(index, elapsedMs, durationMs)
+    }
+
     @Synchronized
     fun videoDurationMs(index: Int): Long = videoDurationByIndex[index.coerceAtLeast(0)] ?: 0L
 
@@ -185,7 +252,17 @@ internal class FallbackCloseGateState {
     }
 
     @Synchronized
+    fun videoPositionMs(index: Int): Long = videoPositionByIndex[index.coerceAtLeast(0)] ?: 0L
+
+    @Synchronized
+    fun retainVideoPositionMs(index: Int, positionMs: Long) {
+        val key = index.coerceAtLeast(0)
+        videoPositionByIndex[key] = maxOf(videoPositionByIndex[key] ?: 0L, positionMs.coerceAtLeast(0L))
+    }
+
+    @Synchronized
     fun clear() {
+        videoPositionByIndex.clear()
         elapsedByIndex.clear()
         videoDurationByIndex.clear()
     }
@@ -206,7 +283,10 @@ internal fun enqueueOwnedFallbackClickBeacon(
 
 internal class FallbackPresentationState(
     private val clockMs: () -> Long = SystemClock::elapsedRealtime,
+    videoPlanV2: Boolean = false,
+    videoPlanState: VideoPlanPresentationState? = null,
 ) {
+    val videoPlan = videoPlanState ?: VideoPlanPresentationState(videoPlanV2, clockMs)
     var stage: FallbackStage = FallbackStage.CONTENT
         private set
     var index: Int = 0
@@ -214,6 +294,8 @@ internal class FallbackPresentationState(
     var clickHandoffPending by mutableStateOf(false)
         private set
     var fetchedAds: List<SimulaApiClient.FallbackAd>? = null
+        private set
+    var primaryEndReached by mutableStateOf(false)
         private set
     private var navigationOwner: Any? = null
     private var navigateInWebView: ((String) -> Boolean)? = null
@@ -223,9 +305,17 @@ internal class FallbackPresentationState(
     private var cleared = false
     private var fetchWaitGeneration = 0L
     private var fetchWaitDeadlineMs = 0L
+    private var fetchWaitTargetIndex = 0
+    private var fallbackResolutionFailed = false
+    private var authoritativeEndClaimed = false
     private val closeGateState = FallbackCloseGateState()
     private val automaticNavigationGates = LinkedHashMap<Int, AutomaticNavigationGate>()
     private val rendererAbandonedIndices = mutableSetOf<Int>()
+    private val videoLeases = LinkedHashMap<Int, VideoAssetLease>()
+    private var serverCandidates: List<SimulaApiClient.FallbackAd> = emptyList()
+    private val pendingVideoIndices = mutableSetOf<Int>()
+    private val unavailableVideoIndices = mutableSetOf<Int>()
+    private val videoPreparationCancellations = LinkedHashMap<Int, () -> Unit>()
 
     fun showing(index: Int) {
         val nextIndex = index.coerceAtLeast(0)
@@ -248,12 +338,122 @@ internal class FallbackPresentationState(
         }
         if (!pending) dispatchReadyNavigation()
     }
-    fun retainFetchedAds(ads: List<SimulaApiClient.FallbackAd>) { fetchedAds = ads }
+    fun retainFetchedAds(ads: List<SimulaApiClient.FallbackAd>) {
+        fetchedAds = ads
+        fallbackResolutionFailed = false
+    }
+
+    @Synchronized
+    fun retainServerCandidates(ads: List<SimulaApiClient.FallbackAd>) {
+        serverCandidates = ads
+        pendingVideoIndices.clear()
+        unavailableVideoIndices.clear()
+        ads.filter { it.type == CreativeType.VIDEO }.forEach { ad ->
+            if (admittedVideoUrl(ad.url) == null) unavailableVideoIndices += ad.sourceIndex
+            else if (!videoLeases.containsKey(ad.sourceIndex)) pendingVideoIndices += ad.sourceIndex
+        }
+    }
+
+    @Synchronized
+    fun registerVideoPreparation(sourceIndex: Int, cancel: () -> Unit): Boolean {
+        if (sourceIndex !in pendingVideoIndices || cleared) return false
+        videoPreparationCancellations.put(sourceIndex, cancel)?.invoke()
+        return true
+    }
+
+    @Synchronized
+    fun settleVideoPreparation(sourceIndex: Int, lease: VideoAssetLease?) {
+        videoPreparationCancellations.remove(sourceIndex)
+        if (sourceIndex !in pendingVideoIndices || cleared) {
+            lease?.release()
+            return
+        }
+        pendingVideoIndices.remove(sourceIndex)
+        if (lease == null) {
+            unavailableVideoIndices += sourceIndex
+        } else {
+            videoLeases.put(sourceIndex, lease)?.release()
+        }
+    }
+
+    @Synchronized
+    fun markPendingVideosUnavailable() {
+        val pending = pendingVideoIndices.toList()
+        pendingVideoIndices.clear()
+        unavailableVideoIndices += pending
+        pending.forEach { videoPreparationCancellations.remove(it)?.invoke() }
+    }
+
+    @Synchronized
+    fun hasPendingVideoPreparation(): Boolean = pendingVideoIndices.isNotEmpty()
+
+    @Synchronized
+    fun displayablePreparedAds(): List<SimulaApiClient.FallbackAd> {
+        val displayable = ArrayList<SimulaApiClient.FallbackAd>(serverCandidates.size)
+        serverCandidates.forEach { ad ->
+            if (ad.type != CreativeType.VIDEO) {
+                displayable += ad
+            } else when {
+                videoLeases.containsKey(ad.sourceIndex) -> displayable += ad
+                ad.sourceIndex in pendingVideoIndices -> return displayable
+                ad.sourceIndex in unavailableVideoIndices -> Unit
+                else -> Unit
+            }
+        }
+        return displayable
+    }
+    @Synchronized
+    fun hasNextStepAfter(sourceIndex: Int): Boolean {
+        val current = serverCandidates.indexOfFirst { it.sourceIndex == sourceIndex }
+        if (current < 0) return false
+        return serverCandidates.drop(current + 1).any { ad ->
+            ad.type != CreativeType.VIDEO || ad.sourceIndex !in unavailableVideoIndices
+        }
+    }
+
+    fun videoFile(sourceIndex: Int): java.io.File? = videoLeases[sourceIndex]?.file
+    fun notifyFirstResolvedStepReady(ads: List<SimulaApiClient.FallbackAd>) {
+        if (ads.firstOrNull()?.type == CreativeType.PLAYABLE) videoPlan.nextStepReady()
+    }
+    var renderableGateReached = false
+        private set
+
+    fun markRenderableGateReached() {
+        renderableGateReached = true
+    }
+
+    fun markPrimaryEndReached() {
+        primaryEndReached = true
+    }
+    fun primaryHasNextStep(): Boolean = fetchedAds?.isNotEmpty() ?: true
     fun fetchFailed() = Unit
     fun terminalizeInitialFetchFailure(): List<SimulaApiClient.FallbackAd> {
         val retained = fetchedAds
         if (retained != null) return retained
-        return emptyList<SimulaApiClient.FallbackAd>().also(::retainFetchedAds)
+        fallbackResolutionFailed = true
+        return emptyList<SimulaApiClient.FallbackAd>().also { fetchedAds = it }
+    }
+    @Synchronized
+    internal fun fallbackResolutionReasonOverride(): VideoLifecycleReason? =
+        VideoLifecycleReason.NEXT_STEP_FAILED.takeIf {
+            fallbackResolutionFailed || unavailableVideoIndices.isNotEmpty()
+        }
+
+    @Synchronized
+    fun claimAuthoritativeEnd(): Boolean {
+        if (authoritativeEndClaimed) return false
+        authoritativeEndClaimed = true
+        return true
+    }
+
+    fun reportAuthoritativeEnd(report: () -> Unit): Boolean {
+        if (!claimAuthoritativeEnd()) return false
+        runCatching(report)
+        return true
+    }
+
+    fun closePendingAfterFallbackResolution() {
+        videoPlan.closePendingHandoff(fallbackResolutionReasonOverride())
     }
     fun retainAutomaticNavigation(
         index: Int,
@@ -335,15 +535,37 @@ internal class FallbackPresentationState(
         durationMs: Long = FALLBACK_CLOSE_GATE_MS,
     ): Long = closeGateState.addElapsedMs(index, elapsedMs, durationMs)
 
+    fun addPlayableCloseGateElapsedMs(
+        index: Int,
+        elapsedMs: Long,
+        durationMs: Long,
+        renderAdmitted: Boolean,
+        foreground: Boolean,
+        clickHandoffPending: Boolean,
+        storeVisitPending: Boolean,
+    ): Long = closeGateState.addPlayableElapsedMs(
+        index,
+        elapsedMs,
+        durationMs,
+        renderAdmitted,
+        foreground,
+        clickHandoffPending,
+        storeVisitPending,
+    )
+
+    fun videoPositionMs(index: Int): Long = closeGateState.videoPositionMs(index)
+    fun retainVideoPositionMs(index: Int, positionMs: Long) = closeGateState.retainVideoPositionMs(index, positionMs)
     fun videoDurationMs(index: Int): Long = closeGateState.videoDurationMs(index)
 
     fun retainVideoDurationMs(index: Int, durationMs: Long) =
         closeGateState.retainVideoDurationMs(index, durationMs)
 
-    fun startPostCloseFetchWait(): Long {
+    fun startPostCloseFetchWait(targetIndex: Int = 0): Long {
         if (stage != FallbackStage.FETCHING) {
+            if (stage == FallbackStage.SHOWING) cancelNavigationLocked()
             fetchWaitGeneration++
             fetchWaitDeadlineMs = clockMs() + FALLBACK_POST_CLOSE_WAIT_MS
+            fetchWaitTargetIndex = targetIndex.coerceAtLeast(0)
             stage = FallbackStage.FETCHING
         }
         return fetchWaitGeneration
@@ -362,13 +584,30 @@ internal class FallbackPresentationState(
         ads: List<SimulaApiClient.FallbackAd>,
     ): Boolean {
         if (stage != FallbackStage.FETCHING || generation != fetchWaitGeneration) return false
-        if (ads.isNotEmpty()) showing(0) else done()
+        if (ads.getOrNull(fetchWaitTargetIndex) != null) {
+            showing(fetchWaitTargetIndex)
+        } else if (hasPendingVideoPreparation()) {
+            return false
+        } else {
+            done()
+        }
+        notifyFirstResolvedStepReady(ads.drop(fetchWaitTargetIndex))
         return true
     }
 
-    fun timeoutPostCloseFetchWait(generation: Long): Boolean {
+    fun timeoutPostCloseFetchWait(
+        generation: Long,
+        ads: List<SimulaApiClient.FallbackAd> = emptyList(),
+    ): Boolean {
         if (stage != FallbackStage.FETCHING || generation != fetchWaitGeneration) return false
-        done()
+        markPendingVideosUnavailable()
+        if (ads.getOrNull(fetchWaitTargetIndex) != null) {
+            showing(fetchWaitTargetIndex)
+            notifyFirstResolvedStepReady(ads.drop(fetchWaitTargetIndex))
+        } else {
+            done()
+            videoPlan.closePendingHandoff(VideoLifecycleReason.NEXT_STEP_TIMEOUT)
+        }
         return true
     }
 
@@ -414,6 +653,11 @@ internal class FallbackPresentationState(
         closeGateState.clear()
         automaticNavigationGates.clear()
         rendererAbandonedIndices.clear()
+        videoPreparationCancellations.values.forEach { runCatching(it) }
+        videoPreparationCancellations.clear()
+        pendingVideoIndices.clear()
+        videoLeases.values.forEach(VideoAssetLease::release)
+        videoLeases.clear()
     }
 
     private fun dispatchReadyNavigation() {
@@ -521,6 +765,7 @@ internal fun FallbackAdHost(
     adUnitId: String? = null,
     presentationState: FallbackPresentationState = remember { FallbackPresentationState() },
     onFullyClosed: () -> Unit,
+    onAuthoritativeEndReached: () -> Unit = {},
     autoStoreRedirect: AutoStoreRedirect? = null,
     onAutoStoreRedirect: (() -> Boolean, (Boolean) -> Unit, ((() -> Unit) -> Unit)) -> Unit =
         { _, completion, _ -> completion(false) },
@@ -537,20 +782,25 @@ internal fun FallbackAdHost(
     onStoreOpen: (ClickInteraction) -> Unit = {},
     persistClick: (String, ClickInteraction, () -> Unit) -> Unit = { _, _, complete -> complete() },
     claimClick: ((String) -> ClickInteractionClaim?)? = null,
+    claimTrustedClick: ((String, String) -> ClickInteractionClaim?)? = null,
+    claimWebClick: ((String) -> ClickInteractionClaim?)? = null,
     routeClick: (((Context) -> Boolean, (Boolean) -> Unit) -> ClickRouteStart)? = null,
     onClickHandoffCreated: (ClickPersistenceHandoff) -> Unit = {},
     onClickHandoffFinished: (ClickPersistenceHandoff) -> Unit = {},
     autoRedirectCoordinator: AutoRedirectCoordinator? = null,
     pendingClickHandoff: () -> ClickPersistenceHandoff? = { null },
-    storeVisitPending: Boolean = false,
+    storeVisitPending: () -> Boolean = { false },
     // The primary serve's CTA routing context, threaded into each end screen so its CTA opens
     // through the shared router (direct resolved Play URL, raw store link as deterministic fallback).
     // Defaults preserve today's behavior when no context is available.
     ctaTrackingUrl: String? = null,
     ctaDestination: String = "appstore",
     ctaStoreUrl: String? = null,
-    content: @Composable (onClose: () -> Unit) -> Unit,
+    videoPlanV2: Boolean = false,
+    content: @Composable (onClose: () -> Unit, nextVideoUrl: String?, hasNextStep: () -> Boolean) -> Unit,
 ) {
+    val canonicalAdFormat = canonicalFullscreenAdFormat(adFormat)
+    val context = LocalContext.current
     var phase by remember(presentationState) {
         mutableStateOf<FallbackPhase>(
             when (presentationState.stage) {
@@ -570,15 +820,22 @@ internal fun FallbackAdHost(
         )
     }
     val fallbackClickGate = remember(impressionId) { ClickInteractionGate() }
-    val clickClaim = claimClick ?: fallbackClickGate::claim
+    val clickClaim = claimClick ?: { source: String -> fallbackClickGate.claim(source) }
+    val webClickClaim = claimWebClick ?: { source: String -> fallbackClickGate.claimWeb(source) }
     // Fullscreen presentations pass their shared coordinator; the local instance is only for the
     // standalone/default host and must not replace presentation state across end-screen indices.
     val localAutoRedirectCoordinator = remember(impressionId) { AutoRedirectCoordinator() }
     val redirects = autoRedirectCoordinator ?: localAutoRedirectCoordinator
+    VideoPlanOverlayClockEffect(presentationState.videoPlan) {
+        presentationState.clickHandoffPending || pendingClickHandoff() != null || storeVisitPending()
+    }
     DisposableEffect(localAutoRedirectCoordinator, autoRedirectCoordinator) {
         onDispose {
             if (autoRedirectCoordinator == null) localAutoRedirectCoordinator.dispose()
         }
+    }
+    fun reportAuthoritativeEnd() {
+        presentationState.reportAuthoritativeEnd(onAuthoritativeEndReached)
     }
     // auto_store_redirect END_SCREEN_N: open the primary ad's store once, when the fallback screen
     // whose index matches the configured trigger is presented (index 0 = END SCREEN 1, index 1 = 2).
@@ -588,7 +845,12 @@ internal fun FallbackAdHost(
     // they present instantly on close instead of fetching then (which flashed the host behind).
     // `GET /load/fallbacks` is side-effect-free, so prefetching reports nothing prematurely.
     // null = still in flight; empty = none returned.
-    var prefetched by remember(presentationState) { mutableStateOf(presentationState.fetchedAds) }
+    var prefetched by remember(presentationState) { mutableStateOf(presentationState.fetchedAds, androidx.compose.runtime.neverEqualPolicy()) }
+    LaunchedEffect(prefetched, presentationState.primaryEndReached) {
+        if (presentationState.primaryEndReached && prefetched?.isEmpty() == true) {
+            reportAuthoritativeEnd()
+        }
+    }
     LaunchedEffect(impressionId) {
         if (prefetched == null) {
             var fetched: List<SimulaApiClient.FallbackAd>? = null
@@ -604,29 +866,63 @@ internal fun FallbackAdHost(
                 if (attempt + 1 < FALLBACK_FETCH_ATTEMPTS) delay(FALLBACK_FETCH_RETRY_MS)
             }
             if (presentationState.stage == FallbackStage.DONE) return@LaunchedEffect
-            val resolved = fetched ?: presentationState.terminalizeInitialFetchFailure()
-            presentationState.retainFetchedAds(resolved)
-            FullscreenVideoPreparer.prepare(nextFallbackVideoUrl(resolved, afterDisplayIndex = -1))
-            prefetched = resolved
+            val accepted = fetched?.take(FALLBACK_SCREEN_MAX)
+            if (accepted == null) {
+                prefetched = presentationState.terminalizeInitialFetchFailure()
+                return@LaunchedEffect
+            }
+            presentationState.retainServerCandidates(accepted)
+            fun publishPreparedState() {
+                val resolved = presentationState.displayablePreparedAds()
+                if (resolved.isNotEmpty() || !presentationState.hasPendingVideoPreparation()) {
+                    presentationState.retainFetchedAds(resolved)
+                    prefetched = resolved
+                }
+            }
+            publishPreparedState()
+            fallbackPreparationWindow(accepted, currentIndex = 0)
+                .filter { it.type == CreativeType.VIDEO && admittedVideoUrl(it.url) != null }
+                .forEach { ad ->
+                    val job = launch {
+                        val lease = when (val result = VideoAssetCache.acquire(context.applicationContext, ad.url)) {
+                            is VideoAssetCacheResult.Ready -> result.lease
+                            is VideoAssetCacheResult.Failed -> null
+                        }
+                        presentationState.settleVideoPreparation(ad.sourceIndex, lease)
+                        publishPreparedState()
+                    }
+                    if (!presentationState.registerVideoPreparation(ad.sourceIndex, job::cancel)) {
+                        job.cancel()
+                    }
+                }
         }
     }
 
     // Primary creative closed → present the prefetched screens immediately. If the prefetch is
     // somehow still in flight (user closed very fast), wait briefly in [FallbackPhase.Fetching].
     fun onPrimaryClosed() {
+        presentationState.videoPlan.handoffPresentationBegan()
         val ads = prefetched
         phase = when {
             ads == null -> FallbackPhase.Fetching(presentationState.startPostCloseFetchWait())
             ads.isNotEmpty() -> FallbackPhase.Showing(ads, index = 0).also { presentationState.showing(0) }
-            else -> FallbackPhase.Done.also { presentationState.done() }
+            else -> FallbackPhase.Done.also {
+                presentationState.closePendingAfterFallbackResolution()
+                presentationState.done()
+            }
         }
+        ads?.let(presentationState::notifyFirstResolvedStepReady)
     }
 
     // This root survives every phase, including Done's final callback frame, so no transition can
     // expose the Activity window or host beneath it.
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         when (val p = phase) {
-            FallbackPhase.Content -> content { onPrimaryClosed() }
+            FallbackPhase.Content -> content(
+                { onPrimaryClosed() },
+                null,
+                presentationState::primaryHasNextStep,
+            )
             // Prefetch wasn't ready at close — hold on the black backdrop and advance when it lands.
             is FallbackPhase.Fetching -> {
                 // Swallow back during this brief settle window so a fast back-press can't finish the
@@ -636,8 +932,17 @@ internal fun FallbackAdHost(
                     val remainingMs = presentationState.postCloseFetchWaitRemainingMs(p.generation)
                         ?: return@LaunchedEffect
                     if (remainingMs > 0L) delay(remainingMs)
-                    if (presentationState.timeoutPostCloseFetchWait(p.generation)) {
-                        phase = FallbackPhase.Done
+                    presentationState.markPendingVideosUnavailable()
+                    val resolved = presentationState.displayablePreparedAds()
+                    presentationState.retainFetchedAds(resolved)
+                    prefetched = resolved
+                    if (presentationState.timeoutPostCloseFetchWait(p.generation, resolved)) {
+                        phase = if (presentationState.stage == FallbackStage.SHOWING) {
+                            FallbackPhase.Showing(resolved, presentationState.index)
+                        } else {
+                            reportAuthoritativeEnd()
+                            FallbackPhase.Done
+                        }
                     }
                 }
                 LaunchedEffect(prefetched, p.generation) {
@@ -648,6 +953,8 @@ internal fun FallbackAdHost(
                     phase = if (presentationState.stage == FallbackStage.SHOWING) {
                         FallbackPhase.Showing(ads, presentationState.index)
                     } else {
+                        presentationState.closePendingAfterFallbackResolution()
+                        reportAuthoritativeEnd()
                         FallbackPhase.Done
                     }
                 }
@@ -718,7 +1025,11 @@ internal fun FallbackAdHost(
                 // next screen would inherit the previous one's elapsed countdown and loaded page.
                 key(screenIndex) {
                     val resolvedClose = ad.closeBehavior.copy(
-                        action = resolveFallbackCloseAction(ad.closeBehavior.action, p.index, p.ads.size),
+                        action = resolveFallbackCloseAction(
+                            ad.closeBehavior.action, p.index,
+                            // Read the preparation snapshot so failure/ready publications refresh chrome.
+                            prefetched != null && presentationState.hasNextStepAfter(ad.sourceIndex),
+                        ),
                     )
                     FallbackAdOverlay(
                         ad = ad,
@@ -729,14 +1040,17 @@ internal fun FallbackAdHost(
                         },
                         persistClick = persistClick,
                         claimClick = clickClaim,
+                        claimTrustedClick = claimTrustedClick,
+                        claimWebClick = webClickClaim,
                         impressionId = impressionId,
-                        adFormat = adFormat,
+                        adFormat = canonicalAdFormat,
                         adUnitId = adUnitId,
                         routeClick = routeClick,
                         presentationState = presentationState,
                         fallbackIndex = p.index,
                         sourceIndex = ad.sourceIndex,
-                        nextVideoUrl = nextFallbackVideoUrl(p.ads, p.index),
+                        nextVideoUrl = null,
+                        hasNextStep = { presentationState.hasNextStepAfter(ad.sourceIndex) },
                         closeBehavior = resolvedClose,
                         onClickHandoffCreated = { handoff ->
                             presentationState.abandonAutomaticNavigation(p.index)
@@ -752,15 +1066,34 @@ internal fun FallbackAdHost(
                         ctaStoreUrl = ctaStoreUrl,
                         onAutomaticNavigation = ::dispatchAutomaticNavigation,
                         onRendererUnavailable = { redirects.deactivate(autoRedirectScope) },
+                        onAuthoritativeEndReached = {
+                            if (!presentationState.hasNextStepAfter(ad.sourceIndex)) reportAuthoritativeEnd()
+                        },
                         storeVisitPending = storeVisitPending,
                         onClose = {
-                            if (!presentationState.advance(p.ads.size)) return@FallbackAdOverlay
+                            presentationState.videoPlan.handoffPresentationBegan()
+                            val latest = presentationState.displayablePreparedAds()
+                            presentationState.retainFetchedAds(latest)
+                            val currentIndex = latest.indexOfFirst { it.sourceIndex == ad.sourceIndex }
+                                .takeIf { it >= 0 } ?: p.index
+                            val nextIndex = currentIndex + 1
+                            if (latest.getOrNull(nextIndex) == null &&
+                                presentationState.hasPendingVideoPreparation()
+                            ) {
+                                phase = FallbackPhase.Fetching(
+                                    presentationState.startPostCloseFetchWait(nextIndex),
+                                )
+                                return@FallbackAdOverlay
+                            }
+                            if (!presentationState.advance(latest.size)) return@FallbackAdOverlay
                             phase = if (presentationState.stage == FallbackStage.SHOWING) {
-                                p.ads.getOrNull(presentationState.index)
-                                    ?.takeIf { it.type == CreativeType.VIDEO }
-                                    ?.let { FullscreenVideoPreparer.prepare(it.url) }
-                                p.copy(index = presentationState.index)
+                                latest.getOrNull(presentationState.index)
+                                    ?.takeIf { it.type == CreativeType.PLAYABLE }
+                                    ?.let { presentationState.videoPlan.nextStepReady() }
+                                FallbackPhase.Showing(latest, presentationState.index)
                             } else {
+                                presentationState.videoPlan.closePendingHandoff()
+                                reportAuthoritativeEnd()
                                 FallbackPhase.Done
                             }
                         },
@@ -790,6 +1123,8 @@ private fun FallbackAdOverlay(
     onStoreOpen: (ClickInteraction) -> Unit = {},
     persistClick: (String, ClickInteraction, () -> Unit) -> Unit,
     claimClick: (String) -> ClickInteractionClaim?,
+    claimTrustedClick: ((String, String) -> ClickInteractionClaim?)?,
+    claimWebClick: (String) -> ClickInteractionClaim?,
     impressionId: String,
     adFormat: String,
     adUnitId: String?,
@@ -798,6 +1133,7 @@ private fun FallbackAdOverlay(
     fallbackIndex: Int,
     sourceIndex: Int,
     nextVideoUrl: String?,
+    hasNextStep: () -> Boolean,
     closeBehavior: CloseBehavior,
     onClickHandoffCreated: (ClickPersistenceHandoff) -> Unit,
     onClickHandoffFinished: (ClickPersistenceHandoff) -> Unit,
@@ -806,17 +1142,21 @@ private fun FallbackAdOverlay(
     ctaStoreUrl: String? = null,
     onAutomaticNavigation: () -> Unit,
     onRendererUnavailable: () -> Unit,
-    storeVisitPending: Boolean,
+    onAuthoritativeEndReached: () -> Unit,
+    storeVisitPending: () -> Boolean,
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
     val adId = ad.adId
-    val nativeClickBeaconV1Enabled = ad.nativeClickBeaconV1Enabled
+    val nativeClickBeaconV1Enabled = ad.videoContract2 || ad.nativeClickBeaconV1Enabled
     val lifecycleOwner = LocalLifecycleOwner.current
     val clickHandler = remember { Handler(Looper.getMainLooper()) }
     val inlineHtml = ad.renderedHtml?.takeIf { it.isNotBlank() }
     val isVideo = ad.type == CreativeType.VIDEO
     val videoUrl = remember(ad.url) { admittedVideoUrl(ad.url) }
+    var videoPositionMs by remember(presentationState, fallbackIndex) {
+        mutableStateOf(presentationState.videoPositionMs(fallbackIndex))
+    }
     var videoDurationMs by remember(presentationState, fallbackIndex) {
         mutableStateOf(presentationState.videoDurationMs(fallbackIndex))
     }
@@ -833,11 +1173,21 @@ private fun FallbackAdOverlay(
     }
     var renderProcessGone by remember(presentationState, fallbackIndex) { mutableStateOf(false) }
     val navigationOwner = remember(presentationState, fallbackIndex) { Any() }
+    val bridge = remember(context) {
+        androidCreativeBridge(
+            appContext = context.applicationContext,
+            activityProvider = { context as? Activity },
+            onEarlyComplete = {},
+        )
+    }
     val renderGate = remember(presentationState, sourceIndex) { RenderAttemptGate() }
     var renderToken by remember(presentationState, sourceIndex) { mutableStateOf(0L) }
     // Keep an opaque layer over the pooled WebView until this creative commits a visible frame.
     var pageCommitted by remember { mutableStateOf(false) }
     var pageLoadFailed by remember { mutableStateOf(false) }
+    var videoFirstFrameAdmitted by remember(presentationState, fallbackIndex) { mutableStateOf(false) }
+    var videoTerminal by remember(presentationState, fallbackIndex) { mutableStateOf(false) }
+    val storeVisitBlocked = storeVisitPending()
     DisposableEffect(presentationState, navigationOwner, fallbackWebView) {
         val webView = fallbackWebView ?: return@DisposableEffect onDispose {}
         val webViewRef = WeakReference(webView)
@@ -879,36 +1229,154 @@ private fun FallbackAdOverlay(
         runCatching(onRendererUnavailable)
     }
     fun failInitialRenderer(token: Long) {
-        if (renderGate.fail(token)) pageLoadFailed = true
+        if (!renderGate.fail(token)) return
+        pageLoadFailed = true
+        applyRendererUnavailable()
+    }
+    fun beginTrustedFallbackCta(request: TrustedCtaOpen) {
+        val routePlan = when (val plan = CreativeCtaRouter.fallbackCtaTapPlan(
+            isMainFrame = true,
+            hasGesture = true,
+            tappedUrl = request.url,
+            creativeBaseUrl = ad.creativeBaseUrl,
+            trackingUrl = ctaTrackingUrl,
+            destination = ctaDestination,
+        )) {
+            CreativeCtaRouter.PrimaryCtaTapPlan.AllowInWebView,
+            CreativeCtaRouter.PrimaryCtaTapPlan.ConsumeWithoutClick,
+            -> return
+            is CreativeCtaRouter.PrimaryCtaTapPlan.Route -> plan.route
+        }
+        val fallbackSource = when (sourceIndex) {
+            0 -> ClickSources.END_SCREEN_1_UNKNOWN
+            1 -> ClickSources.END_SCREEN_2_UNKNOWN
+            else -> ClickSources.END_SCREEN_2_UNKNOWN
+        }
+        val source = ClickSources.trustedHtmlOr(request.clickSource, fallbackSource)
+        val claim = request.interactionId?.let { claimTrustedClick?.invoke(it, source) }
+            ?: claimWebClick(source) ?: return
+        notifyPublisherClick { onAdClick(claim.interaction) }
+        val interaction = claim.interaction
+        val routeStartedAtNanos = System.nanoTime()
+        coordinateDeferredClickPersistence(
+            mainHandler = clickHandler,
+            claim = claim,
+            enqueueBeacon = { completion ->
+                enqueueOwnedFallbackClickBeacon(adId, nativeClickBeaconV1Enabled, completion) { beaconId ->
+                    AdBeaconManager.enqueue(
+                        beaconId,
+                        "click",
+                        adFormat = adFormat,
+                        telemetryServeId = impressionId,
+                        interactionId = interaction.id,
+                        clickSource = interaction.source,
+                        onPersistenceComplete = completion,
+                    )
+                }
+            },
+            recordTelemetry = { completion -> persistClick(adId, interaction, completion) },
+            onHandoff = { committedInteraction, completion ->
+                prepareDeferredCtaRoute(
+                    prepare = {
+                        CreativeCtaRouter.preparePrimaryCta(
+                            routePlan,
+                            ctaDestination,
+                            ctaStoreUrl,
+                            routeStartedAtNanos,
+                        )
+                    },
+                    requestRoute = { route, routeCompletion ->
+                        val start = routeClick?.invoke(route, routeCompletion)
+                        if (start == null) {
+                            routeCompletion(route(context))
+                            PresentationRouteResult.EXECUTED
+                        } else if (start == ClickRouteStart.REJECTED) {
+                            PresentationRouteResult.REJECTED
+                        } else PresentationRouteResult.EXECUTED
+                    },
+                    completion = completion,
+                    open = { routeContext, prepared ->
+                        val outcome = CreativeCtaRouter.launchPrepared(routeContext, prepared)
+                        if (outcome == AutomaticNavigationOutcome.STORE_OPENED) {
+                            runCatching { onStoreOpen(committedInteraction) }
+                        }
+                        outcome != AutomaticNavigationOutcome.FAILED &&
+                            outcome != AutomaticNavigationOutcome.HANDLED
+                    },
+                )
+            },
+            onCreated = onClickHandoffCreated,
+            onFinished = onClickHandoffFinished,
+        )
+    }
+    val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
+    var countdown by remember(presentationState, fallbackIndex) {
+        mutableStateOf(closeGateSecondsRemaining(retainedGateMs, gateMs))
+    }
+    var authoritativeEndReported by remember(presentationState, fallbackIndex) { mutableStateOf(false) }
+    fun reportAuthoritativeEnd() {
+        if (authoritativeEndReported) return
+        authoritativeEndReported = true
+        runCatching(onAuthoritativeEndReached)
+    }
+    fun retainRenderableGateIfReached(): Boolean {
+        val reached = fallbackReachedAuthoritativeGate(
+            isVideo, if (isVideo) videoFirstFrameAdmitted else pageCommitted,
+            countdown, videoTerminal, rendererUnavailable = rendererGone,
+        )
+        if (reached) presentationState.markRenderableGateReached()
+        return reached
     }
     var unavailableExitIssued by remember { mutableStateOf(false) }
-    fun closeOnce() {
+    fun closeOnce(origin: VideoOverlayCloseOrigin) {
         if (unavailableExitIssued) return
+        if (!videoOverlayCloseAllowed(origin, isVideo, ad.videoContract2, videoTerminal) {
+                presentationState.videoPlan.closeCurrent(VideoLifecycleReason.USER, hasNextStep())
+            }
+        ) return
+        // A close can run before the next Compose effect. Retain gate evidence before authority
+        // is delivered to the host, without treating a renderer failure as a completed gate.
+        retainRenderableGateIfReached()
         unavailableExitIssued = true
         runCatching(onClose)
+    }
+    fun finishUnavailableExit(cause: FallbackUnavailableExitCause) {
+        if (fallbackUnavailableExitReportsAuthority(cause, rendererOwnsPhase)) {
+            reportAuthoritativeEnd()
+        }
+        closeOnce(
+            if (cause == FallbackUnavailableExitCause.USER_ESCAPE) {
+                VideoOverlayCloseOrigin.USER
+            } else {
+                VideoOverlayCloseOrigin.AUTOMATIC
+            },
+        )
+    }
+    fun escapePreFirstFrameVideo() {
+        if (!videoPreFirstFrameEscapeAvailable(isVideo, videoFirstFrameAdmitted) ||
+            presentationState.clickHandoffPending || storeVisitPending()
+        ) return
+        applyRendererUnavailable()
+        finishUnavailableExit(FallbackUnavailableExitCause.USER_ESCAPE)
     }
     LaunchedEffect(isVideo, videoUrl, rendererGone) {
         if (shouldEnterFallbackVideoUnavailable(ad.type, videoUrl, rendererGone)) {
             applyRendererUnavailable()
         }
     }
-    LaunchedEffect(rendererGone, rendererOwnsPhase, presentationState.clickHandoffPending, storeVisitPending) {
+    LaunchedEffect(rendererGone, rendererOwnsPhase, presentationState.clickHandoffPending, storeVisitBlocked) {
         if (!rendererGone || !rendererOwnsPhase || presentationState.clickHandoffPending) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             withFrameNanos { }
             if (shouldExitUnavailableCreative(
                     creativeUnavailable = rendererGone,
                     clickHandoffPending = presentationState.clickHandoffPending,
-                    storeVisitPending = storeVisitPending,
+                    storeVisitPending = storeVisitPending(),
                 ) && !unavailableExitIssued
             ) {
-                closeOnce()
+                finishUnavailableExit(FallbackUnavailableExitCause.RENDERER_FAILURE)
             }
         }
-    }
-    val retainedGateMs = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
-    var countdown by remember(presentationState, fallbackIndex) {
-        mutableStateOf(closeGateSecondsRemaining(retainedGateMs, gateMs))
     }
     // Ring fills clockwise from the top (right to left), unfilled → filled, over the countdown.
     val ring = remember(presentationState, fallbackIndex) {
@@ -930,10 +1398,25 @@ private fun FallbackAdOverlay(
     // Foreground-only per-item gate: time accrues only while the Activity is RESUMED, so leaving the app
     // pauses the countdown (parity with the interstitial / rewarded close gates). repeatOnLifecycle
     // cancels the loop when backgrounded and resumes it from the accrued time on return.
-    LaunchedEffect(gateMs, isVideo) {
-        if (!fallbackCloseGateUsesPresentedTime(ad.type)) return@LaunchedEffect
+    LaunchedEffect(
+        gateMs,
+        isVideo,
+        pageCommitted,
+        rendererGone,
+        presentationState.clickHandoffPending,
+        storeVisitBlocked,
+    ) {
+        if (rendererGone || !fallbackCloseGateUsesPresentedTime(ad.type)) return@LaunchedEffect
+        if (!fallbackPlayableGateCanAccrue(
+                renderAdmitted = pageCommitted,
+                foreground = true,
+                clickHandoffPending = presentationState.clickHandoffPending,
+                storeVisitPending = storeVisitBlocked,
+            )
+        ) return@LaunchedEffect
         if (gateMs <= 0L) {
             countdown = 0
+            retainRenderableGateIfReached()
             ring.snapTo(1f)
             return@LaunchedEffect
         }
@@ -943,12 +1426,28 @@ private fun FallbackAdOverlay(
             var lastTickMs = SystemClock.elapsedRealtime()
             while (accumulatedMs < gateMs) {
                 delay(50L)
+                val canAccrue = fallbackPlayableGateCanAccrue(
+                    renderAdmitted = pageCommitted,
+                    foreground = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+                    clickHandoffPending = presentationState.clickHandoffPending,
+                    storeVisitPending = storeVisitPending(),
+                )
+                if (!canAccrue || rendererGone) break
                 val now = SystemClock.elapsedRealtime()
                 val deltaMs = (now - lastTickMs).coerceIn(0L, gateMs)
-                accumulatedMs = presentationState.addCloseGateElapsedMs(fallbackIndex, deltaMs, gateMs)
+                accumulatedMs = presentationState.addPlayableCloseGateElapsedMs(
+                    index = fallbackIndex,
+                    elapsedMs = deltaMs,
+                    durationMs = gateMs,
+                    renderAdmitted = pageCommitted,
+                    foreground = true,
+                    clickHandoffPending = presentationState.clickHandoffPending,
+                    storeVisitPending = storeVisitPending(),
+                )
                 lastTickMs = now
                 ring.snapTo(closeGateProgress(accumulatedMs, gateMs))
                 countdown = closeGateSecondsRemaining(accumulatedMs, gateMs)
+                retainRenderableGateIfReached()
             }
         }
     }
@@ -959,12 +1458,23 @@ private fun FallbackAdOverlay(
         }
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             delay(FALLBACK_RENDER_TIMEOUT_MS)
-            if (renderGate.fail(token)) pageLoadFailed = true
+            failInitialRenderer(token)
         }
     }
     // Back can only close once the countdown elapses (parity with the creative's gated close).
     BackHandler(enabled = true) {
-        if (countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitPending) closeOnce()
+        if (videoPreFirstFrameEscapeAvailable(isVideo, videoFirstFrameAdmitted)) {
+            escapePreFirstFrameVideo()
+            return@BackHandler
+        }
+        if ((isVideo || pageCommitted) && countdown <= 0 &&
+            !presentationState.clickHandoffPending && !storeVisitBlocked
+        ) {
+            closeOnce(VideoOverlayCloseOrigin.USER)
+        }
+    }
+    LaunchedEffect(countdown, isVideo, pageCommitted, videoFirstFrameAdmitted, videoTerminal, rendererGone) {
+        if (retainRenderableGateIfReached()) reportAuthoritativeEnd()
     }
 
     Box(
@@ -973,30 +1483,55 @@ private fun FallbackAdOverlay(
             .background(Color.Black),
     ) {
         if (isVideo && !rendererGone) {
-            videoUrl?.let { videoUrl ->
+            presentationState.videoFile(sourceIndex)?.let { videoFile ->
                 FullscreenVideo(
-                    url = videoUrl,
+                    file = videoFile,
                     posterUrl = ad.posterUrl,
                     adFormat = adFormat,
                     adUnitId = adUnitId,
                     adId = adId.takeIf { it.isNotBlank() },
                     serveId = impressionId.takeIf { it.isNotBlank() },
-                    prewarmNextUrl = nextVideoUrl,
                     configuredGateSeconds = closeBehavior.delaySeconds,
                     initialPlayedMs = presentationState.closeGateElapsedMs(fallbackIndex),
+                    initialPositionMs = presentationState.videoPositionMs(fallbackIndex),
                     ctaEnabled = videoRouting != null,
+                    ctaLabel = ad.cta,
+                    appIconUrl = ad.appIconUrl,
+                    appName = ad.appName,
+                    subtitle = ad.subtitle,
+                    chromeStyle = ad.videoBehavior?.style ?: VideoChromeStyle.CORNER_CTA,
+                    effectiveClosePosition = effectiveClosePosition(
+                        closeBehavior.treatment, closeBehavior.position, ad.progressBarStyle,
+                    ),
+                    bottomProgressBarObstructed = ad.videoContract2 && progressBarAtBottom(
+                        closeBehavior.treatment, closeBehavior.position, ad.progressBarStyle,
+                    ),
+                    videoPool = ad.videoPool,
+                    playbackSlotIdentity = VideoPlaybackSlotIdentity.Fallback(ad.sourceIndex),
+                    clipIndex = ad.clipIndex,
+                    skoverlayEnabled = ad.skoverlay?.enabled,
+                    skoverlayDelaySeconds = ad.skoverlay?.delaySeconds,
+                    videoPlanV2 = ad.videoContract2,
+                    segments = ad.segments,
+                    videoPlanState = presentationState.videoPlan,
+                    presentationBlocked = presentationState.clickHandoffPending || storeVisitBlocked,
+                    willHandoff = hasNextStep,
                     modifier = Modifier
                         .fillMaxSize()
                         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical)),
                     onReady = { durationMs ->
+                        videoFirstFrameAdmitted = true
                         videoDurationMs = durationMs
                         presentationState.retainVideoDurationMs(fallbackIndex, durationMs)
                         gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
                         val accumulated = presentationState.closeGateElapsedMs(fallbackIndex).coerceAtMost(gateMs)
                         countdown = closeGateSecondsRemaining(accumulated, gateMs)
                         videoRingProgress = closeGateProgress(accumulated, gateMs)
+                        retainRenderableGateIfReached()
                     },
-                    onProgress = { _, durationMs, advancedMs ->
+                    onProgress = { positionMs, durationMs, advancedMs ->
+                        presentationState.retainVideoPositionMs(fallbackIndex, positionMs)
+                        videoPositionMs = positionMs
                         videoDurationMs = durationMs
                         presentationState.retainVideoDurationMs(fallbackIndex, durationMs)
                         gateMs = videoCloseGateMs(closeBehavior.delaySeconds, durationMs)
@@ -1007,11 +1542,16 @@ private fun FallbackAdOverlay(
                         )
                         countdown = closeGateSecondsRemaining(accumulated, gateMs)
                         videoRingProgress = closeGateProgress(accumulated, gateMs)
+                        retainRenderableGateIfReached()
                     },
                     onCompleted = {
+                        presentationState.retainVideoPositionMs(fallbackIndex, videoDurationMs)
+                        videoPositionMs = videoDurationMs
                         presentationState.addCloseGateElapsedMs(fallbackIndex, gateMs, gateMs)
                         countdown = 0
                         videoRingProgress = 1f
+                        videoTerminal = true
+                        retainRenderableGateIfReached()
                     },
                     onError = {
                         applyRendererUnavailable()
@@ -1092,6 +1632,7 @@ private fun FallbackAdOverlay(
                     client = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             if (!realLoadStarted) return
+                            BridgeWebViewInstaller.onPageStarted(view)
                             presentationState.onNavigationStarted(url, navigationOwner)
                             if (CreativeCtaRouter.matchesKnownTrackingUrl(url, ctaTrackingUrl)) {
                                 presentationState.markAutomaticTrackerRequested(fallbackIndex)
@@ -1175,7 +1716,7 @@ private fun FallbackAdOverlay(
                                 isMainFrame = request.isForMainFrame,
                                 hasGesture = request.hasGesture(),
                                 tappedUrl = target,
-                                creativeBaseUrl = null,
+                                creativeBaseUrl = ad.creativeBaseUrl,
                                 trackingUrl = ctaTrackingUrl,
                                 destination = ctaDestination,
                             )) {
@@ -1190,7 +1731,12 @@ private fun FallbackAdOverlay(
                             // failure behavior).
                             // A genuine user tap uses one native fallback_cta interaction id for durable
                             // beacon + lifecycle attribution. Programmatic redirects remain non-clicks.
-                            val claim = claimClick(ClickSources.FALLBACK_CTA) ?: return true
+                            val unknownSource = when (sourceIndex) {
+                                0 -> ClickSources.END_SCREEN_1_UNKNOWN
+                                1 -> ClickSources.END_SCREEN_2_UNKNOWN
+                                else -> ClickSources.END_SCREEN_2_UNKNOWN
+                            }
+                            val claim = claimWebClick(unknownSource) ?: return true
                             notifyPublisherClick { onAdClick(claim.interaction) }
                             val interaction = claim.interaction
                             val routeStartedAtNanos = System.nanoTime()
@@ -1283,8 +1829,21 @@ private fun FallbackAdOverlay(
                     presentationState.claimNavigationOwner(navigationOwner)
                     fallbackWebView = this
                     if (inlineHtml != null) {
-                        realLoadStarted = true
-                        loadDataWithBaseURL(null, inlineHtml, "text/html", "UTF-8", null)
+                        val mode = BridgeWebViewInstaller.install(
+                            webView = this,
+                            bridge = bridge,
+                            onTrustedCtaOpen = ::beginTrustedFallbackCta,
+                            fallbackClickSource = when (sourceIndex) {
+                                0 -> ClickSources.END_SCREEN_1_UNKNOWN
+                                else -> ClickSources.END_SCREEN_2_UNKNOWN
+                            },
+                        )
+                        if (mode == BridgeInjectionMode.UNAVAILABLE) {
+                            post(::applyRendererUnavailable)
+                        } else {
+                            realLoadStarted = true
+                            loadDataWithBaseURL(ad.creativeBaseUrl, inlineHtml, "text/html", "UTF-8", null)
+                        }
                     }
                 }
             },
@@ -1299,9 +1858,9 @@ private fun FallbackAdOverlay(
                 if (fallbackWebView === webView) fallbackWebView = null
                 presentationState.unbindNavigation(navigationOwner)
                 if (renderProcessGone) {
-                    WebViewPool.discardAfterRendererGone(webView)
+                    BridgeWebViewInstaller.releaseAfterRendererGone(webView)
                 } else {
-                    WebViewPool.release(webView)
+                    BridgeWebViewInstaller.release(webView)
                 }
             },
         )
@@ -1331,13 +1890,33 @@ private fun FallbackAdOverlay(
             )
         }
 
-        val closeReady = countdown <= 0 && !presentationState.clickHandoffPending && !storeVisitPending
+        val preFirstFrameEscape = videoPreFirstFrameEscapeAvailable(isVideo, videoFirstFrameAdmitted) &&
+            !presentationState.clickHandoffPending && !storeVisitBlocked
+        val closeReady = (isVideo || pageCommitted) && countdown <= 0 &&
+            !presentationState.clickHandoffPending && !storeVisitBlocked
         val closeAlignment = when (closeBehavior.position) {
             ClosePosition.TOP_RIGHT -> Alignment.TopEnd
             ClosePosition.TOP_LEFT -> Alignment.TopStart
             ClosePosition.BOTTOM_LEFT -> Alignment.BottomStart
         }
-        if (closeReady || closeBehavior.treatment == CloseTreatment.COUNTDOWN_CIRCLE) Box(
+        if (preFirstFrameEscape) {
+            VideoPreFirstFrameEscapeButton("Skip unavailable ad", ::escapePreFirstFrameVideo)
+        } else if (isVideo && ad.videoContract2) {
+            AdCloseButton(
+                treatment = closeBehavior.treatment,
+                position = closeBehavior.position,
+                action = closeBehavior.action,
+                progressBarColor = closeBehavior.progressBarColor,
+                isRewardCopy = adFormat == "rewarded",
+                enabled = closeReady,
+                remaining = countdown,
+                progress = smoothVideoRingProgress,
+                progressBarStyle = ad.progressBarStyle,
+                videoProgress = if (videoDurationMs > 0L) videoPositionMs.toFloat() / videoDurationMs else 0f,
+                gateFraction = twoToneGateFraction(closeBehavior.delaySeconds, videoDurationMs),
+                onClose = { closeOnce(VideoOverlayCloseOrigin.USER) },
+            )
+        } else if (closeReady || closeBehavior.treatment == CloseTreatment.COUNTDOWN_CIRCLE) Box(
             modifier = Modifier
                 .align(closeAlignment)
                 .windowInsetsPadding(WindowInsets.safeDrawing)
@@ -1358,7 +1937,7 @@ private fun FallbackAdOverlay(
                                 "Close ad"
                             }
                         }
-                        .clickable(onClick = ::closeOnce),
+                        .clickable(onClick = { closeOnce(VideoOverlayCloseOrigin.USER) }),
                     contentAlignment = Alignment.Center,
                 ) {
                     Box(

@@ -48,7 +48,7 @@ class RewardedParsingTest {
         val body = RewardedInitRequestBody(adUnitId = "unit_1")
         val decoded = json.decodeFromString<RewardedInitRequestBody>(json.encodeToString(body))
         assertEquals("", decoded.sessionId)
-        assertFalse(decoded.capabilities.videoV1)
+        assertEquals(2, decoded.contracts["video"])
     }
 
     @Test
@@ -99,7 +99,7 @@ class RewardedParsingTest {
         """.trimIndent()
 
         val r = json.decodeFromString<RewardedInitApiResponse>(payload)
-        val result = SimulaApiClient.rewardedResultFromResponse(r)
+        val result = SimulaApiClient.rewardedResultFromResponse(r, adUnitId = "rewarded-unit")
         assertEquals("imp_1", r.impressionId)
         assertEquals("<html>primary</html>", r.renderedHtml)
         assertEquals(CreativeType.VIDEO, r.creative.toDomain()?.type)
@@ -111,6 +111,7 @@ class RewardedParsingTest {
         assertEquals("rewarded_video_q3", result.experiment?.experimentId)
         assertEquals("video_b", result.experiment?.variantId)
         assertEquals("creative_media", result.experiment?.layer)
+        assertEquals("rewarded-unit", result.adUnitId)
         assertTrue(r.prewarmSkProduct)
         // The play-to-earn gate now rides on `ad_behavior.close.delay_seconds` (no top-level field).
         assertEquals(30, r.adBehavior?.close?.delaySeconds)
@@ -177,6 +178,7 @@ class RewardedParsingTest {
         assertTrue(encoded.contains("\"session_id\""))
         assertTrue(encoded.contains("\"elapsed_play_time\""))
         assertTrue(encoded.contains("\"completion_reason\":\"duration_elapsed\""))
+        assertFalse(encoded.contains("ad_unit_id"))
 
         val decoded = json.decodeFromString<VerifyRewardRequestBody>(encoded)
         assertEquals("srv_1", decoded.serveId)
@@ -197,21 +199,31 @@ class RewardedParsingTest {
     @Test
     fun `verify response decodes verified and token`() {
         val r = json.decodeFromString<VerifyRewardApiResponse>("""{"verified":true,"token":"tok_1"}""")
-        assertTrue(r.verified)
+        assertEquals(true, r.verified)
         assertEquals("tok_1", r.token)
     }
 
     @Test
     fun `verify response missing token is null`() {
         val r = json.decodeFromString<VerifyRewardApiResponse>("""{"verified":true}""")
-        assertTrue(r.verified)
+        assertEquals(true, r.verified)
         assertNull(r.token)
     }
 
     @Test
-    fun `verify response empty object is unverified`() {
+    fun `verify response empty object is malformed and retryable`() {
         val r = json.decodeFromString<VerifyRewardApiResponse>("{}")
-        assertEquals(false, r.verified)
+        assertNull(r.verified)
         assertNull(r.token)
+    }
+
+    @Test
+    fun `successful HTTP response must explicitly verify reward`() {
+        val failure = runCatching {
+            requireVerifiedReward(json.decodeFromString<VerifyRewardApiResponse>("""{"verified":false}"""))
+        }.exceptionOrNull()
+
+        assertTrue(failure is RewardNotVerifiedException)
+        assertEquals(true, requireVerifiedReward(VerifyRewardApiResponse(verified = true, token = "token")).verified)
     }
 }

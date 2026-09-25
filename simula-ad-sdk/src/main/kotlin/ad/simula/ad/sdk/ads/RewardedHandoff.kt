@@ -37,12 +37,13 @@ internal interface RewardedCallbacks {
         interaction: ClickInteraction,
         onTelemetryPersisted: () -> Unit = {},
     ) = persistClick(interaction, onTelemetryPersisted)
-    fun notifyClicked()
+    fun notifyClicked(interaction: ClickInteraction)
+    fun onDisplayFailed(error: SimulaAdError) = Unit
 
     /** A successfully routed CTA. Fallback HTML still owns its backend beacon. */
     fun onClicked(interaction: ClickInteraction, onTelemetryPersisted: () -> Unit = {}) {
         persistClick(interaction, onTelemetryPersisted)
-        notifyClicked()
+        notifyClicked(interaction)
     }
 
     /**
@@ -51,6 +52,11 @@ internal interface RewardedCallbacks {
      * ad screens may still follow, so the reward is NOT verified here — see [onRewardCompleted].
      */
     fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double)
+
+    /** Teardown safety path when the Activity closes before the whole-unit boundary. */
+    fun onPresentationAborted(earned: Boolean, elapsedPlayTimeSeconds: Double) {
+        onClose(earned, elapsedPlayTimeSeconds)
+    }
 
     /**
      * The whole rewarded unit has been completed — the user dismissed the playable AND every
@@ -63,12 +69,34 @@ internal interface RewardedCallbacks {
         elapsedPlayTimeSeconds: Double,
         completionReason: RewardCompletionReason?,
     )
+
+    /** Publisher-visible completion boundary for the entire rewarded unit. */
+    fun onWholeUnitCompleted(
+        earned: Boolean,
+        elapsedPlayTimeSeconds: Double,
+        completionReason: RewardCompletionReason?,
+    ) {
+        onClose(earned, elapsedPlayTimeSeconds)
+        onRewardCompleted(earned, elapsedPlayTimeSeconds, completionReason)
+    }
 }
+
+internal data class RewardCompletionClaim(
+    val earned: Boolean,
+    val reason: RewardCompletionReason?,
+)
+
+internal data class RewardProgressionUpdate(
+    val newlyAllowed: Boolean,
+    val completionClaim: RewardCompletionClaim?,
+)
 
 /** Everything [SimulaRewardedActivity] needs to render one rewarded presentation. */
 internal class RewardedPresentation(
     val renderedHtml: String = "",
     val creative: Creative,
+    val videoContract2: Boolean = false,
+    val adUnitId: String? = null,
     // The impression id from /load/rewarded — the handle for tracking, reporting and fallbacks.
     val impressionId: String,
     val apiKey: String,
@@ -77,6 +105,7 @@ internal class RewardedPresentation(
     // the interstitial). A null [adBehavior] means no gate (instantly earned) and no store prompt.
     val adBehavior: AdBehavior? = null,
     val trackingUrl: String? = null,
+    val impressionUrl: String? = null,
     val destination: String = "appstore",
     // Raw, unwrapped Play Store link — the deterministic CTA fallback when the tracker is
     // missing or can't be launched (see CreativeCtaRouter).
@@ -86,17 +115,19 @@ internal class RewardedPresentation(
     // for the preview path, which constructs this presentation without a real serve.
     val adValue: AdValue = AdValue.fromBidCpm(0.0),
     val metadata: Map<String, String>? = null,
+    val videoLease: VideoAssetLease? = null,
 ) {
     private val clickInteractionGate = ClickInteractionGate()
     private var pendingClickHandoff: ClickPersistenceHandoff? = null
     private val clickRoute = ResumedPresentationRoute<SimulaRewardedActivity>()
     val primaryCtaNavigation = RetainedPrimaryCtaNavigationState<SimulaRewardedActivity>()
-    val fallbackState = FallbackPresentationState()
+    val fallbackState = FallbackPresentationState(videoPlanV2 = videoContract2)
     val automaticNavigationGate = AutomaticNavigationGate()
     val storeExit by lazy(LazyThreadSafetyMode.NONE) {
         StoreExitTracker(
             adId = impressionId.takeIf { it.isNotBlank() },
             adFormat = "rewarded",
+            adUnitId = adUnitId,
         )
     }
     val autoRedirectCoordinator = AutoRedirectCoordinator()
@@ -106,6 +137,14 @@ internal class RewardedPresentation(
     @Synchronized
     fun claimClick(source: String): ClickInteractionClaim? =
         if (pendingClickHandoff == null) clickInteractionGate.claim(source) else null
+
+    @Synchronized
+    fun claimTrustedClick(interactionId: String, source: String): ClickInteractionClaim? =
+        if (pendingClickHandoff == null) clickInteractionGate.claimTrusted(interactionId, source) else null
+
+    @Synchronized
+    fun claimWebClick(source: String): ClickInteractionClaim? =
+        if (pendingClickHandoff == null) clickInteractionGate.claimWeb(source) else null
 
     fun hasPendingClick(): Boolean = clickInteractionGate.hasPendingClaim()
 
@@ -175,6 +214,7 @@ internal class RewardedPresentation(
         primaryCtaNavigation.clear()
         automaticNavigationGate.clear()
         fallbackState.clear()
+        videoLease?.release()
     }
 
     /** Guards a duplicate SHOWN (DISPLAYED) report if the Activity is recreated on a config change. */
@@ -190,7 +230,14 @@ internal class RewardedPresentation(
     var accumulatedImpressionTimeMs = 0L
 
     /** Set true once the required play duration elapses; gates the reward. */
+    @Volatile
     var rewardEarned = false
+        private set
+    @Volatile
+    var primaryProgressionAllowed = false
+        private set
+    private var authoritativeEndReached = false
+    private var rewardCompletionClaimed = false
 
     /** Sticky evidence that playable HTML committed a visible frame before a later SDK failure. */
     var everCreativeReady = false
@@ -198,8 +245,58 @@ internal class RewardedPresentation(
     var completionReason: RewardCompletionReason? = null
         private set
 
+    @Synchronized
     fun recordCompletionReason(reason: RewardCompletionReason) {
         completionReason = monotonicRewardCompletionReason(completionReason, reason)
+    }
+
+    @Synchronized
+    fun retainRewardEarned(earned: Boolean) {
+        rewardEarned = rewardEarned || earned
+    }
+
+    @Synchronized
+    fun markPrimaryProgressionAllowed(): RewardProgressionUpdate {
+        val newlyAllowed = !primaryProgressionAllowed
+        primaryProgressionAllowed = true
+        return RewardProgressionUpdate(newlyAllowed, claimUnitEndRewardLocked())
+    }
+
+    @Synchronized
+    fun markAuthoritativeEndReached(): RewardCompletionClaim? {
+        authoritativeEndReached = true
+        return claimUnitEndRewardLocked()
+    }
+
+    @Synchronized
+    fun claimRewardCompletion(): RewardCompletionClaim? {
+        if (rewardCompletionClaimed) return null
+        rewardCompletionClaimed = true
+        return RewardCompletionClaim(rewardEarned, completionReason)
+    }
+
+    @Synchronized
+    fun claimEarnedRewardOnTeardown(): RewardCompletionClaim? {
+        if (!rewardEarned || completionReason == null) return null
+        return claimRewardCompletion()
+    }
+
+    @Synchronized
+    internal fun hasAuthoritativeEndReached(): Boolean = authoritativeEndReached
+
+    @Synchronized
+    internal fun hasClaimedRewardCompletion(): Boolean = rewardCompletionClaimed
+
+    private fun claimUnitEndRewardLocked(): RewardCompletionClaim? {
+        if (!videoContract2 || adBehavior?.reward?.earnAt != ad.simula.ad.sdk.model.RewardEarnAt.UNIT_END ||
+            (!primaryProgressionAllowed && !fallbackState.renderableGateReached) ||
+            !authoritativeEndReached || rewardCompletionClaimed
+        ) return null
+        rewardEarned = true
+        completionReason = monotonicRewardCompletionReason(completionReason, RewardCompletionReason.UNIT_END)
+        // Authority only updates internal earning state. Publisher delivery and durable verification
+        // are claimed after the whole-unit close callback, preserving close -> earned -> queue order.
+        return null
     }
 
     /**
@@ -239,5 +336,10 @@ internal object RewardedHandoff {
     fun remove(token: String) {
         pending.remove(token)?.cancelPendingClickHandoff()
         FullscreenPresentationRegistry.release("rewarded:$token")
+    }
+
+    fun recoverAfterLaunchFailure(token: String): RewardedPresentation? {
+        FullscreenPresentationRegistry.release("rewarded:$token")
+        return pending.remove(token)
     }
 }
