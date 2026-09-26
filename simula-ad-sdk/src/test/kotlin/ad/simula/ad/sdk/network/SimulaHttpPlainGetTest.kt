@@ -2,6 +2,8 @@ package ad.simula.ad.sdk.network
 
 import java.io.ByteArrayInputStream
 import java.io.InputStream
+import java.net.CookieHandler
+import java.net.CookieManager
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.URL
@@ -35,6 +37,25 @@ class SimulaHttpPlainGetTest {
         assertEquals(setOf("User-Agent"), connection.requestProperties.keys)
         assertEquals("WebView UA", connection.getRequestProperty("User-Agent"))
         assertFalse(connection.disconnected)
+    }
+
+    @Test
+    fun `plain impression GET still rejects an installed host cookie handler`() = runTest {
+        val previous = CookieHandler.getDefault()
+        val installed = CookieManager()
+        var opened = false
+        try {
+            CookieHandler.setDefault(installed)
+            assertFalse(SimulaHttp.requestPlainGet(
+                url = "https://tracker.example/impression",
+                resolver = resolver { arrayOf(InetAddress.getByName("8.8.8.8")) },
+                openConnection = { opened = true; FakeConnection() },
+            ))
+            assertFalse(opened)
+            assertTrue(CookieHandler.getDefault() === installed)
+        } finally {
+            CookieHandler.setDefault(previous)
+        }
     }
 
     @Test

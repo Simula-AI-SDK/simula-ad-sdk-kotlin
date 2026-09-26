@@ -40,10 +40,12 @@ at the final rendered end screen's gate. Delivery and verification wait until th
 If neither the primary nor a rendered end screen reaches a gate, failures do not create a reward.
 An explicit `verified: false` permanently reconciles verification; malformed responses remain retryable.
 
-Android's `HttpURLConnection` cannot isolate a process-wide `CookieHandler` per connection. When a
-host installs one, cookie-free video downloads report a `SimulaAdError.Network` with telemetry code
-`video_asset:cookie_isolation_unavailable`, rather than no fill. The impression GET is skipped with
-`impression:cookie_isolation_unavailable`. The SDK never replaces the host's cookie handler.
+Android video downloads honor the host's process-wide `CookieHandler`, including its cookie policy
+for each validated redirect destination. The SDK never replaces the handler or forwards cookie
+headers itself. Public-address checks, redirect limits, and download budgets still apply.
+The impression GET remains cookie-isolated: when a global handler is installed, it is skipped with
+`impression:cookie_isolation_unavailable` because `HttpURLConnection` cannot disable that handler
+for an individual request.
 Impression GETs reuse the browser User-Agent when already captured from an SDK WebView; otherwise
 they use the platform default. Measurement never creates a WebView solely to obtain its agent.
 

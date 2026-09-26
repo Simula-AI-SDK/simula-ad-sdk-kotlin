@@ -113,7 +113,7 @@ class VideoAssetCacheTest {
     }
 
     @Test
-    fun `public initial video request is downloaded with cookies suppressed and no sdk headers`() = runTest {
+    fun `public initial video request preserves host cookies without adding sdk headers`() = runTest {
         val connection = HeaderRecordingConnection(
             url = "https://cdn.example/video.mp4",
             status = 200,
@@ -134,9 +134,9 @@ class VideoAssetCacheTest {
         val lease = manager.acquire("https://cdn.example/video.mp4")
 
         assertTrue(lease != null)
-        assertEquals("", connection.effectiveCookie)
-        assertEquals("", connection.effectiveCookie2)
-        assertEquals(setOf("Cookie", "Cookie2"), connection.headersAtConnect.keys)
+        assertEquals("host_session=secret", connection.effectiveCookie)
+        assertEquals("host_session=secret", connection.effectiveCookie2)
+        assertTrue(connection.headersAtConnect.isEmpty())
         assertFalse(connection.instanceFollowRedirects)
         assertFalse(fileOperationUnderLock.get())
         lease?.release()
@@ -144,7 +144,7 @@ class VideoAssetCacheTest {
     }
 
     @Test
-    fun `installed global cookie handler rejects video before opening connection and is not mutated`() = runTest {
+    fun `installed global cookie handler permits video and is not mutated`() = runTest {
         val previous = CookieHandler.getDefault()
         val installed = CookieManager()
         val opens = AtomicInteger()
@@ -164,11 +164,10 @@ class VideoAssetCacheTest {
 
             val result = manager.acquireResult("https://cdn.example/video.mp4")
 
-            assertEquals(VideoAssetCacheResult.Failed(VideoAssetCacheError.COOKIE_ISOLATION_UNAVAILABLE), result)
-            val failure = videoAssetLoadFailure(VideoAssetCacheError.COOKIE_ISOLATION_UNAVAILABLE)
-            assertTrue(failure?.callbackError is SimulaAdError.Network)
-            assertEquals("video_asset:cookie_isolation_unavailable", failure?.telemetrySignature)
-            assertEquals(0, opens.get())
+            assertTrue(result is VideoAssetCacheResult.Ready)
+            (result as? VideoAssetCacheResult.Ready)?.lease?.release()
+            advanceUntilIdle()
+            assertEquals(1, opens.get())
             assertTrue(CookieHandler.getDefault() === installed)
         } finally {
             CookieHandler.setDefault(previous)
@@ -244,7 +243,7 @@ class VideoAssetCacheTest {
     }
 
     @Test
-    fun `safe public redirect opens a newly cookie suppressed header free connection`() = runTest {
+    fun `safe public redirect uses each destination cookies without forwarding headers`() = runTest {
         val initial = HeaderRecordingConnection(
             url = "https://cdn.example/start.mp4",
             status = 302,
@@ -282,10 +281,10 @@ class VideoAssetCacheTest {
             listOf("https://cdn.example/start.mp4", "https://media.example/final.mp4"),
             opened,
         )
+        assertEquals("host_session=initial-secret", initial.effectiveCookie)
+        assertEquals("host_session=redirect-secret", redirected.effectiveCookie)
         listOf(initial, redirected).forEach { connection ->
-            assertEquals("", connection.effectiveCookie)
-            assertEquals("", connection.effectiveCookie2)
-            assertEquals(setOf("Cookie", "Cookie2"), connection.headersAtConnect.keys)
+            assertTrue(connection.headersAtConnect.isEmpty())
             assertFalse(connection.instanceFollowRedirects)
         }
         lease?.release()
@@ -1363,31 +1362,39 @@ class VideoAssetCacheTest {
         val releaseWorker = CountDownLatch(1)
         val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
         val managerScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val clock = TestCoroutineScheduler()
+        val callerDispatcher = StandardTestDispatcher(clock)
         val manager = VideoAssetCacheManager(
             directory = directory,
-            downloadTimeoutMs = 75L,
-            elapsedRealtimeMs = { System.nanoTime() / 1_000_000L },
+            downloadTimeoutMs = VIDEO_DOWNLOAD_TIMEOUT_MS,
+            elapsedRealtimeMs = { clock.currentTime },
             ioDispatcher = dispatcher,
             scope = managerScope,
+            deadlineScheduler = ManualDeadlineScheduler(),
             resolveHost = publicDns,
             openConnection = {
                 FakeConnection(ByteArrayInputStream(byteArrayOf(1, 2, 3)), 3L)
             },
             afterPublish = {
                 published.countDown()
-                releaseWorker.await(5, TimeUnit.SECONDS)
+                releaseWorker.await() // Always released by the test finally block.
             },
         )
         val url = "https://cdn.example/post-move.mp4"
-        val acquisition = async(Dispatchers.Default) { manager.acquire(url) }
-        assertTrue(published.await(2, TimeUnit.SECONDS))
-
-        assertNull(acquisition.await())
-        assertTrue(indexedAssetFiles(directory).isEmpty())
-
-        releaseWorker.countDown()
-        managerScope.cancel()
-        dispatcher.close()
+        try {
+            val acquisition = async(callerDispatcher) { manager.acquire(url) }
+            clock.runCurrent()
+            assertTrue(published.await(5, TimeUnit.SECONDS))
+            // Expire the caller only after the atomic move; CI scheduling cannot preempt publication.
+            clock.advanceTimeBy(VIDEO_DOWNLOAD_TIMEOUT_MS)
+            clock.runCurrent()
+            assertNull(acquisition.await())
+            assertTrue(indexedAssetFiles(directory).isEmpty())
+        } finally {
+            releaseWorker.countDown()
+            managerScope.cancel()
+            dispatcher.close()
+        }
     }
 
     @Test

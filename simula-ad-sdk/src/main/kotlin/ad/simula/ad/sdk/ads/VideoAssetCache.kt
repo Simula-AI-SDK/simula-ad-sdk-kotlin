@@ -18,7 +18,6 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.InetAddress
-import java.net.CookieHandler
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.security.MessageDigest
@@ -69,7 +68,6 @@ private val VIDEO_REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
 internal enum class VideoAssetCacheError(val telemetryCode: String) {
     INVALID_URL("invalid_url"),
     UNSAFE_TARGET("unsafe_target"),
-    COOKIE_ISOLATION_UNAVAILABLE("cookie_isolation_unavailable"),
     UNAVAILABLE("transfer_failed"),
     TOO_LARGE("asset_too_large"),
     CACHE_FULL("cache_full"),
@@ -93,10 +91,6 @@ internal data class VideoAssetLoadFailure(
 internal fun videoAssetLoadFailure(error: VideoAssetCacheError): VideoAssetLoadFailure? = when (error) {
     VideoAssetCacheError.TIMED_OUT -> VideoAssetLoadFailure(
         SimulaAdError.Network(SocketTimeoutException("Video cache deadline exceeded")),
-        error.telemetryCode,
-    )
-    VideoAssetCacheError.COOKIE_ISOLATION_UNAVAILABLE -> VideoAssetLoadFailure(
-        SimulaAdError.Network(SimulaHttp.RedirectCookieIsolationException()),
         error.telemetryCode,
     )
     VideoAssetCacheError.UNAVAILABLE -> VideoAssetLoadFailure(
@@ -317,7 +311,6 @@ internal class VideoAssetCacheManager(
     private val onCapacityCheck: () -> Unit = {},
     private val onDownloadFailure: (Throwable) -> Unit = {},
     private val abortConnection: (HttpURLConnection?) -> Unit = ::abortConnectionAsync,
-    private val cookieHandler: () -> CookieHandler? = CookieHandler::getDefault,
     private val renameFile: (File, File) -> Boolean = { source, destination ->
         source.renameTo(destination)
     },
@@ -531,7 +524,6 @@ internal class VideoAssetCacheManager(
                     )
                     ensureWithinDeadline(deadlineMs, control, deadlineExpired)
                 }
-                SimulaHttp.validateRedirectCookieIsolation(cookieHandler())
                 val connection = openConnection(currentUrl)
                 control.connection.set(connection)
                 configureConnection(connection, remainingTimeoutMs(deadlineMs))
@@ -622,8 +614,7 @@ internal class VideoAssetCacheManager(
         connection.readTimeout = timeoutMs
         connection.instanceFollowRedirects = false
         connection.useCaches = false
-        connection.setRequestProperty("Cookie", "")
-        connection.setRequestProperty("Cookie2", "")
+        // Media downloads honor the host CookieHandler independently for each validated URL.
     }
 
     private fun resolveVideoRedirect(currentUrl: String, location: String?): String? {
@@ -1347,7 +1338,6 @@ private class VideoDeclaredLengthExceededException : java.io.IOException("Video 
 
 private fun normalizeVideoAssetError(failure: Throwable): VideoAssetCacheError = when (failure) {
     is SocketTimeoutException -> VideoAssetCacheError.TIMED_OUT
-    is SimulaHttp.RedirectCookieIsolationException -> VideoAssetCacheError.COOKIE_ISOLATION_UNAVAILABLE
     is SimulaHttp.RedirectTargetRejectedException -> VideoAssetCacheError.UNSAFE_TARGET
     is VideoAssetTooLargeException,
     is VideoDeclaredLengthExceededException,
