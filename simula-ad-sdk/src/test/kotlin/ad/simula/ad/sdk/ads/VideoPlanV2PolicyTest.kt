@@ -36,6 +36,35 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VideoPlanV2PolicyTest {
+    @Test
+    fun `queued handoff pause movement is not rewarded on resume or natural completion`() {
+        val position = VideoPositionAccumulator()
+        assertEquals(2_000L, position.sample(2_000L).totalPlayedMs)
+
+        // The worker finishes pausing after the foreground handoff has already started.
+        position.skipTo(3_000L)
+        assertEquals(2_000L, position.totalPlayedMs)
+        assertEquals(0L, position.sample(3_000L).advancedMs)
+        assertEquals(500L, position.sample(3_500L).advancedMs)
+        assertEquals(500L, position.complete(4_000L).advancedMs)
+        assertEquals(3_000L, position.totalPlayedMs)
+        assertEquals(0L, position.complete(4_000L).advancedMs)
+    }
+
+    @Test
+    fun `repeated handoffs preserve retained play time without counting paused media deltas`() {
+        val position = VideoPositionAccumulator(initialPlayedMs = 2_000L, initialPositionMs = 3_000L)
+        // Stale samples from a restored player must not erase the retained seek baseline.
+        position.skipTo(0L)
+        assertEquals(0L, position.sample(2_000L).advancedMs)
+        assertEquals(500L, position.sample(3_500L).advancedMs)
+        position.skipTo(4_000L)
+        position.skipTo(4_500L)
+        assertEquals(2_500L, position.totalPlayedMs)
+        assertEquals(500L, position.sample(5_000L).advancedMs)
+        assertEquals(3_000L, position.totalPlayedMs)
+    }
+
     private fun playable(sourceIndex: Int) = SimulaApiClient.FallbackAd(
         adId = "p$sourceIndex",
         sourceIndex = sourceIndex,

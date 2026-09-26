@@ -125,8 +125,13 @@ internal class AsyncVideoPlayer private constructor() {
 
     fun seekTo(position: Int) = command { native?.seekTo(position) }
     fun start() = command { native?.start(); publish() }
-    fun pause() = command {
-        if (nativeReady) { if (native?.isPlaying == true) native?.pause(); publish() }
+    fun pause(onPaused: () -> Unit = {}) = command {
+        if (nativeReady) {
+            if (native?.isPlaying == true) native?.pause()
+            publish(onPaused)
+        } else {
+            deliver(onPaused)
+        }
     }
     fun setVolume(left: Float, right: Float) = command { native?.setVolume(left, right) }
 

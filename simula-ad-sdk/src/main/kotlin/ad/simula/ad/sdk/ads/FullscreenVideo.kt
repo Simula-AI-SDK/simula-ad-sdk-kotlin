@@ -748,6 +748,9 @@ private class NativeVideoController(
     private var desiredMuted = desiredMuted
     private var effectiveMuted = desiredMuted
     private var presentationBlocked = false
+    private var presentationPausePending = false
+    private var presentationPauseGeneration = 0L
+    private var completionDeferred = false
     private var bufferingProgressSincePoll = false
     private var lastBufferingPercent = 0
     private var released = false
@@ -793,7 +796,7 @@ private class NativeVideoController(
     }
     private val positionPoll = object : Runnable {
         override fun run() {
-            if (!lifecycleActive || released || failed || !firstFrameRendered) return
+            if (!lifecycleActive || presentationBlocked || released || failed || !firstFrameRendered) return
             if (!ownsPresentationWork()) {
                 releaseAfterLostTerminalClaim()
                 return
@@ -811,7 +814,7 @@ private class NativeVideoController(
                             healthyProgress = false,
                         )
                         if (expired) {
-                            if (nearEndCompletion.onPlaybackTimeout(
+                            if (!presentationPausePending && nearEndCompletion.onPlaybackTimeout(
                                     durationMs = lastVideoDurationMs,
                                     positionMs = lastVideoPositionMs,
                                     firstFrameRendered = firstFrameRendered,
@@ -869,7 +872,7 @@ private class NativeVideoController(
                     }
                 },
             )
-            if (continuePolling && lifecycleActive && !released && !failed && firstFrameRendered) {
+            if (continuePolling && lifecycleActive && !presentationBlocked && !released && !failed && firstFrameRendered) {
                 handler.postDelayed(this, VIDEO_POSITION_POLL_MS)
             }
         }
@@ -918,7 +921,7 @@ private class NativeVideoController(
         val nowMs = SystemClock.elapsedRealtime()
         val deadlineMs = nowMs + VIDEO_READINESS_TIMEOUT_MS
         readinessDeadline = VideoReadinessDeadline(deadlineMs)
-        if (!lifecycleActive) readinessDeadline?.pause(nowMs)
+        if (!lifecycleActive || presentationBlocked) readinessDeadline?.pause(nowMs)
         runCatching {
             val mediaPlayer = AsyncVideoPlayer.create()
             if (mediaPlayer == null) {
@@ -1051,19 +1054,11 @@ private class NativeVideoController(
         if (released || lifecycleActive == active) return
         lifecycleActive = active
         val nowMs = SystemClock.elapsedRealtime()
-        if (active) {
+        if (active && !presentationBlocked) {
             readinessDeadline?.resume(nowMs)
             scheduleReadinessTimeout(nowMs)
             startIfPossible()
-            val pausedAt = pausedAtMs
-            if (videoPlanV2 && firstFrameRendered && pausedAt != null) {
-                pausedAtMs = null
-                recordLifecycle(
-                    stage = VIDEO_STAGE_RESUME,
-                    pausedMs = (nowMs - pausedAt).coerceAtLeast(0L).toDouble(),
-                )
-            }
-        } else {
+        } else if (!active) {
             readinessDeadline?.pause(nowMs)
             handler.removeCallbacks(readinessTimeout)
             if (firstFrameRendered && !completed && !failed) emitProgress(force = true)
@@ -1081,10 +1076,30 @@ private class NativeVideoController(
     }
 
     fun setPresentationBlocked(blocked: Boolean) {
-        if (presentationBlocked == blocked) return
+        if (released || failed || presentationBlocked == blocked) return
+        if (blocked && firstFrameRendered && !completed) emitProgress(force = true)
         presentationBlocked = blocked
+        val nowMs = SystemClock.elapsedRealtime()
         if (blocked) {
-            stallBudget.observe(SystemClock.elapsedRealtime(), eligible = false, healthyProgress = false)
+            readinessDeadline?.pause(nowMs)
+            handler.removeCallbacks(readinessTimeout)
+            presentationPausePending = true
+            val generation = ++presentationPauseGeneration
+            pause paused@ {
+                if (released || failed || generation != presentationPauseGeneration) return@paused
+                // Pause is asynchronous. Discard media movement between the last visible sample
+                // and the worker's pause snapshot, including when the handoff ended quickly.
+                player?.let { position.skipTo(it.currentPosition.toLong()) }
+                presentationPausePending = false
+                startIfPossible()
+            }
+            stallBudget.observe(nowMs, eligible = false, healthyProgress = false)
+            applyEffectiveMuted(true)
+            abandonAudioFocus()
+        } else if (lifecycleActive) {
+            readinessDeadline?.resume(nowMs)
+            scheduleReadinessTimeout(nowMs)
+            startIfPossible()
         }
         publishPlaybackEligibility()
     }
@@ -1145,16 +1160,35 @@ private class NativeVideoController(
     }
 
     private fun scheduleReadinessTimeout(nowMs: Long) {
-        if (!lifecycleActive || firstFrameRendered || released || failed) return
+        if (!lifecycleActive || presentationBlocked || firstFrameRendered || released || failed) return
         handler.removeCallbacks(readinessTimeout)
         val remainingMs = readinessDeadline?.remainingMs(nowMs) ?: 0L
         if (remainingMs <= 0L) readinessTimeout.run() else handler.postDelayed(readinessTimeout, remainingMs)
     }
 
     private fun startIfPossible() {
-        if (!prepared || !resumeSeek.allowsPlaybackCallbacks || !lifecycleActive ||
+        if (!prepared || !resumeSeek.allowsPlaybackCallbacks || !lifecycleActive || presentationBlocked ||
             surface == null || released || failed
         ) return
+        if (presentationPausePending) {
+            // Keep the normal bounded watchdog while waiting for the native pause acknowledgement.
+            schedulePositionPolling()
+            resetPlaybackTimeout()
+            return
+        }
+        val pausedAt = pausedAtMs
+        if (videoPlanV2 && firstFrameRendered && pausedAt != null) {
+            pausedAtMs = null
+            recordLifecycle(
+                stage = VIDEO_STAGE_RESUME,
+                pausedMs = (SystemClock.elapsedRealtime() - pausedAt).coerceAtLeast(0L).toDouble(),
+            )
+        }
+        if (completionDeferred) {
+            completionDeferred = false
+            completePlayback(renderToken)
+            return
+        }
         runCatching {
             val mediaPlayer = player ?: return
             // Acquire focus before the first rendered frame so every video starts without a late volume jump.
@@ -1172,6 +1206,7 @@ private class NativeVideoController(
     }
 
     private fun admitFirstFrame(token: Long) {
+        if (!lifecycleActive || presentationBlocked || presentationPausePending) return
         if (!renderGate.ready(token)) return
         firstFrameRendered = true
         publishPlaybackEligibility()
@@ -1186,11 +1221,15 @@ private class NativeVideoController(
 
     private fun schedulePositionPolling() {
         handler.removeCallbacks(positionPoll)
-        if (lifecycleActive && firstFrameRendered && !released && !failed) handler.post(positionPoll)
+        if (lifecycleActive && !presentationBlocked && firstFrameRendered && !released && !failed) handler.post(positionPoll)
     }
 
     private fun completePlayback(token: Long) {
         if (token != renderToken || released || failed) return
+        if (!lifecycleActive || presentationBlocked || presentationPausePending) {
+            completionDeferred = true
+            return
+        }
         if (!firstFrameRendered) {
             fail(VideoFailureCode.FIRST_FRAME_TIMEOUT)
             return
@@ -1222,7 +1261,7 @@ private class NativeVideoController(
     }
 
     private fun handlePlaybackTimeout() {
-        if (!lifecycleActive || released || failed || !firstFrameRendered || player == null) return
+        if (!lifecycleActive || presentationBlocked || released || failed || !firstFrameRendered || player == null) return
         val progress = emitProgress(force = false)
         if (progress == null) {
             fail(VideoFailureCode.PLAYBACK_ERROR)
@@ -1243,7 +1282,7 @@ private class NativeVideoController(
     }
 
     private fun emitProgress(force: Boolean, completed: Boolean = false): PlayerProgress? {
-        if (!resumeSeek.allowsPlaybackCallbacks) return null
+        if (!resumeSeek.allowsPlaybackCallbacks || presentationBlocked || presentationPausePending) return null
         val mediaPlayer = player ?: return null
         mediaPlayer.refresh()
         if (released || failed) return null
@@ -1339,10 +1378,10 @@ private class NativeVideoController(
         applyTextureTransform()
     }
 
-    private fun pause() {
+    private fun pause(onPaused: () -> Unit = {}) {
         cancelPlaybackCallbacks()
         val mediaPlayer = player
-        runCatching { mediaPlayer?.pause() }
+        runCatching { if (mediaPlayer != null) mediaPlayer.pause(onPaused) else onPaused() }
         updatePlaying(false)
     }
 
@@ -1352,7 +1391,7 @@ private class NativeVideoController(
     }
 
     private fun resetPlaybackTimeout() {
-        if (!lifecycleActive || !firstFrameRendered || released || failed) return
+        if (!lifecycleActive || presentationBlocked || !firstFrameRendered || released || failed) return
         handler.removeCallbacks(playbackTimeout)
         if (videoPlanV2) return
         handler.postDelayed(playbackTimeout, VIDEO_PLAYBACK_TIMEOUT_MS)

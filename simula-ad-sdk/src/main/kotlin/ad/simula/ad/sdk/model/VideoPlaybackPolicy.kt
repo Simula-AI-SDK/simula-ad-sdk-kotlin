@@ -485,6 +485,13 @@ internal class VideoPositionAccumulator(
         return VideoPositionSample(positionMs, advancedMs, totalPlayedMs)
     }
 
+    /** Advance the media baseline without crediting motion while a native pause was queued. */
+    fun skipTo(rawPositionMs: Long) {
+        val played = totalPlayedMs
+        sample(rawPositionMs)
+        totalPlayedMs = played
+    }
+
     fun complete(rawDurationMs: Long): VideoPositionSample {
         val durationMs = rawDurationMs.coerceAtLeast(0L)
         val advancedMs = (durationMs - sessionPlayedMs).coerceAtLeast(0L)
