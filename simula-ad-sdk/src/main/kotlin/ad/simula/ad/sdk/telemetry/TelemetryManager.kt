@@ -261,6 +261,10 @@ internal class TelemetryManager(
         clickSource: String? = null,
         critical: Boolean = false,
         onPersisted: (() -> Unit)? = null,
+        endEvent: String? = null,
+        opens: Int? = null,
+        contaminated: Boolean? = null,
+        freeSpaceDeltaBytes: Long? = null,
     ) {
         accumulate(stage, adFormat, cacheSource, errorCode)
         enqueuePerf(
@@ -276,6 +280,10 @@ internal class TelemetryManager(
                 breadcrumb = breadcrumb,
                 interactionId = interactionId,
                 clickSource = clickSource,
+                endEvent = endEvent,
+                opens = opens?.coerceIn(1, MAX_STORE_OPENS),
+                contaminated = contaminated,
+                freeSpaceDeltaBytes = freeSpaceDeltaBytes,
                 // Critical lifecycle events are admitted independently of session perf sampling.
                 sampleRate = if (critical) 1.0 else effectiveSampleRate,
             ),
@@ -284,12 +292,69 @@ internal class TelemetryManager(
         )
     }
 
+    fun recordVideoLifecycle(
+        stage: String,
+        adFormat: String,
+        adUnitId: String?,
+        adId: String?,
+        serveId: String?,
+        impressionId: String?,
+        style: String?,
+        skoverlayEnabled: Boolean?,
+        skoverlayDelaySeconds: Int?,
+        clipIndex: Int?,
+        videoPositionS: Double?,
+        muted: Boolean?,
+        pool: String?,
+        durationS: Double?,
+        quartile: Int?,
+        reason: String?,
+        pausedMs: Double?,
+        watchedS: Double?,
+        secondsUnmuted: Double?,
+        secondsMuted: Double?,
+        msToNextStepReady: Double?,
+        secondsSinceVideoStart: Double?,
+        on: String?,
+        visibleS: Double?,
+        error: String?,
+    ) {
+        // Video lifecycle is session-sampled perf telemetry; newEvent carries the effective sample_rate.
+        enqueuePerf(
+            newEvent(TYPE_LIFECYCLE, name = stage).copy(
+                adFormat = adFormat,
+                adUnitId = adUnitId,
+                adId = adId,
+                serveId = serveId,
+                impressionId = impressionId,
+                style = style,
+                skoverlayEnabled = skoverlayEnabled,
+                skoverlayDelaySeconds = skoverlayDelaySeconds?.coerceIn(0, 60),
+                clipIndex = clipIndex?.takeIf { it in 0..2 },
+                videoPositionS = videoPositionS?.coerceAtLeast(0.0),
+                muted = muted,
+                pool = pool,
+                durationS = durationS?.coerceAtLeast(0.0),
+                quartile = quartile,
+                reason = reason,
+                pausedMs = pausedMs?.coerceAtLeast(0.0),
+                watchedS = watchedS?.coerceAtLeast(0.0),
+                secondsUnmuted = secondsUnmuted?.coerceAtLeast(0.0),
+                secondsMuted = secondsMuted?.coerceAtLeast(0.0),
+                msToNextStepReady = msToNextStepReady?.coerceAtLeast(0.0),
+                secondsSinceVideoStart = secondsSinceVideoStart?.coerceAtLeast(0.0),
+                on = on?.takeIf { it == "video" || it == "next_step" },
+                visibleS = visibleS?.coerceAtLeast(0.0),
+                error = error,
+            ),
+        )
+    }
+
     /** Set the session experiment assignment for the envelope (last assignment wins). */
     fun setExperiment(experimentId: String?, variantId: String?) {
-        if (experimentId.isNullOrBlank() && variantId.isNullOrBlank()) return
         synchronized(auxLock) {
-            this.experimentId = experimentId
-            this.variantId = variantId
+            this.experimentId = experimentId?.takeIf { it.isNotBlank() }
+            this.variantId = variantId?.takeIf { it.isNotBlank() }
         }
     }
 
@@ -660,6 +725,7 @@ internal class TelemetryManager(
         const val FLUSH_INTERVAL_MS = 30_000L
         const val MAX_ERROR_SIGNATURES = 50
         const val MAX_META_COUNT = 1_000_000
+        const val MAX_STORE_OPENS = 1_000
         const val MAX_MESSAGE_LEN = 300
 
         // Redaction patterns for free-text error messages.

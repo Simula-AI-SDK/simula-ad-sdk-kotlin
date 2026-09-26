@@ -85,7 +85,6 @@ class NativeAdPreloadCacheTest {
         impressionId = "preloaded-impression",
         adInserted = true,
         adFormat = "character_ad",
-        iframeUrl = null,
         renderedHtml = "<html></html>",
     )
 }

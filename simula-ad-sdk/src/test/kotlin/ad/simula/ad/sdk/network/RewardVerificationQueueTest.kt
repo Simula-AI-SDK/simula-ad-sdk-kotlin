@@ -51,6 +51,7 @@ class RewardVerificationQueueTest {
         val tokens = mutableMapOf<String, String?>()
         val errors = mutableMapOf<String, Throwable>()
         val callCounts = mutableMapOf<String, Int>()
+        val completionReasons = mutableMapOf<String, MutableList<String?>>()
         private val release = mutableMapOf<String, CompletableDeferred<Unit>>()
         val entered = mutableMapOf<String, CompletableDeferred<Unit>>()
 
@@ -71,9 +72,180 @@ class RewardVerificationQueueTest {
             errors[serveId]?.let { throw it }
             return tokens[serveId]
         }
+
+        override suspend fun verify(
+            serveId: String,
+            sessionId: String,
+            elapsedPlayTime: Double,
+            adUnitId: String,
+            completionReason: String?,
+        ): String? {
+            completionReasons.getOrPut(serveId) { mutableListOf() } += completionReason
+            return verify(serveId, sessionId, elapsedPlayTime, adUnitId)
+        }
     }
 
     // ── Single-task outcomes ───────────────────────────────────────────────────
+
+    @Test
+    fun `unknown completion reason is preserved while supported rows drain around it`() = runTest {
+        val rows = listOf(
+            PendingVerification(
+                "future",
+                "sess",
+                4.0,
+                retryCount = 0,
+                lastAttemptTimestamp = 0L,
+                completionReason = "future_reason",
+            ),
+            PendingVerification(
+                "known",
+                "sess",
+                30.0,
+                retryCount = 0,
+                lastAttemptTimestamp = 0L,
+                completionReason = "duration_elapsed",
+            ),
+        )
+        val store = FakeStore(rows)
+        val verifier = FakeVerifier()
+        var telemetryCount = 0
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 0L },
+            scope = this,
+            recordUnsupportedCompletionReason = { telemetryCount++ },
+        )
+
+        engine.trigger()
+        advanceUntilIdle()
+        engine.trigger()
+        advanceUntilIdle()
+
+        assertEquals(listOf(rows.first()), store.data)
+        assertEquals(1, verifier.callCounts["known"])
+        assertEquals(null, verifier.callCounts["future"])
+        assertEquals(1, telemetryCount)
+    }
+
+    @Test
+    fun `unsupported-only remainder does not schedule a hot retry`() = runTest {
+        val rows = listOf(
+            PendingVerification(
+                "known",
+                "sess",
+                30.0,
+                retryCount = 2,
+                lastAttemptTimestamp = 123L,
+                completionReason = "duration_elapsed",
+            ),
+            PendingVerification(
+                "future",
+                "sess",
+                5.0,
+                retryCount = 1,
+                lastAttemptTimestamp = 456L,
+                completionReason = "future_reason",
+            ),
+        )
+        val store = FakeStore(rows)
+        val verifier = FakeVerifier()
+        val delays = mutableListOf<Long>()
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 10_123L },
+            scope = this,
+            sleep = { delays += it },
+        )
+
+        engine.trigger()
+        advanceUntilIdle()
+
+        assertEquals(listOf(rows.last()), store.data)
+        assertEquals(1, verifier.callCounts["known"])
+        assertEquals(null, verifier.callCounts["future"])
+        assertTrue(delays.isEmpty())
+    }
+
+    @Test
+    fun `supported callback completes while unsupported persisted row is retained`() = runTest {
+        val unsupported = PendingVerification(
+            "future",
+            "sess",
+            5.0,
+            retryCount = 0,
+            lastAttemptTimestamp = 0L,
+            completionReason = "future_reason",
+        )
+        val store = FakeStore(listOf(unsupported))
+        val verifier = FakeVerifier().apply { tokens["known"] = "token" }
+        val engine = RewardVerificationQueue(store, verifier, clock = { 0L }, scope = this)
+        var received: Result<String?>? = null
+
+        engine.queue(
+            serveId = "known",
+            sessionId = "sess",
+            elapsedPlayTime = 30.0,
+            completionReason = "duration_elapsed",
+        ) { received = it }
+        advanceUntilIdle()
+
+        assertEquals("token", received?.getOrNull())
+        assertEquals(listOf(unsupported), store.data)
+        assertEquals(1, verifier.callCounts["known"])
+        assertEquals(null, verifier.callCounts["future"])
+    }
+
+    @Test
+    fun `same serve enqueue fails callback without touching unsupported persisted row`() = runTest {
+        val unsupported = PendingVerification(
+            "same",
+            "persisted-session",
+            5.0,
+            retryCount = 0,
+            lastAttemptTimestamp = 0L,
+            completionReason = "future_reason",
+        )
+        val store = FakeStore(listOf(unsupported))
+        val verifier = FakeVerifier()
+        val delays = mutableListOf<Long>()
+        val engine = RewardVerificationQueue(
+            store,
+            verifier,
+            clock = { 0L },
+            scope = this,
+            sleep = { delays += it },
+        )
+        var received: Result<String?>? = null
+        var callbackCount = 0
+
+        engine.queue(
+            serveId = "same",
+            sessionId = "new-session",
+            elapsedPlayTime = 30.0,
+            completionReason = "duration_elapsed",
+        ) {
+            callbackCount++
+            received = it
+        }
+        advanceUntilIdle()
+
+        assertEquals(1, callbackCount)
+        assertTrue(received?.exceptionOrNull() is DurableQueuePersistenceException)
+        assertTrue(received?.exceptionOrNull()?.message?.contains("unsupported persisted") == true)
+        assertEquals(listOf(unsupported), store.data)
+        assertTrue(verifier.callCounts.isEmpty())
+        assertTrue(delays.isEmpty())
+
+        engine.trigger()
+        advanceUntilIdle()
+        assertEquals(1, callbackCount)
+        assertEquals(listOf(unsupported), store.data)
+        assertTrue(verifier.callCounts.isEmpty())
+        assertTrue(delays.isEmpty())
+    }
 
     @Test
     fun `success delivers the token and removes the task`() = runTest {
@@ -344,6 +516,52 @@ class RewardVerificationQueueTest {
         assertEquals(1, store.data[0].retryCount)
         assertEquals(1_000L, store.data[0].lastAttemptTimestamp)
         assertEquals(1, verifier.callCounts["A"]) // not hammered
+    }
+
+    @Test
+    fun `explicit unverified 2xx permanently reconciles queue and never reports verified`() = runTest {
+        val store = FakeStore()
+        val verifier = FakeVerifier().apply { errors["A"] = RewardNotVerifiedException() }
+        val engine = RewardVerificationQueue(store, verifier, clock = { 1_000L }, scope = this)
+        var verifiedCount = 0
+        var failureCount = 0
+
+        engine.queue("A", "sess", 5.0) { result ->
+            if (result.isSuccess) verifiedCount++ else failureCount++
+        }
+        advanceUntilIdle()
+
+        assertEquals(0, verifiedCount)
+        assertEquals(1, failureCount)
+        assertEquals(1, verifier.callCounts["A"])
+        assertTrue(store.data.isEmpty())
+    }
+
+    @Test
+    fun `retry preserves original completion reason`() = runTest {
+        var now = 1_000L
+        val store = FakeStore()
+        val verifier = FakeVerifier().apply { errors["A"] = Exception("HTTP error! status: 500") }
+        val engine = RewardVerificationQueue(store, verifier, clock = { now }, scope = this)
+
+        engine.queue(
+            serveId = "A",
+            sessionId = "sess",
+            elapsedPlayTime = 4.0,
+            completionReason = "video_completed",
+        )
+        advanceUntilIdle()
+
+        assertEquals("video_completed", store.data.single().completionReason)
+        assertEquals(listOf("video_completed"), verifier.completionReasons["A"])
+
+        verifier.errors.remove("A")
+        now = 6_000L
+        engine.trigger()
+        advanceUntilIdle()
+
+        assertEquals(listOf("video_completed", "video_completed"), verifier.completionReasons["A"])
+        assertTrue(store.data.isEmpty())
     }
 
     // ── Routing / dropping / stranding (the core regression guards) ──────────────

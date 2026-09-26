@@ -1,5 +1,8 @@
 package ad.simula.ad.sdk.network
 
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -10,6 +13,60 @@ import org.junit.Test
  * and the permanent-vs-retryable error classification the queue engine keys off.
  */
 class RewardVerificationPolicyTest {
+
+    @Test
+    fun `explicit rejection is permanent but missing or malformed verification is retryable`() {
+        val rejected = runCatching {
+            requireVerifiedReward(Json.decodeFromString<VerifyRewardApiResponse>("""{"verified":false}"""))
+        }.exceptionOrNull()
+        assertTrue(rejected is RewardNotVerifiedException)
+        assertTrue(rejected?.let(::isPermanentVerificationError) == true)
+        for (body in listOf("{}", """{"verified":"false"}""", """{"verified":null}""")) {
+            val error = runCatching { requireVerifiedReward(Json.decodeFromString<VerifyRewardApiResponse>(body)) }
+                .exceptionOrNull()
+            assertTrue(error != null)
+            assertFalse(error?.let(::isPermanentVerificationError) == true)
+        }
+    }
+
+    @Test
+    fun `legacy durable verification decodes without completion reason and new row preserves it`() {
+        val json = Json { ignoreUnknownKeys = true }
+        val legacy = json.decodeFromString<PendingVerification>(
+            """{"serveId":"s","sessionId":"session","elapsedPlayTime":4.0,"retryCount":0,"lastAttemptTimestamp":0}""",
+        )
+        assertEquals(null, legacy.completionReason)
+
+        val current = legacy.copy(completionReason = "video_completed")
+        val encoded = json.encodeToString(current)
+        val roundTrip = json.decodeFromString<PendingVerification>(encoded)
+        assertTrue(encoded.contains("\"completion_reason\":\"video_completed\""))
+        assertEquals("video_completed", roundTrip.completionReason)
+    }
+
+    @Test
+    fun `future completion reason survives restart roundtrip and remains unsupported`() {
+        val json = Json { ignoreUnknownKeys = true }
+        val original = PendingVerification(
+            serveId = "future",
+            sessionId = "session",
+            elapsedPlayTime = 7.0,
+            retryCount = 0,
+            lastAttemptTimestamp = 0L,
+            completionReason = "future_reward_reason_v2",
+        )
+
+        val restarted = json.decodeFromString<PendingVerification>(json.encodeToString(original))
+
+        assertEquals("future_reward_reason_v2", restarted.completionReason)
+        assertTrue(hasUnsupportedRewardCompletionReason(restarted))
+        assertFalse(
+            hasUnsupportedRewardCompletionReason(
+                restarted.copy(completionReason = "duration_elapsed"),
+            ),
+        )
+        assertFalse(hasUnsupportedRewardCompletionReason(restarted.copy(completionReason = null)))
+    }
 
     @Test
     fun `backoff is immediate for the first attempt`() {

@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.AdValue
+import ad.simula.ad.sdk.model.Creative
 import ad.simula.ad.sdk.network.SimulaApiClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -88,13 +89,15 @@ class MetadataApiTest {
                     interaction: ad.simula.ad.sdk.network.ClickInteraction,
                     onTelemetryPersisted: () -> Unit,
                 ) = Unit
-                override fun notifyClicked() = Unit
+                override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) = Unit
                 override fun onClosed() = Unit
             },
             metadata = snapshot,
         )
         val rewarded = RewardedPresentation(
-            iframeUrl = "https://example.test/creative",
+            renderedHtml = "<html></html>",
+            creative = Creative(),
+            adUnitId = "rewarded-unit",
             impressionId = "rewarded-impression",
             apiKey = "test-key",
             callbacks = object : RewardedCallbacks {
@@ -105,14 +108,19 @@ class MetadataApiTest {
                     interaction: ad.simula.ad.sdk.network.ClickInteraction,
                     onTelemetryPersisted: () -> Unit,
                 ) = Unit
-                override fun notifyClicked() = Unit
+                override fun notifyClicked(interaction: ad.simula.ad.sdk.network.ClickInteraction) = Unit
                 override fun onClose(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
-                override fun onRewardCompleted(earned: Boolean, elapsedPlayTimeSeconds: Double) = Unit
+                override fun onRewardCompleted(
+                    earned: Boolean,
+                    elapsedPlayTimeSeconds: Double,
+                    completionReason: ad.simula.ad.sdk.model.RewardCompletionReason?,
+                ) = Unit
             },
             metadata = snapshot,
         )
 
         assertEquals(snapshot, interstitial.metadata)
         assertEquals(snapshot, rewarded.metadata)
+        assertEquals("rewarded-unit", rewarded.adUnitId)
     }
 }

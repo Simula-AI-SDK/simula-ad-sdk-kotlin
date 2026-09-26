@@ -9,23 +9,35 @@ import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.DEFAULT_FALLBACK_CLOSE_DELAY_SECONDS
 import ad.simula.ad.sdk.model.Experiment
 import ad.simula.ad.sdk.model.MAX_CLOSE_DELAY_SECONDS
+import ad.simula.ad.sdk.model.MAX_CONTRACT_2_SK_OVERLAY_DELAY_SECONDS
 import ad.simula.ad.sdk.model.MAX_SK_OVERLAY_DELAY_SECONDS
 import ad.simula.ad.sdk.model.OverlayPosition
 import ad.simula.ad.sdk.model.OverlayTiming
+import ad.simula.ad.sdk.model.ProgressBarBehavior
+import ad.simula.ad.sdk.model.ProgressBarStyle
+import ad.simula.ad.sdk.model.RewardBehavior
+import ad.simula.ad.sdk.model.RewardEarnAt
 import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.StoreOpen
 import ad.simula.ad.sdk.model.StorePrompt
 import ad.simula.ad.sdk.model.StorePromptPlatform
+import ad.simula.ad.sdk.model.VideoBehavior
+import ad.simula.ad.sdk.model.VideoChromeStyle
+import ad.simula.ad.sdk.model.VideoSegment
 import ad.simula.ad.sdk.model.fallbackCloseTreatment
 import ad.simula.ad.sdk.model.validatedHexColor
+import ad.simula.ad.sdk.model.admittedRemoteAssetUrl
 import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.descriptors.SerialDescriptor
@@ -33,11 +45,14 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 
@@ -57,6 +72,22 @@ internal object LenientNullableBooleanSerializer : KSerializer<Boolean?> {
     }
 }
 
+internal object LenientNullableIntSerializer : KSerializer<Int?> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("LenientNullableInt", PrimitiveKind.INT)
+
+    override fun deserialize(decoder: Decoder): Int? {
+        val jsonDecoder = decoder as? JsonDecoder ?: return runCatching { decoder.decodeInt() }.getOrNull()
+        val primitive = jsonDecoder.decodeJsonElement() as? JsonPrimitive ?: return null
+        return primitive.takeUnless(JsonPrimitive::isString)?.intOrNull
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    override fun serialize(encoder: Encoder, value: Int?) {
+        if (value == null) encoder.encodeNull() else encoder.encodeInt(value)
+    }
+}
+
 internal object LenientNullableStringSerializer : KSerializer<String?> {
     override val descriptor: SerialDescriptor =
         PrimitiveSerialDescriptor("LenientNullableString", PrimitiveKind.STRING)
@@ -70,6 +101,64 @@ internal object LenientNullableStringSerializer : KSerializer<String?> {
     @OptIn(ExperimentalSerializationApi::class)
     override fun serialize(encoder: Encoder, value: String?) {
         if (value == null) encoder.encodeNull() else encoder.encodeString(value)
+    }
+}
+
+internal object LenientNullableExperimentSerializer : KSerializer<ApiExperiment?> {
+    override val descriptor: SerialDescriptor = ApiExperiment.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): ApiExperiment? {
+        val jsonDecoder = decoder as? JsonDecoder
+            ?: return runCatching { decoder.decodeSerializableValue(ApiExperiment.serializer()) }.getOrNull()
+        val element = jsonDecoder.decodeJsonElement()
+        if (element !is JsonObject) return null
+        return runCatching {
+            jsonDecoder.json.decodeFromJsonElement(ApiExperiment.serializer(), element)
+        }.getOrNull()
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    override fun serialize(encoder: Encoder, value: ApiExperiment?) {
+        if (value == null) encoder.encodeNull()
+        else encoder.encodeSerializableValue(ApiExperiment.serializer(), value)
+    }
+}
+
+internal object LenientNullableAdBehaviorSerializer : KSerializer<ApiAdBehavior?> {
+    override val descriptor: SerialDescriptor = ApiAdBehavior.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): ApiAdBehavior? {
+        val jsonDecoder = decoder as? JsonDecoder
+            ?: return runCatching { decoder.decodeSerializableValue(ApiAdBehavior.serializer()) }.getOrNull()
+        val element = jsonDecoder.decodeJsonElement() as? JsonObject ?: return null
+        return runCatching {
+            jsonDecoder.json.decodeFromJsonElement(ApiAdBehavior.serializer(), element)
+        }.getOrNull()
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    override fun serialize(encoder: Encoder, value: ApiAdBehavior?) {
+        if (value == null) encoder.encodeNull()
+        else encoder.encodeSerializableValue(ApiAdBehavior.serializer(), value)
+    }
+}
+
+internal object LenientNullableCreativeSerializer : KSerializer<ApiCreative?> {
+    override val descriptor: SerialDescriptor = ApiCreative.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): ApiCreative? {
+        val jsonDecoder = decoder as? JsonDecoder
+            ?: return runCatching { decoder.decodeSerializableValue(ApiCreative.serializer()) }.getOrNull()
+        val element = jsonDecoder.decodeJsonElement() as? JsonObject ?: return null
+        return runCatching {
+            jsonDecoder.json.decodeFromJsonElement(ApiCreative.serializer(), element)
+        }.getOrNull()
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    override fun serialize(encoder: Encoder, value: ApiCreative?) {
+        if (value == null) encoder.encodeNull()
+        else encoder.encodeSerializableValue(ApiCreative.serializer(), value)
     }
 }
 
@@ -166,6 +255,9 @@ internal data class FallbackAdsApiResponse(
     @SerialName("native_click_beacon_v1_enabled")
     @Serializable(with = LenientNullableBooleanSerializer::class)
     val nativeClickBeaconV1Enabled: Boolean? = null,
+    @SerialName("video_contract") @Serializable(with = LenientNullableIntSerializer::class)
+    val videoContract: Int? = null,
+    @Serializable(with = LossyFallbackAdBodiesSerializer::class)
     val ads: List<FallbackAdBody> = emptyList(),
 )
 
@@ -176,11 +268,100 @@ internal data class FallbackAdBody(
     @SerialName("native_click_beacon_v1_enabled")
     @Serializable(with = LenientNullableBooleanSerializer::class)
     val nativeClickBeaconV1Enabled: Boolean? = null,
+    val type: String? = null,
+    @Serializable(with = LenientNullableCreativeSerializer::class)
+    val creative: ApiCreative? = null,
+    @SerialName("rendered_html") val renderedHtml: String? = null,
+    // Shipped fallback payloads used `html`; keep decode-only compatibility while preferring rendered_html.
     val html: String? = null,
-    @SerialName("iframe_url") val iframeUrl: String? = null,
-    // Kept as raw JSON so a malformed fallback-only behavior block cannot drop the response.
+    @SerialName("iframe_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val iframeUrl: String? = null,
+    val url: String? = null,
+    @SerialName("poster_url") val posterUrl: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val cta: String? = null,
+    @SerialName("app_icon_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val appIconUrl: String? = null,
+    @SerialName("app_name")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val appName: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val subtitle: String? = null,
+    @SerialName("video_pool")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val videoPool: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val pool: String? = null,
+    @SerialName("clip_index")
+    @Serializable(with = LenientNullableIntSerializer::class)
+    val clipIndex: Int? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val destination: String? = null,
+    @SerialName("tracking_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val trackingUrl: String? = null,
+    @SerialName("android_store_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val androidStoreUrl: String? = null,
+    @SerialName("ios_store_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val iosStoreUrl: String? = null,
+    // Keep fallback behavior raw so malformed or partial close config cannot drop the screen.
     @SerialName("ad_behavior") val adBehavior: JsonElement? = null,
+    @Transient val sourceIndex: Int = -1,
+    @Transient val routingFieldsPresent: Boolean = listOf(
+        trackingUrl,
+        androidStoreUrl,
+    ).any { !it.isNullOrBlank() },
 )
+
+internal object LossyFallbackAdBodiesSerializer : KSerializer<List<FallbackAdBody>> {
+    private val delegate = ListSerializer(FallbackAdBody.serializer())
+    override val descriptor: SerialDescriptor = delegate.descriptor
+
+    override fun deserialize(decoder: Decoder): List<FallbackAdBody> {
+        val jsonDecoder = decoder as? JsonDecoder
+        if (jsonDecoder == null) {
+            return decoder.decodeSerializableValue(delegate).mapIndexed { index, item ->
+                item.copy(sourceIndex = index)
+            }
+        }
+        val array = jsonDecoder.decodeJsonElement() as? JsonArray ?: return emptyList()
+        return array.mapIndexedNotNull { index, element ->
+            runCatching {
+                val body = jsonDecoder.json.decodeFromJsonElement(FallbackAdBody.serializer(), element)
+                body.copy(
+                    sourceIndex = index,
+                    routingFieldsPresent = (element as? JsonObject)?.hasPresentRoutingField() == true,
+                )
+            }.getOrNull()
+        }
+    }
+
+    override fun serialize(encoder: Encoder, value: List<FallbackAdBody>) {
+        val jsonEncoder = encoder as? JsonEncoder
+        if (jsonEncoder == null) {
+            encoder.encodeSerializableValue(delegate, value)
+            return
+        }
+        jsonEncoder.encodeJsonElement(
+            JsonArray(value.map { jsonEncoder.json.encodeToJsonElement(FallbackAdBody.serializer(), it) }),
+        )
+    }
+}
+
+private fun JsonObject.hasPresentRoutingField(): Boolean = listOf(
+    "tracking_url",
+    "android_store_url",
+).any { key ->
+    when (val value = this[key]) {
+        null, JsonNull -> false
+        is JsonPrimitive -> !value.isString || !value.content.isBlank()
+        else -> true
+    }
+}
 
 @Serializable
 internal data class MenuGameClickBody(
@@ -202,6 +383,7 @@ internal data class AdLoadRequestBody(
     // targeting too. Null omits the key (the backend treats it as no context).
     val context: NativeContextBody? = null,
     val metadata: Map<String, String>? = null,
+    val contracts: Map<String, Int> = mapOf("video" to 2),
     // Device capability snapshot so the backend never assigns an unsupported variant. Defaults to a
     // neutral value (no framework access) so pure-JVM tests can construct this; the ad path injects
     // the real values via `currentDeviceCapabilities()`.
@@ -218,6 +400,8 @@ internal data class AdLoadApiResponse(
     val destination: String = "appstore",
     @SerialName("rendered_format") val renderedFormat: String? = null,
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    @SerialName("impression_url") @Serializable(with = LenientNullableStringSerializer::class)
+    val impressionUrl: String? = null,
     // Raw, unwrapped Play Store link for the advertised app — distinct from the
     // attribution-wrapped tracking_url. The deterministic CTA fallback: opened when the tracker
     // is missing or can't be launched, so the CTA still lands on the store. Null when the
@@ -233,9 +417,14 @@ internal data class AdLoadApiResponse(
     // event. Defaults to 0.0 → a $0 estimate when the field is absent (e.g. a no-fill).
     @SerialName("bid_amt") val bidAmt: Double = 0.0,
     // Null when the payload omits `ad_behavior` — the renderer falls back to today's defaults.
-    @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
+    @SerialName("ad_behavior") @Serializable(with = LenientNullableAdBehaviorSerializer::class)
+    val adBehavior: ApiAdBehavior? = null,
+    @Serializable(with = LenientNullableCreativeSerializer::class)
     val creative: ApiCreative? = null,
+    @Serializable(with = LenientNullableExperimentSerializer::class)
     val experiment: ApiExperiment? = null,
+    @SerialName("video_contract") @Serializable(with = LenientNullableIntSerializer::class)
+    val videoContract: Int? = null,
 )
 
 // ── Capability handshake ──────────────────────────────────────────────────────
@@ -270,6 +459,9 @@ internal data class ApiAdBehavior(
     @SerialName("store_prompt") val storePrompt: ApiStorePrompt? = null,
     val skoverlay: ApiSkOverlay? = null,
     @SerialName("auto_store_redirect") val autoStoreRedirect: ApiAutoStoreRedirect? = null,
+    val video: ApiVideoBehavior? = null,
+    val reward: JsonElement? = null,
+    @SerialName("progress_bar") val progressBar: JsonElement? = null,
 )
 
 @Serializable
@@ -288,9 +480,75 @@ internal data class ApiCloseBehavior(
 
 @Serializable
 internal data class ApiCreative(
-    val type: String = "",
+    val type: String? = null,
     @SerialName("bundle_url") val bundleUrl: String? = null,
+    val url: String? = null,
+    @SerialName("poster_url") val posterUrl: String? = null,
     @SerialName("ad_unit_type") val adUnitType: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val cta: String? = null,
+    @SerialName("app_icon_url")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val appIconUrl: String? = null,
+    @SerialName("app_name")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val appName: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val subtitle: String? = null,
+    @SerialName("video_pool")
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val videoPool: String? = null,
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val pool: String? = null,
+    @SerialName("clip_index")
+    @Serializable(with = LenientNullableIntSerializer::class)
+    val clipIndex: Int? = null,
+    @Serializable(with = LossyVideoSegmentsSerializer::class)
+    val segments: List<ApiVideoSegment> = emptyList(),
+)
+
+@Serializable
+internal data class ApiVideoSegment(
+    @SerialName("clip_index") @Serializable(with = LenientIntSerializer::class)
+    val clipIndex: Int = -1,
+    @SerialName("video_pool") @Serializable(with = LenientNullableStringSerializer::class)
+    val videoPool: String? = null,
+    @SerialName("start_seconds") val startSeconds: Double = Double.NaN,
+    @SerialName("end_seconds") val endSeconds: Double = Double.NaN,
+)
+
+internal object LossyVideoSegmentsSerializer : KSerializer<List<ApiVideoSegment>> {
+    private val delegate = ListSerializer(ApiVideoSegment.serializer())
+    override val descriptor: SerialDescriptor = delegate.descriptor
+
+    override fun deserialize(decoder: Decoder): List<ApiVideoSegment> {
+        val jsonDecoder = decoder as? JsonDecoder ?: return decoder.decodeSerializableValue(delegate)
+        val array = jsonDecoder.decodeJsonElement() as? JsonArray ?: return emptyList()
+        if (array.size > 3) return emptyList()
+        val parsed = ArrayList<ApiVideoSegment>(array.size)
+        for (element in array) {
+            val obj = element as? JsonObject ?: return emptyList()
+            val index = (obj["clip_index"] as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString)?.intOrNull
+                ?: return emptyList()
+            val pool = (obj["video_pool"] as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
+                ?.trim()?.takeIf { it.isNotEmpty() } ?: return emptyList()
+            val start = (obj["start_seconds"] as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString)?.doubleOrNull
+                ?: return emptyList()
+            val end = (obj["end_seconds"] as? JsonPrimitive)?.takeUnless(JsonPrimitive::isString)?.doubleOrNull
+                ?: return emptyList()
+            parsed += ApiVideoSegment(index, pool, start, end)
+        }
+        return parsed
+    }
+
+    override fun serialize(encoder: Encoder, value: List<ApiVideoSegment>) =
+        encoder.encodeSerializableValue(delegate, value)
+}
+
+@Serializable
+internal data class ApiVideoBehavior(
+    @Serializable(with = LenientNullableStringSerializer::class)
+    val style: String? = null,
 )
 
 @Serializable
@@ -310,9 +568,12 @@ internal data class ApiStorePrompt(
 
 @Serializable
 internal data class ApiSkOverlay(
-    val enabled: Boolean = false,
+    @Serializable(with = LenientNullableBooleanSerializer::class)
+    val enabled: Boolean? = null,
     val timing: String? = null,
-    @SerialName("delay_seconds") val delaySeconds: Int = 0,
+    @SerialName("delay_seconds")
+    @Serializable(with = LenientNullableIntSerializer::class)
+    val delaySeconds: Int? = null,
     val position: String? = null,
     val dismissible: Boolean = true,
 )
@@ -325,14 +586,25 @@ internal data class ApiAutoStoreRedirect(
 
 /** Maps the wire DTO to the domain model, normalizing enum strings. A null DTO (absent
  * `ad_behavior`) stays null so callers can preserve today's literal behavior. */
-internal fun ApiAdBehavior?.toDomain(): AdBehavior? {
+internal fun ApiAdBehavior?.toDomain(videoContract2: Boolean = false): AdBehavior? {
     if (this == null) return null
     return AdBehavior(
         close = close.toDomain(),
         storeOpen = StoreOpen.from(storeOpen),
         storePrompt = storePrompt.toDomain(),
-        skoverlay = skoverlay.toDomain(),
+        skoverlay = skoverlay.toDomain(videoContract2),
         autoStoreRedirect = autoStoreRedirect.toDomain(),
+        video = video.toDomain().takeIf { videoContract2 },
+        reward = (reward as? JsonObject)?.takeIf { videoContract2 }?.let { value ->
+            val earnAt = (value["earn_at"] as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
+            RewardBehavior(RewardEarnAt.from(earnAt))
+        },
+        progressBar = ProgressBarBehavior(
+            ProgressBarStyle.from(
+                ((progressBar as? JsonObject)?.takeIf { videoContract2 }?.get("style") as? JsonPrimitive)
+                    ?.takeIf(JsonPrimitive::isString)?.content,
+            ),
+        ),
     )
 }
 
@@ -370,12 +642,96 @@ internal fun fallbackCloseBehavior(adBehavior: JsonElement?): CloseBehavior {
         treatment = fallbackCloseTreatment(stringValue("treatment")),
         position = ClosePosition.from(stringValue("position")),
         action = CloseAction.from(stringValue("action")),
+        progressBarColor = validatedHexColor(stringValue("progress_bar_color")),
     )
 }
 
 internal fun ApiCreative?.toDomain(): Creative? {
     if (this == null) return null
-    return Creative(type = type, bundleUrl = bundleUrl, adUnitType = AdUnitType.from(adUnitType))
+    return Creative(
+        type = CreativeType.from(type),
+        bundleUrl = bundleUrl,
+        url = url,
+        posterUrl = posterUrl,
+        adUnitType = AdUnitType.from(adUnitType),
+        cta = cta?.trim()?.takeIf { it.isNotEmpty() },
+        appIconUrl = admittedRemoteAssetUrl(appIconUrl),
+        appName = appName?.trim()?.takeIf { it.isNotEmpty() },
+        subtitle = subtitle?.trim()?.takeIf { it.isNotEmpty() },
+        videoPool = (videoPool ?: pool)?.trim()?.takeIf { it.length in 1..64 },
+        clipIndex = clipIndex?.takeIf { it in 0..2 },
+        segments = validatedVideoSegments(segments),
+    )
+}
+
+internal fun validatedVideoSegments(segments: List<ApiVideoSegment>): List<VideoSegment> {
+    if (segments.isEmpty() || segments.size > 3) return emptyList()
+    var expectedStart = 0.0
+    val validated = ArrayList<VideoSegment>(segments.size)
+    segments.forEachIndexed { expectedIndex, segment ->
+        val pool = segment.videoPool?.trim()?.takeIf { it.length in 1..64 } ?: return emptyList()
+        if (segment.clipIndex != expectedIndex || !segment.startSeconds.isFinite() ||
+            !segment.endSeconds.isFinite() || kotlin.math.abs(segment.startSeconds - expectedStart) > 0.001 ||
+            segment.endSeconds <= segment.startSeconds
+        ) return emptyList()
+        validated += VideoSegment(
+            clipIndex = segment.clipIndex,
+            videoPool = pool,
+            // Accepted tolerance is transport noise only; attribution uses the exact prior boundary.
+            startSeconds = expectedStart,
+            endSeconds = segment.endSeconds,
+        )
+        expectedStart = segment.endSeconds
+    }
+    return validated
+}
+
+internal fun ApiVideoBehavior?.toDomain(): VideoBehavior? {
+    if (this == null) return null
+    return VideoBehavior(
+        style = VideoChromeStyle.from(style),
+    )
+}
+
+internal fun fallbackVideoBehavior(adBehavior: JsonElement?): VideoBehavior? {
+    val video = (adBehavior as? JsonObject)?.get("video") as? JsonObject ?: return null
+    val rawStyle = (video["style"] as? JsonPrimitive)
+        ?.takeIf(JsonPrimitive::isString)
+        ?.content
+    return VideoBehavior(
+        style = VideoChromeStyle.from(rawStyle),
+    )
+}
+
+internal fun fallbackSkOverlayConfig(adBehavior: JsonElement?, videoContract2: Boolean): SkOverlayConfig? {
+    val overlay = (adBehavior as? JsonObject)?.get("skoverlay") as? JsonObject
+    if (overlay == null && !videoContract2) return null
+    fun stringValue(key: String): String? = (overlay?.get(key) as? JsonPrimitive)
+        ?.takeIf(JsonPrimitive::isString)
+        ?.content
+    val enabled = (overlay?.get("enabled") as? JsonPrimitive)
+        ?.takeUnless(JsonPrimitive::isString)
+        ?.booleanOrNull
+        ?: false
+    val parsedDelay = (overlay?.get("delay_seconds") as? JsonPrimitive)
+        ?.takeUnless(JsonPrimitive::isString)
+        ?.intOrNull
+    val delay = if (videoContract2) {
+        parsedDelay?.takeIf { it in 0..MAX_CONTRACT_2_SK_OVERLAY_DELAY_SECONDS } ?: 3
+    } else {
+        clampSkOverlayDelaySeconds(parsedDelay ?: 0)
+    }
+    val dismissible = (overlay?.get("dismissible") as? JsonPrimitive)
+        ?.takeUnless(JsonPrimitive::isString)
+        ?.booleanOrNull
+        ?: true
+    return SkOverlayConfig(
+        enabled = enabled,
+        timing = OverlayTiming.from(stringValue("timing")),
+        delaySeconds = delay,
+        position = OverlayPosition.from(stringValue("position")),
+        dismissible = dismissible,
+    )
 }
 
 internal fun ApiExperiment?.toDomain(): Experiment? {
@@ -393,12 +749,16 @@ internal fun ApiStorePrompt?.toDomain(): StorePrompt? {
     )
 }
 
-internal fun ApiSkOverlay?.toDomain(): SkOverlayConfig? {
+internal fun ApiSkOverlay?.toDomain(videoContract2: Boolean = false): SkOverlayConfig? {
     if (this == null) return null
     return SkOverlayConfig(
-        enabled = enabled,
+        enabled = enabled ?: false,
         timing = OverlayTiming.from(timing),
-        delaySeconds = clampSkOverlayDelaySeconds(delaySeconds),
+        delaySeconds = if (videoContract2) {
+            delaySeconds?.takeIf { it in 0..MAX_CONTRACT_2_SK_OVERLAY_DELAY_SECONDS } ?: 3
+        } else {
+            clampSkOverlayDelaySeconds(delaySeconds ?: 0)
+        },
         position = OverlayPosition.from(position),
         dismissible = dismissible,
     )
@@ -443,19 +803,25 @@ internal data class RewardedInitRequestBody(
     // full-screen formats target the same way native does.
     val context: NativeContextBody? = null,
     val metadata: Map<String, String>? = null,
+    val contracts: Map<String, Int> = mapOf("video" to 2),
+    val capabilities: ApiDeviceCapabilities = ApiDeviceCapabilities(),
 )
 
 @Serializable
 internal data class RewardedInitApiResponse(
     // The impression (minigame serve) id — replaces the old `serve_id`/`ad_id` pair as the
     // single handle for verify-reward, fallbacks, tracking and reporting.
-    @SerialName("impression_id") val impressionId: String = "",
-    @SerialName("iframe_url") val iframeUrl: String = "",
-    // Server-rendered HTML creative; preferred over [iframeUrl] when non-empty (parity with the
-    // interstitial), so the playable fills the surface the same way.
-    @SerialName("rendered_html") val renderedHtml: String = "",
+    @SerialName("impression_id") val impressionId: String? = null,
+    // Playables are rendered from server HTML; video assets are described by creative.url.
+    @SerialName("rendered_html") val renderedHtml: String? = null,
+    @Serializable(with = LenientNullableCreativeSerializer::class)
+    val creative: ApiCreative? = null,
+    @Serializable(with = LenientNullableExperimentSerializer::class)
+    val experiment: ApiExperiment? = null,
     val destination: String = "appstore",
     @SerialName("tracking_url") val trackingUrl: String? = null,
+    @SerialName("impression_url") @Serializable(with = LenientNullableStringSerializer::class)
+    val impressionUrl: String? = null,
     // Raw, unwrapped Play Store link — see [AdLoadApiResponse.androidStoreUrl].
     @SerialName("android_store_url") val androidStoreUrl: String? = null,
     @SerialName("prewarm_sk_product") val prewarmSkProduct: Boolean = false,
@@ -463,7 +829,10 @@ internal data class RewardedInitApiResponse(
     @SerialName("bid_amt") val bidAmt: Double = 0.0,
     // Mirrors the interstitial response: the play-to-earn gate (`close.delay_seconds`) plus the
     // mid-ad store prompt + its tap routing. Null/absent → no gate / no store prompt.
-    @SerialName("ad_behavior") val adBehavior: ApiAdBehavior? = null,
+    @SerialName("ad_behavior") @Serializable(with = LenientNullableAdBehaviorSerializer::class)
+    val adBehavior: ApiAdBehavior? = null,
+    @SerialName("video_contract") @Serializable(with = LenientNullableIntSerializer::class)
+    val videoContract: Int? = null,
 )
 
 @Serializable
@@ -471,14 +840,13 @@ internal data class VerifyRewardRequestBody(
     @SerialName("serve_id") val serveId: String,
     @SerialName("session_id") val sessionId: String,
     @SerialName("elapsed_play_time") val elapsedPlayTime: Double,
-    // Sent alongside serve_id so the SSV reward callback can resolve/validate the ad unit off the
-    // body. Default "" keeps existing callers + already-persisted queue entries decoding cleanly.
-    @SerialName("ad_unit_id") val adUnitId: String = "",
+    @SerialName("completion_reason") val completionReason: String? = null,
 )
 
 @Serializable
 internal data class VerifyRewardApiResponse(
-    val verified: Boolean = false,
+    @Serializable(with = LenientNullableBooleanSerializer::class)
+    val verified: Boolean? = null,
     val token: String? = null,
 )
 
@@ -530,7 +898,7 @@ internal data class NativeContextBody(
 )
 
 /** Response for `POST /load/native` (backend `CaiNativeResponse`). A flat envelope mirroring the
- * imperative [AdLoadApiResponse]: the creative (`iframe_url` + `rendered_html`) and the click-through
+ * imperative [AdLoadApiResponse]: the creative (`rendered_html`) and the click-through
  * params (`destination`, `tracking_url`) sit at the top level (the creative was previously nested
  * under a camelCase `adResponse`). Every field defaults to its empty/no-fill value, so a `{}` or
  * partial payload decodes safely. */
@@ -539,8 +907,7 @@ internal data class NativeAdApiResponse(
     @SerialName("impression_id") val impressionId: String? = null,
     @SerialName("ad_inserted") val adInserted: Boolean = false,
     @SerialName("ad_format") val adFormat: String = "",
-    // The mountable creative — now top-level (was nested under `adResponse`); both null on a no-fill.
-    @SerialName("iframe_url") val iframeUrl: String? = null,
+    // The mountable server-rendered creative; null on a no-fill.
     @SerialName("rendered_html") val renderedHtml: String? = null,
     // Click-through routing (mirrors [AdLoadApiResponse]): `destination` is where a CTA tap goes
     // ("appstore" | "web") and `tracking_url` is the MMP click tracker the SDK routes

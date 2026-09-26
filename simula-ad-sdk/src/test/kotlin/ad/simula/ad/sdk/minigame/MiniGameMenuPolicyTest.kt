@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.minigame
 
+import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.network.ClickInteractionGate
 import ad.simula.ad.sdk.network.ClickPersistenceHandoff
 import ad.simula.ad.sdk.network.ClickSources
@@ -14,6 +15,47 @@ import org.junit.Test
 
 class MiniGameMenuPolicyTest {
     private class Node(var parent: Node? = null, val host: Boolean = false)
+
+    @Test
+    fun `minigame video routes use deferred preparation while HTML stays synchronous`() {
+        assertTrue(fallbackRouteRequiresDeferredPreparation(isVideo = true))
+        assertFalse(fallbackRouteRequiresDeferredPreparation(isVideo = false))
+    }
+
+    @Test
+    fun `v2 terminal auto advance waits for blockers resumed lifecycle and one frame`() {
+        fun ready(
+            clickPending: Boolean = false,
+            storePending: Boolean = false,
+            resumed: Boolean = true,
+            framePresented: Boolean = true,
+        ) = miniGameVideoAutoAdvanceReady(
+            videoPlanV2 = true,
+            currentType = CreativeType.VIDEO,
+            terminal = true,
+            clickHandoffPending = clickPending,
+            storeVisitPending = storePending,
+            lifecycleResumed = resumed,
+            framePresented = framePresented,
+        )
+
+        assertFalse(ready(clickPending = true))
+        assertFalse(ready(storePending = true))
+        assertFalse(ready(resumed = false))
+        assertFalse(ready(framePresented = false))
+        assertTrue(ready())
+        assertFalse(
+            miniGameVideoAutoAdvanceReady(
+                videoPlanV2 = true,
+                currentType = CreativeType.PLAYABLE,
+                terminal = true,
+                clickHandoffPending = false,
+                storeVisitPending = false,
+                lifecycleResumed = true,
+                framePresented = true,
+            ),
+        )
+    }
 
     @Test
     fun `nested wrappers resolve the first host`() {

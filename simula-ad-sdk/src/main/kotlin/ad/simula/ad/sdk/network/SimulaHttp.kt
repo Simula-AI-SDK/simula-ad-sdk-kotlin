@@ -2,6 +2,7 @@ package ad.simula.ad.sdk.network
 
 import ad.simula.ad.sdk.telemetry.Telemetry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -15,9 +16,107 @@ import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.URL
 import java.net.UnknownHostException
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.Future
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.GZIPInputStream
 import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLException
+
+internal fun interface DeadlineHostResolver {
+    fun resolve(host: String, deadlineNanos: Long): Array<InetAddress>
+}
+
+/** Bounds both OS resolver concurrency and callers' wait, even when libc DNS ignores interruption. */
+internal class BoundedDeadlineHostResolver(
+    private val lookup: (String) -> Array<InetAddress> = InetAddress::getAllByName,
+    private val clockNanos: () -> Long = System::nanoTime,
+    maxWorkers: Int = 2,
+    queueCapacity: Int = 8,
+    private val recordOverload: () -> Unit = {
+        Telemetry.recordError(signature = "dns:resolver_overloaded")
+    },
+) : DeadlineHostResolver {
+    private val workerCount = maxWorkers.coerceIn(1, 2)
+    private val executor = ThreadPoolExecutor(
+        workerCount,
+        workerCount,
+        30L,
+        TimeUnit.SECONDS,
+        ArrayBlockingQueue(queueCapacity.coerceAtLeast(1)),
+        { runnable -> Thread(runnable, "simula-dns-resolver").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    ).apply { allowCoreThreadTimeOut(true) }
+
+    override fun resolve(host: String, deadlineNanos: Long): Array<InetAddress> {
+        val remaining = deadlineNanos - clockNanos()
+        if (remaining <= 0L) throw SocketTimeoutException("DNS deadline exceeded")
+        val future: Future<Array<InetAddress>> = try {
+            executor.submit<Array<InetAddress>> { lookup(host) }
+        } catch (_: RejectedExecutionException) {
+            // libc DNS may ignore interruption after a caller's deadline. Keep the fixed workers
+            // bounded and fail closed under saturation; rotating executors would leak blocked threads.
+            runCatching(recordOverload)
+            throw RedirectResolverOverloadedException()
+        }
+        return try {
+            future.get(remaining, TimeUnit.NANOSECONDS)
+        } catch (_: TimeoutException) {
+            future.cancel(true)
+            (future as? Runnable)?.let(executor::remove)
+            executor.purge()
+            throw SocketTimeoutException("DNS deadline exceeded")
+        } catch (interrupted: InterruptedException) {
+            future.cancel(true)
+            (future as? Runnable)?.let(executor::remove)
+            executor.purge()
+            Thread.currentThread().interrupt()
+            throw SocketTimeoutException("DNS resolution interrupted")
+        } catch (failure: java.util.concurrent.ExecutionException) {
+            throw (failure.cause as? Exception ?: UnknownHostException(host))
+        }
+    }
+
+    internal fun queuedTaskCount(): Int = executor.queue.size
+}
+
+internal class RedirectResolverOverloadedException : IOException("DNS resolver overloaded")
+
+/** Keeps potentially blocking platform disconnect calls off cancellation and deadline threads. */
+internal class BoundedConnectionAborter(
+    maxWorkers: Int = 2,
+    queueCapacity: Int = 16,
+) {
+    private val threadId = AtomicInteger()
+    private val workerCount = maxWorkers.coerceIn(1, 2)
+    private val executor = ThreadPoolExecutor(
+        workerCount,
+        workerCount,
+        30L,
+        TimeUnit.SECONDS,
+        ArrayBlockingQueue(queueCapacity.coerceAtLeast(1)),
+        { runnable ->
+            Thread(runnable, "simula-http-abort-${threadId.incrementAndGet()}").apply { isDaemon = true }
+        },
+        ThreadPoolExecutor.DiscardPolicy(),
+    ).apply { allowCoreThreadTimeOut(true) }
+
+    fun abort(connection: HttpURLConnection?) {
+        connection ?: return
+        runCatching { executor.execute { runCatching { connection.disconnect() } } }
+    }
+}
+
+private val SharedDeadlineHostResolver = BoundedDeadlineHostResolver()
+private val SharedConnectionAborter = BoundedConnectionAborter()
+
+internal fun abortConnectionAsync(connection: HttpURLConnection?) {
+    SharedConnectionAborter.abort(connection)
+}
 
 /**
  * Minimal native HTTP layer built on [HttpURLConnection].
@@ -31,6 +130,10 @@ internal object SimulaHttp {
 
     private const val CONNECT_TIMEOUT_MS = 10_000
     private const val READ_TIMEOUT_MS = 10_000
+    private const val PLAIN_GET_TIMEOUT_MS = 5_000
+    private const val PLAIN_GET_MAX_REDIRECTS = 5
+    private const val NANOS_PER_MILLISECOND = 1_000_000L
+    private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
 
     // Response-body caps so a misconfigured/hostile backend or CDN (or a gzip bomb) can't OOM the
     // host: readBytes() would otherwise buffer the entire response into a single array. Caps are
@@ -46,6 +149,82 @@ internal object SimulaHttp {
         val code: Int,
         val locations: List<String>,
     )
+
+    /** One unauthenticated third-party impression GET. No SDK, privacy, device, or telemetry headers. */
+    suspend fun requestPlainGet(
+        url: String,
+        resolver: DeadlineHostResolver = SharedDeadlineHostResolver,
+        clockNanos: () -> Long = System::nanoTime,
+        userAgent: String? = SimulaUserAgent.browserValue,
+        openConnection: (String) -> HttpURLConnection = { target ->
+            URL(target).openConnection() as? HttpURLConnection
+                ?: throw IOException("Expected an HttpURLConnection")
+        },
+    ): Boolean = withContext(Dispatchers.IO) {
+        var conn: HttpURLConnection? = null
+        try {
+            val deadlineNanos = saturatingDeadlineNanos(clockNanos(), PLAIN_GET_TIMEOUT_MS.toLong())
+            var current = url
+            var redirects = 0
+            var result: Boolean? = null
+            while (result == null) {
+                validateRedirectCookieIsolation()
+                validatePublicRedirectTarget(current, deadlineNanos, resolver)
+                val connectTimeoutMs = remainingPlainGetTimeoutMs(deadlineNanos, clockNanos)
+                    ?: return@withContext false
+                conn = openConnection(current)
+                configurePlainGetConnection(conn, connectTimeoutMs, userAgent)
+                validateRedirectCookieIsolation()
+                conn.connect()
+                val readTimeoutMs = remainingPlainGetTimeoutMs(deadlineNanos, clockNanos)
+                if (readTimeoutMs == null) {
+                    abortConnectionAsync(conn)
+                    return@withContext false
+                }
+                conn.readTimeout = readTimeoutMs
+                val code = conn.responseCode
+                runCatching { (conn.errorStream ?: conn.inputStream)?.close() }
+
+                if (code in REDIRECT_CODES) {
+                    if (redirects >= PLAIN_GET_MAX_REDIRECTS) return@withContext false
+                    val location = conn.getHeaderField("Location")?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: return@withContext false
+                    current = resolvePublicRedirect(current, location)
+                        ?: return@withContext false
+                    redirects++
+                    conn = null
+                    continue
+                }
+                result = code in 200..299
+            }
+            result
+        } catch (cancelled: CancellationException) {
+            abortConnectionAsync(conn)
+            throw cancelled
+        } catch (_: RedirectCookieIsolationException) {
+            abortConnectionAsync(conn)
+            Telemetry.recordError(signature = "impression:cookie_isolation_unavailable")
+            false
+        } catch (_: Exception) {
+            abortConnectionAsync(conn)
+            false
+        }
+    }
+
+    internal fun configurePlainGetConnection(
+        conn: HttpURLConnection,
+        timeoutMs: Int = PLAIN_GET_TIMEOUT_MS,
+        userAgent: String? = null,
+    ) {
+        conn.requestMethod = "GET"
+        conn.connectTimeout = timeoutMs.coerceAtLeast(1)
+        conn.readTimeout = timeoutMs.coerceAtLeast(1)
+        conn.instanceFollowRedirects = false
+        conn.useCaches = false
+        conn.defaultUseCaches = false
+        // Reuse the captured browser identity without creating a WebView for a measurement GET.
+        userAgent?.takeIf { it.isNotBlank() }?.let { conn.setRequestProperty("User-Agent", it) }
+    }
 
     internal class RedirectTargetRejectedException : IOException("Redirect target is not public")
     internal class RedirectCookieIsolationException : IOException("Redirect cookie isolation unavailable")
@@ -152,14 +331,15 @@ internal object SimulaHttp {
             URL(target).openConnection() as? HttpURLConnection
                 ?: throw IOException("Expected an HttpURLConnection")
         },
-        validateTarget: (String) -> Unit = ::validatePublicRedirectTarget,
+        resolver: DeadlineHostResolver = SharedDeadlineHostResolver,
+        validateTarget: (String, Long) -> Unit = { target, deadline ->
+            validatePublicRedirectTarget(target, deadline, resolver)
+        },
         validateCookieIsolation: () -> Unit = ::validateRedirectCookieIsolation,
     ): RedirectHeadResponse = suspendCancellableCoroutine { continuation ->
         val activeConnection = AtomicReference<HttpURLConnection?>(null)
         continuation.invokeOnCancellation {
-            // HttpURLConnection is blocking; cancellation must abort the socket from the cancelling
-            // thread rather than waiting for the IO worker to observe coroutine cancellation.
-            runCatching { activeConnection.getAndSet(null)?.disconnect() }
+            abortConnectionAsync(activeConnection.getAndSet(null))
         }
         Dispatchers.IO.dispatch(continuation.context, Runnable {
             if (!continuation.isActive) return@Runnable
@@ -167,18 +347,23 @@ internal object SimulaHttp {
             try {
                 val started = System.nanoTime()
                 val boundedTimeoutMs = timeoutMs.coerceIn(1L, Int.MAX_VALUE.toLong())
+                val deadlineNanos = saturatingDeadlineNanos(started, boundedTimeoutMs)
                 validateCookieIsolation()
-                validateTarget(url)
+                validateTarget(url, deadlineNanos)
                 conn = openConnection(url)
                 activeConnection.set(conn)
                 if (!continuation.isActive) {
-                    runCatching { activeConnection.getAndSet(null)?.disconnect() }
+                    abortConnectionAsync(activeConnection.getAndSet(null))
                     return@Runnable
                 }
-                configureRedirectHeadConnection(conn, boundedTimeoutMs.toInt(), userAgent)
+                configureRedirectHeadConnection(
+                    conn,
+                    remainingTimeoutMs(started, boundedTimeoutMs),
+                    userAgent,
+                )
                 validateRedirectCookieIsolation()
                 if (!continuation.isActive) {
-                    runCatching { activeConnection.getAndSet(null)?.disconnect() }
+                    abortConnectionAsync(activeConnection.getAndSet(null))
                     return@Runnable
                 }
                 conn.connect()
@@ -194,7 +379,7 @@ internal object SimulaHttp {
                 // Exceptional connections are not reusable; abort them so a timed-out probe cannot
                 // continue in the background and race the browser fallback.
                 activeConnection.compareAndSet(conn, null)
-                runCatching { conn?.disconnect() }
+                abortConnectionAsync(conn)
                 continuation.resumeWith(Result.failure(e))
             }
         })
@@ -207,7 +392,9 @@ internal object SimulaHttp {
 
     private fun remainingTimeoutMs(startNanos: Long, timeoutMs: Long): Int {
         val elapsedMs = ((System.nanoTime() - startNanos).coerceAtLeast(0L) / 1_000_000L)
-        return (timeoutMs - elapsedMs).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+        val remaining = timeoutMs - elapsedMs
+        if (remaining <= 0L) throw SocketTimeoutException("Request deadline exceeded")
+        return remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     }
 
     internal fun configureRedirectHeadConnection(
@@ -230,18 +417,69 @@ internal object SimulaHttp {
 
     internal fun validatePublicRedirectTarget(
         value: String,
-        resolve: (String) -> Array<InetAddress> = InetAddress::getAllByName,
+        deadlineNanos: Long,
+        resolver: DeadlineHostResolver = SharedDeadlineHostResolver,
     ) {
-        val host = runCatching { URL(value).host.trimEnd('.').lowercase() }.getOrNull()
+        val uri = runCatching { URI(value) }.getOrNull() ?: throw RedirectTargetRejectedException()
+        if (!uri.isAbsolute || uri.scheme?.lowercase() !in setOf("http", "https") || uri.rawUserInfo != null) {
+            throw RedirectTargetRejectedException()
+        }
+        val authority = uri.rawAuthority ?: throw RedirectTargetRejectedException()
+        if (!hasValidNetworkAuthority(authority)) throw RedirectTargetRejectedException()
+        val host = uri.host?.removePrefix("[")?.removeSuffix("]")?.trimEnd('.')?.lowercase()
             ?.takeIf { it.isNotBlank() }
             ?: throw RedirectTargetRejectedException()
         if (host == "localhost" || host.endsWith(".localhost") || host.endsWith(".local") ||
             host.endsWith(".internal") || host.endsWith(".home.arpa")
         ) throw RedirectTargetRejectedException()
-        val addresses = resolve(host)
+        val addresses = runCatching { resolver.resolve(host, deadlineNanos) }
+            .getOrElse { throw RedirectTargetRejectedException() }
         if (addresses.isEmpty() || addresses.any { !it.isPublicRedirectAddress() }) {
             throw RedirectTargetRejectedException()
         }
+    }
+
+    private fun hasValidNetworkAuthority(authority: String): Boolean {
+        if (authority.isBlank() || authority.contains('@')) return false
+        val portText = when {
+            authority.startsWith('[') -> {
+                val closing = authority.indexOf(']')
+                if (closing <= 1) return false
+                val suffix = authority.substring(closing + 1)
+                when {
+                    suffix.isEmpty() -> null
+                    suffix.startsWith(':') -> suffix.drop(1)
+                    else -> return false
+                }
+            }
+            authority.count { it == ':' } > 1 -> return false
+            ':' in authority -> authority.substringAfterLast(':')
+            else -> null
+        }
+        if (portText == null) return true
+        val port = portText.toIntOrNull() ?: return false
+        return port in 1..65535
+    }
+
+    internal fun resolvePublicRedirect(current: String, location: String): String? = runCatching {
+        URI(current).resolve(URI(location)).toASCIIString()
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    private fun remainingPlainGetTimeoutMs(
+        deadlineNanos: Long,
+        clockNanos: () -> Long,
+    ): Int? {
+        val remainingNanos = deadlineNanos - clockNanos()
+        if (remainingNanos <= 0L) return null
+        return ((remainingNanos + NANOS_PER_MILLISECOND - 1L) / NANOS_PER_MILLISECOND)
+            .coerceIn(1L, PLAIN_GET_TIMEOUT_MS.toLong())
+            .toInt()
+    }
+
+    private fun saturatingDeadlineNanos(startNanos: Long, timeoutMs: Long): Long {
+        val timeoutNanos = timeoutMs.coerceAtMost(Long.MAX_VALUE / NANOS_PER_MILLISECOND) *
+            NANOS_PER_MILLISECOND
+        return if (startNanos > Long.MAX_VALUE - timeoutNanos) Long.MAX_VALUE else startNanos + timeoutNanos
     }
 
     private fun InetAddress.isPublicRedirectAddress(): Boolean {
@@ -263,8 +501,7 @@ internal object SimulaHttp {
                     bytes.copyOfRange(4, 12).all { it.toInt() == 0 } &&
                     bytes.copyOfRange(12, 16).isPublicIpv4Address()
                 val special2001 = first == 0x20 && second == 0x01 && when {
-                    third == 0x00 && fourth == 0x02 -> true
-                    third == 0x00 && fourth in 0x10..0x2f -> true
+                    third <= 0x01 -> true
                     third == 0x0d && fourth == 0xb8 -> true
                     else -> false
                 }
@@ -288,6 +525,7 @@ internal object SimulaHttp {
             first == 172 && second in 16..31 -> false
             first == 192 && second == 168 -> false
             first == 192 && second == 0 && third in setOf(0, 2) -> false
+            first == 192 && second == 88 && third == 99 -> false
             first == 198 && second in 18..19 -> false
             first == 198 && second == 51 && third == 100 -> false
             first == 203 && second == 0 && third == 113 -> false
