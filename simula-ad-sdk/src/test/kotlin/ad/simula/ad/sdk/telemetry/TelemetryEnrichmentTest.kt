@@ -247,6 +247,10 @@ class TelemetryEnrichmentTest {
             cacheSource = null,
             interactionId = "interaction-1",
             clickSource = "primary_cta",
+            endEvent = "activity_resumed",
+            opens = 2,
+            contaminated = true,
+            freeSpaceDeltaBytes = -184_000_000L,
         )
         m.recordLifecycle("load_success", "character_ad", "unit1", "ad2", null, null, null, cacheSource = "preload")
         advanceUntilIdle()
@@ -260,6 +264,10 @@ class TelemetryEnrichmentTest {
         assertEquals("ad1", opened.serveId)
         assertEquals(0.25, opened.sampleRate ?: -1.0, 0.0)
         assertEquals(1500L, opened.durationMs)
+        assertEquals("activity_resumed", opened.endEvent)
+        assertEquals(2, opened.opens)
+        assertEquals(true, opened.contaminated)
+        assertEquals(-184_000_000L, opened.freeSpaceDeltaBytes)
         assertNull(opened.cacheSource)
         assertEquals(0.25, sender.batches.first().sampleRate ?: -1.0, 0.0)
 

@@ -402,14 +402,17 @@ class FullscreenClickHandoffPolicyTest {
     fun `store visit requires an actual pause before resume counts as return`() {
         val visit = StoreVisitLifecycle()
 
-        assertNull(visit.open("cta", openedAtMs = 100L))
+        assertTrue(visit.open("cta", openedAtMs = 100L))
         assertEquals(StoreVisitPhase.LAUNCHING, visit.phase)
         assertNull(visit.resume())
         assertEquals(StoreVisitPhase.LAUNCHING, visit.phase)
 
-        assertTrue(visit.pause())
+        assertEquals(
+            ResolvedStoreVisit("cta", 100L, opens = 1, contaminated = null),
+            visit.pause(),
+        )
         assertEquals(StoreVisitPhase.AWAY, visit.phase)
-        assertEquals(ResolvedStoreVisit("cta", 100L), visit.resume())
+        assertEquals(ResolvedStoreVisit("cta", 100L, opens = 1, contaminated = null), visit.resume())
         assertEquals(StoreVisitPhase.NONE, visit.phase)
     }
 
@@ -418,9 +421,61 @@ class FullscreenClickHandoffPolicyTest {
         val visit = StoreVisitLifecycle()
         visit.open("store_prompt", openedAtMs = 200L)
 
-        assertEquals(ResolvedStoreVisit("store_prompt", 200L), visit.launchTimedOut())
+        assertTrue(visit.launchTimedOut())
         assertEquals(StoreVisitPhase.NONE, visit.phase)
-        assertNull(visit.launchTimedOut())
+        assertFalse(visit.launchTimedOut())
+    }
+
+    @Test
+    fun `store visits carry presentation open ordinal and reset contamination`() {
+        val visit = StoreVisitLifecycle()
+
+        visit.open("cta", openedAtMs = 100L)
+        visit.observeContamination()
+        visit.pause()
+        visit.contaminate()
+        assertEquals(
+            ResolvedStoreVisit("cta", 100L, opens = 1, contaminated = true),
+            visit.resume(),
+        )
+
+        visit.open("store_prompt", openedAtMs = 200L)
+        visit.observeContamination()
+        visit.pause()
+        assertEquals(
+            ResolvedStoreVisit("store_prompt", 200L, opens = 2, contaminated = false),
+            visit.resume(),
+        )
+    }
+
+    @Test
+    fun `ad closure is terminal for confirmed and provisional store visits`() {
+        for (confirmed in listOf(false, true)) {
+            val visit = StoreVisitLifecycle()
+            visit.open("cta", openedAtMs = 100L)
+            if (confirmed) visit.pause()
+            assertEquals(confirmed, visit.abandon() != null)
+            assertFalse(visit.open("fallback_cta", openedAtMs = 200L))
+            assertNull(visit.pause())
+            assertNull(visit.resume())
+            assertNull(visit.abandon())
+            assertFalse(visit.launchTimedOut())
+        }
+    }
+
+    @Test
+    fun `unconfirmed launch does not consume an open ordinal and duplicate callback is ignored`() {
+        val visit = StoreVisitLifecycle()
+
+        assertTrue(visit.open("cta", openedAtMs = 100L))
+        assertFalse(visit.open("store_prompt", openedAtMs = 150L))
+        assertTrue(visit.launchTimedOut())
+
+        assertTrue(visit.open("store_prompt", openedAtMs = 200L))
+        assertEquals(
+            ResolvedStoreVisit("store_prompt", 200L, opens = 1, contaminated = null),
+            visit.pause(),
+        )
     }
 
     @Test

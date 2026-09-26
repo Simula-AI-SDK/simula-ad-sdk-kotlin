@@ -166,6 +166,7 @@ internal class SimulaInterstitialActivity : ComponentActivity() {
         p.attachActivity(this)
         token?.let { InterstitialHandoff.markPresented(it) }
         storeExit = p.storeExit
+        storeExit?.attach(applicationContext)
 
         configureWindow()
         @Suppress("DEPRECATION")

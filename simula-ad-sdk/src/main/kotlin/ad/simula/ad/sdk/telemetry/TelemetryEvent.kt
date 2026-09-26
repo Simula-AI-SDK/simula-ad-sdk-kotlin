@@ -52,6 +52,14 @@ internal data class TelemetryEvent(
     // Store-exit type for store_opened/returned/abandoned: primary_cta | store_prompt |
     // install_banner | fallback_cta | auto_redirect.
     val trigger: String? = null,
+    // Store-visit terminal signal: sheet_dismissed | app_foreground | activity_resumed | ad_closed.
+    @SerialName("end_event") val endEvent: String? = null,
+    // One-based store-open ordinal within a single ad presentation.
+    val opens: Int? = null,
+    // True when a known signal (for example, screen-off) contaminated a proxy dwell measurement.
+    val contaminated: Boolean? = null,
+    // Best-effort install heuristic. Omitted unless both before/after samples are available.
+    @SerialName("free_space_delta_bytes") val freeSpaceDeltaBytes: Long? = null,
     // Native load source for load_success: preload | cache | network.
     @SerialName("cache_source") val cacheSource: String? = null,
     @SerialName("impression_id") val impressionId: String? = null,

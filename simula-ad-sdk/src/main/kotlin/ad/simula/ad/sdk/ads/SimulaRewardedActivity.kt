@@ -129,6 +129,7 @@ internal class SimulaRewardedActivity : ComponentActivity() {
         p.attachActivity(this)
         token?.let { RewardedHandoff.markPresented(it) }
         storeExit = p.storeExit
+        storeExit?.attach(applicationContext)
 
         configureWindow()
         @Suppress("DEPRECATION")

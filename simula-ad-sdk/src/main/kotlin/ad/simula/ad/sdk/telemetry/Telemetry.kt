@@ -202,11 +202,19 @@ internal object Telemetry {
         clickSource: String? = null,
         critical: Boolean = false,
         onPersisted: (() -> Unit)? = null,
+        endEvent: String? = null,
+        opens: Int? = null,
+        contaminated: Boolean? = null,
+        freeSpaceDeltaBytes: Long? = null,
     ) = manager?.recordLifecycle(
         stage, adFormat, adUnitId, adId, serveId, durationMs, errorCode, trigger, cacheSource,
         breadcrumb, interactionId, clickSource,
         critical = critical,
         onPersisted = onPersisted,
+        endEvent = endEvent,
+        opens = opens,
+        contaminated = contaminated,
+        freeSpaceDeltaBytes = freeSpaceDeltaBytes,
     ) ?: runCatching { onPersisted?.invoke() }.let { Unit }
 
     fun recordVideoLifecycle(
