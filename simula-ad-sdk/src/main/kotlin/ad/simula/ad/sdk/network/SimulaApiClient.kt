@@ -456,7 +456,7 @@ internal object SimulaApiClient {
         val response = SimulaHttp.request(
             url = endpoint("minigames/init"),
             method = "POST",
-            headers = jsonHeaders(),
+            headers = jsonHeaders() + ArtifactRequestOptions.headers(),
             body = json.encodeToString(requestBody),
         )
         if (!response.isSuccessful) {
@@ -569,7 +569,7 @@ internal object SimulaApiClient {
         val response = SimulaHttp.request(
             url = endpoint("load/interstitial"),
             method = "POST",
-            headers = jsonHeaders(),
+            headers = jsonHeaders() + ArtifactRequestOptions.headers(),
             body = json.encodeToString(requestBody),
         )
         if (!response.isSuccessful) failHttp(response)
@@ -750,7 +750,7 @@ internal object SimulaApiClient {
         val response = SimulaHttp.request(
             url = endpoint("load/rewarded"),
             method = "POST",
-            headers = jsonHeaders(),
+            headers = jsonHeaders() + ArtifactRequestOptions.headers(),
             body = json.encodeToString(requestBody),
         )
         if (!response.isSuccessful) failHttp(response)

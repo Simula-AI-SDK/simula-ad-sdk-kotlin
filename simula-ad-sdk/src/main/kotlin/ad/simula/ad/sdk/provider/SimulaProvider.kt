@@ -1,5 +1,6 @@
 package ad.simula.ad.sdk.provider
 
+import ad.simula.ad.sdk.network.ArtifactRequestOptions
 import android.app.Application
 import android.util.Log
 import androidx.compose.runtime.Composable
@@ -244,6 +245,7 @@ fun SimulaProvider(
                 explicitPrivacy = currentExplicitPrivacy,
             ) {
                 ProcessApiEnvironment.ensureDefault(stagingManifestValue)
+                ArtifactRequestOptions.freeze()
                 Telemetry.claimInitialization(
                     context = applicationContext,
                     apiKey = apiKey,

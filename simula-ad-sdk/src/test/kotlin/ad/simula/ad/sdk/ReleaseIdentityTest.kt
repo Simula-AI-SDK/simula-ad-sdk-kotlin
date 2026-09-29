@@ -8,7 +8,7 @@ import org.junit.Test
 class ReleaseIdentityTest {
     @Test
     fun `release identity matches PR version`() {
-        assertEquals("1.2.1-dev.4", SimulaAdSdkInfo.VERSION)
+        assertEquals("1.2.1-dev.5", SimulaAdSdkInfo.VERSION)
         assertEquals(SimulaAdSdkInfo.VERSION, SIMULA_SDK_VERSION)
         val buildFile = listOf(
             File("build.gradle.kts"),

@@ -10,7 +10,7 @@ plugins {
     alias(libs.plugins.vanniktech.maven.publish)
 }
 
-val sdkVersion = "1.2.1-dev.4"
+val sdkVersion = "1.2.1-dev.5"
 val stagingHostname = "simula-api-staging-701226639755.us-central1.run.app"
 val stagingCapable = Regex("^\\d+\\.\\d+\\.\\d+-dev\\.\\d+$").matches(sdkVersion)
 val stagingBaseUrl = if (stagingCapable) "https://$stagingHostname" else ""
@@ -28,6 +28,11 @@ android {
 
         consumerProguardFiles("consumer-rules.pro")
     }
+
+    sourceSets.getByName("main").java.srcDir(
+        if (stagingCapable) "src/devArtifact/kotlin" else "src/stableArtifact/kotlin"
+    )
+    if (stagingCapable) sourceSets.getByName("test").java.srcDir("src/devArtifactTest/kotlin")
 
     buildTypes {
         release {
@@ -135,7 +140,7 @@ val verifyVersionConsistency = tasks.register("verifyVersionConsistency") {
 
 val verifyStableAarExcludesStaging = tasks.register("verifyStableAarExcludesStaging") {
     group = "verification"
-    description = "Verifies that stable release AARs do not contain the staging hostname."
+    description = "Verifies development-only endpoints and options are present only in dev AARs."
     dependsOn("bundleReleaseAar")
     val releaseAar = layout.buildDirectory.file("outputs/aar/${project.name}-release.aar")
     inputs.file(releaseAar)
@@ -143,8 +148,8 @@ val verifyStableAarExcludesStaging = tasks.register("verifyStableAarExcludesStag
     inputs.property("stagingHostname", stagingHostname)
 
     doLast {
-        if (stagingCapable) return@doLast
-        val needle = stagingHostname.toByteArray(Charsets.UTF_8)
+        val forbidden = listOf(stagingHostname, "X-Simula-Dev-Hide-Companion", "SimulaDevOptions", "hidePlayableCompanion")
+        var needle = forbidden.first().toByteArray(Charsets.UTF_8)
 
         fun containsNeedle(bytes: ByteArray): Boolean {
             if (bytes.size < needle.size) return false
@@ -171,8 +176,13 @@ val verifyStableAarExcludesStaging = tasks.register("verifyStableAarExcludesStag
         }
 
         val aar = releaseAar.get().asFile
-        if (archiveContainsNeedle(aar.readBytes())) {
-            throw GradleException("Stable AAR contains staging hostname: $stagingHostname")
+        val bytes = aar.readBytes()
+        for (marker in forbidden) {
+            needle = marker.toByteArray(Charsets.UTF_8)
+            val present = archiveContainsNeedle(bytes)
+            if (present != stagingCapable) {
+                throw GradleException("Incorrect artifact channel content for marker: $marker (dev=$stagingCapable)")
+            }
         }
     }
 }
