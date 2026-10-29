@@ -218,6 +218,7 @@ internal data class InitMinigameRequestBody(
     val messages: List<MessageBody>? = null,
     @SerialName("delegate_char") val delegateChar: Boolean = true,
     @SerialName("menu_id") val menuId: String? = null,
+    @SerialName("game_id") val gameId: String = gameType,
 )
 
 @Serializable

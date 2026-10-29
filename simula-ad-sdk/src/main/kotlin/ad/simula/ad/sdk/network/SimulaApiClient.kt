@@ -14,6 +14,7 @@ import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.admittedRemoteAssetUrl
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
+import ad.simula.ad.sdk.privacy.ConsentSnapshot
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.util.Log
 import kotlinx.coroutines.Deferred
@@ -41,6 +42,9 @@ import java.net.URLEncoder
  * NativeAdError.AdUnitNotFound — distinct from a generic transport error.
  */
 internal class AdUnitNotFoundException(message: String) : Exception(message)
+internal class CatalogHttpException(val status: Int) : Exception("HTTP error! status: $status")
+/** Identity actually sent at creation, which may differ from the host's requested PPID. */
+internal data class CreatedSession(val id: String, val primaryUserID: String?)
 internal class RewardNotVerifiedException : Exception("Reward verification response was not verified")
 
 internal fun requireVerifiedReward(response: VerifyRewardApiResponse): VerifyRewardApiResponse {
@@ -50,6 +54,14 @@ internal fun requireVerifiedReward(response: VerifyRewardApiResponse): VerifyRew
 }
 
 private val sessionBodyJson = Json { encodeDefaults = true }
+
+internal fun sessionCreateQuery(devMode: Boolean?, primaryUserID: String?, privacy: ConsentSnapshot): String =
+    buildList {
+        if (devMode != null) add("devMode=$devMode")
+        if (privacy.allowsPrimaryUserID && !primaryUserID.isNullOrBlank()) {
+            add("ppid=${URLEncoder.encode(primaryUserID, "UTF-8")}")
+        }
+    }.joinToString("&")
 
 internal fun sessionCreateBody(
     privacy: JsonObject,
@@ -137,28 +149,26 @@ internal object SimulaApiClient {
     // ── Session ─────────────────────────────────────────────────────────────
 
     /**
-     * Create a server session and return its id.
+     * Create a server session and return its id with the identity sent on the wire.
      * Returns null on network failure or an invalid API key (401).
      */
     suspend fun createSession(
         apiKey: String,
         devMode: Boolean? = null,
         primaryUserID: String? = null,
-    ): String? = withContext(Dispatchers.IO) {
+        endpointConfiguration: ApiEndpointConfiguration? = null,
+    ): CreatedSession? = withContext(Dispatchers.IO) {
         try {
-            val params = buildList {
-                if (devMode != null) add("devMode=$devMode")
-                if (!primaryUserID.isNullOrBlank()) {
-                    add("ppid=${URLEncoder.encode(primaryUserID, "UTF-8")}")
-                }
-            }
-            val url = endpoint("session/create") +
-                if (params.isEmpty()) "" else "?" + params.joinToString("&")
+            val privacy = SimulaPrivacy.current
+            val sentUserID = primaryUserID?.takeIf { privacy.allowsPrimaryUserID && it.isNotBlank() }
+            val query = sessionCreateQuery(devMode, sentUserID, privacy)
+            val url = (endpointConfiguration?.url("session/create") ?: endpoint("session/create")) +
+                if (query.isEmpty()) "" else "?$query"
 
             // Establish consent at session creation: the backend ties the `privacy`
             // block to the session and inherits it on subsequent calls.
             val body = sessionCreateBody(
-                privacy = SimulaPrivacy.current.privacyJson(),
+                privacy = privacy.privacyJson(),
                 capabilities = currentDeviceCapabilities(),
             )
 
@@ -182,13 +192,13 @@ internal object SimulaApiClient {
 
             val data = json.decodeFromString<SessionResponse>(response.body)
             // Honor a server-side telemetry directive (kill-switch / sampling) if present.
-            if (data.telemetryEnabled != null || data.telemetrySampleRate != null) {
+            if (endpointConfiguration == null && (data.telemetryEnabled != null || data.telemetrySampleRate != null)) {
                 Telemetry.applyServerConfig(
                     enabled = data.telemetryEnabled ?: true,
                     sampleRate = data.telemetrySampleRate ?: 1.0,
                 )
             }
-            data.sessionId?.takeIf { it.isNotEmpty() }
+            data.sessionId?.takeIf { it.isNotBlank() }?.let { CreatedSession(it, sentUserID) }
         } catch (_: Exception) {
             null
         }
@@ -203,7 +213,7 @@ internal object SimulaApiClient {
      * in the URL path, never lands in a telemetry network event.
      */
     suspend fun updatePpid(apiKey: String, sessionId: String, ppid: String): Boolean = withContext(Dispatchers.IO) {
-        if (sessionId.isBlank() || ppid.isBlank()) return@withContext false
+        if (sessionId.isBlank() || ppid.isBlank() || !SimulaPrivacy.current.allowsPrimaryUserID) return@withContext false
         try {
             val url = endpoint("session/") +
                 URLEncoder.encode(sessionId, "UTF-8") +
@@ -279,10 +289,13 @@ internal object SimulaApiClient {
      * [sessionId] is retained for source compatibility. The public v2 catalog is
      * session-independent so every supported game remains available in the menu.
      */
-    suspend fun fetchCatalog(sessionId: String? = null): CatalogResult = coalesce(catalogUrl(sessionId)) {
+    suspend fun fetchCatalog(
+        sessionId: String? = null,
+        endpointConfiguration: ApiEndpointConfiguration? = null,
+    ): CatalogResult = coalesce(endpointConfiguration?.url("minigames/catalogv2") ?: catalogUrl(sessionId)) {
       withContext(Dispatchers.IO) {
         val response = SimulaHttp.request(
-            url = catalogUrl(sessionId),
+            url = endpointConfiguration?.url("minigames/catalogv2") ?: catalogUrl(sessionId),
             method = "GET",
             headers = jsonHeaders(),
         )
@@ -437,6 +450,8 @@ internal object SimulaApiClient {
         messages: List<Message>? = null,
         delegateChar: Boolean = true,
         menuId: String? = null,
+        endpointConfiguration: ApiEndpointConfiguration? = null,
+        companionEnabled: Boolean? = null,
     ): MinigameResult = withContext(Dispatchers.IO) {
         val requestBody = InitMinigameRequestBody(
             gameType = gameType,
@@ -454,13 +469,14 @@ internal object SimulaApiClient {
         )
 
         val response = SimulaHttp.request(
-            url = endpoint("minigames/init"),
+            url = endpointConfiguration?.url("minigames/init") ?: endpoint("minigames/init"),
             method = "POST",
-            headers = jsonHeaders(),
+            headers = jsonHeaders() +
+                (companionEnabled?.let { mapOf("X-Simula-Dev-Companion" to if (it) "enabled" else "disabled") } ?: emptyMap()),
             body = json.encodeToString(requestBody),
         )
         if (!response.isSuccessful) {
-            throw Exception("HTTP error! status: ${response.code}")
+            throw CatalogHttpException(response.code)
         }
         if (response.body.isBlank()) {
             throw Exception("Empty response body")

@@ -1,5 +1,7 @@
 package ad.simula.ad.sdk.provider
 
+import ad.simula.ad.sdk.ads.SimulaAds
+import ad.simula.ad.sdk.network.CreatedSession
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -9,11 +11,68 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SimulaSessionStoreTest {
+    @Test
+    fun `omitted creation identity stays anonymous until a consented patch completes`() = runTest {
+        var consent = false
+        val enteredPatch = CompletableDeferred<Unit>()
+        val releasePatch = CompletableDeferred<Boolean>()
+        val patches = mutableListOf<String>()
+        val store = testStore(
+            initialUserID = "user-a",
+            allowsPrimaryUserID = { consent },
+            returnedUserID = { null },
+            patchPpid = { _, _, user ->
+                patches += user
+                enteredPatch.complete(Unit)
+                releasePatch.await()
+            },
+        ) { _, _, _ -> "anonymous-session" }
+
+        assertEquals("anonymous-session", store.ensureSession())
+        runCurrent()
+        assertNull(store.sessionUserID)
+        assertNull(SimulaAds.consistentSessionId(store.sessionId, store.sessionUserID, "user-a"))
+        assertTrue(patches.isEmpty())
+
+        consent = true
+        assertEquals("anonymous-session", store.ensureSession())
+        enteredPatch.await()
+        assertNull(store.sessionUserID)
+        assertNull(SimulaAds.consistentSessionId(store.sessionId, store.sessionUserID, "user-a"))
+        releasePatch.complete(true)
+        runCurrent()
+        assertEquals(listOf("user-a"), patches)
+        assertEquals("user-a", store.sessionUserID)
+        assertEquals("anonymous-session", SimulaAds.consistentSessionId(store.sessionId, store.sessionUserID, "user-a"))
+    }
+
+    @Test
+    fun `failed identity patch cannot claim that an anonymous session represents a user`() = runTest {
+        var consent = false
+        var patches = 0
+        val store = testStore(
+            initialUserID = "user-a", allowsPrimaryUserID = { consent }, returnedUserID = { null },
+            patchPpid = { _, _, _ -> ++patches > 1 },
+        ) { _, _, _ -> "session" }
+        store.ensureSession()
+        runCurrent()
+        consent = true
+        store.ensureSession()
+        runCurrent()
+        assertEquals(1, patches)
+        assertNull(store.sessionUserID)
+        store.ensureSession()
+        runCurrent()
+        assertEquals(2, patches)
+        assertEquals("user-a", store.sessionUserID)
+    }
+
     @Test
     fun `generation change is lazy and next ensure replaces the cached session`() = runTest {
         var generation = 0L
@@ -326,6 +385,8 @@ class SimulaSessionStoreTest {
         sessionGeneration: () -> Long = { 0L },
         beforeExpiredSessionCreate: suspend () -> Unit = {},
         patchPpid: suspend (String, String, String) -> Boolean = { _, _, _ -> true },
+        allowsPrimaryUserID: () -> Boolean = { true },
+        returnedUserID: (String?) -> String? = { it },
         createSession: suspend (String, Boolean, String?) -> String?,
     ) = SimulaSessionStore(
         apiKey = "api-key",
@@ -333,11 +394,12 @@ class SimulaSessionStoreTest {
         initialUserID = initialUserID,
         workScope = backgroundScope,
         publicationDispatcher = UnconfinedTestDispatcher(testScheduler),
-        createSession = createSession,
+        createSession = { key, dev, user -> createSession(key, dev, user)?.let { CreatedSession(it, returnedUserID(user)) } },
         recordSessionOperation = { _, _, _, _ -> },
         fireIpv4 = { _, _, _, _ -> },
         patchPpid = patchPpid,
         sessionGeneration = sessionGeneration,
         beforeExpiredSessionCreate = beforeExpiredSessionCreate,
+        allowsPrimaryUserID = allowsPrimaryUserID,
     )
 }

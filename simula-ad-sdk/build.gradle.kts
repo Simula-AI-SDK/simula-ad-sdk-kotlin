@@ -10,7 +10,7 @@ plugins {
     alias(libs.plugins.vanniktech.maven.publish)
 }
 
-val sdkVersion = "1.2.1-dev.4"
+val sdkVersion = "1.2.1-dev.6"
 val stagingHostname = "simula-api-staging-701226639755.us-central1.run.app"
 val stagingCapable = Regex("^\\d+\\.\\d+\\.\\d+-dev\\.\\d+$").matches(sdkVersion)
 val stagingBaseUrl = if (stagingCapable) "https://$stagingHostname" else ""

@@ -2,7 +2,9 @@ package ad.simula.ad.sdk.provider
 
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.network.Ipv4Beacon
+import ad.simula.ad.sdk.network.CreatedSession
 import ad.simula.ad.sdk.network.SimulaApiClient
+import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import ad.simula.ad.sdk.telemetry.Telemetry
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,7 +39,7 @@ internal class SimulaSessionStore(
     initialUserID: String?,
     private val workScope: CoroutineScope = SimulaScope,
     private val publicationDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
-    private val createSession: suspend (String, Boolean, String?) -> String? = SimulaApiClient::createSession,
+    private val createSession: suspend (String, Boolean, String?) -> CreatedSession? = { key, dev, user -> SimulaApiClient.createSession(key, dev, user) },
     private val recordSessionOperation: (String, Long, Boolean, String?) -> Unit = { name, durationMs, success, failureClass ->
         Telemetry.recordOperation(name, durationMs, success, failureClass = failureClass)
     },
@@ -45,6 +47,7 @@ internal class SimulaSessionStore(
     private val patchPpid: suspend (String, String, String) -> Boolean = SimulaApiClient::updatePpid,
     private val sessionGeneration: () -> Long = { 0L },
     private val beforeExpiredSessionCreate: suspend () -> Unit = {},
+    private val allowsPrimaryUserID: () -> Boolean = { SimulaPrivacy.current.allowsPrimaryUserID },
 ) {
     private var publishedSession by mutableStateOf(
         PublishedSession(id = null, userID = null, generation = currentSessionGeneration()),
@@ -86,6 +89,7 @@ internal class SimulaSessionStore(
         workScope.launch {
             ppidSyncMutex.withLock {
                 while (true) {
+                    if (!allowsPrimaryUserID()) break
                     val target = effectiveUserID ?: break
                     val snapshot = publishedSession
                     val sid = snapshot.id?.takeIf { it.isNotBlank() } ?: break
@@ -143,7 +147,10 @@ internal class SimulaSessionStore(
             cachedSession?.let { cached ->
                 // The process generation is independent of sessionLock. Revalidate after selecting
                 // the cache so a foreground expiration racing that selection cannot reuse the id.
-                if (currentSessionGeneration() <= cached.generation) return cached.id
+                if (currentSessionGeneration() <= cached.generation) {
+                    if (allowsPrimaryUserID() && effectiveUserID != null && effectiveUserID != cached.userID) reconcileServerPpid()
+                    return cached.id
+                }
                 return@let
             }
             if (cachedSession != null) continue
@@ -198,17 +205,18 @@ internal class SimulaSessionStore(
         runCatching { startupGate()?.await() }
         if (refreshExpiredSession) runCatching { beforeExpiredSessionCreate() }
         val ppidAtCreation = effectiveUserID
-        val createdId = runCatching { createSession(apiKey, devMode, ppidAtCreation) }
+        val created = runCatching { createSession(apiKey, devMode, ppidAtCreation) }
             .getOrNull()
-            ?.takeIf { it.isNotBlank() }
+            ?.takeIf { it.id.isNotBlank() }
+        val createdId = created?.id
         val durationMs = (System.nanoTime() - startNanos) / 1_000_000
 
         val result = withContext(NonCancellable + publicationDispatcher) {
             runCatching {
                 synchronized(sessionLock) {
                     if (sessionFlight !== flight) return@synchronized publishedSession.id
-                    if (createdId != null) {
-                        publishedSession = PublishedSession(createdId, ppidAtCreation, flight.generation)
+                    if (created != null) {
+                        publishedSession = PublishedSession(createdId, created.primaryUserID, flight.generation)
                     }
                     sessionFlight = null
                     publishedSession.id
@@ -231,9 +239,10 @@ internal class SimulaSessionStore(
             }
         }
         if (effectiveUserID == ppidAtCreation) {
-            runCatching { fireIpv4(apiKey, createdId, ppidAtCreation, Ipv4Beacon.REASON_INIT) }
+            val sentUserID = if (created != null) created.primaryUserID else ppidAtCreation
+            runCatching { fireIpv4(apiKey, createdId, sentUserID, Ipv4Beacon.REASON_INIT) }
         }
-        if (createdId != null && effectiveUserID != ppidAtCreation) reconcileServerPpid()
+        if (created != null && effectiveUserID != created.primaryUserID) reconcileServerPpid()
     }
 
     private fun currentSessionGeneration(): Long = runCatching(sessionGeneration).getOrDefault(0L)
