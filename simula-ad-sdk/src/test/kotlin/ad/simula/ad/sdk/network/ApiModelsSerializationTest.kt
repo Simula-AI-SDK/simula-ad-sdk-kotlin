@@ -141,6 +141,7 @@ class ApiModelsSerializationTest {
         assertFalse(decoded.currencyMode)  // default false
 
         assertTrue(encoded.contains("\"game_type\""))
+        assertEquals("trivia", json.parseToJsonElement(encoded).jsonObject["game_id"]?.jsonPrimitive?.content)
         assertTrue(encoded.contains("\"session_id\""))
         assertTrue(encoded.contains("\"delegate_char\""))
     }

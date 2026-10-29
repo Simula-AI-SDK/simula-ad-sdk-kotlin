@@ -98,8 +98,36 @@ fun GameWebView(
     playableBorderColor: String = "#262626",
     onDimensionsOnClose: ((heightDp: Float, isBottomSheet: Boolean) -> Unit)? = null,
 ) {
+    GameWebViewWithPreparedUrl(
+        gameId = gameId, charID = charID, charName = charName, charImage = charImage,
+        messages = messages, delegateChar = delegateChar, onClose = onClose,
+        onServeIdReceived = onServeIdReceived, charDesc = charDesc, menuId = menuId,
+        playableHeight = playableHeight, playableBorderColor = playableBorderColor,
+        onDimensionsOnClose = onDimensionsOnClose,
+    )
+}
+
+@Composable
+internal fun GameWebViewWithPreparedUrl(
+    gameId: String,
+    charID: String,
+    charName: String,
+    charImage: String,
+    messages: List<Message> = emptyList(),
+    delegateChar: Boolean = true,
+    onClose: () -> Unit,
+    // The minigame serve id — the menu fetches the post-game ad screens with it
+    // (`GET /load/fallbacks/{serveId}`).
+    onServeIdReceived: ((serveId: String) -> Unit)? = null,
+    charDesc: String? = null,
+    menuId: String? = null,
+    playableHeight: Any? = null,
+    playableBorderColor: String = "#262626",
+    onDimensionsOnClose: ((heightDp: Float, isBottomSheet: Boolean) -> Unit)? = null,
+    preparedIframeUrl: String? = null,
+) {
     val simulaContext = useSimula()
-    if (simulaContext.apiKey.isBlank()) return
+    if (simulaContext.apiKey.isBlank() && preparedIframeUrl == null) return
     val context = LocalContext.current
     val config = LocalConfiguration.current
 
@@ -118,8 +146,15 @@ fun GameWebView(
     }
 
     // Fetch the minigame iframe URL
-    LaunchedEffect(gameId, charID) {
+    LaunchedEffect(gameId, charID, preparedIframeUrl) {
         loading = true
+        error = null
+        pageLoaded = false
+        if (preparedIframeUrl != null) {
+            iframeUrl = preparedIframeUrl
+            loading = false
+            return@LaunchedEffect
+        }
         try {
             // Await the (coalesced) session instead of hard-failing on a launch race.
             val sessionId = simulaContext.ensureSession()
