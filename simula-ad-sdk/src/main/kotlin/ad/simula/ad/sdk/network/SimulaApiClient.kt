@@ -41,6 +41,7 @@ import java.net.URLEncoder
  * NativeAdError.AdUnitNotFound — distinct from a generic transport error.
  */
 internal class AdUnitNotFoundException(message: String) : Exception(message)
+internal class CatalogHttpException(val status: Int) : Exception("HTTP error! status: $status")
 internal class RewardNotVerifiedException : Exception("Reward verification response was not verified")
 
 internal fun requireVerifiedReward(response: VerifyRewardApiResponse): VerifyRewardApiResponse {
@@ -144,6 +145,7 @@ internal object SimulaApiClient {
         apiKey: String,
         devMode: Boolean? = null,
         primaryUserID: String? = null,
+        endpointConfiguration: ApiEndpointConfiguration? = null,
     ): String? = withContext(Dispatchers.IO) {
         try {
             val params = buildList {
@@ -152,7 +154,7 @@ internal object SimulaApiClient {
                     add("ppid=${URLEncoder.encode(primaryUserID, "UTF-8")}")
                 }
             }
-            val url = endpoint("session/create") +
+            val url = (endpointConfiguration?.url("session/create") ?: endpoint("session/create")) +
                 if (params.isEmpty()) "" else "?" + params.joinToString("&")
 
             // Establish consent at session creation: the backend ties the `privacy`
@@ -182,7 +184,7 @@ internal object SimulaApiClient {
 
             val data = json.decodeFromString<SessionResponse>(response.body)
             // Honor a server-side telemetry directive (kill-switch / sampling) if present.
-            if (data.telemetryEnabled != null || data.telemetrySampleRate != null) {
+            if (endpointConfiguration == null && (data.telemetryEnabled != null || data.telemetrySampleRate != null)) {
                 Telemetry.applyServerConfig(
                     enabled = data.telemetryEnabled ?: true,
                     sampleRate = data.telemetrySampleRate ?: 1.0,
@@ -279,10 +281,13 @@ internal object SimulaApiClient {
      * [sessionId] is retained for source compatibility. The public v2 catalog is
      * session-independent so every supported game remains available in the menu.
      */
-    suspend fun fetchCatalog(sessionId: String? = null): CatalogResult = coalesce(catalogUrl(sessionId)) {
+    suspend fun fetchCatalog(
+        sessionId: String? = null,
+        endpointConfiguration: ApiEndpointConfiguration? = null,
+    ): CatalogResult = coalesce(endpointConfiguration?.url("minigames/catalogv2") ?: catalogUrl(sessionId)) {
       withContext(Dispatchers.IO) {
         val response = SimulaHttp.request(
-            url = catalogUrl(sessionId),
+            url = endpointConfiguration?.url("minigames/catalogv2") ?: catalogUrl(sessionId),
             method = "GET",
             headers = jsonHeaders(),
         )
@@ -437,6 +442,8 @@ internal object SimulaApiClient {
         messages: List<Message>? = null,
         delegateChar: Boolean = true,
         menuId: String? = null,
+        endpointConfiguration: ApiEndpointConfiguration? = null,
+        companionEnabled: Boolean? = null,
     ): MinigameResult = withContext(Dispatchers.IO) {
         val requestBody = InitMinigameRequestBody(
             gameType = gameType,
@@ -454,13 +461,14 @@ internal object SimulaApiClient {
         )
 
         val response = SimulaHttp.request(
-            url = endpoint("minigames/init"),
+            url = endpointConfiguration?.url("minigames/init") ?: endpoint("minigames/init"),
             method = "POST",
-            headers = jsonHeaders() + ArtifactRequestOptions.headers(),
+            headers = jsonHeaders() + ArtifactRequestOptions.headers() +
+                (companionEnabled?.let { mapOf("X-Simula-Dev-Companion" to if (it) "enabled" else "disabled") } ?: emptyMap()),
             body = json.encodeToString(requestBody),
         )
         if (!response.isSuccessful) {
-            throw Exception("HTTP error! status: ${response.code}")
+            throw CatalogHttpException(response.code)
         }
         if (response.body.isBlank()) {
             throw Exception("Empty response body")

@@ -37,7 +37,7 @@ internal class SimulaSessionStore(
     initialUserID: String?,
     private val workScope: CoroutineScope = SimulaScope,
     private val publicationDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
-    private val createSession: suspend (String, Boolean, String?) -> String? = SimulaApiClient::createSession,
+    private val createSession: suspend (String, Boolean, String?) -> String? = { key, dev, user -> SimulaApiClient.createSession(key, dev, user) },
     private val recordSessionOperation: (String, Long, Boolean, String?) -> Unit = { name, durationMs, success, failureClass ->
         Telemetry.recordOperation(name, durationMs, success, failureClass = failureClass)
     },
