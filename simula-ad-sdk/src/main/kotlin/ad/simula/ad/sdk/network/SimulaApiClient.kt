@@ -43,6 +43,8 @@ import java.net.URLEncoder
  */
 internal class AdUnitNotFoundException(message: String) : Exception(message)
 internal class CatalogHttpException(val status: Int) : Exception("HTTP error! status: $status")
+/** Identity actually sent at creation, which may differ from the host's requested PPID. */
+internal data class CreatedSession(val id: String, val primaryUserID: String?)
 internal class RewardNotVerifiedException : Exception("Reward verification response was not verified")
 
 internal fun requireVerifiedReward(response: VerifyRewardApiResponse): VerifyRewardApiResponse {
@@ -147,7 +149,7 @@ internal object SimulaApiClient {
     // ── Session ─────────────────────────────────────────────────────────────
 
     /**
-     * Create a server session and return its id.
+     * Create a server session and return its id with the identity sent on the wire.
      * Returns null on network failure or an invalid API key (401).
      */
     suspend fun createSession(
@@ -155,10 +157,11 @@ internal object SimulaApiClient {
         devMode: Boolean? = null,
         primaryUserID: String? = null,
         endpointConfiguration: ApiEndpointConfiguration? = null,
-    ): String? = withContext(Dispatchers.IO) {
+    ): CreatedSession? = withContext(Dispatchers.IO) {
         try {
             val privacy = SimulaPrivacy.current
-            val query = sessionCreateQuery(devMode, primaryUserID, privacy)
+            val sentUserID = primaryUserID?.takeIf { privacy.allowsPrimaryUserID && it.isNotBlank() }
+            val query = sessionCreateQuery(devMode, sentUserID, privacy)
             val url = (endpointConfiguration?.url("session/create") ?: endpoint("session/create")) +
                 if (query.isEmpty()) "" else "?$query"
 
@@ -195,7 +198,7 @@ internal object SimulaApiClient {
                     sampleRate = data.telemetrySampleRate ?: 1.0,
                 )
             }
-            data.sessionId?.takeIf { it.isNotEmpty() }
+            data.sessionId?.takeIf { it.isNotBlank() }?.let { CreatedSession(it, sentUserID) }
         } catch (_: Exception) {
             null
         }
@@ -210,7 +213,7 @@ internal object SimulaApiClient {
      * in the URL path, never lands in a telemetry network event.
      */
     suspend fun updatePpid(apiKey: String, sessionId: String, ppid: String): Boolean = withContext(Dispatchers.IO) {
-        if (sessionId.isBlank() || ppid.isBlank()) return@withContext false
+        if (sessionId.isBlank() || ppid.isBlank() || !SimulaPrivacy.current.allowsPrimaryUserID) return@withContext false
         try {
             val url = endpoint("session/") +
                 URLEncoder.encode(sessionId, "UTF-8") +

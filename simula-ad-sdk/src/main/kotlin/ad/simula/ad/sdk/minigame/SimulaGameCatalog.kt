@@ -56,7 +56,7 @@ class SimulaGameCatalog private constructor(
         }
         val sid = sessionId ?: SimulaApiClient.createSession(
             apiKey, false, primaryUserID, endpoint,
-        )?.also { sessionId = it } ?: throw IllegalStateException("Session unavailable")
+        )?.id?.also { sessionId = it } ?: throw IllegalStateException("Session unavailable")
         if (SimulaPrivacy.current != privacy) throw IllegalStateException("Privacy changed; retry the game")
         try {
             val result = SimulaApiClient.getMinigame(

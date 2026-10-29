@@ -41,6 +41,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -353,10 +354,14 @@ internal fun GameWebViewWithPreparedUrl(
                     }
                     gameUrl != null -> {
                         // WebView loads in background
-                        GameWebViewContent(
-                            url = gameUrl,
-                            onPageFinished = { pageLoaded = true },
-                        )
+                        // The URL owns the pooled view and its navigation client. A replacement
+                        // must release the old player before loading the new game.
+                        key(gameUrl) {
+                            GameWebViewContent(
+                                url = gameUrl,
+                                onPageFinished = { pageLoaded = true },
+                            )
+                        }
                         // Loading overlay stays visible until page finishes painting
                         if (!pageLoaded) {
                             Box(
