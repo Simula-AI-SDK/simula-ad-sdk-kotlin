@@ -127,7 +127,7 @@ internal fun GameWebViewWithPreparedUrl(
     preparedIframeUrl: String? = null,
 ) {
     val simulaContext = useSimula()
-    if (simulaContext.apiKey.isBlank()) return
+    if (simulaContext.apiKey.isBlank() && preparedIframeUrl == null) return
     val context = LocalContext.current
     val config = LocalConfiguration.current
 
@@ -146,8 +146,10 @@ internal fun GameWebViewWithPreparedUrl(
     }
 
     // Fetch the minigame iframe URL
-    LaunchedEffect(gameId, charID) {
+    LaunchedEffect(gameId, charID, preparedIframeUrl) {
         loading = true
+        error = null
+        pageLoaded = false
         if (preparedIframeUrl != null) {
             iframeUrl = preparedIframeUrl
             loading = false

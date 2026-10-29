@@ -463,7 +463,7 @@ internal object SimulaApiClient {
         val response = SimulaHttp.request(
             url = endpointConfiguration?.url("minigames/init") ?: endpoint("minigames/init"),
             method = "POST",
-            headers = jsonHeaders() + ArtifactRequestOptions.headers() +
+            headers = jsonHeaders() +
                 (companionEnabled?.let { mapOf("X-Simula-Dev-Companion" to if (it) "enabled" else "disabled") } ?: emptyMap()),
             body = json.encodeToString(requestBody),
         )
@@ -577,7 +577,7 @@ internal object SimulaApiClient {
         val response = SimulaHttp.request(
             url = endpoint("load/interstitial"),
             method = "POST",
-            headers = jsonHeaders() + ArtifactRequestOptions.headers(),
+            headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
         )
         if (!response.isSuccessful) failHttp(response)
@@ -758,7 +758,7 @@ internal object SimulaApiClient {
         val response = SimulaHttp.request(
             url = endpoint("load/rewarded"),
             method = "POST",
-            headers = jsonHeaders() + ArtifactRequestOptions.headers(),
+            headers = jsonHeaders(),
             body = json.encodeToString(requestBody),
         )
         if (!response.isSuccessful) failHttp(response)

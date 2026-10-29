@@ -29,11 +29,6 @@ android {
         consumerProguardFiles("consumer-rules.pro")
     }
 
-    sourceSets.getByName("main").java.srcDir(
-        if (stagingCapable) "src/devArtifact/kotlin" else "src/stableArtifact/kotlin"
-    )
-    if (stagingCapable) sourceSets.getByName("test").java.srcDir("src/devArtifactTest/kotlin")
-
     buildTypes {
         release {
             // Published SDK: the library is intentionally NOT minified here. The
@@ -140,7 +135,7 @@ val verifyVersionConsistency = tasks.register("verifyVersionConsistency") {
 
 val verifyStableAarExcludesStaging = tasks.register("verifyStableAarExcludesStaging") {
     group = "verification"
-    description = "Verifies development-only endpoints and options are present only in dev AARs."
+    description = "Verifies that stable release AARs do not contain the staging hostname."
     dependsOn("bundleReleaseAar")
     val releaseAar = layout.buildDirectory.file("outputs/aar/${project.name}-release.aar")
     inputs.file(releaseAar)
@@ -148,8 +143,8 @@ val verifyStableAarExcludesStaging = tasks.register("verifyStableAarExcludesStag
     inputs.property("stagingHostname", stagingHostname)
 
     doLast {
-        val forbidden = listOf(stagingHostname, "X-Simula-Dev-Hide-Companion", "SimulaDevOptions", "hidePlayableCompanion")
-        var needle = forbidden.first().toByteArray(Charsets.UTF_8)
+        if (stagingCapable) return@doLast
+        val needle = stagingHostname.toByteArray(Charsets.UTF_8)
 
         fun containsNeedle(bytes: ByteArray): Boolean {
             if (bytes.size < needle.size) return false
@@ -176,13 +171,8 @@ val verifyStableAarExcludesStaging = tasks.register("verifyStableAarExcludesStag
         }
 
         val aar = releaseAar.get().asFile
-        val bytes = aar.readBytes()
-        for (marker in forbidden) {
-            needle = marker.toByteArray(Charsets.UTF_8)
-            val present = archiveContainsNeedle(bytes)
-            if (present != stagingCapable) {
-                throw GradleException("Incorrect artifact channel content for marker: $marker (dev=$stagingCapable)")
-            }
+        if (archiveContainsNeedle(aar.readBytes())) {
+            throw GradleException("Stable AAR contains staging hostname: $stagingHostname")
         }
     }
 }

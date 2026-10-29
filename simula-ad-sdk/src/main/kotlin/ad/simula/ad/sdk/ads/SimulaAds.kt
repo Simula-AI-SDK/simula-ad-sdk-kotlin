@@ -1,6 +1,5 @@
 package ad.simula.ad.sdk.ads
 
-import ad.simula.ad.sdk.network.ArtifactRequestOptions
 import ad.simula.ad.sdk.core.ProcessLaunchSettledGate
 import ad.simula.ad.sdk.core.ProcessApiKeyOwner
 import ad.simula.ad.sdk.core.ImperativeInitializationAttempt
@@ -192,7 +191,6 @@ object SimulaAds {
                     explicitPrivacy = privacy != null,
                 ) {
                     ProcessApiEnvironment.ensureDefault(stagingManifestValue)
-                    ArtifactRequestOptions.freeze()
                     Telemetry.claimInitialization(
                         context = applicationContext,
                         apiKey = apiKey,
