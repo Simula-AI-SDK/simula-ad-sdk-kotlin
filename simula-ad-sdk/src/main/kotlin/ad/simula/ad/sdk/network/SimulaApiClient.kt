@@ -14,6 +14,7 @@ import ad.simula.ad.sdk.model.admittedVideoUrl
 import ad.simula.ad.sdk.model.admittedRemoteAssetUrl
 import ad.simula.ad.sdk.core.SimulaScope
 import ad.simula.ad.sdk.privacy.SimulaPrivacy
+import ad.simula.ad.sdk.privacy.ConsentSnapshot
 import ad.simula.ad.sdk.telemetry.Telemetry
 import android.util.Log
 import kotlinx.coroutines.Deferred
@@ -51,6 +52,14 @@ internal fun requireVerifiedReward(response: VerifyRewardApiResponse): VerifyRew
 }
 
 private val sessionBodyJson = Json { encodeDefaults = true }
+
+internal fun sessionCreateQuery(devMode: Boolean?, primaryUserID: String?, privacy: ConsentSnapshot): String =
+    buildList {
+        if (devMode != null) add("devMode=$devMode")
+        if (privacy.allowsPrimaryUserID && !primaryUserID.isNullOrBlank()) {
+            add("ppid=${URLEncoder.encode(primaryUserID, "UTF-8")}")
+        }
+    }.joinToString("&")
 
 internal fun sessionCreateBody(
     privacy: JsonObject,
@@ -148,19 +157,15 @@ internal object SimulaApiClient {
         endpointConfiguration: ApiEndpointConfiguration? = null,
     ): String? = withContext(Dispatchers.IO) {
         try {
-            val params = buildList {
-                if (devMode != null) add("devMode=$devMode")
-                if (!primaryUserID.isNullOrBlank()) {
-                    add("ppid=${URLEncoder.encode(primaryUserID, "UTF-8")}")
-                }
-            }
+            val privacy = SimulaPrivacy.current
+            val query = sessionCreateQuery(devMode, primaryUserID, privacy)
             val url = (endpointConfiguration?.url("session/create") ?: endpoint("session/create")) +
-                if (params.isEmpty()) "" else "?" + params.joinToString("&")
+                if (query.isEmpty()) "" else "?$query"
 
             // Establish consent at session creation: the backend ties the `privacy`
             // block to the session and inherits it on subsequent calls.
             val body = sessionCreateBody(
-                privacy = SimulaPrivacy.current.privacyJson(),
+                privacy = privacy.privacyJson(),
                 capabilities = currentDeviceCapabilities(),
             )
 

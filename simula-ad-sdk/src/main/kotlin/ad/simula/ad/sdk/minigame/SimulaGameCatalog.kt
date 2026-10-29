@@ -10,6 +10,8 @@ import ad.simula.ad.sdk.network.CatalogHttpException
 import ad.simula.ad.sdk.network.SimulaApiClient
 import ad.simula.ad.sdk.network.readStagingEnvironmentManifestValue
 import ad.simula.ad.sdk.network.resolveApiEnvironment
+import ad.simula.ad.sdk.privacy.ConsentSnapshot
+import ad.simula.ad.sdk.privacy.SimulaPrivacy
 import android.content.Context
 import androidx.compose.runtime.Composable
 import kotlinx.coroutines.sync.Mutex
@@ -26,6 +28,7 @@ class SimulaGameCatalog private constructor(
 ) {
     private val sessionLock = Mutex()
     private var sessionId: String? = null
+    private var sessionPrivacy: ConsentSnapshot? = null
 
     suspend fun fetch(): GameCatalog {
         val result = SimulaApiClient.fetchCatalog(endpointConfiguration = endpoint)
@@ -46,9 +49,15 @@ class SimulaGameCatalog private constructor(
     ): String = sessionLock.withLock {
         // Consent and startup infrastructure must precede the scoped session too.
         SimulaAds.startupGate?.await()
+        val privacy = SimulaPrivacy.current
+        if (sessionPrivacy != privacy) {
+            sessionId = null
+            sessionPrivacy = privacy
+        }
         val sid = sessionId ?: SimulaApiClient.createSession(
             apiKey, false, primaryUserID, endpoint,
         )?.also { sessionId = it } ?: throw IllegalStateException("Session unavailable")
+        if (SimulaPrivacy.current != privacy) throw IllegalStateException("Privacy changed; retry the game")
         try {
             val result = SimulaApiClient.getMinigame(
                 gameType = gameId, sessionId = sid, screenWidth = width, screenHeight = height,
