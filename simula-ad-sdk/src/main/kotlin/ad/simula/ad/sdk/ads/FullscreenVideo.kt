@@ -1161,8 +1161,8 @@ private class NativeVideoController(
 
     private fun scheduleReadinessTimeout(nowMs: Long) {
         if (!lifecycleActive || presentationBlocked || firstFrameRendered || released || failed) return
+        val remainingMs = readinessDeadline?.remainingMs(nowMs) ?: return
         handler.removeCallbacks(readinessTimeout)
-        val remainingMs = readinessDeadline?.remainingMs(nowMs) ?: 0L
         if (remainingMs <= 0L) readinessTimeout.run() else handler.postDelayed(readinessTimeout, remainingMs)
     }
 
