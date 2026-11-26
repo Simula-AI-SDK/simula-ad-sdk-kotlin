@@ -436,7 +436,7 @@ internal class FallbackPresentationState(
     @Synchronized
     internal fun fallbackResolutionReasonOverride(): VideoLifecycleReason? =
         VideoLifecycleReason.NEXT_STEP_FAILED.takeIf {
-            fallbackResolutionFailed || unavailableVideoIndices.isNotEmpty()
+            fallbackResolutionFailed || unavailableVideoIndices.isNotEmpty() || index in rendererAbandonedIndices
         }
 
     @Synchronized
@@ -1087,7 +1087,7 @@ internal fun FallbackAdHost(
                             phase = if (presentationState.stage == FallbackStage.SHOWING) {
                                 FallbackPhase.Showing(latest, presentationState.index)
                             } else {
-                                presentationState.videoPlan.closePendingHandoff()
+                                presentationState.closePendingAfterFallbackResolution()
                                 reportAuthoritativeEnd()
                                 FallbackPhase.Done
                             }
@@ -1221,9 +1221,6 @@ private fun FallbackAdOverlay(
         if (rendererGone) return
         rendererGone = true
         rendererOwnsPhase = presentationState.abandonRenderer(fallbackIndex, navigationOwner)
-        if (!isVideo && rendererOwnsPhase) {
-            presentationState.videoPlan.resolvePendingHandoffForFailedNextStep()
-        }
         runCatching(onRendererUnavailable)
     }
     fun failInitialRenderer(token: Long) {

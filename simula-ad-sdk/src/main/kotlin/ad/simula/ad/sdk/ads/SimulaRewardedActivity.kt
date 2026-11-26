@@ -681,15 +681,6 @@ private fun RewardedMinigame(
     }
     var unavailableExitIssued by remember(presentation) { mutableStateOf(false) }
     val storeVisitBlocked = storeVisitPending()
-    LaunchedEffect(videoTerminal, close.action, clickHandoffPending, storeVisitBlocked) {
-        if (!shouldAutomaticallyAdvanceCompletedVideo(videoTerminal, close.action)) return@LaunchedEffect
-        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            if (presentation.pendingClickHandoff() == null && !storeVisitPending()) {
-                presentation.automaticNavigationGate.clear()
-                onFinish(true)
-            }
-        }
-    }
     LaunchedEffect(bridgeUnavailable, clickHandoffPending, storeVisitBlocked) {
         if (rewardedUnavailableCreativeAction(
                 isVideo = isVideo,
@@ -825,9 +816,29 @@ private fun RewardedMinigame(
 
     // PLAYABLE_END — open the store the moment the close button appears (here, when the reward is
     // earned and the reward/close pill becomes a close button). SDK-native, no bridge.
-    if (autoRedirect?.enabled == true && autoRedirect.trigger == AutoStoreRedirectTrigger.PLAYABLE_END) {
-        LaunchedEffect(rewardEarned, bridgeReady) {
-            if (rewardEarned && bridgeReady) fireAutoStoreRedirect()
+    val playableEndRedirectReady = autoRedirect?.enabled == true &&
+        autoRedirect.trigger == AutoStoreRedirectTrigger.PLAYABLE_END && rewardEarned && bridgeReady
+    var playableEndRedirectSubmitted by remember(presentation) { mutableStateOf(false) }
+    LaunchedEffect(playableEndRedirectReady) {
+        if (playableEndRedirectReady) fireAutoStoreRedirect()
+        playableEndRedirectSubmitted = playableEndRedirectReady
+    }
+
+    // The close gate and playback can finish together. Keep the primary alive until its configured
+    // redirect has been submitted and resolved, then let the existing store visit gate take over.
+    val awaitingPlayableEndRedirect = playableEndRedirectReady && (!playableEndRedirectSubmitted ||
+        presentation.autoRedirectCoordinator.hasPendingRoute(autoRedirectScope))
+    LaunchedEffect(videoTerminal, close.action, clickHandoffPending, storeVisitBlocked, awaitingPlayableEndRedirect) {
+        if (!shouldAutomaticallyAdvanceCompletedVideo(videoTerminal, close.action) ||
+            awaitingPlayableEndRedirect
+        ) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            if (presentation.pendingClickHandoff() == null && !storeVisitPending() &&
+                !(playableEndRedirectReady && presentation.autoRedirectCoordinator.hasPendingRoute(autoRedirectScope))
+            ) {
+                presentation.automaticNavigationGate.clear()
+                onFinish(true)
+            }
         }
     }
 

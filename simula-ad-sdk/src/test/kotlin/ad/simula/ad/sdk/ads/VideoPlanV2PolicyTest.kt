@@ -697,6 +697,24 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
+    fun `playable renderer failure waits for the next fallback or reports a terminal failure`() {
+        val recovered = pendingFallbackHandoffState()
+        recovered.showing(0)
+        assertTrue(recovered.abandonRenderer(index = 0, owner = Any()))
+        assertTrue(recovered.advance(total = 2))
+        assertTrue(recovered.videoPlan.nextStepReady() != null)
+        assertNull(recovered.fallbackResolutionReasonOverride())
+
+        val exhausted = pendingFallbackHandoffState()
+        exhausted.showing(0)
+        assertTrue(exhausted.abandonRenderer(index = 0, owner = Any()))
+        assertTrue(exhausted.advance(total = 1))
+        assertEquals(VideoLifecycleReason.NEXT_STEP_FAILED, exhausted.fallbackResolutionReasonOverride())
+        exhausted.closePendingAfterFallbackResolution()
+        assertNull(exhausted.videoPlan.nextStepReady())
+    }
+
+    @Test
     fun `pre first frame failure preserves predecessor handoff for the next viable step`() {
         assertEquals(
             VideoPreFirstFrameFailureAction.PRESERVE_PENDING_HANDOFF,
