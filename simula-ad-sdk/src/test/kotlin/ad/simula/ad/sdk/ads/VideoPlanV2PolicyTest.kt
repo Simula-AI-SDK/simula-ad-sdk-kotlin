@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.CreativeType
+import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.VideoAudioSessionState
@@ -16,6 +17,7 @@ import ad.simula.ad.sdk.model.VideoPositionAccumulator
 import ad.simula.ad.sdk.model.VideoQuartileTracker
 import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.resolvedVideoChromeStyle
+import ad.simula.ad.sdk.model.shouldAutomaticallyAdvanceCompletedVideo
 import ad.simula.ad.sdk.model.storePromptHalfGateReached
 import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.model.videoStorePromptReached
@@ -148,6 +150,13 @@ class VideoPlanV2PolicyTest {
             VideoSequenceAdvance.MANUAL,
             videoSequenceAdvance(false, CreativeType.VIDEO, terminal = true, false, false),
         )
+    }
+
+    @Test
+    fun `contract two primary video advances on completion with a forward action`() {
+        assertTrue(shouldAutomaticallyAdvanceCompletedVideo(videoCompleted = true, closeAction = CloseAction.FORWARD))
+        assertFalse(shouldAutomaticallyAdvanceCompletedVideo(videoCompleted = true, closeAction = CloseAction.CLOSE_X))
+        assertFalse(shouldAutomaticallyAdvanceCompletedVideo(videoCompleted = false, closeAction = CloseAction.FORWARD))
     }
 
     @Test
@@ -688,6 +697,24 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
+    fun `playable renderer failure waits for the next fallback or reports a terminal failure`() {
+        val recovered = pendingFallbackHandoffState()
+        recovered.showing(0)
+        assertTrue(recovered.abandonRenderer(index = 0, owner = Any()))
+        assertTrue(recovered.advance(total = 2))
+        assertTrue(recovered.videoPlan.nextStepReady() != null)
+        assertNull(recovered.fallbackResolutionReasonOverride())
+
+        val exhausted = pendingFallbackHandoffState()
+        exhausted.showing(0)
+        assertTrue(exhausted.abandonRenderer(index = 0, owner = Any()))
+        assertTrue(exhausted.advance(total = 1))
+        assertEquals(VideoLifecycleReason.NEXT_STEP_FAILED, exhausted.fallbackResolutionReasonOverride())
+        exhausted.closePendingAfterFallbackResolution()
+        assertNull(exhausted.videoPlan.nextStepReady())
+    }
+
+    @Test
     fun `pre first frame failure preserves predecessor handoff for the next viable step`() {
         assertEquals(
             VideoPreFirstFrameFailureAction.PRESERVE_PENDING_HANDOFF,
@@ -839,12 +866,13 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `accepted delayed playable fallback reports first step ready immediately`() {
+    fun `accepted delayed playable fallback retains handoff until a frame commits`() {
         val state = pendingFallbackHandoffState()
         val generation = state.startPostCloseFetchWait()
 
         assertTrue(state.resolvePostCloseFetchWait(generation, listOf(playable(0))))
-        assertNull(state.videoPlan.nextStepReady())
+        state.playableFrameCommitted(index = 1)
+        assertTrue(state.videoPlan.nextStepReady() != null)
     }
 
     @Test
@@ -916,6 +944,8 @@ class VideoPlanV2PolicyTest {
         assertTrue(state.timeoutPostCloseFetchWait(generation, listOf(playable(0))))
 
         assertEquals(FallbackStage.SHOWING, state.stage)
+        assertTrue(terminalEvents.isEmpty())
+        state.playableFrameCommitted(index = 0)
         assertEquals(listOf(VIDEO_STAGE_HANDOFF to VideoLifecycleReason.COMPLETED), terminalEvents)
     }
 

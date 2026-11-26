@@ -446,6 +446,7 @@ class ClickTrackingTest {
         val scope = Any()
         var completion: ((Boolean) -> Unit)? = null
         coordinator.activate(scope)
+        assertFalse(coordinator.hasPendingRoute(scope))
 
         assertEquals(
             AutoRedirectResult.DEFERRED,
@@ -456,7 +457,9 @@ class ClickTrackingTest {
             coordinator.requestAsync(scope, null) { _, _, _ -> error("must not start twice") },
         )
 
+        assertTrue(coordinator.hasPendingRoute(scope))
         completion?.invoke(true)
+        assertFalse(coordinator.hasPendingRoute(scope))
 
         assertEquals(
             AutoRedirectResult.SUPPRESSED,

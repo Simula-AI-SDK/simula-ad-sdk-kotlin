@@ -223,8 +223,8 @@ internal enum class ClosePosition {
     }
 }
 
-/** Glyph shown by the close/navigation control. Both actions invoke the same dismissal callback;
- * FORWARD only changes the visual and accessibility label. */
+/** Both actions invoke the same dismissal callback. A fullscreen contract-2 primary video
+ * with FORWARD also progresses when the video naturally ends. */
 internal enum class CloseAction {
     CLOSE_X, FORWARD;
 

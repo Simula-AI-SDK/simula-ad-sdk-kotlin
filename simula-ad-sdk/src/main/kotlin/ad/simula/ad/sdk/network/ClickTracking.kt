@@ -1,6 +1,9 @@
 package ad.simula.ad.sdk.network
 
 import androidx.annotation.MainThread
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import java.lang.ref.WeakReference
 import java.util.UUID
 
@@ -372,8 +375,8 @@ internal class AutoRedirectCoordinator {
     private var disposed = false
     private var redirectOpened = false
     private var userRouteOpened = false
-    private var routeInProgress = false
-    private var waitingScope: Any? = null
+    private var routeInProgress by mutableStateOf(false)
+    private var waitingScope by mutableStateOf<Any?>(null)
     private var waitingRoute: AsyncAutoRoute? = null
     private var activeRouteScope: Any? = null
     private var activeRoute: AsyncAutoRoute? = null
@@ -398,6 +401,10 @@ internal class AutoRedirectCoordinator {
 
     fun isActive(scope: Any): Boolean = synchronized(this) {
         !disposed && activeScope === scope && !redirectOpened && !userRouteOpened && observedHandoff == null
+    }
+
+    fun hasPendingRoute(scope: Any): Boolean = synchronized(this) {
+        activeScope === scope && (routeInProgress || waitingScope === scope)
     }
 
     fun deactivate(scope: Any) {

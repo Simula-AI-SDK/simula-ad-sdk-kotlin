@@ -30,6 +30,7 @@ import ad.simula.ad.sdk.model.VideoSequenceAdvance
 import ad.simula.ad.sdk.model.primaryCreativeCloseAllowed
 import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.model.effectiveSkOverlayConfig
+import ad.simula.ad.sdk.model.shouldAutomaticallyAdvanceCompletedVideo
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.ClickInteraction
@@ -674,9 +675,29 @@ private fun CreativeInterstitial(
     // PLAYABLE_END — open the store the moment the close button becomes available (SDK-native, no
     // bridge). The keyed effect runs on first composition (covers a delay-0 immediate close) and on
     // every flip of `closeEnabled`; the presentation coordinator makes repeats a no-op after success.
-    if (autoRedirect?.enabled == true && autoRedirect.trigger == AutoStoreRedirectTrigger.PLAYABLE_END) {
-        LaunchedEffect(closeEnabled, bridgeReady) {
-            if (closeEnabled && bridgeReady) fireAutoStoreRedirect()
+    val playableEndRedirectReady = autoRedirect?.enabled == true &&
+        autoRedirect.trigger == AutoStoreRedirectTrigger.PLAYABLE_END && closeEnabled && bridgeReady
+    var playableEndRedirectSubmitted by remember(presentation) { mutableStateOf(false) }
+    LaunchedEffect(playableEndRedirectReady) {
+        if (playableEndRedirectReady) fireAutoStoreRedirect()
+        playableEndRedirectSubmitted = playableEndRedirectReady
+    }
+
+    // The close gate and playback can finish together. Keep the primary alive until its configured
+    // redirect has been submitted and resolved, then let the existing store visit gate take over.
+    val awaitingPlayableEndRedirect = playableEndRedirectReady && (!playableEndRedirectSubmitted ||
+        presentation.autoRedirectCoordinator.hasPendingRoute(autoRedirectScope))
+    LaunchedEffect(videoTerminal, close.action, clickHandoffPending, storeVisitBlocked, awaitingPlayableEndRedirect) {
+        if (!shouldAutomaticallyAdvanceCompletedVideo(videoTerminal, close.action) ||
+            awaitingPlayableEndRedirect
+        ) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            if (presentation.pendingClickHandoff() == null && !storeVisitPending() &&
+                !(playableEndRedirectReady && presentation.autoRedirectCoordinator.hasPendingRoute(autoRedirectScope))
+            ) {
+                presentation.automaticNavigationGate.clear()
+                onFinish()
+            }
         }
     }
 
