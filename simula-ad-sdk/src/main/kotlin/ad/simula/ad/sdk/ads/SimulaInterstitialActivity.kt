@@ -30,6 +30,7 @@ import ad.simula.ad.sdk.model.VideoSequenceAdvance
 import ad.simula.ad.sdk.model.primaryCreativeCloseAllowed
 import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.model.effectiveSkOverlayConfig
+import ad.simula.ad.sdk.model.shouldAutomaticallyAdvanceCompletedVideo
 import ad.simula.ad.sdk.network.AdBeaconManager
 import ad.simula.ad.sdk.network.AutoRedirectResult
 import ad.simula.ad.sdk.network.ClickInteraction
@@ -549,6 +550,15 @@ private fun CreativeInterstitial(
     }
     var videoTerminal by remember(presentation) { mutableStateOf(false) }
     val storeVisitBlocked = storeVisitPending()
+    LaunchedEffect(videoTerminal, close.action, clickHandoffPending, storeVisitBlocked) {
+        if (!shouldAutomaticallyAdvanceCompletedVideo(videoTerminal, close.action)) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            if (presentation.pendingClickHandoff() == null && !storeVisitPending()) {
+                presentation.automaticNavigationGate.clear()
+                onFinish()
+            }
+        }
+    }
     DisposableEffect(presentation) {
         val subscription = presentation.pendingClickHandoff()?.addResultListener {
             clickHandoffPending = false

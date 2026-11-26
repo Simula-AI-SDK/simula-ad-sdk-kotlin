@@ -162,6 +162,11 @@ internal fun videoSequenceAdvance(
     }
 }
 
+internal fun shouldAutomaticallyAdvanceCompletedVideo(
+    videoCompleted: Boolean,
+    closeAction: CloseAction,
+): Boolean = videoCompleted && closeAction == CloseAction.FORWARD
+
 internal fun primaryCreativeCloseAllowed(
     videoContract2: Boolean,
     creativeType: CreativeType,

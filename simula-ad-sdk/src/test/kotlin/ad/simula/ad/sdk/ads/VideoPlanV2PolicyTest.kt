@@ -1,6 +1,7 @@
 package ad.simula.ad.sdk.ads
 
 import ad.simula.ad.sdk.model.CreativeType
+import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.CloseTreatment
 import ad.simula.ad.sdk.model.VideoAudioSessionState
@@ -16,6 +17,7 @@ import ad.simula.ad.sdk.model.VideoPositionAccumulator
 import ad.simula.ad.sdk.model.VideoQuartileTracker
 import ad.simula.ad.sdk.model.SkOverlayConfig
 import ad.simula.ad.sdk.model.resolvedVideoChromeStyle
+import ad.simula.ad.sdk.model.shouldAutomaticallyAdvanceCompletedVideo
 import ad.simula.ad.sdk.model.storePromptHalfGateReached
 import ad.simula.ad.sdk.model.videoSequenceAdvance
 import ad.simula.ad.sdk.model.videoStorePromptReached
@@ -148,6 +150,13 @@ class VideoPlanV2PolicyTest {
             VideoSequenceAdvance.MANUAL,
             videoSequenceAdvance(false, CreativeType.VIDEO, terminal = true, false, false),
         )
+    }
+
+    @Test
+    fun `contract two primary video advances on completion with a forward action`() {
+        assertTrue(shouldAutomaticallyAdvanceCompletedVideo(videoCompleted = true, closeAction = CloseAction.FORWARD))
+        assertFalse(shouldAutomaticallyAdvanceCompletedVideo(videoCompleted = true, closeAction = CloseAction.CLOSE_X))
+        assertFalse(shouldAutomaticallyAdvanceCompletedVideo(videoCompleted = false, closeAction = CloseAction.FORWARD))
     }
 
     @Test

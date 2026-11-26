@@ -901,6 +901,7 @@ internal fun FallbackAdHost(
     // Primary creative closed → present the prefetched screens immediately. If the prefetch is
     // somehow still in flight (user closed very fast), wait briefly in [FallbackPhase.Fetching].
     fun onPrimaryClosed() {
+        if (phase != FallbackPhase.Content) return
         presentationState.videoPlan.handoffPresentationBegan()
         val ads = prefetched
         phase = when {
