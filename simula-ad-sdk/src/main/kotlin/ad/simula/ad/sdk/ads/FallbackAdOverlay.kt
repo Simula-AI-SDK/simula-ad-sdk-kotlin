@@ -412,8 +412,8 @@ internal class FallbackPresentationState(
     }
 
     fun videoFile(sourceIndex: Int): java.io.File? = videoLeases[sourceIndex]?.file
-    fun notifyFirstResolvedStepReady(ads: List<SimulaApiClient.FallbackAd>) {
-        if (ads.firstOrNull()?.type == CreativeType.PLAYABLE) videoPlan.nextStepReady()
+    fun playableFrameCommitted(index: Int) {
+        if (stage == FallbackStage.SHOWING && this.index == index) videoPlan.nextStepReady()
     }
     var renderableGateReached = false
         private set
@@ -591,7 +591,6 @@ internal class FallbackPresentationState(
         } else {
             done()
         }
-        notifyFirstResolvedStepReady(ads.drop(fetchWaitTargetIndex))
         return true
     }
 
@@ -603,7 +602,6 @@ internal class FallbackPresentationState(
         markPendingVideosUnavailable()
         if (ads.getOrNull(fetchWaitTargetIndex) != null) {
             showing(fetchWaitTargetIndex)
-            notifyFirstResolvedStepReady(ads.drop(fetchWaitTargetIndex))
         } else {
             done()
             videoPlan.closePendingHandoff(VideoLifecycleReason.NEXT_STEP_TIMEOUT)
@@ -912,7 +910,6 @@ internal fun FallbackAdHost(
                 presentationState.done()
             }
         }
-        ads?.let(presentationState::notifyFirstResolvedStepReady)
     }
 
     // This root survives every phase, including Done's final callback frame, so no transition can
@@ -1088,9 +1085,6 @@ internal fun FallbackAdHost(
                             }
                             if (!presentationState.advance(latest.size)) return@FallbackAdOverlay
                             phase = if (presentationState.stage == FallbackStage.SHOWING) {
-                                latest.getOrNull(presentationState.index)
-                                    ?.takeIf { it.type == CreativeType.PLAYABLE }
-                                    ?.let { presentationState.videoPlan.nextStepReady() }
                                 FallbackPhase.Showing(latest, presentationState.index)
                             } else {
                                 presentationState.videoPlan.closePendingHandoff()
@@ -1227,6 +1221,9 @@ private fun FallbackAdOverlay(
         if (rendererGone) return
         rendererGone = true
         rendererOwnsPhase = presentationState.abandonRenderer(fallbackIndex, navigationOwner)
+        if (!isVideo && rendererOwnsPhase) {
+            presentationState.videoPlan.resolvePendingHandoffForFailedNextStep()
+        }
         runCatching(onRendererUnavailable)
     }
     fun failInitialRenderer(token: Long) {
@@ -1651,7 +1648,10 @@ private fun FallbackAdOverlay(
                                 (url != "about:blank" || inlineHtml != null) &&
                                 !pageLoadFailed
                             ) {
-                                if (renderGate.ready(token)) pageCommitted = true
+                                if (renderGate.ready(token)) {
+                                    pageCommitted = true
+                                    presentationState.playableFrameCommitted(fallbackIndex)
+                                }
                             }
                         }
                         override fun onReceivedError(

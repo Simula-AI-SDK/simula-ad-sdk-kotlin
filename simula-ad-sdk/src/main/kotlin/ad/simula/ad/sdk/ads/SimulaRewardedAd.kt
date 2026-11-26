@@ -8,6 +8,7 @@ import ad.simula.ad.sdk.model.AdValue
 import ad.simula.ad.sdk.model.CloseBehavior
 import ad.simula.ad.sdk.model.ClosePosition
 import ad.simula.ad.sdk.model.Creative
+import ad.simula.ad.sdk.model.CloseAction
 import ad.simula.ad.sdk.model.CreativeType
 import ad.simula.ad.sdk.model.ExtraParametersStore
 import ad.simula.ad.sdk.model.StorePrompt
@@ -257,7 +258,9 @@ class SimulaRewardedAd(val adUnitId: String) {
     }
 
     private fun scheduleWebViewPrewarm(generation: Int, ad: SimulaApiClient.RewardedInitResult) {
-        if (ad.creative.type == CreativeType.VIDEO) {
+        if (ad.creative.type == CreativeType.VIDEO &&
+            (!ad.videoContract2 || ad.adBehavior?.close?.action != CloseAction.FORWARD)
+        ) {
             return
         }
         val context = SimulaAds.appContext

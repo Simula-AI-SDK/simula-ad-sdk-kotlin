@@ -848,12 +848,13 @@ class VideoPlanV2PolicyTest {
     }
 
     @Test
-    fun `accepted delayed playable fallback reports first step ready immediately`() {
+    fun `accepted delayed playable fallback retains handoff until a frame commits`() {
         val state = pendingFallbackHandoffState()
         val generation = state.startPostCloseFetchWait()
 
         assertTrue(state.resolvePostCloseFetchWait(generation, listOf(playable(0))))
-        assertNull(state.videoPlan.nextStepReady())
+        state.playableFrameCommitted(index = 1)
+        assertTrue(state.videoPlan.nextStepReady() != null)
     }
 
     @Test
@@ -925,6 +926,8 @@ class VideoPlanV2PolicyTest {
         assertTrue(state.timeoutPostCloseFetchWait(generation, listOf(playable(0))))
 
         assertEquals(FallbackStage.SHOWING, state.stage)
+        assertTrue(terminalEvents.isEmpty())
+        state.playableFrameCommitted(index = 0)
         assertEquals(listOf(VIDEO_STAGE_HANDOFF to VideoLifecycleReason.COMPLETED), terminalEvents)
     }
 
